@@ -1,8 +1,8 @@
 # Agent Handoff — nova-ve Project
 
 > **Date:** 2026-04-21  
-> **Last commit:** `f934417` on `main`  
-> **Status:** Issues #1, #2, #3 closed. Issues #4–#10 open.  
+> **Last commit:** `d9be8d1` on `main`  
+> **Status:** Issues #1, #2, #3, #10 closed. Issues #4–#9 open.  
 > **Read this first, then README.md / CONTRIBUTING.md for conventions.**
 
 ---
@@ -10,9 +10,9 @@
 ## 1. Project State at a Glance
 
 ```
-Closed Issues:  #1 (Auth), #2 (DB Migrations), #3 (Lab CRUD)
+Closed Issues:  #1 (Auth), #2 (DB Migrations), #3 (Lab CRUD), #10 (Folder Mgmt)
 Open Issues:    #4 (Node Lifecycle), #5 (Frontend API), #6 (Canvas), #7 (Templates),
-                #8 (Console), #9 (Testing), #10 (Folders)
+                #8 (Console), #9 (Testing)
 ```
 
 ### What's Working Right Now
@@ -25,7 +25,8 @@ Open Issues:    #4 (Node Lifecycle), #5 (Frontend API), #6 (Canvas), #7 (Templat
 | User CRUD (admin RBAC) | ✅ | POST/GET/PATCH/DELETE /api/users |
 | Lab CRUD (create/update/delete) | ✅ | POST/PUT/DELETE /api/labs |
 | Lab read (DB + filesystem) | ✅ | GET /api/labs/{path} |
-| Folder listing | ✅ | GET /api/folders/ |
+| Folder listing | ✅ | GET /api/folders/ + /api/folders/{path} |
+| Folder CRUD | ✅ | POST/PUT/DELETE /api/folders |
 | Topology/Nodes/Networks read | ✅ | GET /api/labs/{path}/... |
 | SvelteKit frontend (dev) | ✅ | `npm run check` passes 0 errors |
 | TopologyCanvas (read-only) | ✅ | Renders nodes, edges, networks |
@@ -68,7 +69,7 @@ Open Issues:    #4 (Node Lifecycle), #5 (Frontend API), #6 (Canvas), #7 (Templat
 | 7 | Template and image management | MED | MED | `routers/templates.py` (new), `models/template.py` (new) |
 | 8 | Console access (telnet/rdp/HTML5) | MED | HIGH | `routers/console.py` (new), Guacamole integration |
 | 9 | Testing + CI pipeline | MED | LOW | `backend/tests/`, `.github/workflows/ci.yml` |
-| 10 | Folder management CRUD | LOW | LOW | `routers/folders.py`, `services/folder_service.py` |
+
 
 ### Issue Comments Already Have Implementation Notes
 
@@ -282,7 +283,7 @@ Tables managed by Alembic (migration `37fcfbd00d8a`):
 ```bash
 cd backend && source .venv/bin/activate
 python -c "from app.main import app; print('OK', len(app.routes), 'routes')"
-# Should print: OK 32 routes (or more as you add)
+# Should print: OK 36 routes (or more as you add)
 ```
 
 ### Frontend Type Check
@@ -411,7 +412,6 @@ def safe_path(filename: str) -> Path:
    - Will catch regressions as complexity grows
 
 ### Quick Wins
-- #10 (Folder CRUD) — Low complexity, similar pattern to Lab CRUD
 - #9 (Testing) — Well-defined scope, no runtime dependencies
 
 ### Avoid for Now
