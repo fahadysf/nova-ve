@@ -54,3 +54,7 @@ pgdata/
 labdata/
 *.qcow2
 *.iso
+
+# Temp
+tmp/
+*.tmp
