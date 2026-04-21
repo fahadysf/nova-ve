@@ -29,7 +29,7 @@ class LabMetaRead(LabMetaBase):
 
 
 class LabMetaCreate(LabMetaBase):
-    path: str
+    path: Optional[str] = None
     filename: Optional[str] = None
 
 

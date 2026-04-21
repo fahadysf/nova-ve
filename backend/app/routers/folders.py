@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.schemas.user import UserRead
 from app.schemas.folder import FolderListResponse, FolderItem, LabListItem
-import os
+from app.models.lab import LabMeta
 import time
 from pathlib import Path
 from app.config import get_settings
@@ -19,19 +20,35 @@ def _fmt_time(ts: float) -> str:
 @router.get("/")
 async def list_root(
     current_user: UserRead = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
-    settings = get_settings()
-    base = settings.LABS_DIR
-
     folders = [
         FolderItem(name="Running", path="/Running"),
         FolderItem(name="Shared", path="/Shared"),
         FolderItem(name="Users", path="/Users"),
     ]
 
+    # List labs from DB (created via API)
     labs = []
+    result = await db.execute(select(LabMeta))
+    db_labs = result.scalars().all()
+
+    for lab in db_labs:
+        labs.append(LabListItem(
+            file=lab.filename,
+            path=f"/{lab.filename}",
+            umtime=int(time.time()),
+            mtime=_fmt_time(time.time()),
+        ))
+
+    # Also scan filesystem for labs not yet in DB (legacy/seeded files)
+    settings = get_settings()
+    base = settings.LABS_DIR
     if base.exists():
+        db_filenames = {lab.filename for lab in db_labs}
         for f in sorted(base.glob("*.json")):
+            if f.name in db_filenames:
+                continue
             st = f.stat()
             labs.append(LabListItem(
                 file=f.name,
