@@ -5,7 +5,7 @@ from app.database import get_db
 from app.schemas.auth import LoginRequest, AuthResponse
 from app.schemas.user import UserRead, UserCreate
 from app.services.auth_service import AuthService
-from app.dependencies import get_current_user, get_current_admin
+from app.dependencies import get_current_user, get_current_admin, get_optional_user
 from app.config import get_settings
 from app.core.security import create_access_token
 from app.core.constants import UserRole
@@ -68,7 +68,7 @@ async def login(
 async def register(
     request: UserCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: UserRead = Depends(get_current_user),
+    current_user: UserRead | None = Depends(get_optional_user),
 ):
     """Register a new user. Admin only, unless no users exist (first user becomes admin)."""
     from sqlalchemy import select, func
@@ -80,7 +80,7 @@ async def register(
     result = await db.execute(select(func.count()).select_from(User))
     user_count = result.scalar()
 
-    if user_count > 0 and current_user.role != UserRole.ADMIN:
+    if user_count > 0 and (not current_user or current_user.role != UserRole.ADMIN):
         raise HTTPException(
             status_code=403,
             detail={"code": 403, "status": "forbidden", "message": "Admin access required to create users."},
@@ -95,7 +95,7 @@ async def register(
             "message": f"User {request.username} already exists.",
         }
 
-    role = request.role if current_user.role == UserRole.ADMIN else UserRole.USER
+    role = request.role if current_user and current_user.role == UserRole.ADMIN else UserRole.USER
     if user_count == 0:
         role = UserRole.ADMIN
 
@@ -145,8 +145,7 @@ async def get_me(
     }
 
 
-@router.get("/logout")
-async def logout(
+async def _logout(
     response: Response,
     request: Request,
     db: AsyncSession = Depends(get_db),
@@ -167,3 +166,21 @@ async def logout(
         "status": "success",
         "message": "User logged out (90014).",
     }
+
+
+@router.post("/logout")
+async def logout(
+    response: Response,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    return await _logout(response, request, db)
+
+
+@router.get("/logout")
+async def logout_legacy(
+    response: Response,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    return await _logout(response, request, db)

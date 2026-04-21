@@ -58,3 +58,4 @@ labdata/
 # Temp
 tmp/
 *.tmp
+.omx/

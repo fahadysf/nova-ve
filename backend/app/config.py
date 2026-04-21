@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # QEMU / System
     QEMU_BINARY: str = "/usr/bin/qemu-system-x86_64"
+    QEMU_IMG_BINARY: str = "/usr/bin/qemu-img"
     DOCKER_HOST: str = "unix:///var/run/docker.sock"
 
     class Config:

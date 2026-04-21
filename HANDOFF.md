@@ -87,6 +87,7 @@ Every open issue (#4–#10) has a comment with:
 ## 3. Environment Setup (Do This First)
 
 ### Prerequisites
+- Ubuntu 26.04 LTS is the project base OS for deployment and system integration
 - Python 3.12 (NOT 3.14 — `pydantic-core` will fail to build)
 - Node.js 22+ (for frontend)
 - Docker & Docker Compose (for PostgreSQL)

@@ -1,19 +1,46 @@
-from fastapi import APIRouter, Depends, HTTPException
+import uuid
+
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.database import get_db
-from app.dependencies import get_current_user, get_current_admin
-from app.schemas.user import UserRead
+from app.dependencies import get_current_user
 from app.schemas.lab import LabMetaCreate, LabMetaUpdate
+from app.schemas.network import NetworkCreate, NetworkUpdate
+from app.schemas.node import NodeCreate, NodeUpdate
+from app.schemas.user import UserRead
 from app.services.lab_service import LabService
-import json
-from pathlib import Path
-from app.config import get_settings
+from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
 
 
-def _lab_path(filename: str) -> Path:
-    return get_settings().LABS_DIR / filename
+def _read_lab_data(lab_path: str) -> dict:
+    return LabService.read_lab_json_static(lab_path)
+
+
+def _default_interfaces(node_type: str, ethernet_count: int) -> list[dict]:
+    interfaces = []
+    for index in range(ethernet_count):
+        if node_type == "qemu":
+            name = f"Gi{index + 1}"
+        else:
+            name = f"eth{index}"
+        interfaces.append({"name": name, "network_id": 0})
+    return interfaces
+
+
+def _resize_interfaces(existing: list[dict], node_type: str, ethernet_count: int) -> list[dict]:
+    resized = _default_interfaces(node_type, ethernet_count)
+    for index, interface in enumerate(existing[:ethernet_count]):
+        resized[index]["name"] = interface.get("name", resized[index]["name"])
+        resized[index]["network_id"] = interface.get("network_id", 0)
+    return resized
+
+
+def _first_mac_for_node(node_id: int) -> str:
+    return f"50:00:00:{node_id:02x}:00:00"
 
 
 @router.post("/")
@@ -71,68 +98,6 @@ async def create_lab(
     }
 
 
-@router.get("/{lab_path:path}")
-async def get_lab(
-    lab_path: str,
-    current_user: UserRead = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    # Try DB first, fall back to filesystem
-    lab_service = LabService(db)
-    lab = await lab_service.get_lab_by_filename(lab_path)
-
-    if lab:
-        return {
-            "code": 200,
-            "status": "success",
-            "message": "Lab has been loaded (60020).",
-            "data": {
-                "id": str(lab.id),
-                "filename": lab.filename,
-                "name": lab.name,
-                "path": lab.path,
-                "owner": lab.owner,
-                "author": lab.author,
-                "description": lab.description,
-                "body": lab.body,
-                "version": lab.version,
-                "scripttimeout": lab.scripttimeout,
-                "countdown": lab.countdown,
-                "linkwidth": lab.linkwidth,
-                "grid": lab.grid,
-                "lock": lab.lock,
-                "sat": "-1",
-                "shared": [],
-            },
-        }
-
-    # Fallback: read from filesystem directly
-    filepath = _lab_path(lab_path)
-    if not filepath.exists():
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
-
-    with open(filepath, "r") as f:
-        data = json.load(f)
-
-    meta = data.get("meta", {})
-    meta["id"] = data.get("id")
-    meta["filename"] = filepath.name
-    meta["path"] = str(filepath)
-    meta["owner"] = current_user.username
-    meta.setdefault("shared", [])
-
-    return {
-        "code": 200,
-        "status": "success",
-        "message": "Lab has been loaded (60020).",
-        "data": meta,
-    }
-
-
 @router.put("/{lab_path:path}")
 async def update_lab(
     lab_path: str,
@@ -157,9 +122,7 @@ async def update_lab(
             "message": "Access denied.",
         }
 
-    updates = request.model_dump(exclude_unset=True)
-    lab = await lab_service.update_lab(lab, **updates)
-
+    lab = await lab_service.update_lab(lab, **request.model_dump(exclude_unset=True))
     return {
         "code": 200,
         "status": "success",
@@ -207,7 +170,6 @@ async def delete_lab(
         }
 
     await lab_service.delete_lab(lab)
-
     return {
         "code": 200,
         "status": "success",
@@ -220,16 +182,14 @@ async def get_topology(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
 ):
-    filepath = _lab_path(lab_path)
-    if not filepath.exists():
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
         }
-
-    with open(filepath, "r") as f:
-        data = json.load(f)
 
     return {
         "code": 200,
@@ -239,27 +199,121 @@ async def get_topology(
     }
 
 
-@router.get("/{lab_path:path}/nodes")
-async def list_nodes(
+@router.put("/{lab_path:path}/topology")
+async def update_topology(
     lab_path: str,
+    payload: dict | list,
     current_user: UserRead = Depends(get_current_user),
 ):
-    filepath = _lab_path(lab_path)
-    if not filepath.exists():
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
         }
 
-    with open(filepath, "r") as f:
-        data = json.load(f)
+    if isinstance(payload, list):
+        data["topology"] = payload
+    else:
+        data["topology"] = payload.get("topology", data.get("topology", []))
+        for node_id, node_patch in payload.get("nodes", {}).items():
+            node = data.get("nodes", {}).get(str(node_id))
+            if node:
+                if "left" in node_patch:
+                    node["left"] = node_patch["left"]
+                if "top" in node_patch:
+                    node["top"] = node_patch["top"]
+        for network_id, network_patch in payload.get("networks", {}).items():
+            network = data.get("networks", {}).get(str(network_id))
+            if network:
+                if "left" in network_patch:
+                    network["left"] = network_patch["left"]
+                if "top" in network_patch:
+                    network["top"] = network_patch["top"]
+
+    LabService.write_lab_json_static(lab_path, data)
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Topology saved successfully.",
+        "data": data.get("topology", []),
+    }
+
+
+@router.get("/{lab_path:path}/nodes")
+async def list_nodes(
+    lab_path: str,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
 
     return {
         "code": 200,
         "status": "success",
         "message": "Successfully listed nodes (60026).",
-        "data": data.get("nodes", {}),
+        "data": NodeRuntimeService().enrich_nodes(data),
+    }
+
+
+@router.post("/{lab_path:path}/nodes")
+async def create_node(
+    lab_path: str,
+    request: NodeCreate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    nodes = data.setdefault("nodes", {})
+    next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
+    node = {
+        "id": next_id,
+        "name": request.name,
+        "type": request.type,
+        "template": request.template,
+        "image": request.image,
+        "console": request.console,
+        "status": 0,
+        "delay": 0,
+        "cpu": request.cpu,
+        "ram": request.ram,
+        "ethernet": request.ethernet,
+        "cpulimit": 1,
+        "uuid": str(uuid.uuid4()) if request.type == "qemu" else None,
+        "firstmac": _first_mac_for_node(next_id) if request.type == "qemu" else None,
+        "left": request.left,
+        "top": request.top,
+        "icon": "Router.png" if request.type == "qemu" else "Misc-2D-Docker-S.svg",
+        "width": "0",
+        "config": False,
+        "config_list": [],
+        "sat": 0,
+        "computed_sat": 0,
+        "interfaces": _default_interfaces(request.type, request.ethernet),
+    }
+    nodes[str(next_id)] = node
+    LabService.write_lab_json_static(lab_path, data)
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Node created successfully.",
+        "data": node,
     }
 
 
@@ -269,20 +323,16 @@ async def list_interfaces(
     node_id: int,
     current_user: UserRead = Depends(get_current_user),
 ):
-    filepath = _lab_path(lab_path)
-    if not filepath.exists():
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
         }
 
-    with open(filepath, "r") as f:
-        data = json.load(f)
-
-    nodes = data.get("nodes", {})
-    node = nodes.get(str(node_id), {})
-
+    node = data.get("nodes", {}).get(str(node_id), {})
     return {
         "code": 200,
         "status": "success",
@@ -291,11 +341,100 @@ async def list_interfaces(
             "id": node_id,
             "sort": node.get("type", "qemu"),
             "ethernet": [
-                {"name": iface.get("name", f"eth{i}"), "network_id": iface.get("network_id", 0)}
-                for i, iface in enumerate(node.get("interfaces", []))
+                {
+                    "name": iface.get("name", f"eth{index}"),
+                    "network_id": iface.get("network_id", 0),
+                }
+                for index, iface in enumerate(node.get("interfaces", []))
             ],
             "serial": [],
         },
+    }
+
+
+@router.put("/{lab_path:path}/nodes/{node_id}")
+async def update_node(
+    lab_path: str,
+    node_id: int,
+    request: NodeUpdate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    node = data.get("nodes", {}).get(str(node_id))
+    if not node:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Node does not exist.",
+        }
+
+    for field, value in request.model_dump(exclude_unset=True).items():
+        if value is not None:
+            node[field] = value
+
+    node["interfaces"] = _resize_interfaces(
+        node.get("interfaces", []),
+        node.get("type", "qemu"),
+        int(node.get("ethernet", 0)),
+    )
+    LabService.write_lab_json_static(lab_path, data)
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Node updated successfully.",
+        "data": node,
+    }
+
+
+@router.delete("/{lab_path:path}/nodes/{node_id}")
+async def delete_node(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    nodes = data.get("nodes", {})
+    if str(node_id) not in nodes:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Node does not exist.",
+        }
+
+    try:
+        NodeRuntimeService().stop_node(data, node_id)
+    except NodeRuntimeError:
+        pass
+
+    nodes.pop(str(node_id))
+    data["topology"] = [
+        link
+        for link in data.get("topology", [])
+        if link.get("source") != f"node{node_id}" and link.get("destination") != f"node{node_id}"
+    ]
+    LabService.write_lab_json_static(lab_path, data)
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Node deleted successfully.",
     }
 
 
@@ -305,7 +444,22 @@ async def start_node(
     node_id: int,
     current_user: UserRead = Depends(get_current_user),
 ):
-    # TODO: implement actual subprocess start
+    try:
+        data = _read_lab_data(lab_path)
+        NodeRuntimeService().start_node(data, node_id)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as e:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+
     return {
         "code": 200,
         "status": "success",
@@ -319,7 +473,22 @@ async def stop_node(
     node_id: int,
     current_user: UserRead = Depends(get_current_user),
 ):
-    # TODO: implement actual subprocess stop
+    try:
+        data = _read_lab_data(lab_path)
+        NodeRuntimeService().stop_node(data, node_id)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as e:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+
     return {
         "code": 200,
         "status": "success",
@@ -333,11 +502,59 @@ async def wipe_node(
     node_id: int,
     current_user: UserRead = Depends(get_current_user),
 ):
-    # TODO: implement overlay deletion
+    try:
+        data = _read_lab_data(lab_path)
+        NodeRuntimeService().wipe_node(data, node_id)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as e:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+
     return {
         "code": 200,
         "status": "success",
         "message": "Node cleared (80053).",
+    }
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/logs")
+async def node_logs(
+    lab_path: str,
+    node_id: int,
+    tail: int = 200,
+    follow: bool = False,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    runtime_service = NodeRuntimeService()
+    lab_id = str(data.get("id"))
+    if follow:
+        return StreamingResponse(
+            runtime_service.stream_logs(lab_id, node_id, tail=tail),
+            media_type="text/plain",
+        )
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Node logs fetched.",
+        "data": {"logs": runtime_service.read_logs(lab_id, node_id, tail=tail)},
     }
 
 
@@ -346,20 +563,203 @@ async def list_networks(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
 ):
-    filepath = _lab_path(lab_path)
-    if not filepath.exists():
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
         }
 
-    with open(filepath, "r") as f:
-        data = json.load(f)
-
     return {
         "code": 200,
         "status": "success",
         "message": "Successfully listed networks (60004).",
         "data": data.get("networks", {}),
+    }
+
+
+@router.post("/{lab_path:path}/networks")
+async def create_network(
+    lab_path: str,
+    request: NetworkCreate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    networks = data.setdefault("networks", {})
+    next_id = max((int(network_key) for network_key in networks.keys()), default=0) + 1
+    network = {
+        "id": next_id,
+        "name": request.name,
+        "type": request.type,
+        "left": request.left,
+        "top": request.top,
+        "icon": "01-Cloud-Default.svg",
+        "width": 0,
+        "style": "Solid",
+        "linkstyle": "Straight",
+        "color": "",
+        "label": "",
+        "visibility": 1,
+        "smart": -1,
+        "count": 0,
+    }
+    networks[str(next_id)] = network
+    LabService.write_lab_json_static(lab_path, data)
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Network created successfully.",
+        "data": network,
+    }
+
+
+@router.put("/{lab_path:path}/networks/{network_id}")
+async def update_network(
+    lab_path: str,
+    network_id: int,
+    request: NetworkUpdate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    network = data.get("networks", {}).get(str(network_id))
+    if not network:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Network does not exist.",
+        }
+
+    for field, value in request.model_dump(exclude_unset=True).items():
+        if value is not None:
+            network[field] = value
+
+    LabService.write_lab_json_static(lab_path, data)
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Network updated successfully.",
+        "data": network,
+    }
+
+
+@router.delete("/{lab_path:path}/networks/{network_id}")
+async def delete_network(
+    lab_path: str,
+    network_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    networks = data.get("networks", {})
+    if str(network_id) not in networks:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Network does not exist.",
+        }
+
+    networks.pop(str(network_id))
+    for node in data.get("nodes", {}).values():
+        for interface in node.get("interfaces", []):
+            if interface.get("network_id") == network_id:
+                interface["network_id"] = 0
+
+    data["topology"] = [
+        link
+        for link in data.get("topology", [])
+        if link.get("network_id") != network_id
+        and link.get("source") != f"network{network_id}"
+        and link.get("destination") != f"network{network_id}"
+    ]
+    LabService.write_lab_json_static(lab_path, data)
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Network deleted successfully.",
+    }
+
+
+@router.get("/{lab_path:path}")
+async def get_lab(
+    lab_path: str,
+    current_user: UserRead = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    lab_service = LabService(db)
+    lab = await lab_service.get_lab_by_filename(lab_path)
+
+    if lab:
+        return {
+            "code": 200,
+            "status": "success",
+            "message": "Lab has been loaded (60020).",
+            "data": {
+                "id": str(lab.id),
+                "filename": lab.filename,
+                "name": lab.name,
+                "path": lab.path,
+                "owner": lab.owner,
+                "author": lab.author,
+                "description": lab.description,
+                "body": lab.body,
+                "version": lab.version,
+                "scripttimeout": lab.scripttimeout,
+                "countdown": lab.countdown,
+                "linkwidth": lab.linkwidth,
+                "grid": lab.grid,
+                "lock": lab.lock,
+                "sat": "-1",
+                "shared": [],
+            },
+        }
+
+    try:
+        data = _read_lab_data(lab_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    relative_path = lab_path.strip("/").replace("\\", "/")
+    meta = data.get("meta", {})
+    meta["id"] = data.get("id")
+    meta["filename"] = relative_path
+    meta["path"] = f"/{relative_path}"
+    meta["owner"] = current_user.username
+    meta.setdefault("shared", [])
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Lab has been loaded (60020).",
+        "data": meta,
     }

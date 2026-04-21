@@ -11,6 +11,7 @@ A clean-room network virtualization environment inspired by legacy platform, bui
 | Database | PostgreSQL (app data) + JSON files (lab topology) |
 | Virtualization | QEMU/KVM + Docker |
 | Console | Apache Guacamole (HTML5) |
+| Base OS | Ubuntu 26.04 LTS |
 
 ## Quick Start
 
