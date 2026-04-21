@@ -1,11 +1,26 @@
 from fastapi import APIRouter, Depends
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.schemas.user import UserRead
+from app.services.node_runtime_service import NodeRuntimeService
 import psutil
 
 router = APIRouter(prefix="/api", tags=["system"])
+
+
+@router.get("/health")
+async def healthcheck(
+    db: AsyncSession = Depends(get_db),
+):
+    await db.execute(text("SELECT 1"))
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Healthcheck passed.",
+        "data": {"database": "ok"},
+    }
 
 
 @router.get("/status")
@@ -14,6 +29,7 @@ async def get_status(
 ):
     mem = psutil.virtual_memory()
     disk = psutil.disk_usage("/")
+    runtime_counts = NodeRuntimeService().runtime_counts()
     return {
         "code": 200,
         "status": "success",
@@ -34,11 +50,11 @@ async def get_status(
             "mem": f"{mem.percent:.4f}",
             "swap": "0.0000",
             "swapavailable": "8388604",
-            "iol": 0,
-            "dynamips": 0,
-            "qemu": 0,
-            "docker": 0,
-            "vpcs": 0,
+            "iol": runtime_counts["iol"],
+            "dynamips": runtime_counts["dynamips"],
+            "qemu": runtime_counts["qemu"],
+            "docker": runtime_counts["docker"],
+            "vpcs": runtime_counts["vpcs"],
         },
     }
 

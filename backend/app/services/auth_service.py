@@ -4,9 +4,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from argon2 import PasswordHasher
 from app.models.user import User
+from app.config import get_settings
 from app.core.security import hash_password, verify_password
 
 ph = PasswordHasher()
+settings = get_settings()
 
 
 class AuthService:
@@ -48,7 +50,7 @@ class AuthService:
     async def create_session(self, user: User) -> str:
         token = str(uuid.uuid4())
         user.session_token = token
-        user.session_expires = int(time.time()) + 14400  # 4h
+        user.session_expires = int(time.time()) + settings.SESSION_MAX_AGE
         user.online = True
         await self.db.commit()
         return token

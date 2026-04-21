@@ -55,3 +55,16 @@ async def get_current_admin(
             detail={"code": 403, "status": "forbidden", "message": "Admin access required."},
         )
     return current_user
+
+
+async def get_optional_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security_bearer),
+    db: AsyncSession = Depends(get_db),
+) -> UserRead | None:
+    try:
+        return await get_current_user(request, credentials, db)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_401_UNAUTHORIZED:
+            return None
+        raise
