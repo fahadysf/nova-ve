@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from argon2 import PasswordHasher
 from app.models.user import User
+from app.core.security import hash_password, verify_password
 
 ph = PasswordHasher()
 
@@ -17,11 +18,32 @@ class AuthService:
         user = result.scalar_one_or_none()
         if not user or not user.password_hash:
             return None
-        try:
-            ph.verify(user.password_hash, password)
+        if verify_password(password, user.password_hash):
             return user
-        except Exception:
-            return None
+        return None
+
+    async def create_user(
+        self,
+        username: str,
+        password: str,
+        email: str,
+        name: str,
+        role: str = "user",
+        **kwargs,
+    ) -> User:
+        """Create a new user with an Argon2-hashed password."""
+        user = User(
+            username=username,
+            password_hash=hash_password(password),
+            email=email,
+            name=name,
+            role=role,
+            **kwargs,
+        )
+        self.db.add(user)
+        await self.db.commit()
+        await self.db.refresh(user)
+        return user
 
     async def create_session(self, user: User) -> str:
         token = str(uuid.uuid4())

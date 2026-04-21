@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     SESSION_COOKIE_NAME: str = "nova_session"
     SESSION_USER_COOKIE: str = "nova_user"
     SESSION_MAX_AGE: int = 14400  # 4 hours
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
+    COOKIE_SECURE: bool = False  # Set True in production with HTTPS
+    COOKIE_SAMESITE: str = "lax"
 
     # QEMU / System
     QEMU_BINARY: str = "/usr/bin/qemu-system-x86_64"

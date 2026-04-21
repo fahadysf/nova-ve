@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import auth, folders, labs, system, users
-from app.database import Base, engine
+from app.database import engine
+from app.config import get_settings
 
+settings = get_settings()
 app = FastAPI(title="nova-ve", version="0.1.0-alpha")
 
 # CORS for frontend dev
@@ -24,8 +26,20 @@ app.include_router(users.router)
 
 @app.on_event("startup")
 async def startup():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    # Tables are managed by Alembic migrations.
+    # Dev convenience: warn if DB looks empty.
+    from sqlalchemy import text
+    async with engine.connect() as conn:
+        result = await conn.execute(
+            text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema='public' AND table_name='users')")
+        )
+        has_users = result.scalar()
+        if not has_users:
+            import logging
+            logger = logging.getLogger("nova-ve")
+            logger.warning(
+                "Database tables not found. Run: cd backend && alembic upgrade head && python -m scripts.seed"
+            )
 
 
 @app.on_event("shutdown")

@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 from app.database import Base
 from app.config import get_settings
+from app.models import User, LabMeta, Pod, Html5Session  # noqa: F401 — register tables in metadata
 
 settings = get_settings()
 config = context.config
