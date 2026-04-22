@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { writable } from 'svelte/store';
   import {
     Background,
@@ -6,6 +7,7 @@
     MiniMap,
     Panel,
     SvelteFlow,
+    useSvelteFlow,
     type Connection,
     type Edge,
     type Node
@@ -26,6 +28,7 @@
     device: CustomNode,
     network: NetworkNode
   } as unknown as Record<string, never>;
+  const { screenToFlowPosition } = useSvelteFlow();
 
   const nodesStore = writable<Node[]>([]);
   const edgesStore = writable<Edge[]>([]);
@@ -39,6 +42,11 @@
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saveState: 'idle' | 'saving' | 'saved' = 'idle';
   let selectedEdgeId: string | null = null;
+  let paletteLoading = true;
+  let paletteItems: Array<
+    | { kind: 'node'; title: string; subtitle: string; type: string; template: string; image: string }
+    | { kind: 'network'; title: string; subtitle: string; networkType: string }
+  > = [];
   let menu:
     | {
         x: number;
@@ -149,6 +157,44 @@
       y: touch?.clientY ?? 0
     };
   }
+
+  onMount(async () => {
+    try {
+      const nodeItems: Array<(typeof paletteItems)[number]> = [];
+      for (const templateType of ['qemu', 'docker']) {
+        const templatesResponse = await apiRequest<Record<string, { name: string; template: string }>>(
+          `/list/templates/${templateType}`,
+          { suppressToast: true }
+        );
+        for (const template of Object.values(templatesResponse.data ?? {})) {
+          const imagesResponse = await apiRequest<Record<string, { image: string }>>(
+            `/list/images/${templateType}/${template.template}`,
+            { suppressToast: true }
+          );
+          const firstImage = Object.values(imagesResponse.data ?? {})[0];
+          if (!firstImage) {
+            continue;
+          }
+          nodeItems.push({
+            kind: 'node',
+            title: template.name,
+            subtitle: `${templateType} · ${firstImage.image}`,
+            type: templateType,
+            template: template.template,
+            image: firstImage.image
+          });
+        }
+      }
+      paletteItems = [
+        ...nodeItems,
+        { kind: 'network', title: 'Bridge Network', subtitle: 'bridge', networkType: 'bridge' }
+      ];
+    } catch (_error) {
+      paletteItems = [{ kind: 'network', title: 'Bridge Network', subtitle: 'bridge', networkType: 'bridge' }];
+    } finally {
+      paletteLoading = false;
+    }
+  });
 
   function scheduleSave() {
     if (saveTimer) {
@@ -488,6 +534,59 @@
       }
     }
   }
+
+  async function createNetworkAt(position: { x: number; y: number }, networkType = 'bridge') {
+    const response = await apiRequest<NetworkData>(`/labs/${labId}/networks`, {
+      method: 'POST',
+      body: {
+        name: `net-${Object.keys(localNetworks).length + 1}`,
+        type: networkType,
+        left: Math.round(position.x),
+        top: Math.round(position.y)
+      }
+    });
+    localNetworks[String(response.data.id)] = response.data;
+  }
+
+  async function createNodeAt(
+    position: { x: number; y: number },
+    payload: { type: string; template: string; image: string; title: string }
+  ) {
+    const response = await apiRequest<NodeData>(`/labs/${labId}/nodes`, {
+      method: 'POST',
+      body: {
+        name: `${payload.title}-${Object.keys(localNodes).length + 1}`,
+        type: payload.type,
+        template: payload.template,
+        image: payload.image,
+        left: Math.round(position.x),
+        top: Math.round(position.y)
+      }
+    });
+    localNodes[String(response.data.id)] = response.data;
+  }
+
+  function paletteDragData(item: (typeof paletteItems)[number]): string {
+    return JSON.stringify(item);
+  }
+
+  async function handleCanvasDrop(event: DragEvent) {
+    event.preventDefault();
+    const raw = event.dataTransfer?.getData('application/nova-ve-palette');
+    if (!raw) {
+      return;
+    }
+
+    const payload = JSON.parse(raw) as (typeof paletteItems)[number];
+    const position = screenToFlowPosition({ x: event.clientX, y: event.clientY }, { snapToGrid: true });
+
+    if (payload.kind === 'network') {
+      await createNetworkAt(position, payload.networkType);
+      return;
+    }
+
+    await createNodeAt(position, payload);
+  }
 </script>
 
 <div class="relative h-full w-full flex-1">
@@ -532,20 +631,54 @@
       selectedEdgeId = null;
       closeMenu();
     }}
+    on:dragover={(event) => {
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'move';
+      }
+    }}
+    on:drop={handleCanvasDrop}
   >
     <Background patternColor="#374151" gap={20} />
     <Controls />
     <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" />
 
     <Panel position="top-left">
-      <div class="rounded-lg border border-gray-700 bg-gray-900/95 px-3 py-2 text-xs uppercase tracking-[0.24em] text-gray-400">
-        {#if saveState === 'saving'}
-          Saving topology…
-        {:else if saveState === 'saved'}
-          Topology saved
-        {:else}
-          Topology editor
-        {/if}
+      <div class="space-y-3 rounded-lg border border-gray-700 bg-gray-900/95 p-3 text-xs text-gray-300">
+        <div class="uppercase tracking-[0.24em] text-gray-500">
+          {#if saveState === 'saving'}
+            Saving topology…
+          {:else if saveState === 'saved'}
+            Topology saved
+          {:else}
+            Topology editor
+          {/if}
+        </div>
+        <div class="space-y-2 border-t border-gray-800 pt-3">
+          <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Palette</div>
+          {#if paletteLoading}
+            <div class="rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
+              Loading templates…
+            </div>
+          {:else}
+            {#each paletteItems as item}
+              <button
+                type="button"
+                draggable="true"
+                class="block w-56 rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                on:dragstart={(event) => {
+                  event.dataTransfer?.setData('application/nova-ve-palette', paletteDragData(item));
+                  if (event.dataTransfer) {
+                    event.dataTransfer.effectAllowed = 'move';
+                  }
+                }}
+              >
+                <div class="font-medium text-gray-100">{item.title}</div>
+                <div class="mt-1 text-[11px] uppercase tracking-[0.2em] text-gray-500">{item.subtitle}</div>
+              </button>
+            {/each}
+          {/if}
+        </div>
       </div>
     </Panel>
 
