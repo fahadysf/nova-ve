@@ -132,6 +132,19 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
     log_response = await labs.node_logs("sample.json", 1, tail=20, follow=False, current_user=SimpleNamespace(username="admin"))
     assert log_response["data"]["logs"] == "boot ok"
 
+    console_response = await labs.node_console("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    assert console_response["code"] == 200
+    assert console_response["data"]["console"] == "telnet"
+    assert console_response["data"]["port"] > 0
+
+    telnet_response = await labs.node_telnet("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    assert "telnet://127.0.0.1:" in telnet_response.body.decode()
+    assert telnet_response.headers["content-disposition"].endswith('node-1.telnet"')
+
+    html5_response = await labs.node_html5("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    assert html5_response.status_code == 307
+    assert "/html5/#/client/" in html5_response.headers["location"]
+
     stop_response = await labs.stop_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
     assert stop_response["code"] == 200
     assert killed
@@ -155,3 +168,23 @@ async def test_start_node_fails_when_qemu_image_missing(monkeypatch, patched_set
     response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
     assert response["code"] == 400
     assert "base image not found" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_rdp_file_generation_uses_console_runtime(monkeypatch, patched_settings, sample_lab):
+    monkeypatch.setattr(
+        "app.routers.labs.NodeRuntimeService",
+        lambda: SimpleNamespace(
+            console_info=lambda _lab_data, _node_id: {
+                "console": "rdp",
+                "host": "127.0.0.1",
+                "port": 3391,
+                "url": "/html5/#/client/demo",
+            }
+        ),
+    )
+
+    response = await labs.node_rdp("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    body = response.body.decode()
+    assert "full address:s:127.0.0.1:3391" in body
+    assert response.headers["content-disposition"].endswith('node-1.rdp"')
