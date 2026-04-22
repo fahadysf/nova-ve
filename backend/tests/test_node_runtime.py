@@ -107,13 +107,20 @@ class _RuntimeFakeDB:
         self.commit_count += 1
 
 
+def _mock_runtime_binaries(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.NodeRuntimeService._resolve_binary",
+        staticmethod(lambda binary: binary),
+    )
+
+
 @pytest.mark.asyncio
 async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, sample_lab):
     recorded_runs = []
     recorded_popen = []
     killed = []
 
-    monkeypatch.setattr("app.services.node_runtime_service.NodeRuntimeService._resolve_binary", staticmethod(lambda binary: binary))
+    _mock_runtime_binaries(monkeypatch)
     monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", _fake_subprocess_run_factory(recorded_runs))
 
     def fake_popen(cmd, cwd=None, stdin=None, stdout=None, stderr=None, start_new_session=None):
@@ -182,7 +189,7 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
 
 @pytest.mark.asyncio
 async def test_start_node_fails_when_qemu_image_missing(monkeypatch, patched_settings, sample_lab):
-    monkeypatch.setattr("app.services.node_runtime_service.NodeRuntimeService._resolve_binary", staticmethod(lambda binary: binary))
+    _mock_runtime_binaries(monkeypatch)
     missing_image_lab = dict(sample_lab)
     missing_image_lab["nodes"] = {
         "1": {
