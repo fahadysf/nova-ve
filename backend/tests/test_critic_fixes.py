@@ -161,8 +161,8 @@ async def test_lab_router_supports_node_network_and_topology_mutations(patched_s
         "nested/lab.json",
         {
             "topology": [{"source": "node1", "destination": "network1", "network_id": 1}],
-            "nodes": {"1": {"left": 200, "top": 150}},
-            "networks": {"1": {"left": 410, "top": 255}},
+            "nodes": {"1": {"left": 200, "top": 150, "interfaces": [{"name": "Gi1", "network_id": 1}]}},
+            "networks": {"1": {"left": 410, "top": 255, "visibility": 0}},
         },
         current_user=current_user,
     )
@@ -170,7 +170,9 @@ async def test_lab_router_supports_node_network_and_topology_mutations(patched_s
 
     saved_lab = LabService.read_lab_json_static("nested/lab.json")
     assert saved_lab["nodes"]["1"]["left"] == 200
+    assert saved_lab["nodes"]["1"]["interfaces"][0]["network_id"] == 1
     assert saved_lab["networks"]["1"]["left"] == 410
+    assert saved_lab["networks"]["1"]["visibility"] == 0
     assert saved_lab["topology"][0]["network_id"] == 1
 
     delete_network_response = await labs.delete_network("nested/lab.json", 1, current_user=current_user)
