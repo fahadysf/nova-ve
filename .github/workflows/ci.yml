@@ -12,6 +12,8 @@ permissions:
 jobs:
   backend:
     runs-on: [self-hosted, linux, x64, docker, nova-ve-ci]
+    env:
+      PYTHONPATH: ${{ github.workspace }}/backend
     defaults:
       run:
         working-directory: backend
@@ -26,7 +28,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run backend tests
-        run: pytest
+        run: python -m pytest
 
       - name: Import app
         run: python -c "from app.main import app; print(app.title)"
@@ -45,11 +47,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install
 
       - name: Run frontend checks
         run: npm run check
