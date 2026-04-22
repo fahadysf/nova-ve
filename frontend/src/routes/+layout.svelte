@@ -2,6 +2,7 @@
   import '../app.css';
   import { onMount } from 'svelte';
   import { authStore, checkAuth } from '$lib/stores/auth';
+  import ToastStack from '$lib/components/ToastStack.svelte';
 
   onMount(() => {
     checkAuth();
@@ -17,3 +18,5 @@
     <slot />
   {/if}
 </div>
+
+<ToastStack />
