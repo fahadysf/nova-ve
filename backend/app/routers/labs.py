@@ -10,6 +10,7 @@ from app.schemas.lab import LabMetaCreate, LabMetaUpdate
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import NodeCreate, NodeUpdate
 from app.schemas.user import UserRead
+from app.services.html5_service import Html5SessionService
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateError, TemplateService
@@ -820,7 +821,15 @@ async def node_html5(
     lab_path: str,
     node_id: int,
     current_user: UserRead = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
+    if not getattr(current_user, "html5", True):
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": "HTML5 console access is disabled for this user.",
+        }
+
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
@@ -843,7 +852,13 @@ async def node_html5(
             "message": str(e),
         }
 
-    return RedirectResponse(url=console["url"], status_code=307)
+    html5_url = await Html5SessionService(db).create_console_url(
+        current_user,
+        host=console["host"],
+        port=console["port"],
+        protocol=console["console"],
+    )
+    return RedirectResponse(url=html5_url, status_code=307)
 
 
 @router.get("/{lab_path:path}/networks")
