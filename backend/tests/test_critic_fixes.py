@@ -57,13 +57,16 @@ def runtime_settings(tmp_path):
     labs_dir = tmp_path / "labs"
     images_dir = tmp_path / "images"
     tmp_dir = tmp_path / "tmp"
+    templates_dir = tmp_path / "templates"
     labs_dir.mkdir()
     images_dir.mkdir()
     tmp_dir.mkdir()
+    templates_dir.mkdir()
     return SimpleNamespace(
         LABS_DIR=labs_dir,
         IMAGES_DIR=images_dir,
         TMP_DIR=tmp_dir,
+        TEMPLATES_DIR=templates_dir,
         QEMU_BINARY="qemu-system-x86_64",
         QEMU_IMG_BINARY="qemu-img",
         DOCKER_HOST="unix:///var/run/docker.sock",
@@ -76,6 +79,7 @@ def patched_settings(monkeypatch, runtime_settings):
     monkeypatch.setattr("app.services.lab_service.get_settings", lambda: runtime_settings)
     monkeypatch.setattr("app.services.folder_service.get_settings", lambda: runtime_settings)
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: runtime_settings)
+    monkeypatch.setattr("app.services.template_service.get_settings", lambda: runtime_settings)
     return runtime_settings
 
 
@@ -106,6 +110,21 @@ async def test_lab_service_preserves_nested_relative_paths(patched_settings):
 @pytest.mark.asyncio
 async def test_lab_router_supports_node_network_and_topology_mutations(patched_settings):
     lab_path = patched_settings.LABS_DIR / "nested" / "lab.json"
+    _write_lab(
+        patched_settings.TEMPLATES_DIR / "qemu" / "csr.yml",
+        """type: qemu
+name: Cisco CSR1000v
+cpu: 2
+ram: 4096
+ethernet: 4
+console: telnet
+icon: Router.png
+cpulimit: 1
+""",
+    )
+    image_dir = patched_settings.IMAGES_DIR / "qemu" / "csr1000v"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "hda.qcow2").write_text("image")
     _write_lab(
         lab_path,
         """{

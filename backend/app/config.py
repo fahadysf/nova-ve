@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     LABS_DIR: Path = Path("/var/lib/nova-ve/labs")
     IMAGES_DIR: Path = Path("/var/lib/nova-ve/images")
     TMP_DIR: Path = Path("/var/lib/nova-ve/tmp")
+    TEMPLATES_DIR: Path = Path(__file__).resolve().parents[1] / "templates"
 
     # Auth
     SESSION_COOKIE_NAME: str = "nova_session"

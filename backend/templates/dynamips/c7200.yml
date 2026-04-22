@@ -1,0 +1,8 @@
+type: dynamips
+name: Cisco 7200
+cpulimit: 1
+icon: Router.png
+cpu: 1
+ram: 512
+ethernet: 2
+console: telnet

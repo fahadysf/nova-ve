@@ -12,6 +12,7 @@ from app.schemas.node import NodeCreate, NodeUpdate
 from app.schemas.user import UserRead
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
+from app.services.template_service import TemplateError, TemplateService
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
 
@@ -279,30 +280,47 @@ async def create_node(
 
     nodes = data.setdefault("nodes", {})
     next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
+    try:
+        template = TemplateService().validate_node_request(
+            request.type,
+            request.template,
+            request.image,
+        )
+    except TemplateError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+
+    provided_fields = request.model_fields_set
     node = {
         "id": next_id,
         "name": request.name,
         "type": request.type,
         "template": request.template,
         "image": request.image,
-        "console": request.console,
+        "console": request.console if "console" in provided_fields else template.console,
         "status": 0,
         "delay": 0,
-        "cpu": request.cpu,
-        "ram": request.ram,
-        "ethernet": request.ethernet,
-        "cpulimit": 1,
+        "cpu": request.cpu if "cpu" in provided_fields else template.cpu,
+        "ram": request.ram if "ram" in provided_fields else template.ram,
+        "ethernet": request.ethernet if "ethernet" in provided_fields else template.ethernet,
+        "cpulimit": template.cpulimit,
         "uuid": str(uuid.uuid4()) if request.type == "qemu" else None,
         "firstmac": _first_mac_for_node(next_id) if request.type == "qemu" else None,
         "left": request.left,
         "top": request.top,
-        "icon": "Router.png" if request.type == "qemu" else "Misc-2D-Docker-S.svg",
+        "icon": template.icon,
         "width": "0",
         "config": False,
         "config_list": [],
         "sat": 0,
         "computed_sat": 0,
-        "interfaces": _default_interfaces(request.type, request.ethernet),
+        "interfaces": _default_interfaces(
+            request.type,
+            request.ethernet if "ethernet" in provided_fields else template.ethernet,
+        ),
     }
     nodes[str(next_id)] = node
     LabService.write_lab_json_static(lab_path, data)
