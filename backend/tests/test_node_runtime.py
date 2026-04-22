@@ -90,6 +90,23 @@ class _FakeProcess:
         return None
 
 
+class _RuntimeFakeDB:
+    def __init__(self):
+        self.executed = []
+        self.added = []
+        self.commit_count = 0
+
+    async def execute(self, query):
+        self.executed.append(query)
+        return None
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.commit_count += 1
+
+
 @pytest.mark.asyncio
 async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, sample_lab):
     recorded_runs = []
@@ -141,9 +158,17 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
     assert "telnet://127.0.0.1:" in telnet_response.body.decode()
     assert telnet_response.headers["content-disposition"].endswith('node-1.telnet"')
 
-    html5_response = await labs.node_html5("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    html5_db = _RuntimeFakeDB()
+    html5_response = await labs.node_html5(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", html5=True, pod=0),
+        db=html5_db,
+    )
     assert html5_response.status_code == 307
     assert "/html5/#/client/" in html5_response.headers["location"]
+    assert "token=" in html5_response.headers["location"]
+    assert html5_db.added
 
     stop_response = await labs.stop_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
     assert stop_response["code"] == 200
@@ -188,3 +213,27 @@ async def test_rdp_file_generation_uses_console_runtime(monkeypatch, patched_set
     body = response.body.decode()
     assert "full address:s:127.0.0.1:3391" in body
     assert response.headers["content-disposition"].endswith('node-1.rdp"')
+
+
+@pytest.mark.asyncio
+async def test_html5_respects_user_flag(monkeypatch, patched_settings, sample_lab):
+    monkeypatch.setattr(
+        "app.routers.labs.NodeRuntimeService",
+        lambda: SimpleNamespace(
+            console_info=lambda _lab_data, _node_id: {
+                "console": "telnet",
+                "host": "127.0.0.1",
+                "port": 2323,
+                "url": "/html5/#/client/demo",
+            }
+        ),
+    )
+
+    response = await labs.node_html5(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="user", html5=False, pod=0),
+        db=_RuntimeFakeDB(),
+    )
+    assert response["code"] == 403
+    assert "disabled" in response["message"].lower()
