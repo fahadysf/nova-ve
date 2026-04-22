@@ -247,6 +247,7 @@ async def test_folder_listing_and_lab_creation_are_scoped_to_user_root(patched_s
     assert root_listing["code"] == 200
     assert all(item["path"].startswith("/Users/alice") for item in root_listing["data"]["folders"])
     assert all(item["path"].startswith("/Users/alice") for item in root_listing["data"]["labs"])
+    assert "/Users/alice/root/lab-a.json" in {item["path"] for item in root_listing["data"]["labs"]}
 
     denied_listing = await folders.list_folder("Users/bob", current_user=current_user, db=db)
     assert denied_listing["code"] == 403
