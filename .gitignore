@@ -34,8 +34,6 @@ frontend/package-lock.json
 frontend/pnpm-lock.yaml
 !frontend/src/lib/
 !frontend/src/lib/**
-frontend/src/lib/components/canvas/CustomNode.svelte
-frontend/src/lib/components/canvas/NetworkNode.svelte
 
 # Environment
 .env
