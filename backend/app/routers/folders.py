@@ -41,7 +41,7 @@ def _scoped_folder_path(current_user: UserRead, raw_path: str, treat_as_absolute
     return f"{root}/{normalized}"
 
 
-async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str) -> dict:
+async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recursive: bool = False) -> dict:
     existing_paths = {lab["path"] for lab in result["labs"]}
     folder_prefix = folder_path.strip("/")
     lab_service = LabService(db)
@@ -49,11 +49,15 @@ async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str) -> di
     for lab in await lab_service.list_labs():
         relative_filename = lab.filename.strip("/")
         if folder_prefix:
-            if "/" not in relative_filename:
-                continue
-            if relative_filename.rsplit("/", 1)[0] != folder_prefix:
-                continue
-        elif "/" in relative_filename:
+            if recursive:
+                if not (relative_filename == folder_prefix or relative_filename.startswith(f"{folder_prefix}/")):
+                    continue
+            else:
+                if "/" not in relative_filename:
+                    continue
+                if relative_filename.rsplit("/", 1)[0] != folder_prefix:
+                    continue
+        elif not recursive and "/" in relative_filename:
             continue
 
         if lab.path in existing_paths:
@@ -80,8 +84,8 @@ async def list_root(
 ):
     try:
         scoped_root = _scoped_folder_path(current_user, "", treat_as_absolute=False)
-        result = FolderService.list_folder(scoped_root)
-        result = await _merge_db_labs(result, db, scoped_root)
+        result = FolderService.list_folder(scoped_root, recursive=True)
+        result = await _merge_db_labs(result, db, scoped_root, recursive=True)
     except ValueError as e:
         return {
             "code": 400,

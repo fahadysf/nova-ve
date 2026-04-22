@@ -49,7 +49,7 @@ def _fmt_time(ts: float) -> str:
 
 class FolderService:
     @staticmethod
-    def list_folder(folder_path: str = "") -> dict:
+    def list_folder(folder_path: str = "", recursive: bool = False) -> dict:
         """List contents of a folder. Returns folders and labs."""
         labs_dir = _labs_dir()
 
@@ -77,7 +77,8 @@ class FolderService:
                 })
 
         if target_dir.exists() and target_dir.is_dir():
-            for entry in sorted(target_dir.iterdir()):
+            entries = sorted(target_dir.rglob("*")) if recursive else sorted(target_dir.iterdir())
+            for entry in entries:
                 if entry.is_dir() and entry.name not in ("__pycache__", ".git"):
                     st = entry.stat()
                     folders.append({
