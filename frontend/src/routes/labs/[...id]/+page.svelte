@@ -105,7 +105,7 @@
       </aside>
 
       <div class="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
-        <TopologyCanvas {nodes} {networks} {topology} />
+        <TopologyCanvas labId={labId} {nodes} {networks} {topology} />
       </div>
     </div>
   {/if}

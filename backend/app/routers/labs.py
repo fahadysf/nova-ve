@@ -220,18 +220,16 @@ async def update_topology(
         data["topology"] = payload.get("topology", data.get("topology", []))
         for node_id, node_patch in payload.get("nodes", {}).items():
             node = data.get("nodes", {}).get(str(node_id))
-            if node:
-                if "left" in node_patch:
-                    node["left"] = node_patch["left"]
-                if "top" in node_patch:
-                    node["top"] = node_patch["top"]
+            if node and isinstance(node_patch, dict):
+                for field, value in node_patch.items():
+                    if value is not None:
+                        node[field] = value
         for network_id, network_patch in payload.get("networks", {}).items():
             network = data.get("networks", {}).get(str(network_id))
-            if network:
-                if "left" in network_patch:
-                    network["left"] = network_patch["left"]
-                if "top" in network_patch:
-                    network["top"] = network_patch["top"]
+            if network and isinstance(network_patch, dict):
+                for field, value in network_patch.items():
+                    if value is not None:
+                        network[field] = value
 
     LabService.write_lab_json_static(lab_path, data)
     return {

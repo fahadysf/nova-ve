@@ -42,6 +42,11 @@ export interface FolderListing {
   labs: LabListItem[];
 }
 
+export interface NodeInterface {
+  name: string;
+  network_id: number;
+}
+
 export interface NodeData {
   id: number;
   name: string;
@@ -56,6 +61,7 @@ export interface NodeData {
   left: number;
   top: number;
   icon: string;
+  interfaces: NodeInterface[];
   width?: string;
   uuid?: string;
   firstmac?: string;
@@ -71,23 +77,52 @@ export interface NetworkData {
   left: number;
   top: number;
   icon: string;
-  visibility: boolean;
+  visibility: boolean | number;
+  count?: number;
+  style?: string;
+  linkstyle?: string;
+  color?: string;
+  label?: string;
+  smart?: number;
   width?: number;
 }
 
 export interface TopologyLink {
   type: 'ethernet';
   source: string;
+  source_node_name?: string;
   source_type: 'node' | 'network';
   source_label: string;
   source_interfaceId: number;
+  source_suspend?: number;
   destination: string;
   destination_type: 'node' | 'network';
+  destination_node_name?: string;
   destination_label: string;
   destination_interfaceId: number | string;
+  destination_suspend?: number;
   network_id: number;
+  style?: string;
+  linkstyle?: string;
+  label?: string;
+  labelpos?: string;
   width?: string;
   color?: string;
+  stub?: string;
+  curviness?: string;
+  beziercurviness?: string;
+  round?: string;
+  midpoint?: string;
+  srcpos?: string;
+  dstpos?: string;
+  source_delay?: number;
+  source_loss?: number;
+  source_bandwidth?: number;
+  source_jitter?: number;
+  destination_delay?: number;
+  destination_loss?: number;
+  destination_bandwidth?: number;
+  destination_jitter?: number;
 }
 
 export interface LabMeta {
