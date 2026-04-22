@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, folders, labs, system, users
+from app.routers import auth, folders, labs, listing, system, users
 from app.database import engine
 from app.config import get_settings
 
@@ -20,6 +20,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(folders.router)
 app.include_router(labs.router)
+app.include_router(listing.router)
 app.include_router(system.router)
 app.include_router(users.router)
 

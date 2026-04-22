@@ -1,0 +1,9 @@
+type: qemu
+name: Cisco CSR1000v
+cpulimit: 1
+icon: Router.png
+cpu: 2
+ram: 4096
+ethernet: 4
+console: telnet
+qemu_arch: x86_64
