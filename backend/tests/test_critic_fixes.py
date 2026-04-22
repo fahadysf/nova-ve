@@ -90,7 +90,7 @@ def _write_lab(path: Path, content: str) -> None:
 
 @pytest.mark.asyncio
 async def test_lab_service_preserves_nested_relative_paths(patched_settings):
-    db = FakeDB()
+    db = FakeDB(execute_results=[FakeResult(scalars=[])])
     service = LabService(db)
 
     lab = await service.create_lab(
@@ -233,6 +233,45 @@ async def test_folder_rename_and_delete_propagate_to_lab_records(patched_setting
     assert delete_response["code"] == 200
     assert lab_record in db.deleted
     assert not (patched_settings.LABS_DIR / "labs" / "core").exists()
+
+
+@pytest.mark.asyncio
+async def test_folder_listing_and_lab_creation_are_scoped_to_user_root(patched_settings):
+    _write_lab(patched_settings.LABS_DIR / "Users" / "alice" / "root" / "lab-a.json", "{}")
+    _write_lab(patched_settings.LABS_DIR / "Users" / "bob" / "lab-b.json", "{}")
+
+    current_user = SimpleNamespace(username="alice", role="user", folder="/Users/alice")
+    db = FakeDB(execute_results=[FakeResult(scalars=[])])
+
+    root_listing = await folders.list_root(current_user=current_user, db=db)
+    assert root_listing["code"] == 200
+    assert all(item["path"].startswith("/Users/alice") for item in root_listing["data"]["folders"])
+    assert all(item["path"].startswith("/Users/alice") for item in root_listing["data"]["labs"])
+
+    denied_listing = await folders.list_folder("Users/bob", current_user=current_user, db=db)
+    assert denied_listing["code"] == 403
+
+    created_lab = await labs.create_lab(
+        SimpleNamespace(
+            name="Scoped Lab",
+            path="",
+            filename=None,
+            author="alice",
+            description="",
+            body="",
+            version="0",
+            scripttimeout=300,
+            countdown=0,
+            linkwidth="1",
+            grid=True,
+            lock=False,
+            sat="-1",
+        ),
+        current_user=current_user,
+        db=FakeDB(),
+    )
+    assert created_lab["code"] == 200
+    assert created_lab["data"]["path"].startswith("/Users/alice/")
 
 
 @pytest.mark.asyncio

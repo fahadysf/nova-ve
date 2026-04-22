@@ -21,6 +21,30 @@ def _read_lab_data(lab_path: str) -> dict:
     return LabService.read_lab_json_static(lab_path)
 
 
+def _user_root(current_user: UserRead) -> str:
+    if getattr(current_user, "role", "admin") == "admin":
+        return ""
+    return getattr(current_user, "folder", "/").strip().replace("\\", "/").strip("/")
+
+
+def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: bool) -> str:
+    normalized = raw_path.strip().replace("\\", "/").strip("/")
+    root = _user_root(current_user)
+    if not root:
+        return normalized
+
+    if not normalized:
+        return root
+
+    if normalized == root or normalized.startswith(f"{root}/"):
+        return normalized
+
+    if treat_as_absolute or raw_path.strip().startswith("/"):
+        raise PermissionError("Access denied.")
+
+    return f"{root}/{normalized}"
+
+
 def _default_interfaces(node_type: str, ethernet_count: int) -> list[dict]:
     interfaces = []
     for index in range(ethernet_count):
@@ -52,10 +76,11 @@ async def create_lab(
 ):
     lab_service = LabService(db)
     try:
+        scoped_path = _scoped_lab_path(current_user, request.path or "", treat_as_absolute=False)
         lab = await lab_service.create_lab(
             owner=current_user.username,
             name=request.name,
-            path=request.path,
+            path=scoped_path,
             filename=request.filename,
             author=request.author,
             description=request.description,
@@ -71,6 +96,12 @@ async def create_lab(
     except FileExistsError as e:
         return {
             "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
             "status": "fail",
             "message": str(e),
         }
@@ -107,7 +138,15 @@ async def update_lab(
     db: AsyncSession = Depends(get_db),
 ):
     lab_service = LabService(db)
-    lab = await lab_service.get_lab_by_filename(lab_path)
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+    lab = await lab_service.get_lab_by_filename(scoped_path)
 
     if not lab:
         return {
@@ -154,7 +193,15 @@ async def delete_lab(
     db: AsyncSession = Depends(get_db),
 ):
     lab_service = LabService(db)
-    lab = await lab_service.get_lab_by_filename(lab_path)
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+    lab = await lab_service.get_lab_by_filename(scoped_path)
 
     if not lab:
         return {
@@ -184,12 +231,18 @@ async def get_topology(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     return {
@@ -207,12 +260,19 @@ async def update_topology(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     if isinstance(payload, list):
@@ -232,7 +292,7 @@ async def update_topology(
                     if value is not None:
                         network[field] = value
 
-    LabService.write_lab_json_static(lab_path, data)
+    LabService.write_lab_json_static(scoped_path, data)
     return {
         "code": 200,
         "status": "success",
@@ -247,12 +307,18 @@ async def list_nodes(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     return {
@@ -270,12 +336,19 @@ async def create_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     nodes = data.setdefault("nodes", {})
@@ -323,7 +396,7 @@ async def create_node(
         ),
     }
     nodes[str(next_id)] = node
-    LabService.write_lab_json_static(lab_path, data)
+    LabService.write_lab_json_static(scoped_path, data)
 
     return {
         "code": 200,
@@ -340,12 +413,18 @@ async def list_interfaces(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     node = data.get("nodes", {}).get(str(node_id), {})
@@ -376,12 +455,19 @@ async def update_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     node = data.get("nodes", {}).get(str(node_id))
@@ -401,7 +487,7 @@ async def update_node(
         node.get("type", "qemu"),
         int(node.get("ethernet", 0)),
     )
-    LabService.write_lab_json_static(lab_path, data)
+    LabService.write_lab_json_static(scoped_path, data)
 
     return {
         "code": 200,
@@ -418,12 +504,19 @@ async def delete_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     nodes = data.get("nodes", {})
@@ -445,7 +538,7 @@ async def delete_node(
         for link in data.get("topology", [])
         if link.get("source") != f"node{node_id}" and link.get("destination") != f"node{node_id}"
     ]
-    LabService.write_lab_json_static(lab_path, data)
+    LabService.write_lab_json_static(scoped_path, data)
 
     return {
         "code": 200,
@@ -461,7 +554,7 @@ async def start_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         NodeRuntimeService().start_node(data, node_id)
     except FileNotFoundError:
         return {
@@ -472,6 +565,12 @@ async def start_node(
     except NodeRuntimeError as e:
         return {
             "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
             "status": "fail",
             "message": str(e),
         }
@@ -490,7 +589,7 @@ async def stop_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         NodeRuntimeService().stop_node(data, node_id)
     except FileNotFoundError:
         return {
@@ -501,6 +600,12 @@ async def stop_node(
     except NodeRuntimeError as e:
         return {
             "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
             "status": "fail",
             "message": str(e),
         }
@@ -519,7 +624,7 @@ async def wipe_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         NodeRuntimeService().wipe_node(data, node_id)
     except FileNotFoundError:
         return {
@@ -530,6 +635,12 @@ async def wipe_node(
     except NodeRuntimeError as e:
         return {
             "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
             "status": "fail",
             "message": str(e),
         }
@@ -550,12 +661,18 @@ async def node_logs(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     runtime_service = NodeRuntimeService()
@@ -581,7 +698,7 @@ async def node_console(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
     except FileNotFoundError:
         return {
@@ -594,6 +711,12 @@ async def node_console(
             "code": 400,
             "status": "fail",
             "message": str(exc),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     return {
@@ -611,7 +734,7 @@ async def node_telnet(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
     except FileNotFoundError:
         return {
@@ -624,6 +747,12 @@ async def node_telnet(
             "code": 400,
             "status": "fail",
             "message": str(exc),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     if console["console"] != "telnet":
@@ -646,7 +775,7 @@ async def node_rdp(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
     except FileNotFoundError:
         return {
@@ -659,6 +788,12 @@ async def node_rdp(
             "code": 400,
             "status": "fail",
             "message": str(exc),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     if console["console"] != "rdp":
@@ -687,7 +822,7 @@ async def node_html5(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
     except FileNotFoundError:
         return {
@@ -701,6 +836,12 @@ async def node_html5(
             "status": "fail",
             "message": str(exc),
         }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
 
     return RedirectResponse(url=console["url"], status_code=307)
 
@@ -711,12 +852,18 @@ async def list_networks(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     return {
@@ -734,12 +881,19 @@ async def create_network(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     networks = data.setdefault("networks", {})
@@ -761,7 +915,7 @@ async def create_network(
         "count": 0,
     }
     networks[str(next_id)] = network
-    LabService.write_lab_json_static(lab_path, data)
+    LabService.write_lab_json_static(scoped_path, data)
 
     return {
         "code": 200,
@@ -779,12 +933,19 @@ async def update_network(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     network = data.get("networks", {}).get(str(network_id))
@@ -799,7 +960,7 @@ async def update_network(
         if value is not None:
             network[field] = value
 
-    LabService.write_lab_json_static(lab_path, data)
+    LabService.write_lab_json_static(scoped_path, data)
     return {
         "code": 200,
         "status": "success",
@@ -815,12 +976,19 @@ async def delete_network(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(lab_path)
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
             "status": "fail",
             "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
         }
 
     networks = data.get("networks", {})
@@ -844,7 +1012,7 @@ async def delete_network(
         and link.get("source") != f"network{network_id}"
         and link.get("destination") != f"network{network_id}"
     ]
-    LabService.write_lab_json_static(lab_path, data)
+    LabService.write_lab_json_static(scoped_path, data)
 
     return {
         "code": 200,
@@ -859,8 +1027,16 @@ async def get_lab(
     current_user: UserRead = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
     lab_service = LabService(db)
-    lab = await lab_service.get_lab_by_filename(lab_path)
+    lab = await lab_service.get_lab_by_filename(scoped_path)
 
     if lab:
         return {
@@ -888,7 +1064,7 @@ async def get_lab(
         }
 
     try:
-        data = _read_lab_data(lab_path)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
