@@ -1,7 +1,7 @@
 import uuid
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import StreamingResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -572,6 +572,137 @@ async def node_logs(
         "message": "Node logs fetched.",
         "data": {"logs": runtime_service.read_logs(lab_id, node_id, tail=tail)},
     }
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/console")
+async def node_console(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+        console = NodeRuntimeService().console_info(data, node_id)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Node console fetched.",
+        "data": console,
+    }
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/telnet")
+async def node_telnet(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+        console = NodeRuntimeService().console_info(data, node_id)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+
+    if console["console"] != "telnet":
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": "Node console is not telnet.",
+        }
+
+    body = f"telnet://{console['host']}:{console['port']}\n"
+    response = PlainTextResponse(body, media_type="application/x-telnet")
+    response.headers["Content-Disposition"] = f'attachment; filename="node-{node_id}.telnet"'
+    return response
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/rdp")
+async def node_rdp(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+        console = NodeRuntimeService().console_info(data, node_id)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+
+    if console["console"] != "rdp":
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": "Node console is not RDP.",
+        }
+
+    body = "\n".join(
+        [
+            f"full address:s:{console['host']}:{console['port']}",
+            f"prompt for credentials:i:1",
+            f"administrative session:i:0",
+        ]
+    )
+    response = PlainTextResponse(body, media_type="application/x-rdp")
+    response.headers["Content-Disposition"] = f'attachment; filename="node-{node_id}.rdp"'
+    return response
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/html5")
+async def node_html5(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(lab_path)
+        console = NodeRuntimeService().console_info(data, node_id)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+
+    return RedirectResponse(url=console["url"], status_code=307)
 
 
 @router.get("/{lab_path:path}/networks")

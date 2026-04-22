@@ -122,6 +122,23 @@ class NodeRuntimeService:
 
         return self._read_qemu_logs(runtime, tail=tail)
 
+    def console_info(self, lab_data: dict[str, Any], node_id: int, host: str = "127.0.0.1") -> dict[str, Any]:
+        lab_id = self._lab_id(lab_data)
+        node = self._node_data(lab_data, node_id)
+        runtime = self._runtime_record(lab_id, node_id)
+        if not runtime:
+            raise NodeRuntimeError(f"Node is not running: {node_id}")
+
+        return {
+            "lab_id": lab_id,
+            "node_id": node_id,
+            "name": node.get("name", f"node-{node_id}"),
+            "console": runtime.get("console", node.get("console", "telnet")),
+            "host": host,
+            "port": int(runtime.get("console_port", 0)),
+            "url": self._console_url(runtime),
+        }
+
     def stream_logs(self, lab_id: str, node_id: int, tail: int = 200) -> Iterator[str]:
         runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
         if not runtime:
