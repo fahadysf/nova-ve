@@ -6,6 +6,7 @@ Usage:
 """
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -18,32 +19,35 @@ from app.services.auth_service import AuthService
 from app.core.constants import UserRole
 
 
-DEFAULT_ADMIN = {
-    "username": "admin",
-    "password": "admin",
-    "email": "admin@nova-ve.local",
-    "name": "Administrator",
-    "role": UserRole.ADMIN,
-}
+def get_default_admin() -> dict[str, str | UserRole]:
+    return {
+        "username": os.getenv("NOVA_VE_ADMIN_USERNAME", "admin"),
+        "password": os.getenv("NOVA_VE_ADMIN_PASSWORD", "admin"),
+        "email": os.getenv("NOVA_VE_ADMIN_EMAIL", "admin@nova-ve.local"),
+        "name": os.getenv("NOVA_VE_ADMIN_NAME", "Administrator"),
+        "role": UserRole.ADMIN,
+    }
 
 
 async def seed_admin_user(db: AsyncSession) -> None:
     auth_service = AuthService(db)
-    user = await auth_service.create_user(**DEFAULT_ADMIN)
-    print(f"[seed] Created admin user: {user.username} / {DEFAULT_ADMIN['password']}")
+    default_admin = get_default_admin()
+    user = await auth_service.create_user(**default_admin)
+    print(f"[seed] Created admin user: {user.username}")
 
 
 async def seed() -> None:
+    default_admin = get_default_admin()
     async with async_session_maker() as db:
         async with db.begin():
             auth_service = AuthService(db)
-            # Check if admin already exists
+            # Check if the configured bootstrap admin already exists.
             from sqlalchemy import select
             from app.models.user import User
-            result = await db.execute(select(User).where(User.username == "admin"))
+            result = await db.execute(select(User).where(User.username == default_admin["username"]))
             existing = result.scalar_one_or_none()
             if existing:
-                print("[seed] Admin user already exists, skipping.")
+                print(f"[seed] Admin user {default_admin['username']} already exists, skipping.")
                 return
 
         # Re-open session for seeding (previous was in transaction)
