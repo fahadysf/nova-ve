@@ -4,11 +4,14 @@ on:
   push:
     branches:
       - main
-  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   backend:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, docker, nova-ve-ci]
     defaults:
       run:
         working-directory: backend
@@ -32,7 +35,7 @@ jobs:
         run: python -m compileall app tests
 
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, docker, nova-ve-ci]
     defaults:
       run:
         working-directory: frontend
@@ -55,9 +58,12 @@ jobs:
         run: npm run build
 
   compose-smoke:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, docker, nova-ve-ci]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Clean any stale compose state
+        run: docker compose down -v || true
 
       - name: Validate compose file
         run: docker compose config -q
