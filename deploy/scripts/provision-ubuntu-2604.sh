@@ -104,6 +104,7 @@ ensure_backend_env() {
   local guacamole_db_password
   local guacamole_database_url
   local guacamole_data_source
+  local guacamole_state_dir
   local public_path
   local target_host
   local expire_seconds
@@ -148,12 +149,16 @@ PY
   guacamole_db_password="$(awk -F= '/^GUACAMOLE_DB_PASSWORD=/{print $2}' "${ENV_FILE}" | tail -n1)"
   guacamole_database_url="$(awk -F= '/^GUACAMOLE_DATABASE_URL=/{print $2}' "${ENV_FILE}" | tail -n1)"
   guacamole_data_source="$(awk -F= '/^GUACAMOLE_DATA_SOURCE=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  guacamole_state_dir="$(awk -F= '/^GUACAMOLE_STATE_DIR=/{print $2}' "${ENV_FILE}" | tail -n1)"
 
   if [[ -z "${public_path}" ]]; then
     printf '\nGUACAMOLE_PUBLIC_PATH=/html5/\n' >> "${ENV_FILE}"
   fi
   if [[ -z "${target_host}" ]]; then
     printf 'GUACAMOLE_TARGET_HOST=host.docker.internal\n' >> "${ENV_FILE}"
+  fi
+  if [[ -z "${guacamole_state_dir}" ]]; then
+    printf 'GUACAMOLE_STATE_DIR=/var/lib/nova-ve/guacamole\n' >> "${ENV_FILE}"
   fi
   if [[ -z "${guacamole_data_source}" ]]; then
     printf 'GUACAMOLE_DATA_SOURCE=postgresql\n' >> "${ENV_FILE}"
@@ -205,7 +210,7 @@ run apt-get install -y --no-install-recommends \
   npm
 
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve
-run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole "${FRONTEND_ROOT}"
+run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole /var/lib/nova-ve/guacamole/db "${FRONTEND_ROOT}"
 run chown -R "${APP_OWNER}:${APP_GROUP}" /var/lib/nova-ve
 run systemctl enable docker
 run systemctl restart docker

@@ -8,6 +8,7 @@ ENV_FILE="${LOCAL_ROOT}/backend.env"
 LABS_DIR="${LOCAL_ROOT}/labs"
 IMAGES_DIR="${LOCAL_ROOT}/images"
 TMP_DIR="${LOCAL_ROOT}/tmp"
+GUACAMOLE_STATE_DIR="${LOCAL_ROOT}/guacamole"
 ADMIN_PASSWORD="${NOVA_VE_ADMIN_PASSWORD:-admin}"
 SECRET_KEY="${SECRET_KEY:-dev-secret-key-do-not-use-in-production}"
 
@@ -36,7 +37,7 @@ DOCKER_HOST_VALUE="$(detect_docker_host)"
 GUACAMOLE_SECRET="${GUACAMOLE_JSON_SECRET_KEY:-$(generate_secret)}"
 GUACAMOLE_DB_PASSWORD="${GUACAMOLE_DB_PASSWORD:-guacuser}"
 
-mkdir -p "${LOCAL_ROOT}" "${LABS_DIR}" "${IMAGES_DIR}" "${TMP_DIR}"
+mkdir -p "${LOCAL_ROOT}" "${LABS_DIR}" "${IMAGES_DIR}" "${TMP_DIR}" "${GUACAMOLE_STATE_DIR}/db"
 cp -f "${REPO_ROOT}/backend/labs/alpine-docker-demo.json" "${LABS_DIR}/alpine-docker-demo.json"
 
 cat > "${ENV_FILE}" <<EOF
@@ -52,6 +53,7 @@ DOCKER_HOST=${DOCKER_HOST_VALUE}
 GUACAMOLE_PUBLIC_PATH=/html5/
 GUACAMOLE_INTERNAL_URL=http://127.0.0.1:8081/html5/
 GUACAMOLE_TARGET_HOST=host.docker.internal
+GUACAMOLE_STATE_DIR=${GUACAMOLE_STATE_DIR}
 GUACAMOLE_DATABASE_URL=postgresql+asyncpg://guacuser:${GUACAMOLE_DB_PASSWORD}@127.0.0.1:5433/guacdb
 GUACAMOLE_DATA_SOURCE=postgresql
 GUACAMOLE_JSON_SECRET_KEY=${GUACAMOLE_SECRET}
