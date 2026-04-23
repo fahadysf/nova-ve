@@ -7,7 +7,7 @@ services:
       POSTGRES_USER: guacuser
       POSTGRES_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
     volumes:
-      - guacdb:/var/lib/postgresql/data
+      - ${GUACAMOLE_STATE_DIR:-/var/lib/nova-ve/guacamole}/db:/var/lib/postgresql/data
     ports:
       - "127.0.0.1:5433:5432"
 
@@ -33,6 +33,3 @@ services:
       POSTGRESQL_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
     ports:
       - "127.0.0.1:8081:8080"
-
-volumes:
-  guacdb:

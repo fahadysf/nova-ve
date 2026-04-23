@@ -24,6 +24,7 @@ def _guacamole_engine(database_url: str):
 
 class GuacamoleDatabaseService:
     AUTH_CACHE_KEY = "__guac_auth__"
+    ROOT_GROUP_NAME = "nova-ve"
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -40,19 +41,22 @@ class GuacamoleDatabaseService:
         port: int,
         protocol: str,
         connection_name: str,
+        connection_key: str | None = None,
     ) -> str:
         username = self._guacamole_username(current_user)
         password = self._guacamole_password(current_user)
         target_host = self._target_host(host)
+        stable_connection_key = connection_key or connection_name
 
         async with self.engine.begin() as conn:
             entity_id = await self._ensure_entity(conn, username)
             await self._ensure_user(conn, entity_id, password)
-            group_id = await self._ensure_connection_group(conn, username)
+            root_group_id = await self._ensure_root_connection_group(conn)
+            group_id = await self._ensure_connection_group(conn, username, root_group_id)
             connection_id = await self._ensure_connection(
                 conn,
                 group_id=group_id,
-                name=self._connection_name(current_user, connection_name, protocol, target_host, port),
+                name=self._connection_name(current_user, stable_connection_key, protocol),
                 protocol=protocol,
                 host=target_host,
                 port=port,
@@ -97,10 +101,12 @@ class GuacamoleDatabaseService:
         return hashlib.sha256(material).hexdigest()
 
     @staticmethod
-    def _connection_name(current_user: UserRead, connection_name: str, protocol: str, host: str, port: int) -> str:
+    def _connection_name(current_user: UserRead, connection_key: str, protocol: str) -> str:
         username = str(current_user.username).strip() or "user"
-        base = f"{connection_name}-{protocol}-{host}-{port}-{username}"
-        return base[:120]
+        base = f"{connection_key}-{protocol}-{username}"
+        digest = hashlib.sha256(base.encode("utf-8")).hexdigest()[:12]
+        safe_prefix = connection_key.replace(":", "-")[:72]
+        return f"{safe_prefix}-{protocol}-{digest}"[:120]
 
     def _client_identifier(self, connection_id: int) -> str:
         raw = f"{connection_id}\0c\0{self.settings.GUACAMOLE_DATA_SOURCE}".encode("utf-8")
@@ -191,17 +197,18 @@ class GuacamoleDatabaseService:
         )
         return int(user_id)
 
-    async def _ensure_connection_group(self, conn, username: str) -> int:
-        group_name = f"nova-ve:{username}"
+    async def _ensure_root_connection_group(self, conn) -> int:
         existing = await conn.execute(
             text(
                 """
                 SELECT connection_group_id
                 FROM guacamole_connection_group
                 WHERE connection_group_name = :name AND parent_id IS NULL
+                ORDER BY connection_group_id
+                LIMIT 1
                 """
             ),
-            {"name": group_name},
+            {"name": self.ROOT_GROUP_NAME},
         )
         group_id = existing.scalar_one_or_none()
         if group_id is not None:
@@ -215,7 +222,37 @@ class GuacamoleDatabaseService:
                 RETURNING connection_group_id
                 """
             ),
-            {"name": group_name},
+            {"name": self.ROOT_GROUP_NAME},
+        )
+        return int(inserted.scalar_one())
+
+    async def _ensure_connection_group(self, conn, username: str, root_group_id: int) -> int:
+        group_name = f"nova-ve:{username}"
+        existing = await conn.execute(
+            text(
+                """
+                SELECT connection_group_id
+                FROM guacamole_connection_group
+                WHERE connection_group_name = :name AND parent_id = :parent_id
+                ORDER BY connection_group_id
+                LIMIT 1
+                """
+            ),
+            {"name": group_name, "parent_id": root_group_id},
+        )
+        group_id = existing.scalar_one_or_none()
+        if group_id is not None:
+            return int(group_id)
+
+        inserted = await conn.execute(
+            text(
+                """
+                INSERT INTO guacamole_connection_group (connection_group_name, parent_id, type)
+                VALUES (:name, :parent_id, 'ORGANIZATIONAL')
+                RETURNING connection_group_id
+                """
+            ),
+            {"name": group_name, "parent_id": root_group_id},
         )
         return int(inserted.scalar_one())
 

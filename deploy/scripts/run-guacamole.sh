@@ -19,6 +19,9 @@ if [[ -z "${GUACAMOLE_DB_PASSWORD:-}" ]]; then
   exit 1
 fi
 
+state_dir="${GUACAMOLE_STATE_DIR:-/var/lib/nova-ve/guacamole}"
+mkdir -p "${state_dir}/db"
+
 docker compose -f "${COMPOSE_FILE}" up -d --pull missing guacdb
 guacdb_container="$(docker compose -f "${COMPOSE_FILE}" ps -q guacdb)"
 for _ in $(seq 1 30); do

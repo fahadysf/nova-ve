@@ -876,6 +876,7 @@ async def node_html5(
                 port=console["port"],
                 protocol=console["console"],
                 connection_name=console["name"],
+                connection_key=f"{data.get('id', lab_path)}:{node_id}:{console['console']}",
             )
         else:
             html5_url = await Html5SessionService().create_console_url(

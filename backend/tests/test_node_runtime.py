@@ -10,6 +10,7 @@ import psutil
 import pytest
 
 from app.routers import labs
+from app.services.guacamole_db_service import GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionService
 from app.services.node_runtime_service import NodeRuntimeService
 
@@ -358,6 +359,29 @@ async def test_html5_route_prefers_db_backed_service_when_configured(monkeypatch
     )
     assert response.status_code == 307
     assert response.headers["location"] == "/html5/#/client/db-backed?token=dbtoken"
+
+
+def test_guacamole_connection_name_ignores_transient_host_and_port():
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    user = SimpleNamespace(username="admin")
+
+    key_one = service._connection_name(user, "lab-1:1:telnet", "telnet")
+    key_two = service._connection_name(user, "lab-1:1:telnet", "telnet")
+    key_other = service._connection_name(user, "lab-1:2:telnet", "telnet")
+
+    assert key_one == key_two
+    assert key_one != key_other
+
+
+def test_guacamole_connection_name_remains_unique_for_long_keys():
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    user = SimpleNamespace(username="admin")
+    prefix = "x" * 150
+
+    key_one = service._connection_name(user, prefix + "alpha", "telnet")
+    key_two = service._connection_name(user, prefix + "beta", "telnet")
+
+    assert key_one != key_two
 
 
 @pytest.mark.asyncio
