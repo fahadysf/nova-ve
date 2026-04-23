@@ -11,12 +11,14 @@ export default defineConfig({
 						'/html5': {
 							target: process.env.NOVA_VE_HTML5_ORIGIN,
 							changeOrigin: true,
+							ws: true,
 						},
 				  }
 				: {
 						'/html5': {
 							target: 'http://127.0.0.1:8081',
 							changeOrigin: true,
+							ws: true,
 						},
 				  }),
 			'/api': {
