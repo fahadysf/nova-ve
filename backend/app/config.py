@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     QEMU_BINARY: str = "/usr/bin/qemu-system-x86_64"
     QEMU_IMG_BINARY: str = "/usr/bin/qemu-img"
     DOCKER_HOST: str = "unix:///var/run/docker.sock"
+    GUACAMOLE_PUBLIC_PATH: str = "/html5/"
+    GUACAMOLE_INTERNAL_URL: str = "http://127.0.0.1:8081/html5/"
+    GUACAMOLE_TARGET_HOST: str = "host.docker.internal"
+    GUACAMOLE_JSON_SECRET_KEY: str = ""
+    GUACAMOLE_JSON_EXPIRE_SECONDS: int = 300
 
     class Config:
         env_file = ".env"

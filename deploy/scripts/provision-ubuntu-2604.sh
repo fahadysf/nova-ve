@@ -12,6 +12,8 @@ ENV_FILE="${ENV_DIR}/backend.env"
 FRONTEND_ROOT="${NOVA_VE_FRONTEND_ROOT:-/var/lib/nova-ve/www}"
 CADDY_TEMPLATE="${REPO_ROOT}/deploy/templates/Caddyfile.tpl"
 BACKEND_SERVICE_TEMPLATE="${REPO_ROOT}/deploy/templates/nova-ve-backend.service.tpl"
+PYTHON_BIN="${NOVA_VE_PYTHON_BIN:-python3}"
+GUACAMOLE_COMPOSE_SCRIPT="${REPO_ROOT}/deploy/scripts/run-guacamole.sh"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -57,6 +59,10 @@ require_target_host() {
     echo "Run this script as root." >&2
     exit 1
   fi
+  if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
+    echo "Required Python runtime ${PYTHON_BIN} is not installed." >&2
+    exit 1
+  fi
 }
 
 render_template() {
@@ -94,25 +100,58 @@ ensure_backend_env() {
     return 0
   fi
 
+  local guacamole_secret
+  local public_path
+  local target_host
+  local expire_seconds
   install -d -m 0700 "${ENV_DIR}"
   if [[ ! -f "${ENV_FILE}" ]]; then
     local secret
     local admin_password
-    secret="$(python3.12 - <<'PY'
+    secret="$("${PYTHON_BIN}" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(48))
 PY
 )"
-    admin_password="$(python3.12 - <<'PY'
+    admin_password="$("${PYTHON_BIN}" - <<'PY'
 import secrets
 print(secrets.token_urlsafe(24))
+PY
+)"
+    guacamole_secret="$("${PYTHON_BIN}" - <<'PY'
+import secrets
+print(secrets.token_hex(16))
 PY
 )"
     install -m 0600 /dev/null "${ENV_FILE}"
     sed \
       -e "s|^SECRET_KEY=.*|SECRET_KEY=${secret}|" \
       -e "s|^NOVA_VE_ADMIN_PASSWORD=.*|NOVA_VE_ADMIN_PASSWORD=${admin_password}|" \
+      -e "s|^GUACAMOLE_JSON_SECRET_KEY=.*|GUACAMOLE_JSON_SECRET_KEY=${guacamole_secret}|" \
       "${REPO_ROOT}/deploy/env/backend.env.example" > "${ENV_FILE}"
+  fi
+
+  public_path="$(awk -F= '/^GUACAMOLE_PUBLIC_PATH=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  target_host="$(awk -F= '/^GUACAMOLE_TARGET_HOST=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  expire_seconds="$(awk -F= '/^GUACAMOLE_JSON_EXPIRE_SECONDS=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  guacamole_secret="$(awk -F= '/^GUACAMOLE_JSON_SECRET_KEY=/{print $2}' "${ENV_FILE}" | tail -n1)"
+
+  if [[ -z "${public_path}" ]]; then
+    printf '\nGUACAMOLE_PUBLIC_PATH=/html5/\n' >> "${ENV_FILE}"
+  fi
+  if [[ -z "${target_host}" ]]; then
+    printf 'GUACAMOLE_TARGET_HOST=host.docker.internal\n' >> "${ENV_FILE}"
+  fi
+  if [[ -z "${expire_seconds}" ]]; then
+    printf 'GUACAMOLE_JSON_EXPIRE_SECONDS=300\n' >> "${ENV_FILE}"
+  fi
+  if [[ -z "${guacamole_secret}" ]]; then
+    guacamole_secret="$("${PYTHON_BIN}" - <<'PY'
+import secrets
+print(secrets.token_hex(16))
+PY
+)"
+    printf 'GUACAMOLE_JSON_SECRET_KEY=%s\n' "${guacamole_secret}" >> "${ENV_FILE}"
   fi
   chmod 0600 "${ENV_FILE}"
 }
@@ -120,41 +159,53 @@ PY
 require_target_host
 
 run apt-get update
-run apt-get install -y \
+run apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
   jq \
+  openssl \
   build-essential \
   libpq-dev \
+  python3-dev \
   postgresql \
   postgresql-contrib \
   caddy \
-  python3.12 \
-  python3.12-venv \
+  docker.io \
+  docker-compose-v2 \
+  python3 \
+  python3-venv \
   nodejs \
   npm
 
-run install -d -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/tmp "${FRONTEND_ROOT}"
+run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve
+run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole "${FRONTEND_ROOT}"
+run chown -R "${APP_OWNER}:${APP_GROUP}" /var/lib/nova-ve
+run systemctl enable docker
+run systemctl restart docker
+run usermod -aG docker "${APP_OWNER}"
 ensure_backend_env
 
 ensure_database
 
-run python3.12 -m venv "${REPO_ROOT}/backend/.venv"
+run "${PYTHON_BIN}" -m venv "${REPO_ROOT}/backend/.venv"
 run "${REPO_ROOT}/backend/.venv/bin/pip" install --upgrade pip
 run "${REPO_ROOT}/backend/.venv/bin/pip" install -r "${REPO_ROOT}/backend/requirements.txt"
 
 run "${REPO_ROOT}/deploy/scripts/run-migrations.sh"
 run "${REPO_ROOT}/deploy/scripts/run-seed.sh"
 run "${REPO_ROOT}/deploy/scripts/build-frontend.sh"
+run "${GUACAMOLE_COMPOSE_SCRIPT}"
 
 render_template "${CADDY_TEMPLATE}" /etc/caddy/Caddyfile
 render_template "${BACKEND_SERVICE_TEMPLATE}" /etc/systemd/system/nova-ve-backend.service
 run caddy validate --config /etc/caddy/Caddyfile
 
 run systemctl daemon-reload
+run systemctl enable docker
 run systemctl enable postgresql
 run systemctl enable caddy
 run systemctl enable nova-ve-backend
+run systemctl restart docker
 run systemctl restart postgresql
 run systemctl restart nova-ve-backend
 run systemctl restart caddy

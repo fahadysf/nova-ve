@@ -1,11 +1,14 @@
 import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from app.routers import labs
+from app.services.html5_service import Html5SessionService
 from app.services.node_runtime_service import NodeRuntimeService
 
 
@@ -31,6 +34,10 @@ def runtime_settings(tmp_path):
         QEMU_BINARY="qemu-system-x86_64",
         QEMU_IMG_BINARY="qemu-img",
         DOCKER_HOST="unix:///var/run/docker.sock",
+        GUACAMOLE_JSON_SECRET_KEY="4c0b569e4c96df157eee1b65dd0e4d41",
+        GUACAMOLE_PUBLIC_PATH="/html5/",
+        GUACAMOLE_TARGET_HOST="host.docker.internal",
+        GUACAMOLE_JSON_EXPIRE_SECONDS=300,
     )
 
 
@@ -68,11 +75,16 @@ def sample_lab(runtime_settings):
 def patched_settings(monkeypatch, runtime_settings):
     monkeypatch.setattr("app.services.lab_service.get_settings", lambda: runtime_settings)
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: runtime_settings)
+    monkeypatch.setattr("app.services.html5_service.get_settings", lambda: runtime_settings)
     return runtime_settings
 
 
 def _fake_subprocess_run_factory(recorded_calls):
-    def _fake_run(cmd, capture_output=False, text=False):
+    real_run = subprocess.run
+
+    def _fake_run(cmd, capture_output=False, text=False, **kwargs):
+        if os.path.basename(cmd[0]) == "openssl":
+            return real_run(cmd, capture_output=capture_output, text=text, **kwargs)
         recorded_calls.append(cmd)
         if os.path.basename(cmd[0]) == "qemu-img":
             Path(cmd[-1]).write_text("overlay-image")
@@ -90,21 +102,32 @@ class _FakeProcess:
         return None
 
 
-class _RuntimeFakeDB:
-    def __init__(self):
-        self.executed = []
-        self.added = []
-        self.commit_count = 0
+def _decrypt_guacamole_payload_value(payload: str, secret_key: str) -> dict:
+    decrypted = subprocess.run(
+        [
+            "openssl",
+            "enc",
+            "-aes-128-cbc",
+            "-d",
+            "-K",
+            secret_key,
+            "-iv",
+            "00000000000000000000000000000000",
+            "-nosalt",
+            "-base64",
+            "-A",
+        ],
+        input=payload.encode("utf-8"),
+        capture_output=True,
+        check=True,
+    ).stdout
+    return json.loads(decrypted[32:].decode("utf-8"))
 
-    async def execute(self, query):
-        self.executed.append(query)
-        return None
 
-    def add(self, obj):
-        self.added.append(obj)
-
-    async def commit(self):
-        self.commit_count += 1
+def _decrypt_guacamole_payload(url: str, secret_key: str) -> dict:
+    parsed = urlparse(url)
+    payload = parse_qs(parsed.query)["data"][0]
+    return _decrypt_guacamole_payload_value(payload, secret_key)
 
 
 def _mock_runtime_binaries(monkeypatch):
@@ -140,6 +163,13 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
         status=lambda: "sleeping",
     ))
     monkeypatch.setattr("app.services.node_runtime_service.os.killpg", lambda pid, sig: killed.append((pid, sig)))
+    async def fake_console_url(*_args, **_kwargs):
+        return "/html5/#/client/test-client?token=test-token"
+
+    monkeypatch.setattr(
+        "app.services.html5_service.Html5SessionService.create_console_url",
+        fake_console_url,
+    )
 
     start_response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
     assert start_response["code"] == 200
@@ -152,7 +182,7 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
     assert node["status"] == 2
     assert node["cpu_usage"] == 7
     assert node["ram_usage"] == 2048
-    assert node["url"].startswith("/html5/#/client/")
+    assert node["url"] == "/api/labs/sample.json/nodes/1/html5"
 
     log_response = await labs.node_logs("sample.json", 1, tail=20, follow=False, current_user=SimpleNamespace(username="admin"))
     assert log_response["data"]["logs"] == "boot ok"
@@ -161,22 +191,19 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
     assert console_response["code"] == 200
     assert console_response["data"]["console"] == "telnet"
     assert console_response["data"]["port"] > 0
+    assert console_response["data"]["url"] == "/api/labs/sample.json/nodes/1/html5"
 
     telnet_response = await labs.node_telnet("sample.json", 1, current_user=SimpleNamespace(username="admin"))
     assert "telnet://127.0.0.1:" in telnet_response.body.decode()
     assert telnet_response.headers["content-disposition"].endswith('node-1.telnet"')
 
-    html5_db = _RuntimeFakeDB()
     html5_response = await labs.node_html5(
         "sample.json",
         1,
         current_user=SimpleNamespace(username="admin", html5=True, pod=0),
-        db=html5_db,
     )
     assert html5_response.status_code == 307
-    assert "/html5/#/client/" in html5_response.headers["location"]
-    assert "token=" in html5_response.headers["location"]
-    assert html5_db.added
+    assert html5_response.headers["location"] == "/html5/#/client/test-client?token=test-token"
 
     stop_response = await labs.stop_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
     assert stop_response["code"] == 200
@@ -242,7 +269,49 @@ async def test_html5_respects_user_flag(monkeypatch, patched_settings, sample_la
         "sample.json",
         1,
         current_user=SimpleNamespace(username="user", html5=False, pod=0),
-        db=_RuntimeFakeDB(),
     )
     assert response["code"] == 403
     assert "disabled" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_html5_session_service_encrypts_guacamole_json(patched_settings):
+    service = Html5SessionService()
+    encrypted_payload = service._encrypted_payload(
+        current_user=SimpleNamespace(username="admin"),
+        host="host.docker.internal",
+        port=3389,
+        protocol="rdp",
+        connection_name="rdp-node",
+    )
+
+    payload = _decrypt_guacamole_payload_value(encrypted_payload, patched_settings.GUACAMOLE_JSON_SECRET_KEY)
+    assert payload["username"] == "admin"
+    assert payload["connections"]["rdp-node"]["protocol"] == "rdp"
+    assert payload["connections"]["rdp-node"]["parameters"]["hostname"] == "host.docker.internal"
+    assert payload["connections"]["rdp-node"]["parameters"]["port"] == "3389"
+    assert payload["connections"]["rdp-node"]["parameters"]["ignore-cert"] == "true"
+
+
+@pytest.mark.asyncio
+async def test_html5_session_service_builds_direct_client_url(monkeypatch, patched_settings):
+    service = Html5SessionService()
+
+    async def fake_request_auth_token(_encrypted_payload: str):
+        return "TOKEN-123", "json"
+
+    async def fake_connection_identifier(_auth_token: str, _data_source: str, _connection_name: str):
+        return "alpine-vnc"
+
+    monkeypatch.setattr(service, "_request_auth_token", fake_request_auth_token)
+    monkeypatch.setattr(service, "_connection_identifier", fake_connection_identifier)
+
+    url = await service.create_console_url(
+        SimpleNamespace(username="admin"),
+        host="192.0.2.50",
+        port=3389,
+        protocol="rdp",
+        connection_name="rdp-node",
+    )
+
+    assert url == "/html5/#/client/YWxwaW5lLXZuYwBjAGpzb24%3D?token=TOKEN-123"

@@ -310,7 +310,25 @@ async def test_auth_session_uses_configured_max_age(monkeypatch):
     token = await AuthService(db).create_session(user)
     assert token
     assert user.online is True
-    assert 0 < user.session_expires - int(__import__("time").time()) <= 60
+    assert 14390 <= user.session_expires - int(__import__("time").time()) <= 14400
+
+
+@pytest.mark.asyncio
+async def test_auth_validate_session_renews_expiry(monkeypatch):
+    monkeypatch.setattr("app.services.auth_service.settings", SimpleNamespace(SESSION_MAX_AGE=14400))
+    now = int(__import__("time").time())
+    user = SimpleNamespace(
+        username="admin",
+        session_token="token-1",
+        session_expires=now + 30,
+        online=True,
+    )
+    db = FakeDB(execute_results=[FakeResult(scalar=user)])
+
+    validated = await AuthService(db).validate_session("token-1", "admin")
+    assert validated is user
+    assert user.session_expires > now + 14000
+    assert db.commit_count == 1
 
 
 @pytest.mark.asyncio
