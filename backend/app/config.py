@@ -1,6 +1,22 @@
-from pydantic_settings import BaseSettings
+import os
 from functools import lru_cache
 from pathlib import Path
+from sys import platform
+
+from pydantic_settings import BaseSettings
+
+
+def _default_docker_host() -> str:
+    explicit = os.getenv("DOCKER_HOST", "").strip()
+    if explicit:
+        return explicit
+
+    if platform == "darwin":
+        rancher_socket = Path.home() / ".rd" / "docker.sock"
+        if rancher_socket.exists():
+            return f"unix://{rancher_socket}"
+
+    return "unix:///var/run/docker.sock"
 
 
 class Settings(BaseSettings):
@@ -34,7 +50,7 @@ class Settings(BaseSettings):
     # QEMU / System
     QEMU_BINARY: str = "/usr/bin/qemu-system-x86_64"
     QEMU_IMG_BINARY: str = "/usr/bin/qemu-img"
-    DOCKER_HOST: str = "unix:///var/run/docker.sock"
+    DOCKER_HOST: str = _default_docker_host()
     GUACAMOLE_PUBLIC_PATH: str = "/html5/"
     GUACAMOLE_INTERNAL_URL: str = "http://127.0.0.1:8081/html5/"
     GUACAMOLE_TARGET_HOST: str = "host.docker.internal"

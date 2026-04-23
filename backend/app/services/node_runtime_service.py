@@ -220,6 +220,9 @@ class NodeRuntimeService:
         return runtime
 
     def _is_runtime_alive(self, runtime: dict[str, Any]) -> bool:
+        if runtime.get("kind") == "docker":
+            return self._is_docker_running(runtime)
+
         pid = runtime.get("pid")
         if not pid:
             return False
@@ -232,10 +235,6 @@ class NodeRuntimeService:
         expected_create_time = runtime.get("pid_create_time")
         if expected_create_time and abs(process.create_time() - expected_create_time) > 1:
             return False
-
-        if runtime.get("kind") == "docker":
-            return self._is_docker_running(runtime)
-
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
 
     def _start_qemu_node(self, lab_id: str, node: dict[str, Any]) -> dict[str, Any]:
@@ -535,7 +534,7 @@ class NodeRuntimeService:
             metrics["cpu_usage"] = int(process.cpu_percent(interval=0.0))
             metrics["ram_usage"] = process.memory_info().rss
         except psutil.Error:
-            pass
+            return metrics
         return metrics
 
     def _read_qemu_logs(self, runtime: dict[str, Any], tail: int) -> str:

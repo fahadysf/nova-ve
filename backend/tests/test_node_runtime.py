@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
+import psutil
 import pytest
 
 from app.routers import labs
@@ -464,3 +465,63 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
 
     service.stop_node(lab_data, 2)
     assert "nova-ve-lab123-net1" not in existing_networks
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypatch, patched_settings):
+    lab_data = {
+        "id": "lab-123",
+        "meta": {"name": "docker-demo"},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "alpine-a",
+                "type": "docker",
+                "image": "nova-ve-alpine-telnet:latest",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 1,
+                "interfaces": [{"name": "eth0", "network_id": 1}],
+            }
+        },
+        "networks": {
+            "1": {"id": 1, "name": "lab-link", "type": "bridge"}
+        },
+        "topology": [],
+    }
+
+    def fake_run(cmd, capture_output=False, text=False, **_kwargs):
+        args = cmd[3:] if len(cmd) > 2 and cmd[1] == "--host" else cmd[1:]
+        if args[:2] == ["network", "inspect"]:
+            return SimpleNamespace(returncode=1, stdout="", stderr="missing")
+        if args[:2] == ["network", "create"]:
+            return SimpleNamespace(returncode=0, stdout="created\n", stderr="")
+        if args[0] == "run":
+            return SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
+        if args[:2] == ["inspect", "-f"] and args[2] == "{{.State.Pid}}":
+            return SimpleNamespace(returncode=0, stdout="4321\n", stderr="")
+        if args[:2] == ["inspect", "-f"] and args[2] == "{{.State.Running}}":
+            return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if args[0] == "stop":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[0] == "rm":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[:2] == ["network", "rm"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    _mock_runtime_binaries(monkeypatch)
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", fake_run)
+
+    def fake_psutil_process(pid):
+        if pid == 4321:
+            raise psutil.Error("pid not visible on host")
+        return SimpleNamespace(create_time=lambda: 1.0)
+
+    monkeypatch.setattr("app.services.node_runtime_service.psutil.Process", fake_psutil_process)
+
+    service = NodeRuntimeService()
+    service.start_node(lab_data, 1)
+    enriched = service.enrich_node("lab-123", 1, lab_data["nodes"]["1"])
+    assert enriched["status"] == 2

@@ -49,6 +49,31 @@ A clean-room network virtualization environment inspired by legacy platform, bui
 
 6. **Open** `http://localhost:5173`
 
+### Local macOS + Rancher Desktop
+
+For Docker-backed local lab testing on macOS with Rancher Desktop:
+
+1. **Prepare the local runtime**
+   ```bash
+   ./deploy/scripts/setup-local-rancher.sh
+   ```
+
+2. **Run the backend**
+   ```bash
+   NOVA_VE_ENV_FILE=.omx/local/backend.env ./deploy/scripts/run-local-backend.sh
+   ```
+
+3. **Run the frontend**
+   ```bash
+   NOVA_VE_BACKEND_ORIGIN=http://127.0.0.1:8000 NOVA_VE_HTML5_ORIGIN=http://127.0.0.1:8081 NOVA_VE_FRONTEND_PORT=5174 ./deploy/scripts/run-local-frontend.sh
+   ```
+
+4. **Open** `http://127.0.0.1:5174` (or the next free port if `5174` is already in use)
+
+This path prepares a repo-local env file, starts PostgreSQL and Guacamole via Docker, builds the Alpine demo image, and uses Rancher Desktop's Docker socket for local lab node runtime.
+
+If you proxy the frontend to a non-local backend or Guacamole host during development, set both `NOVA_VE_BACKEND_ORIGIN` and `NOVA_VE_HTML5_ORIGIN` explicitly.
+
 ### Docker Compose (all services)
 
 ```bash

@@ -1,2 +1,3 @@
 #!/bin/sh
-exec script -qfc "/bin/bash -li" /dev/null
+export TERM="${TERM:-xterm-256color}"
+exec tmux new-session -A -s console
