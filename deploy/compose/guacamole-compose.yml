@@ -1,4 +1,16 @@
 services:
+  guacdb:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: guacdb
+      POSTGRES_USER: guacuser
+      POSTGRES_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
+    volumes:
+      - guacdb:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5433:5432"
+
   guacd:
     image: guacamole/guacd:1.6.0
     restart: unless-stopped
@@ -10,10 +22,17 @@ services:
     restart: unless-stopped
     depends_on:
       - guacd
+      - guacdb
     environment:
       GUACD_HOSTNAME: guacd
       WEBAPP_CONTEXT: html5
-      JSON_ENABLED: "true"
-      JSON_SECRET_KEY: ${GUACAMOLE_JSON_SECRET_KEY}
+      POSTGRESQL_ENABLED: "true"
+      POSTGRESQL_HOSTNAME: guacdb
+      POSTGRESQL_DATABASE: guacdb
+      POSTGRESQL_USERNAME: guacuser
+      POSTGRESQL_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
     ports:
       - "127.0.0.1:8081:8080"
+
+volumes:
+  guacdb:

@@ -36,7 +36,7 @@ Long-running processes:
 - `postgresql` from Ubuntu packages
 - `caddy` from Ubuntu packages
 - `nova-ve-backend.service` for FastAPI/Uvicorn on `127.0.0.1:8000`
-- Docker-managed `guacd` + Guacamole webapp containers for HTML5 console access
+- Docker-managed `guacdb` + `guacd` + Guacamole webapp containers for HTML5 console access
 
 No `nova-ve-frontend.service` exists in this lane because the frontend is served as static assets by Caddy.
 
@@ -46,6 +46,7 @@ No `nova-ve-frontend.service` exists in this lane because the frontend is served
 - Backend bind: `127.0.0.1:8000`
 - Database bind: local host only via PostgreSQL defaults
 - Guacamole webapp bind: `127.0.0.1:8081`
+- Guacamole database bind: `127.0.0.1:5433`
 - `guacd`: Docker-internal port `4822`
 
 Route ownership:
@@ -67,6 +68,8 @@ Route ownership:
 - The backend service must **not** self-migrate on startup.
 - Initial seed runs as a separate explicit provisioning/deploy action via `deploy/scripts/run-seed.sh`.
 - Seed is safe to rerun because it skips creation when the configured admin user already exists.
+- Guacamole schema bootstrap runs as an explicit provisioning/deploy action inside `deploy/scripts/run-guacamole.sh`.
+- Guacamole auth/storage uses PostgreSQL-backed datasource `postgresql`, not the legacy JSON-auth-only path, for the target host lane.
 - Installer success must not depend on undocumented manual Alembic or seed commands.
 
 ## Filesystem Layout
@@ -78,6 +81,7 @@ Route ownership:
 - Images: `/var/lib/nova-ve/images`
 - Temp: `/var/lib/nova-ve/tmp`
 - Guacamole support state: `/var/lib/nova-ve/guacamole`
+- Guacamole DB credentials and backend access URL are carried in `/etc/nova-ve/backend.env`
 
 ## Toolchain Expectations
 

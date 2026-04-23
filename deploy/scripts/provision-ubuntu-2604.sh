@@ -101,6 +101,9 @@ ensure_backend_env() {
   fi
 
   local guacamole_secret
+  local guacamole_db_password
+  local guacamole_database_url
+  local guacamole_data_source
   local public_path
   local target_host
   local expire_seconds
@@ -123,10 +126,17 @@ import secrets
 print(secrets.token_hex(16))
 PY
 )"
+    guacamole_db_password="$("${PYTHON_BIN}" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)"
     install -m 0600 /dev/null "${ENV_FILE}"
     sed \
       -e "s|^SECRET_KEY=.*|SECRET_KEY=${secret}|" \
       -e "s|^NOVA_VE_ADMIN_PASSWORD=.*|NOVA_VE_ADMIN_PASSWORD=${admin_password}|" \
+      -e "s|^GUACAMOLE_DB_PASSWORD=.*|GUACAMOLE_DB_PASSWORD=${guacamole_db_password}|" \
+      -e "s|^GUACAMOLE_DATABASE_URL=.*|GUACAMOLE_DATABASE_URL=postgresql+asyncpg://guacuser:${guacamole_db_password}@127.0.0.1:5433/guacdb|" \
       -e "s|^GUACAMOLE_JSON_SECRET_KEY=.*|GUACAMOLE_JSON_SECRET_KEY=${guacamole_secret}|" \
       "${REPO_ROOT}/deploy/env/backend.env.example" > "${ENV_FILE}"
   fi
@@ -135,12 +145,18 @@ PY
   target_host="$(awk -F= '/^GUACAMOLE_TARGET_HOST=/{print $2}' "${ENV_FILE}" | tail -n1)"
   expire_seconds="$(awk -F= '/^GUACAMOLE_JSON_EXPIRE_SECONDS=/{print $2}' "${ENV_FILE}" | tail -n1)"
   guacamole_secret="$(awk -F= '/^GUACAMOLE_JSON_SECRET_KEY=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  guacamole_db_password="$(awk -F= '/^GUACAMOLE_DB_PASSWORD=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  guacamole_database_url="$(awk -F= '/^GUACAMOLE_DATABASE_URL=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  guacamole_data_source="$(awk -F= '/^GUACAMOLE_DATA_SOURCE=/{print $2}' "${ENV_FILE}" | tail -n1)"
 
   if [[ -z "${public_path}" ]]; then
     printf '\nGUACAMOLE_PUBLIC_PATH=/html5/\n' >> "${ENV_FILE}"
   fi
   if [[ -z "${target_host}" ]]; then
     printf 'GUACAMOLE_TARGET_HOST=host.docker.internal\n' >> "${ENV_FILE}"
+  fi
+  if [[ -z "${guacamole_data_source}" ]]; then
+    printf 'GUACAMOLE_DATA_SOURCE=postgresql\n' >> "${ENV_FILE}"
   fi
   if [[ -z "${expire_seconds}" ]]; then
     printf 'GUACAMOLE_JSON_EXPIRE_SECONDS=300\n' >> "${ENV_FILE}"
@@ -152,6 +168,17 @@ print(secrets.token_hex(16))
 PY
 )"
     printf 'GUACAMOLE_JSON_SECRET_KEY=%s\n' "${guacamole_secret}" >> "${ENV_FILE}"
+  fi
+  if [[ -z "${guacamole_db_password}" ]]; then
+    guacamole_db_password="$("${PYTHON_BIN}" - <<'PY'
+import secrets
+print(secrets.token_urlsafe(24))
+PY
+)"
+    printf 'GUACAMOLE_DB_PASSWORD=%s\n' "${guacamole_db_password}" >> "${ENV_FILE}"
+  fi
+  if [[ -z "${guacamole_database_url}" ]]; then
+    printf 'GUACAMOLE_DATABASE_URL=postgresql+asyncpg://guacuser:%s@127.0.0.1:5433/guacdb\n' "${guacamole_db_password}" >> "${ENV_FILE}"
   fi
   chmod 0600 "${ENV_FILE}"
 }
