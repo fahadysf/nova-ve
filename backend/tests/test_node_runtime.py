@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -278,6 +279,8 @@ async def test_html5_respects_user_flag(monkeypatch, patched_settings, sample_la
 @pytest.mark.asyncio
 async def test_html5_session_service_encrypts_guacamole_json(patched_settings):
     service = Html5SessionService()
+    original_token_hex = secrets.token_hex
+    secrets.token_hex = lambda _n=8: "cafebabe"
     encrypted_payload = service._encrypted_payload(
         current_user=SimpleNamespace(username="admin"),
         host="host.docker.internal",
@@ -285,9 +288,10 @@ async def test_html5_session_service_encrypts_guacamole_json(patched_settings):
         protocol="rdp",
         connection_name="rdp-node",
     )
+    secrets.token_hex = original_token_hex
 
     payload = _decrypt_guacamole_payload_value(encrypted_payload, patched_settings.GUACAMOLE_JSON_SECRET_KEY)
-    assert payload["username"] == "admin"
+    assert payload["username"] == "admin-cafebabe"
     assert payload["connections"]["rdp-node"]["protocol"] == "rdp"
     assert payload["connections"]["rdp-node"]["parameters"]["hostname"] == "host.docker.internal"
     assert payload["connections"]["rdp-node"]["parameters"]["port"] == "3389"

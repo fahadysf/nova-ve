@@ -60,7 +60,7 @@ class Html5SessionService:
 
         payload = json.dumps(
             {
-                "username": current_user.username,
+                "username": self._guacamole_username(current_user),
                 "expires": self._expires_timestamp(),
                 "connections": {
                     connection_name: {
@@ -101,6 +101,12 @@ class Html5SessionService:
             raise Html5SessionError(error)
 
         return encrypted.stdout.decode("utf-8", errors="ignore").strip()
+
+    @staticmethod
+    def _guacamole_username(current_user: UserRead) -> str:
+        base = str(current_user.username).strip() or "user"
+        suffix = secrets.token_hex(8)
+        return f"{base}-{suffix}"
 
     def _expires_timestamp(self) -> int:
         expires_at = datetime.now(UTC) + timedelta(seconds=self.settings.GUACAMOLE_JSON_EXPIRE_SECONDS)

@@ -140,9 +140,55 @@
     consoleWindows = consoleWindows.map((window) => (window.id === windowId ? updater(window) : window));
   }
 
+  function consoleIframe(windowId: number): HTMLIFrameElement | null {
+    return document.querySelector(`iframe[data-console-window-id="${windowId}"]`);
+  }
+
+  function focusGuacamoleWindow(windowId: number, attempts = 12) {
+    const iframe = consoleIframe(windowId);
+    if (!iframe) {
+      if (attempts > 0) {
+        setTimeout(() => focusGuacamoleWindow(windowId, attempts - 1), 200);
+      }
+      return;
+    }
+
+    iframe.focus();
+    try {
+      iframe.contentWindow?.focus();
+      const frameDocument = iframe.contentDocument;
+      const keyboardTarget =
+        (frameDocument?.querySelector('textarea.clipboard-service-target') as HTMLTextAreaElement | null) ??
+        (frameDocument?.querySelector('textarea') as HTMLTextAreaElement | null);
+      const canvas = frameDocument?.querySelector('canvas') as HTMLCanvasElement | null;
+
+      if (keyboardTarget) {
+        keyboardTarget.focus();
+      } else {
+        frameDocument?.body?.focus();
+      }
+
+      iframe.contentWindow?.localStorage?.removeItem('GUAC_AUTH_TOKEN');
+
+      if (canvas) {
+        const pointerEvent = { bubbles: true, cancelable: true, view: iframe.contentWindow };
+        canvas.dispatchEvent(new MouseEvent('mousedown', pointerEvent));
+        canvas.dispatchEvent(new MouseEvent('mouseup', pointerEvent));
+        canvas.dispatchEvent(new MouseEvent('click', pointerEvent));
+      }
+    } catch (_error) {
+      return;
+    }
+
+    if (attempts > 0) {
+      setTimeout(() => focusGuacamoleWindow(windowId, attempts - 1), 200);
+    }
+  }
+
   function focusConsoleWindow(windowId: number) {
     const zIndex = nextWindowZIndex();
     replaceConsoleWindow(windowId, (window) => ({ ...window, zIndex }));
+    setTimeout(() => focusGuacamoleWindow(windowId), 0);
   }
 
   function buildConsoleWindow(node: NodeData, existingWindow?: ConsoleWindowState): ConsoleWindowState {
@@ -186,6 +232,7 @@
     const nextWindow = buildConsoleWindow(node);
     await tick();
     consoleWindows = [...consoleWindows, nextWindow];
+    focusGuacamoleWindow(nextWindow.id);
   }
 
   async function handleConsoleNodeChange(windowId: number, event: Event) {
@@ -204,6 +251,7 @@
       if (!existingWindow) return;
       const nextWindow = buildConsoleWindow(node, existingWindow);
       replaceConsoleWindow(windowId, () => nextWindow);
+      setTimeout(() => focusGuacamoleWindow(windowId), 0);
     }
   }
 
@@ -217,14 +265,17 @@
     }
   }
 
-  function reloadConsole(windowId: number) {
+  async function reloadConsole(windowId: number) {
+    const targetWindow = consoleWindows.find((window) => window.id === windowId);
+    if (!targetWindow) return;
     replaceConsoleWindow(windowId, (window) => ({
       ...window,
       minimized: false,
-      src: `/api/labs/${labId}/nodes/${window.nodeId}/html5?ts=${Date.now()}`,
+      src: `/api/labs/${labId}/nodes/${targetWindow.nodeId}/html5?ts=${Date.now()}`,
       requestId: Date.now(),
       zIndex: nextWindowZIndex()
     }));
+    setTimeout(() => focusGuacamoleWindow(windowId), 0);
   }
 
   function toggleConsoleMaximize(windowId: number) {
@@ -578,7 +629,9 @@
                   <iframe
                     title={`Guacamole console for ${consoleWindow.nodeName}`}
                     src={consoleWindow.src}
+                    data-console-window-id={consoleWindow.id}
                     class="h-full w-full border-0"
+                    on:load={() => focusGuacamoleWindow(consoleWindow.id)}
                   ></iframe>
                 {/key}
               </div>
