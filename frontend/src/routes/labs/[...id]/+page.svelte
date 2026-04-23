@@ -17,35 +17,43 @@
   let loading = true;
   let error = '';
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
-  type ConsoleWindowState = ConsoleBounds & {
+  type ConsoleTab = {
     id: number;
     nodeId: number;
     nodeName: string;
     src: string;
     requestId: number;
+  };
+  type ConsoleWorkspaceState = ConsoleBounds & {
+    tabs: ConsoleTab[];
+    activeTabId: number | null;
     maximized: boolean;
     minimized: boolean;
     restoreBounds: ConsoleBounds | null;
-    zIndex: number;
   };
 
   const CONSOLE_HEADER_HEIGHT = 56;
 
-  let consoleWindows: ConsoleWindowState[] = [];
-  let consoleWindowCounter = 0;
+  let consoleWorkspace: ConsoleWorkspaceState | null = null;
+  let activeConsoleTabState: ConsoleTab | null = null;
+  let consoleTabCounter = 0;
   let summaryCollapsed = false;
   let inventoryCollapsed = false;
-  let dragState:
-    | { windowId: number; startX: number; startY: number; originX: number; originY: number }
-    | null = null;
-  let resizeState:
-    | { windowId: number; startX: number; startY: number; width: number; height: number }
-    | null = null;
+  let dragState: { startX: number; startY: number; originX: number; originY: number } | null = null;
+  let resizeState: { startX: number; startY: number; width: number; height: number } | null = null;
 
   $: labId = $page.params.id ?? '';
   $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
   $: networkList = Object.values(networks).sort((a, b) => a.id - b.id);
   $: runningConsoleNodes = nodeList.filter((node) => node.status === 2);
+  $: {
+    const workspace = consoleWorkspace;
+    if (!workspace || workspace.activeTabId == null) {
+      activeConsoleTabState = null;
+    } else {
+      activeConsoleTabState = workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
+    }
+  }
 
   onMount(async () => {
     if (!$authStore.authenticated) {
@@ -71,12 +79,23 @@
       nodes = nodeData;
       networks = networkData;
       topology = topologyData ?? [];
-      consoleWindows = consoleWindows
-        .filter((window) => nodeData[String(window.nodeId)]?.status === 2)
-        .map((window) => ({
-          ...window,
-          nodeName: nodeData[String(window.nodeId)]?.name || window.nodeName
-        }));
+      if (consoleWorkspace) {
+        const priorActiveTabId = consoleWorkspace.activeTabId;
+        const tabs = consoleWorkspace.tabs
+          .filter((tab) => nodeData[String(tab.nodeId)]?.status === 2)
+          .map((tab) => ({
+            ...tab,
+            nodeName: nodeData[String(tab.nodeId)]?.name || tab.nodeName
+          }));
+        consoleWorkspace = tabs.length
+          ? {
+              ...consoleWorkspace,
+              tabs,
+              activeTabId:
+                tabs.find((tab) => tab.id === priorActiveTabId)?.id ?? tabs[0].id
+            }
+          : null;
+      }
     } catch (e) {
       error = e instanceof ApiError ? e.message : 'Unable to load the lab.';
     } finally {
@@ -84,16 +103,12 @@
     }
   }
 
-  function nextConsoleWindowId(): number {
-    consoleWindowCounter += 1;
-    return consoleWindowCounter;
+  function nextConsoleTabId(): number {
+    consoleTabCounter += 1;
+    return consoleTabCounter;
   }
 
-  function nextWindowZIndex(): number {
-    return consoleWindows.reduce((highest, window) => Math.max(highest, window.zIndex), 39) + 1;
-  }
-
-  function defaultConsoleBounds(windowOffset = consoleWindows.length): ConsoleBounds {
+  function defaultConsoleBounds(windowOffset = consoleWorkspace?.tabs.length ?? 0): ConsoleBounds {
     const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1440;
     const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 900;
     const width = Math.max(480, Math.min(700, Math.round(viewportWidth * 0.38)));
@@ -134,21 +149,29 @@
   }
 
   function replaceConsoleWindow(
-    windowId: number,
-    updater: (window: ConsoleWindowState) => ConsoleWindowState
+    updater: (workspace: ConsoleWorkspaceState) => ConsoleWorkspaceState
   ) {
-    consoleWindows = consoleWindows.map((window) => (window.id === windowId ? updater(window) : window));
+    if (!consoleWorkspace) return;
+    consoleWorkspace = updater(consoleWorkspace);
   }
 
-  function consoleIframe(windowId: number): HTMLIFrameElement | null {
-    return document.querySelector(`iframe[data-console-window-id="${windowId}"]`);
+  function activeConsoleTab(): ConsoleTab | null {
+    if (!consoleWorkspace || consoleWorkspace.activeTabId == null) return null;
+    const activeTabId = consoleWorkspace.activeTabId;
+    return consoleWorkspace.tabs.find((tab) => tab.id === activeTabId) ?? null;
   }
 
-  function focusGuacamoleWindow(windowId: number, attempts = 12) {
-    const iframe = consoleIframe(windowId);
+  function consoleIframe(tabId?: number): HTMLIFrameElement | null {
+    const targetTabId = tabId ?? activeConsoleTabState?.id;
+    if (targetTabId == null) return null;
+    return document.querySelector(`iframe[data-console-tab-id="${targetTabId}"]`);
+  }
+
+  function focusGuacamoleWindow(tabId?: number, attempts = 4) {
+    const iframe = consoleIframe(tabId);
     if (!iframe) {
       if (attempts > 0) {
-        setTimeout(() => focusGuacamoleWindow(windowId, attempts - 1), 200);
+        requestAnimationFrame(() => focusGuacamoleWindow(tabId, attempts - 1));
       }
       return;
     }
@@ -156,45 +179,21 @@
     iframe.focus();
     try {
       iframe.contentWindow?.focus();
-      const frameDocument = iframe.contentDocument;
-      const keyboardTarget =
-        (frameDocument?.querySelector('textarea.clipboard-service-target') as HTMLTextAreaElement | null) ??
-        (frameDocument?.querySelector('textarea') as HTMLTextAreaElement | null);
-      const canvas = frameDocument?.querySelector('canvas') as HTMLCanvasElement | null;
-
-      if (keyboardTarget) {
-        keyboardTarget.focus();
-      } else {
-        frameDocument?.body?.focus();
-      }
-
-      iframe.contentWindow?.localStorage?.removeItem('GUAC_AUTH_TOKEN');
-
-      if (canvas) {
-        const pointerEvent = { bubbles: true, cancelable: true, view: iframe.contentWindow };
-        canvas.dispatchEvent(new MouseEvent('mousedown', pointerEvent));
-        canvas.dispatchEvent(new MouseEvent('mouseup', pointerEvent));
-        canvas.dispatchEvent(new MouseEvent('click', pointerEvent));
-      }
     } catch (_error) {
-      return;
-    }
-
-    if (attempts > 0) {
-      setTimeout(() => focusGuacamoleWindow(windowId, attempts - 1), 200);
+      if (attempts > 0) {
+        requestAnimationFrame(() => focusGuacamoleWindow(tabId, attempts - 1));
+      }
     }
   }
 
-  function focusConsoleWindow(windowId: number) {
-    const zIndex = nextWindowZIndex();
-    replaceConsoleWindow(windowId, (window) => ({ ...window, zIndex }));
-    setTimeout(() => focusGuacamoleWindow(windowId), 0);
+  function focusConsoleWorkspace() {
+    setTimeout(() => focusGuacamoleWindow(activeConsoleTabState?.id), 0);
   }
 
-  function buildConsoleWindow(node: NodeData, existingWindow?: ConsoleWindowState): ConsoleWindowState {
-    const priorBounds = existingWindow?.maximized
+  function buildConsoleWorkspace(existingWorkspace?: ConsoleWorkspaceState): ConsoleWorkspaceState {
+    const priorBounds = existingWorkspace?.maximized
       ? maximizedConsoleBounds()
-      : existingWindow ?? defaultConsoleBounds();
+      : existingWorkspace ?? defaultConsoleBounds();
     const bounds = clampConsoleBounds({
       x: priorBounds.x,
       y: priorBounds.y,
@@ -204,15 +203,11 @@
 
     return {
       ...bounds,
-      id: existingWindow?.id ?? nextConsoleWindowId(),
-      nodeId: node.id,
-      nodeName: node.name,
-      src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}`,
-      requestId: Date.now(),
-      maximized: existingWindow?.maximized ?? false,
+      tabs: existingWorkspace?.tabs ?? [],
+      activeTabId: existingWorkspace?.activeTabId ?? null,
+      maximized: existingWorkspace?.maximized ?? false,
       minimized: false,
-      restoreBounds: existingWindow?.restoreBounds ?? bounds,
-      zIndex: nextWindowZIndex()
+      restoreBounds: existingWorkspace?.restoreBounds ?? bounds
     };
   }
 
@@ -222,158 +217,169 @@
       return;
     }
 
-    const existingWindow = consoleWindows.find((window) => window.nodeId === node.id);
-    if (existingWindow) {
-      focusConsoleWindow(existingWindow.id);
-      replaceConsoleWindow(existingWindow.id, (window) => ({ ...window, minimized: false }));
+    const existingTab = consoleWorkspace?.tabs.find((tab) => tab.nodeId === node.id);
+    if (existingTab) {
+      replaceConsoleWindow((workspace) => ({ ...workspace, minimized: false, activeTabId: existingTab.id }));
+      await tick();
+      focusGuacamoleWindow(existingTab.id);
       return;
     }
 
-    const nextWindow = buildConsoleWindow(node);
+    const nextTab: ConsoleTab = {
+      id: nextConsoleTabId(),
+      nodeId: node.id,
+      nodeName: node.name,
+      src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}`,
+      requestId: Date.now()
+    };
     await tick();
-    consoleWindows = [...consoleWindows, nextWindow];
-    focusGuacamoleWindow(nextWindow.id);
+    const nextWorkspace = buildConsoleWorkspace(consoleWorkspace ?? undefined);
+    nextWorkspace.tabs = [...nextWorkspace.tabs, nextTab];
+    nextWorkspace.activeTabId = nextTab.id;
+    consoleWorkspace = nextWorkspace;
+    await tick();
+    focusGuacamoleWindow(nextTab.id);
   }
 
-  async function handleConsoleNodeChange(windowId: number, event: Event) {
+  async function handleConsoleNodeChange(event: Event) {
     const selectedId = Number((event.currentTarget as HTMLSelectElement).value);
     const node = nodeList.find((candidate) => candidate.id === selectedId);
     if (node) {
-      const existingTargetWindow = consoleWindows.find(
-        (window) => window.nodeId === node.id && window.id !== windowId
-      );
-      if (existingTargetWindow) {
-        focusConsoleWindow(existingTargetWindow.id);
-        replaceConsoleWindow(existingTargetWindow.id, (window) => ({ ...window, minimized: false }));
+      const existingTab = consoleWorkspace?.tabs.find((tab) => tab.nodeId === node.id);
+      if (existingTab) {
+        replaceConsoleWindow((workspace) => ({ ...workspace, minimized: false, activeTabId: existingTab.id }));
+        await tick();
+        focusGuacamoleWindow(existingTab.id);
         return;
       }
-      const existingWindow = consoleWindows.find((window) => window.id === windowId);
-      if (!existingWindow) return;
-      const nextWindow = buildConsoleWindow(node, existingWindow);
-      replaceConsoleWindow(windowId, () => nextWindow);
-      setTimeout(() => focusGuacamoleWindow(windowId), 0);
+
+      await openConsole(node);
     }
   }
 
-  function closeConsole(windowId: number) {
-    consoleWindows = consoleWindows.filter((window) => window.id !== windowId);
-    if (dragState?.windowId === windowId) {
+  async function selectConsoleTab(tabId: number) {
+    if (!consoleWorkspace) return;
+    consoleWorkspace = { ...consoleWorkspace, activeTabId: tabId };
+    await tick();
+    focusGuacamoleWindow(tabId);
+  }
+
+  function closeConsole(tabId: number) {
+    if (!consoleWorkspace) return;
+    const tabs = consoleWorkspace.tabs.filter((tab) => tab.id !== tabId);
+    if (!tabs.length) {
+      consoleWorkspace = null;
       dragState = null;
-    }
-    if (resizeState?.windowId === windowId) {
       resizeState = null;
+      return;
     }
+    const activeTabId =
+      tabId === consoleWorkspace.activeTabId ? tabs[tabs.length - 1].id : consoleWorkspace.activeTabId;
+    consoleWorkspace = { ...consoleWorkspace, tabs, activeTabId };
   }
 
-  async function reloadConsole(windowId: number) {
-    const targetWindow = consoleWindows.find((window) => window.id === windowId);
-    if (!targetWindow) return;
-    replaceConsoleWindow(windowId, (window) => ({
-      ...window,
+  async function reloadConsole() {
+    const activeTab = activeConsoleTab();
+    if (!activeTab || !consoleWorkspace) return;
+    consoleWorkspace = {
+      ...consoleWorkspace,
       minimized: false,
-      src: `/api/labs/${labId}/nodes/${targetWindow.nodeId}/html5?ts=${Date.now()}`,
-      requestId: Date.now(),
-      zIndex: nextWindowZIndex()
-    }));
-    setTimeout(() => focusGuacamoleWindow(windowId), 0);
+      tabs: consoleWorkspace.tabs.map((tab) =>
+        tab.id === activeTab.id
+          ? { ...tab, src: `/api/labs/${labId}/nodes/${activeTab.nodeId}/html5?ts=${Date.now()}`, requestId: Date.now() }
+          : tab
+      )
+    };
+    setTimeout(() => focusGuacamoleWindow(activeTab.id), 0);
   }
 
-  function toggleConsoleMaximize(windowId: number) {
-    const targetWindow = consoleWindows.find((window) => window.id === windowId);
-    if (!targetWindow) return;
+  function toggleConsoleMaximize() {
+    if (!consoleWorkspace) return;
 
-    if (targetWindow.maximized) {
-      const restored = clampConsoleBounds(targetWindow.restoreBounds ?? defaultConsoleBounds());
-      replaceConsoleWindow(windowId, (window) => ({
-        ...window,
+    if (consoleWorkspace.maximized) {
+      const restored = clampConsoleBounds(consoleWorkspace.restoreBounds ?? defaultConsoleBounds());
+      consoleWorkspace = {
+        ...consoleWorkspace,
         ...restored,
         maximized: false,
         minimized: false,
-        restoreBounds: restored,
-        zIndex: nextWindowZIndex()
-      }));
+        restoreBounds: restored
+      };
       return;
     }
 
     const currentBounds = {
-      x: targetWindow.x,
-      y: targetWindow.y,
-      width: targetWindow.width,
-      height: targetWindow.height
+      x: consoleWorkspace.x,
+      y: consoleWorkspace.y,
+      width: consoleWorkspace.width,
+      height: consoleWorkspace.height
     };
-    replaceConsoleWindow(windowId, (window) => ({
-      ...window,
+    consoleWorkspace = {
+      ...consoleWorkspace,
       ...maximizedConsoleBounds(),
       maximized: true,
       minimized: false,
-      restoreBounds: currentBounds,
-      zIndex: nextWindowZIndex()
-    }));
-  }
-
-  function toggleConsoleMinimize(windowId: number) {
-    const targetWindow = consoleWindows.find((window) => window.id === windowId);
-    if (!targetWindow) return;
-    replaceConsoleWindow(windowId, (window) => ({
-      ...window,
-      minimized: !window.minimized,
-      maximized: window.minimized ? window.maximized : false,
-      zIndex: nextWindowZIndex()
-    }));
-  }
-
-  function beginConsoleDrag(windowId: number, event: MouseEvent) {
-    const targetWindow = consoleWindows.find((window) => window.id === windowId);
-    if (!targetWindow || targetWindow.maximized) return;
-    focusConsoleWindow(windowId);
-    dragState = {
-      windowId,
-      startX: event.clientX,
-      startY: event.clientY,
-      originX: targetWindow.x,
-      originY: targetWindow.y
+      restoreBounds: currentBounds
     };
   }
 
-  function beginConsoleResize(windowId: number, event: MouseEvent) {
-    const targetWindow = consoleWindows.find((window) => window.id === windowId);
-    if (!targetWindow || targetWindow.maximized || targetWindow.minimized) return;
-    event.stopPropagation();
-    focusConsoleWindow(windowId);
-    resizeState = {
-      windowId,
+  function toggleConsoleMinimize() {
+    if (!consoleWorkspace) return;
+    consoleWorkspace = {
+      ...consoleWorkspace,
+      minimized: !consoleWorkspace.minimized,
+      maximized: consoleWorkspace.minimized ? consoleWorkspace.maximized : false
+    };
+  }
+
+  function beginConsoleDrag(event: MouseEvent) {
+    if (!consoleWorkspace || consoleWorkspace.maximized) return;
+    focusConsoleWorkspace();
+    dragState = {
       startX: event.clientX,
       startY: event.clientY,
-      width: targetWindow.width,
-      height: targetWindow.height
+      originX: consoleWorkspace.x,
+      originY: consoleWorkspace.y
+    };
+  }
+
+  function beginConsoleResize(event: MouseEvent) {
+    if (!consoleWorkspace || consoleWorkspace.maximized || consoleWorkspace.minimized) return;
+    event.stopPropagation();
+    focusConsoleWorkspace();
+    resizeState = {
+      startX: event.clientX,
+      startY: event.clientY,
+      width: consoleWorkspace.width,
+      height: consoleWorkspace.height
     };
   }
 
   function handleWindowPointerMove(event: MouseEvent) {
-    if (dragState) {
+    if (dragState && consoleWorkspace) {
       const drag = dragState;
-      replaceConsoleWindow(drag.windowId, (window) => ({
-        ...window,
+      consoleWorkspace = {
+        ...consoleWorkspace,
         ...clampConsoleBounds({
           x: drag.originX + (event.clientX - drag.startX),
           y: drag.originY + (event.clientY - drag.startY),
-          width: window.width,
-          height: window.height
+          width: consoleWorkspace.width,
+          height: consoleWorkspace.height
         })
-      }));
+      };
     }
 
-    if (resizeState) {
+    if (resizeState && consoleWorkspace) {
       const resize = resizeState;
-      replaceConsoleWindow(resize.windowId, (window) => ({
-        ...window,
+      consoleWorkspace = {
+        ...consoleWorkspace,
         ...clampConsoleBounds({
-          x: window.x,
-          y: window.y,
+          x: consoleWorkspace.x,
+          y: consoleWorkspace.y,
           width: resize.width + (event.clientX - resize.startX),
           height: resize.height + (event.clientY - resize.startY)
         })
-      }));
+      };
     }
   }
 
@@ -563,89 +569,131 @@
         </SvelteFlowProvider>
       </div>
 
-      {#each [...consoleWindows].sort((left, right) => left.zIndex - right.zIndex) as consoleWindow (consoleWindow.id)}
+      {#if consoleWorkspace}
         <div
           role="dialog"
           tabindex="-1"
-          aria-label={`Console window for ${consoleWindow.nodeName}`}
+          aria-label="Console workspace"
           class="pointer-events-auto fixed flex overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
-          style={`left: ${consoleWindow.x}px; top: ${consoleWindow.y}px; width: ${consoleWindow.width}px; height: ${consoleWindow.minimized ? CONSOLE_HEADER_HEIGHT : consoleWindow.height}px; z-index: ${consoleWindow.zIndex};`}
-          on:mousedown={() => focusConsoleWindow(consoleWindow.id)}
+          style={`left: ${consoleWorkspace.x}px; top: ${consoleWorkspace.y}px; width: ${consoleWorkspace.width}px; height: ${consoleWorkspace.minimized ? CONSOLE_HEADER_HEIGHT : consoleWorkspace.height}px; z-index: 50;`}
+          on:mousedown={focusConsoleWorkspace}
         >
           <div class="flex h-full w-full flex-col">
             <div
               role="toolbar"
-              aria-label={`Console window controls for ${consoleWindow.nodeName}`}
+              aria-label="Console workspace controls"
               tabindex="-1"
-              class={`flex items-center justify-between border-b border-gray-800 px-3 py-2 ${consoleWindow.maximized ? 'cursor-default' : 'cursor-move'}`}
-              on:mousedown={(event) => beginConsoleDrag(consoleWindow.id, event)}
+              class={`flex items-center justify-between border-b border-gray-800 px-3 py-2 ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
+              on:mousedown={beginConsoleDrag}
             >
               <div class="flex items-center gap-3">
                 <div class="flex items-center gap-2">
                   <button
                     class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
-                    aria-label={`Close ${consoleWindow.nodeName}`}
-                    on:click={() => closeConsole(consoleWindow.id)}
+                    aria-label="Close console workspace"
+                    on:click={() => (consoleWorkspace = null)}
                   ></button>
                   <button
                     class="h-3 w-3 rounded-full bg-amber-300 transition hover:bg-amber-200"
-                    aria-label={`${consoleWindow.minimized ? 'Restore' : 'Minimize'} ${consoleWindow.nodeName}`}
-                    on:click={() => toggleConsoleMinimize(consoleWindow.id)}
+                    aria-label={consoleWorkspace.minimized ? 'Restore console workspace' : 'Minimize console workspace'}
+                    on:click={toggleConsoleMinimize}
                   ></button>
                   <button
                     class="h-3 w-3 rounded-full bg-emerald-400 transition hover:bg-emerald-300"
-                    aria-label={`${consoleWindow.maximized ? 'Restore' : 'Maximize'} ${consoleWindow.nodeName}`}
-                    on:click={() => toggleConsoleMaximize(consoleWindow.id)}
+                    aria-label={consoleWorkspace.maximized ? 'Restore console workspace' : 'Maximize console workspace'}
+                    on:click={toggleConsoleMaximize}
                   ></button>
                 </div>
                 <div>
-                  <div class="text-[9px] uppercase tracking-[0.24em] text-gray-500">HTML5 Console</div>
-                  <div class="mt-0.5 text-xs font-medium text-gray-100">{consoleWindow.nodeName}</div>
+                  <div class="text-[9px] uppercase tracking-[0.24em] text-gray-500">HTML5 Console Workspace</div>
+                  <div class="mt-0.5 text-xs font-medium text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</div>
                 </div>
               </div>
               <div class="flex items-center gap-2">
-                <label class="sr-only" for={`console-node-select-${consoleWindow.id}`}>Console target</label>
+                <label class="sr-only" for="console-node-select">Console target</label>
                 <select
-                  id={`console-node-select-${consoleWindow.id}`}
+                  id="console-node-select"
                   class="rounded-md border border-gray-700 bg-gray-900 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
-                  value={consoleWindow.nodeId}
-                  on:change={(event) => handleConsoleNodeChange(consoleWindow.id, event)}
+                  value={activeConsoleTabState?.nodeId ?? ''}
+                  on:change={handleConsoleNodeChange}
                 >
+                  <option value="" disabled selected={activeConsoleTabState == null}>Select</option>
                   {#each runningConsoleNodes as node}
                     <option value={node.id}>{node.name}</option>
                   {/each}
                 </select>
                 <button
                   class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
-                  on:click={() => reloadConsole(consoleWindow.id)}
+                  on:click={reloadConsole}
+                  disabled={activeConsoleTabState == null}
                 >
                   Reload
                 </button>
               </div>
             </div>
-            {#if !consoleWindow.minimized}
-              <div class="min-h-0 flex-1 bg-gray-950">
-                {#key consoleWindow.requestId}
-                  <iframe
-                    title={`Guacamole console for ${consoleWindow.nodeName}`}
-                    src={consoleWindow.src}
-                    data-console-window-id={consoleWindow.id}
-                    class="h-full w-full border-0"
-                    on:load={() => focusGuacamoleWindow(consoleWindow.id)}
-                  ></iframe>
-                {/key}
+            {#if !consoleWorkspace.minimized}
+              <div class="flex min-h-0 flex-1 flex-col bg-gray-950">
+                <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-900/80 px-3 py-2">
+                  {#each consoleWorkspace.tabs as tab}
+                    <div class={`flex items-center gap-1 rounded-md border ${tab.id === consoleWorkspace.activeTabId ? 'border-blue-500 bg-blue-500/10 text-white' : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-blue-500 hover:text-white'}`}>
+                      <button
+                        type="button"
+                        class="px-3 py-1.5 text-[10px] uppercase tracking-[0.18em]"
+                        on:click={() => selectConsoleTab(tab.id)}
+                      >
+                        {tab.nodeName}
+                      </button>
+                      <button
+                        type="button"
+                        class="pr-2 text-gray-500 hover:text-red-400"
+                        aria-label={`Close ${tab.nodeName}`}
+                        on:click={() => closeConsole(tab.id)}
+                      >
+                        ×
+                      </button>
+                    </div>
+                  {/each}
+                </div>
+                <div class="relative min-h-0 flex-1 bg-gray-950">
+                  {#each consoleWorkspace.tabs as tab (tab.id)}
+                    <div
+                      role="presentation"
+                      class={`absolute inset-0 h-full w-full ${tab.id === consoleWorkspace.activeTabId ? 'block' : 'hidden'}`}
+                      on:mouseenter={() => {
+                        if (consoleWorkspace?.activeTabId !== tab.id) {
+                          selectConsoleTab(tab.id);
+                        } else {
+                          focusGuacamoleWindow(tab.id);
+                        }
+                      }}
+                    >
+                      <iframe
+                        title={`Guacamole console for ${tab.nodeName}`}
+                        src={tab.src}
+                        data-console-tab-id={tab.id}
+                        tabindex="-1"
+                        class="h-full w-full border-0"
+                        on:load={() => {
+                          if (consoleWorkspace?.activeTabId === tab.id) {
+                            focusGuacamoleWindow(tab.id);
+                          }
+                        }}
+                      ></iframe>
+                    </div>
+                  {/each}
+                </div>
               </div>
             {/if}
           </div>
-          {#if !consoleWindow.maximized && !consoleWindow.minimized}
+          {#if !consoleWorkspace.maximized && !consoleWorkspace.minimized}
             <button
               class="absolute bottom-0 right-0 h-5 w-5 cursor-nwse-resize bg-transparent"
-              aria-label="Resize console window"
-              on:mousedown={(event) => beginConsoleResize(consoleWindow.id, event)}
+              aria-label="Resize console workspace"
+              on:mousedown={beginConsoleResize}
             ></button>
           {/if}
         </div>
-      {/each}
+      {/if}
     </div>
   {/if}
 </div>

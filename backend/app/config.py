@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     GUACAMOLE_PUBLIC_PATH: str = "/html5/"
     GUACAMOLE_INTERNAL_URL: str = "http://127.0.0.1:8081/html5/"
     GUACAMOLE_TARGET_HOST: str = "host.docker.internal"
+    GUACAMOLE_DATABASE_URL: str = ""
+    GUACAMOLE_DATA_SOURCE: str = "postgresql"
     GUACAMOLE_JSON_SECRET_KEY: str = ""
     GUACAMOLE_JSON_EXPIRE_SECONDS: int = 300
 

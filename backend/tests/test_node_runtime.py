@@ -36,6 +36,8 @@ def runtime_settings(tmp_path):
         QEMU_BINARY="qemu-system-x86_64",
         QEMU_IMG_BINARY="qemu-img",
         DOCKER_HOST="unix:///var/run/docker.sock",
+        GUACAMOLE_DATABASE_URL="",
+        GUACAMOLE_DATA_SOURCE="postgresql",
         GUACAMOLE_JSON_SECRET_KEY="4c0b569e4c96df157eee1b65dd0e4d41",
         GUACAMOLE_PUBLIC_PATH="/html5/",
         GUACAMOLE_TARGET_HOST="host.docker.internal",
@@ -320,6 +322,42 @@ async def test_html5_session_service_builds_direct_client_url(monkeypatch, patch
     )
 
     assert url == "/html5/#/client/YWxwaW5lLXZuYwBjAGpzb24%3D?token=TOKEN-123"
+
+
+@pytest.mark.asyncio
+async def test_html5_route_prefers_db_backed_service_when_configured(monkeypatch, patched_settings, sample_lab):
+    patched_settings.GUACAMOLE_DATABASE_URL = "postgresql+asyncpg://guacuser:guacuser@127.0.0.1:5433/guacdb"
+    monkeypatch.setattr("app.routers.labs.get_settings", lambda: patched_settings)
+    monkeypatch.setattr("app.services.guacamole_db_service.get_settings", lambda: patched_settings)
+
+    monkeypatch.setattr(
+        "app.routers.labs.NodeRuntimeService",
+        lambda: SimpleNamespace(
+            console_info=lambda _lab_data, _node_id: {
+                "name": "alpine-a",
+                "console": "telnet",
+                "host": "127.0.0.1",
+                "port": 2323,
+                "url": "/html5/#/client/demo",
+            }
+        ),
+    )
+
+    async def fake_db_console_url(*_args, **_kwargs):
+        return "/html5/#/client/db-backed?token=dbtoken"
+
+    monkeypatch.setattr(
+        "app.services.guacamole_db_service.GuacamoleDatabaseService.create_console_url",
+        fake_db_console_url,
+    )
+
+    response = await labs.node_html5(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", html5=True, pod=0),
+    )
+    assert response.status_code == 307
+    assert response.headers["location"] == "/html5/#/client/db-backed?token=dbtoken"
 
 
 @pytest.mark.asyncio

@@ -6,11 +6,13 @@ from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResp
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.config import get_settings
 from app.dependencies import get_current_user
 from app.schemas.lab import LabMetaCreate, LabMetaUpdate
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import NodeCreate, NodeUpdate
 from app.schemas.user import UserRead
+from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
@@ -866,19 +868,30 @@ async def node_html5(
         }
 
     try:
-        html5_url = await Html5SessionService().create_console_url(
-            current_user,
-            host=console["host"],
-            port=console["port"],
-            protocol=console["console"],
-            connection_name=console["name"],
-        )
-    except Html5SessionError as exc:
+        settings = get_settings()
+        if settings.GUACAMOLE_DATABASE_URL.strip():
+            html5_url = await GuacamoleDatabaseService().create_console_url(
+                current_user,
+                host=console["host"],
+                port=console["port"],
+                protocol=console["console"],
+                connection_name=console["name"],
+            )
+        else:
+            html5_url = await Html5SessionService().create_console_url(
+                current_user,
+                host=console["host"],
+                port=console["port"],
+                protocol=console["console"],
+                connection_name=console["name"],
+            )
+    except (Html5SessionError, GuacamoleDatabaseError) as exc:
         return {
             "code": 500,
             "status": "fail",
             "message": str(exc),
         }
+
     return RedirectResponse(url=html5_url, status_code=307)
 
 

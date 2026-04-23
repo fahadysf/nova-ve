@@ -9,7 +9,7 @@
   };
 </script>
 
-<div class="rounded border px-2.5 py-1.5 text-[11px] font-medium flex items-center gap-1.5"
+<div class="rounded border px-2.5 py-1.5 text-[7px] font-medium flex items-center gap-1.5"
   class:bg-gray-800={data.status !== 2}
   class:border-gray-600={data.status !== 2}
   class:bg-gray-900={data.status === 2}
