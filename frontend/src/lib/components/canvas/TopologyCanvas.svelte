@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { createEventDispatcher } from 'svelte';
   import { onMount } from 'svelte';
   import { writable } from 'svelte/store';
   import {
@@ -23,6 +24,10 @@
   export let nodes: Record<string, NodeData> = {};
   export let networks: Record<string, NetworkData> = {};
   export let topology: TopologyLink[] = [];
+
+  const dispatch = createEventDispatcher<{
+    console: { nodeId: number; node: NodeData };
+  }>();
 
   const nodeTypes = {
     device: CustomNode,
@@ -489,11 +494,7 @@
     }
 
     if (action === 'console') {
-      if (node.url) {
-        window.open(node.url, '_blank', 'noopener');
-      } else {
-        toastStore.push('No console URL is available for this node yet.');
-      }
+      dispatch('console', { nodeId: decoded.id, node });
       return;
     }
 

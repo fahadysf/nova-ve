@@ -1,0 +1,19 @@
+services:
+  guacd:
+    image: guacamole/guacd:1.6.0
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  guacamole:
+    image: guacamole/guacamole:1.6.0
+    restart: unless-stopped
+    depends_on:
+      - guacd
+    environment:
+      GUACD_HOSTNAME: guacd
+      WEBAPP_CONTEXT: html5
+      JSON_ENABLED: "true"
+      JSON_SECRET_KEY: ${GUACAMOLE_JSON_SECRET_KEY}
+    ports:
+      - "127.0.0.1:8081:8080"

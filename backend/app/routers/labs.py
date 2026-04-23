@@ -1,4 +1,5 @@
 import uuid
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
@@ -10,7 +11,7 @@ from app.schemas.lab import LabMetaCreate, LabMetaUpdate
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import NodeCreate, NodeUpdate
 from app.schemas.user import UserRead
-from app.services.html5_service import Html5SessionService
+from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateError, TemplateService
@@ -67,6 +68,11 @@ def _resize_interfaces(existing: list[dict], node_type: str, ethernet_count: int
 
 def _first_mac_for_node(node_id: int) -> str:
     return f"50:00:00:{node_id:02x}:00:00"
+
+
+def _html5_launcher_url(lab_path: str, node_id: int) -> str:
+    quoted_path = quote(lab_path.strip("/"), safe="/")
+    return f"/api/labs/{quoted_path}/nodes/{node_id}/html5"
 
 
 @router.post("/")
@@ -308,7 +314,8 @@ async def list_nodes(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -322,11 +329,15 @@ async def list_nodes(
             "message": str(e),
         }
 
+    nodes = NodeRuntimeService().enrich_nodes(data)
+    for key, node in nodes.items():
+        node["url"] = _html5_launcher_url(scoped_path, int(key))
+
     return {
         "code": 200,
         "status": "success",
         "message": "Successfully listed nodes (60026).",
-        "data": NodeRuntimeService().enrich_nodes(data),
+        "data": nodes,
     }
 
 
@@ -699,7 +710,8 @@ async def node_console(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
         console = NodeRuntimeService().console_info(data, node_id)
     except FileNotFoundError:
         return {
@@ -719,6 +731,8 @@ async def node_console(
             "status": "fail",
             "message": str(e),
         }
+
+    console["url"] = _html5_launcher_url(scoped_path, node_id)
 
     return {
         "code": 200,
@@ -821,7 +835,6 @@ async def node_html5(
     lab_path: str,
     node_id: int,
     current_user: UserRead = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
     if not getattr(current_user, "html5", True):
         return {
@@ -852,12 +865,20 @@ async def node_html5(
             "message": str(e),
         }
 
-    html5_url = await Html5SessionService(db).create_console_url(
-        current_user,
-        host=console["host"],
-        port=console["port"],
-        protocol=console["console"],
-    )
+    try:
+        html5_url = await Html5SessionService().create_console_url(
+            current_user,
+            host=console["host"],
+            port=console["port"],
+            protocol=console["console"],
+            connection_name=console["name"],
+        )
+    except Html5SessionError as exc:
+        return {
+            "code": 500,
+            "status": "fail",
+            "message": str(exc),
+        }
     return RedirectResponse(url=html5_url, status_code=307)
 
 

@@ -2,13 +2,16 @@ import uuid
 import time
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from argon2 import PasswordHasher
 from app.models.user import User
 from app.config import get_settings
 from app.core.security import hash_password, verify_password
 
-ph = PasswordHasher()
 settings = get_settings()
+MIN_SESSION_MAX_AGE = 14400
+
+
+def session_max_age_seconds() -> int:
+    return max(int(settings.SESSION_MAX_AGE), MIN_SESSION_MAX_AGE)
 
 
 class AuthService:
@@ -50,20 +53,25 @@ class AuthService:
     async def create_session(self, user: User) -> str:
         token = str(uuid.uuid4())
         user.session_token = token
-        user.session_expires = int(time.time()) + settings.SESSION_MAX_AGE
+        user.session_expires = int(time.time()) + session_max_age_seconds()
         user.online = True
         await self.db.commit()
         return token
 
     async def validate_session(self, token: str, username: str) -> User | None:
+        now = int(time.time())
         result = await self.db.execute(
             select(User).where(
                 User.username == username,
                 User.session_token == token,
-                User.session_expires > int(time.time()),
+                User.session_expires > now,
             )
         )
-        return result.scalar_one_or_none()
+        user = result.scalar_one_or_none()
+        if user:
+            user.session_expires = now + session_max_age_seconds()
+            await self.db.commit()
+        return user
 
     async def destroy_session(self, user: User) -> None:
         user.session_token = None

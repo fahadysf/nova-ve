@@ -2,16 +2,21 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, Request, Response, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
-from app.schemas.auth import LoginRequest, AuthResponse
+from app.schemas.auth import LoginRequest
 from app.schemas.user import UserRead, UserCreate
 from app.services.auth_service import AuthService
-from app.dependencies import get_current_user, get_current_admin, get_optional_user
+from app.dependencies import get_current_user, get_optional_user
 from app.config import get_settings
 from app.core.security import create_access_token
 from app.core.constants import UserRole
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 settings = get_settings()
+SESSION_MAX_AGE_FLOOR = 14400
+
+
+def _session_cookie_max_age() -> int:
+    return max(int(settings.SESSION_MAX_AGE), SESSION_MAX_AGE_FLOOR)
 
 
 @router.post("/login")
@@ -42,7 +47,7 @@ async def login(
         httponly=True,
         secure=settings.COOKIE_SECURE,
         samesite=settings.COOKIE_SAMESITE,
-        max_age=settings.SESSION_MAX_AGE,
+        max_age=_session_cookie_max_age(),
     )
     response.set_cookie(
         key=settings.SESSION_USER_COOKIE,
@@ -51,7 +56,7 @@ async def login(
         httponly=True,
         secure=settings.COOKIE_SECURE,
         samesite=settings.COOKIE_SAMESITE,
-        max_age=settings.SESSION_MAX_AGE,
+        max_age=_session_cookie_max_age(),
     )
 
     return {
