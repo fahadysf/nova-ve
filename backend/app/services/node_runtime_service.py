@@ -48,7 +48,7 @@ class NodeRuntimeService:
         if node.get("type") == "qemu":
             runtime = self._start_qemu_node(lab_id, node)
         elif node.get("type") == "docker":
-            runtime = self._start_docker_node(lab_id, node)
+            runtime = self._start_docker_node(lab_data, node)
         else:
             raise NodeRuntimeError(f"Unsupported node type: {node.get('type')}")
 
@@ -321,14 +321,20 @@ class NodeRuntimeService:
             "started_at": time.time(),
         }
 
-    def _start_docker_node(self, lab_id: str, node: dict[str, Any]) -> dict[str, Any]:
+    def _start_docker_node(self, lab_data: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
         docker_binary = self._resolve_binary("docker")
         if not docker_binary:
             raise NodeRuntimeError("Docker binary not found")
 
+        lab_id = self._lab_id(lab_data)
         console_mode = node.get("console", "rdp")
         console_port = self._allocate_console_port(console_mode)
         container_name = self._container_name(lab_id, node["id"])
+        network_specs = self._docker_network_specs(lab_data, node)
+
+        for spec in network_specs:
+            self._ensure_docker_network(docker_binary, spec)
+
         cmd = [
             docker_binary,
             "--host",
@@ -342,14 +348,54 @@ class NodeRuntimeService:
             str(node.get("cpu", 1)),
             "--memory",
             f"{node.get('ram', 1024)}m",
+            "--hostname",
+            self._docker_network_alias(node),
             "-p",
             f"{console_port}:{self._container_console_port(console_mode)}",
+        ]
+
+        if network_specs:
+            cmd += [
+                "--network",
+                network_specs[0]["name"],
+                "--network-alias",
+                self._docker_network_alias(node),
+            ]
+
+        cmd += [
             str(node.get("image")),
         ]
 
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise NodeRuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to start Docker container")
+
+        for spec in network_specs[1:]:
+            attach = subprocess.run(
+                [
+                    docker_binary,
+                    "--host",
+                    self.settings.DOCKER_HOST,
+                    "network",
+                    "connect",
+                    "--alias",
+                    self._docker_network_alias(node),
+                    spec["name"],
+                    container_name,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if attach.returncode != 0:
+                self._stop_docker_runtime(
+                    {
+                        "container_name": container_name,
+                        "network_names": [item["name"] for item in network_specs],
+                    }
+                )
+                raise NodeRuntimeError(
+                    attach.stderr.strip() or attach.stdout.strip() or "Failed to attach Docker network"
+                )
 
         pid = self._docker_container_pid(docker_binary, container_name)
         pid_create_time = None
@@ -376,6 +422,7 @@ class NodeRuntimeService:
             "stdout_log": str(work_dir / "stdout.log"),
             "stderr_log": str(work_dir / "stderr.log"),
             "command": cmd,
+            "network_names": [spec["name"] for spec in network_specs],
             "started_at": time.time(),
         }
 
@@ -416,6 +463,7 @@ class NodeRuntimeService:
             capture_output=True,
             text=True,
         )
+        self._prune_docker_networks(docker_binary, runtime.get("network_names", []))
 
     def _ensure_qemu_overlay(self, work_dir: Path, node: dict[str, Any]) -> Path:
         overlay_path = work_dir / "virtioa.qcow2"
@@ -614,6 +662,124 @@ class NodeRuntimeService:
     def _container_name(lab_id: str, node_id: int) -> str:
         safe_lab_id = lab_id.replace("-", "")[:12]
         return f"nova-ve-{safe_lab_id}-{node_id}"
+
+    def _docker_network_specs(self, lab_data: dict[str, Any], node: dict[str, Any]) -> list[dict[str, Any]]:
+        lab_id = self._lab_id(lab_data)
+        networks = lab_data.get("networks", {})
+        seen: set[int] = set()
+        specs: list[dict[str, Any]] = []
+
+        for interface in node.get("interfaces", []):
+            network_id = int(interface.get("network_id") or 0)
+            if not network_id or network_id in seen:
+                continue
+
+            network = networks.get(str(network_id))
+            if not network:
+                continue
+
+            network_type = str(network.get("type", "bridge"))
+            if network_type.startswith("pnet"):
+                continue
+
+            seen.add(network_id)
+            specs.append(
+                {
+                    "id": network_id,
+                    "name": self._docker_network_name(lab_id, network_id),
+                    "internal": network_type.startswith("internal") or network_type.startswith("private"),
+                }
+            )
+
+        return specs
+
+    def _ensure_docker_network(self, docker_binary: str, spec: dict[str, Any]) -> None:
+        inspect = subprocess.run(
+            [
+                docker_binary,
+                "--host",
+                self.settings.DOCKER_HOST,
+                "network",
+                "inspect",
+                spec["name"],
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if inspect.returncode == 0:
+            return
+
+        create_cmd = [
+            docker_binary,
+            "--host",
+            self.settings.DOCKER_HOST,
+            "network",
+            "create",
+            "--driver",
+            "bridge",
+            "--label",
+            f"nova-ve.network_id={spec['id']}",
+        ]
+        if spec["internal"]:
+            create_cmd.append("--internal")
+        create_cmd.append(spec["name"])
+
+        result = subprocess.run(create_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            raise NodeRuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to create Docker network")
+
+    def _prune_docker_networks(self, docker_binary: str, network_names: list[str]) -> None:
+        for network_name in network_names:
+            inspect = subprocess.run(
+                [
+                    docker_binary,
+                    "--host",
+                    self.settings.DOCKER_HOST,
+                    "network",
+                    "inspect",
+                    network_name,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            if inspect.returncode != 0:
+                continue
+
+            try:
+                inspected = json.loads(inspect.stdout)
+            except json.JSONDecodeError:
+                continue
+
+            containers = {}
+            if inspected and isinstance(inspected, list):
+                containers = inspected[0].get("Containers") or {}
+            if containers:
+                continue
+
+            subprocess.run(
+                [
+                    docker_binary,
+                    "--host",
+                    self.settings.DOCKER_HOST,
+                    "network",
+                    "rm",
+                    network_name,
+                ],
+                capture_output=True,
+                text=True,
+            )
+
+    @staticmethod
+    def _docker_network_name(lab_id: str, network_id: int) -> str:
+        safe_lab_id = "".join(character for character in lab_id.lower() if character.isalnum())[:12]
+        return f"nova-ve-{safe_lab_id}-net{network_id}"
+
+    @staticmethod
+    def _docker_network_alias(node: dict[str, Any]) -> str:
+        name = str(node.get("name") or f"node-{node.get('id', 'x')}")
+        cleaned = "".join(character.lower() if character.isalnum() else "-" for character in name)
+        alias = "-".join(filter(None, cleaned.split("-")))
+        return alias or f"node-{node.get('id', 'x')}"
 
     @staticmethod
     def _mac_for_index(first_mac: str | None, index: int) -> str:
