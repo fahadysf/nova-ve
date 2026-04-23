@@ -315,3 +315,152 @@ async def test_html5_session_service_builds_direct_client_url(monkeypatch, patch
     )
 
     assert url == "/html5/#/client/YWxwaW5lLXZuYwBjAGpzb24%3D?token=TOKEN-123"
+
+
+@pytest.mark.asyncio
+async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch, patched_settings):
+    lab_data = {
+        "id": "lab-123",
+        "meta": {"name": "docker-demo"},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "alpine-a",
+                "type": "docker",
+                "image": "nova-ve-alpine-telnet:latest",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 1,
+                "interfaces": [{"name": "eth0", "network_id": 1}],
+            },
+            "2": {
+                "id": 2,
+                "name": "alpine-b",
+                "type": "docker",
+                "image": "nova-ve-alpine-telnet:latest",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 1,
+                "interfaces": [{"name": "eth0", "network_id": 1}],
+            },
+        },
+        "networks": {
+            "1": {
+                "id": 1,
+                "name": "lab-link",
+                "type": "bridge",
+            }
+        },
+        "topology": [],
+    }
+
+    recorded_calls: list[list[str]] = []
+    existing_networks: set[str] = set()
+    containers: dict[str, dict[str, object]] = {}
+
+    _mock_runtime_binaries(monkeypatch)
+
+    def fake_run(cmd, capture_output=False, text=False, **_kwargs):
+        recorded_calls.append(cmd)
+        if os.path.basename(cmd[0]) != "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        args = cmd[3:] if len(cmd) > 2 and cmd[1] == "--host" else cmd[1:]
+        if args[:2] == ["network", "inspect"]:
+            network_name = args[2]
+            if network_name not in existing_networks:
+                return SimpleNamespace(returncode=1, stdout="", stderr="no such network")
+
+            attached = {
+                name: {}
+                for name, container in containers.items()
+                if network_name in container["networks"]
+            }
+            stdout = json.dumps([{"Name": network_name, "Containers": attached}])
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+        if args[:2] == ["network", "create"]:
+            network_name = args[-1]
+            existing_networks.add(network_name)
+            return SimpleNamespace(returncode=0, stdout=f"{network_name}\n", stderr="")
+
+        if args[:2] == ["network", "connect"]:
+            network_name = args[-2]
+            container_name = args[-1]
+            containers[container_name]["networks"].add(network_name)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        if args[:2] == ["network", "rm"]:
+            network_name = args[-1]
+            existing_networks.discard(network_name)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        if args[0] == "run":
+            container_name = args[args.index("--name") + 1]
+            network_name = args[args.index("--network") + 1]
+            containers[container_name] = {
+                "running": True,
+                "pid": 2200 + len(containers),
+                "networks": {network_name},
+            }
+            return SimpleNamespace(returncode=0, stdout=f"{container_name}-cid\n", stderr="")
+
+        if args[:2] == ["inspect", "-f"]:
+            template = args[2]
+            container_name = args[3]
+            container = containers.get(container_name)
+            if not container:
+                return SimpleNamespace(returncode=1, stdout="", stderr="missing")
+            if template == "{{.State.Pid}}":
+                return SimpleNamespace(returncode=0, stdout=f"{container['pid']}\n", stderr="")
+            if template == "{{.State.Running}}":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=("true" if container["running"] else "false") + "\n",
+                    stderr="",
+                )
+
+        if args[0] == "stop":
+            container_name = args[-1]
+            if container_name in containers:
+                containers[container_name]["running"] = False
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        if args[0] == "rm":
+            container_name = args[-1]
+            containers.pop(container_name, None)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        raise AssertionError(f"Unhandled docker invocation: {cmd}")
+
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.psutil.Process",
+        lambda pid: SimpleNamespace(create_time=lambda: float(pid)),
+    )
+
+    service = NodeRuntimeService()
+    runtime_a = service.start_node(lab_data, 1)
+    runtime_b = service.start_node(lab_data, 2)
+
+    assert runtime_a["network_names"] == ["nova-ve-lab123-net1"]
+    assert runtime_b["network_names"] == ["nova-ve-lab123-net1"]
+
+    network_create_calls = [call for call in recorded_calls if call[3:5] == ["network", "create"]]
+    assert len(network_create_calls) == 1
+
+    run_calls = [call for call in recorded_calls if call[3] == "run"]
+    assert len(run_calls) == 2
+    assert all("--network" in call for call in run_calls)
+    assert run_calls[0][run_calls[0].index("--network") + 1] == "nova-ve-lab123-net1"
+    assert run_calls[1][run_calls[1].index("--network") + 1] == "nova-ve-lab123-net1"
+    assert run_calls[0][run_calls[0].index("--network-alias") + 1] == "alpine-a"
+    assert run_calls[1][run_calls[1].index("--network-alias") + 1] == "alpine-b"
+
+    service.stop_node(lab_data, 1)
+    assert "nova-ve-lab123-net1" in existing_networks
+
+    service.stop_node(lab_data, 2)
+    assert "nova-ve-lab123-net1" not in existing_networks

@@ -5,6 +5,8 @@
   import { apiGetData, ApiError } from '$lib/api';
   import type { FolderListing, LabListItem } from '$lib/types';
 
+  const preferredLabPath = '/alpine-docker-demo.json';
+
   let labs: LabListItem[] = [];
   let loading = true;
   let error = '';
@@ -22,7 +24,14 @@
     error = '';
     try {
       const data = await apiGetData<FolderListing>('/folders/');
-      labs = data.labs || [];
+      labs = [...(data.labs || [])].sort((left, right) => {
+        const leftPreferred = left.path === preferredLabPath;
+        const rightPreferred = right.path === preferredLabPath;
+        if (leftPreferred !== rightPreferred) {
+          return leftPreferred ? -1 : 1;
+        }
+        return left.file.localeCompare(right.file);
+      });
     } catch (e) {
       error = e instanceof ApiError ? e.message : 'Unable to load labs.';
     } finally {
