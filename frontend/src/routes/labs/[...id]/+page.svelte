@@ -18,19 +18,29 @@
   let error = '';
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
   type ConsoleWindowState = ConsoleBounds & {
+    id: number;
     nodeId: number;
     nodeName: string;
     src: string;
     requestId: number;
     maximized: boolean;
+    minimized: boolean;
     restoreBounds: ConsoleBounds | null;
+    zIndex: number;
   };
 
-  let consoleWindow: ConsoleWindowState | null = null;
+  const CONSOLE_HEADER_HEIGHT = 56;
+
+  let consoleWindows: ConsoleWindowState[] = [];
+  let consoleWindowCounter = 0;
   let summaryCollapsed = false;
   let inventoryCollapsed = false;
-  let dragState: { startX: number; startY: number; originX: number; originY: number } | null = null;
-  let resizeState: { startX: number; startY: number; width: number; height: number } | null = null;
+  let dragState:
+    | { windowId: number; startX: number; startY: number; originX: number; originY: number }
+    | null = null;
+  let resizeState:
+    | { windowId: number; startX: number; startY: number; width: number; height: number }
+    | null = null;
 
   $: labId = $page.params.id ?? '';
   $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
@@ -61,12 +71,12 @@
       nodes = nodeData;
       networks = networkData;
       topology = topologyData ?? [];
-      if (consoleWindow) {
-        const activeNode = nodeData[String(consoleWindow.nodeId)];
-        if (!activeNode || activeNode.status !== 2) {
-          consoleWindow = null;
-        }
-      }
+      consoleWindows = consoleWindows
+        .filter((window) => nodeData[String(window.nodeId)]?.status === 2)
+        .map((window) => ({
+          ...window,
+          nodeName: nodeData[String(window.nodeId)]?.name || window.nodeName
+        }));
     } catch (e) {
       error = e instanceof ApiError ? e.message : 'Unable to load the lab.';
     } finally {
@@ -74,17 +84,27 @@
     }
   }
 
-  function defaultConsoleBounds(): ConsoleBounds {
+  function nextConsoleWindowId(): number {
+    consoleWindowCounter += 1;
+    return consoleWindowCounter;
+  }
+
+  function nextWindowZIndex(): number {
+    return consoleWindows.reduce((highest, window) => Math.max(highest, window.zIndex), 39) + 1;
+  }
+
+  function defaultConsoleBounds(windowOffset = consoleWindows.length): ConsoleBounds {
     const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1440;
     const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 900;
-    const width = Math.max(560, Math.min(820, Math.round(viewportWidth * 0.48)));
-    const height = Math.max(380, Math.min(680, Math.round(viewportHeight * 0.52)));
+    const width = Math.max(480, Math.min(700, Math.round(viewportWidth * 0.38)));
+    const height = Math.max(320, Math.min(520, Math.round(viewportHeight * 0.42)));
+    const offset = Math.min(windowOffset, 6) * 28;
 
     return {
       width,
       height,
-      x: Math.max(24, viewportWidth - width - 32),
-      y: Math.max(72, viewportHeight - height - 32)
+      x: Math.max(24, viewportWidth - width - 32 - offset),
+      y: Math.max(72, 88 + offset)
     };
   }
 
@@ -113,8 +133,22 @@
     };
   }
 
-  function buildConsoleWindow(node: NodeData): ConsoleWindowState {
-    const priorBounds = consoleWindow?.maximized ? maximizedConsoleBounds() : consoleWindow ?? defaultConsoleBounds();
+  function replaceConsoleWindow(
+    windowId: number,
+    updater: (window: ConsoleWindowState) => ConsoleWindowState
+  ) {
+    consoleWindows = consoleWindows.map((window) => (window.id === windowId ? updater(window) : window));
+  }
+
+  function focusConsoleWindow(windowId: number) {
+    const zIndex = nextWindowZIndex();
+    replaceConsoleWindow(windowId, (window) => ({ ...window, zIndex }));
+  }
+
+  function buildConsoleWindow(node: NodeData, existingWindow?: ConsoleWindowState): ConsoleWindowState {
+    const priorBounds = existingWindow?.maximized
+      ? maximizedConsoleBounds()
+      : existingWindow ?? defaultConsoleBounds();
     const bounds = clampConsoleBounds({
       x: priorBounds.x,
       y: priorBounds.y,
@@ -124,12 +158,15 @@
 
     return {
       ...bounds,
+      id: existingWindow?.id ?? nextConsoleWindowId(),
       nodeId: node.id,
       nodeName: node.name,
       src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}`,
       requestId: Date.now(),
-      maximized: consoleWindow?.maximized ?? false,
-      restoreBounds: consoleWindow?.restoreBounds ?? bounds
+      maximized: existingWindow?.maximized ?? false,
+      minimized: false,
+      restoreBounds: existingWindow?.restoreBounds ?? bounds,
+      zIndex: nextWindowZIndex()
     };
   }
 
@@ -139,107 +176,153 @@
       return;
     }
 
+    const existingWindow = consoleWindows.find((window) => window.nodeId === node.id);
+    if (existingWindow) {
+      focusConsoleWindow(existingWindow.id);
+      replaceConsoleWindow(existingWindow.id, (window) => ({ ...window, minimized: false }));
+      return;
+    }
+
     const nextWindow = buildConsoleWindow(node);
-    consoleWindow = null;
     await tick();
-    consoleWindow = nextWindow;
+    consoleWindows = [...consoleWindows, nextWindow];
   }
 
-  async function handleConsoleNodeChange(event: Event) {
+  async function handleConsoleNodeChange(windowId: number, event: Event) {
     const selectedId = Number((event.currentTarget as HTMLSelectElement).value);
     const node = nodeList.find((candidate) => candidate.id === selectedId);
     if (node) {
-      await openConsole(node);
+      const existingTargetWindow = consoleWindows.find(
+        (window) => window.nodeId === node.id && window.id !== windowId
+      );
+      if (existingTargetWindow) {
+        focusConsoleWindow(existingTargetWindow.id);
+        replaceConsoleWindow(existingTargetWindow.id, (window) => ({ ...window, minimized: false }));
+        return;
+      }
+      const existingWindow = consoleWindows.find((window) => window.id === windowId);
+      if (!existingWindow) return;
+      const nextWindow = buildConsoleWindow(node, existingWindow);
+      replaceConsoleWindow(windowId, () => nextWindow);
     }
   }
 
-  function closeConsole() {
-    consoleWindow = null;
-    dragState = null;
-    resizeState = null;
+  function closeConsole(windowId: number) {
+    consoleWindows = consoleWindows.filter((window) => window.id !== windowId);
+    if (dragState?.windowId === windowId) {
+      dragState = null;
+    }
+    if (resizeState?.windowId === windowId) {
+      resizeState = null;
+    }
   }
 
-  function reloadConsole() {
-    if (!consoleWindow) return;
-    consoleWindow = {
-      ...consoleWindow,
-      src: `/api/labs/${labId}/nodes/${consoleWindow.nodeId}/html5?ts=${Date.now()}`,
-      requestId: Date.now()
-    };
+  function reloadConsole(windowId: number) {
+    replaceConsoleWindow(windowId, (window) => ({
+      ...window,
+      minimized: false,
+      src: `/api/labs/${labId}/nodes/${window.nodeId}/html5?ts=${Date.now()}`,
+      requestId: Date.now(),
+      zIndex: nextWindowZIndex()
+    }));
   }
 
-  function toggleConsoleMaximize() {
-    if (!consoleWindow) return;
+  function toggleConsoleMaximize(windowId: number) {
+    const targetWindow = consoleWindows.find((window) => window.id === windowId);
+    if (!targetWindow) return;
 
-    if (consoleWindow.maximized) {
-      const restored = clampConsoleBounds(consoleWindow.restoreBounds ?? defaultConsoleBounds());
-      consoleWindow = {
-        ...consoleWindow,
+    if (targetWindow.maximized) {
+      const restored = clampConsoleBounds(targetWindow.restoreBounds ?? defaultConsoleBounds());
+      replaceConsoleWindow(windowId, (window) => ({
+        ...window,
         ...restored,
         maximized: false,
-        restoreBounds: restored
-      };
+        minimized: false,
+        restoreBounds: restored,
+        zIndex: nextWindowZIndex()
+      }));
       return;
     }
 
     const currentBounds = {
-      x: consoleWindow.x,
-      y: consoleWindow.y,
-      width: consoleWindow.width,
-      height: consoleWindow.height
+      x: targetWindow.x,
+      y: targetWindow.y,
+      width: targetWindow.width,
+      height: targetWindow.height
     };
-    consoleWindow = {
-      ...consoleWindow,
+    replaceConsoleWindow(windowId, (window) => ({
+      ...window,
       ...maximizedConsoleBounds(),
       maximized: true,
-      restoreBounds: currentBounds
-    };
+      minimized: false,
+      restoreBounds: currentBounds,
+      zIndex: nextWindowZIndex()
+    }));
   }
 
-  function beginConsoleDrag(event: MouseEvent) {
-    if (!consoleWindow || consoleWindow.maximized) return;
+  function toggleConsoleMinimize(windowId: number) {
+    const targetWindow = consoleWindows.find((window) => window.id === windowId);
+    if (!targetWindow) return;
+    replaceConsoleWindow(windowId, (window) => ({
+      ...window,
+      minimized: !window.minimized,
+      maximized: window.minimized ? window.maximized : false,
+      zIndex: nextWindowZIndex()
+    }));
+  }
+
+  function beginConsoleDrag(windowId: number, event: MouseEvent) {
+    const targetWindow = consoleWindows.find((window) => window.id === windowId);
+    if (!targetWindow || targetWindow.maximized) return;
+    focusConsoleWindow(windowId);
     dragState = {
+      windowId,
       startX: event.clientX,
       startY: event.clientY,
-      originX: consoleWindow.x,
-      originY: consoleWindow.y
+      originX: targetWindow.x,
+      originY: targetWindow.y
     };
   }
 
-  function beginConsoleResize(event: MouseEvent) {
-    if (!consoleWindow || consoleWindow.maximized) return;
+  function beginConsoleResize(windowId: number, event: MouseEvent) {
+    const targetWindow = consoleWindows.find((window) => window.id === windowId);
+    if (!targetWindow || targetWindow.maximized || targetWindow.minimized) return;
     event.stopPropagation();
+    focusConsoleWindow(windowId);
     resizeState = {
+      windowId,
       startX: event.clientX,
       startY: event.clientY,
-      width: consoleWindow.width,
-      height: consoleWindow.height
+      width: targetWindow.width,
+      height: targetWindow.height
     };
   }
 
   function handleWindowPointerMove(event: MouseEvent) {
-    if (dragState && consoleWindow) {
-      consoleWindow = {
-        ...consoleWindow,
+    if (dragState) {
+      const drag = dragState;
+      replaceConsoleWindow(drag.windowId, (window) => ({
+        ...window,
         ...clampConsoleBounds({
-          x: dragState.originX + (event.clientX - dragState.startX),
-          y: dragState.originY + (event.clientY - dragState.startY),
-          width: consoleWindow.width,
-          height: consoleWindow.height
+          x: drag.originX + (event.clientX - drag.startX),
+          y: drag.originY + (event.clientY - drag.startY),
+          width: window.width,
+          height: window.height
         })
-      };
+      }));
     }
 
-    if (resizeState && consoleWindow) {
-      consoleWindow = {
-        ...consoleWindow,
+    if (resizeState) {
+      const resize = resizeState;
+      replaceConsoleWindow(resize.windowId, (window) => ({
+        ...window,
         ...clampConsoleBounds({
-          x: consoleWindow.x,
-          y: consoleWindow.y,
-          width: resizeState.width + (event.clientX - resizeState.startX),
-          height: resizeState.height + (event.clientY - resizeState.startY)
+          x: window.x,
+          y: window.y,
+          width: resize.width + (event.clientX - resize.startX),
+          height: resize.height + (event.clientY - resize.startY)
         })
-      };
+      }));
     }
   }
 
@@ -291,8 +374,8 @@
       </div>
     </div>
   {:else}
-    <div class="relative flex flex-1 gap-4 overflow-hidden p-6">
-      <aside class="shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 transition-[width] duration-200" style={`width: ${summaryCollapsed ? '3.5rem' : '18rem'}`}>
+    <div class="relative flex flex-1 gap-3 overflow-hidden p-4">
+      <aside class="shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 transition-[width] duration-200" style={`width: ${summaryCollapsed ? '3.5rem' : '15rem'}`}>
         {#if summaryCollapsed}
           <button class="flex h-full w-full flex-col items-center justify-between px-2 py-4 text-[10px] uppercase tracking-[0.3em] text-gray-500 hover:text-white" on:click={toggleSummaryCollapsed}>
             <span>»</span>
@@ -300,14 +383,14 @@
             <span></span>
           </button>
         {:else}
-          <div class="p-5">
+          <div class="p-4">
             <div class="flex items-center justify-between">
               <h2 class="text-sm uppercase tracking-[0.24em] text-gray-500">Lab Summary</h2>
               <button class="rounded-md border border-gray-700 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-blue-500 hover:text-white" on:click={toggleSummaryCollapsed}>
                 Collapse
               </button>
             </div>
-            <div class="mt-4 space-y-4 text-sm">
+            <div class="mt-3 space-y-3 text-xs">
               <div>
                 <div class="text-gray-500">Owner</div>
                 <div class="mt-1 text-gray-100">{labMeta?.owner || 'n/a'}</div>
@@ -329,7 +412,7 @@
         {/if}
       </aside>
 
-      <aside class="shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 transition-[width] duration-200" style={`width: ${inventoryCollapsed ? '3.5rem' : '22rem'}`}>
+      <aside class="shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 transition-[width] duration-200" style={`width: ${inventoryCollapsed ? '3.5rem' : '19rem'}`}>
         {#if inventoryCollapsed}
           <button class="flex h-full w-full flex-col items-center justify-between px-2 py-4 text-[10px] uppercase tracking-[0.3em] text-gray-500 hover:text-white" on:click={toggleInventoryCollapsed}>
             <span>»</span>
@@ -337,7 +420,7 @@
             <span></span>
           </button>
         {:else}
-          <div class="p-5">
+          <div class="p-4">
             <div class="flex items-center justify-between">
               <h2 class="text-sm uppercase tracking-[0.24em] text-gray-500">Inventory</h2>
               <div class="flex items-center gap-2">
@@ -356,20 +439,20 @@
             <div class="mt-4">
               <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Nodes</div>
               {#if nodeList.length === 0}
-                <div class="mt-2 rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-sm text-gray-500">
+                <div class="mt-2 rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-500">
                   No nodes in this lab.
                 </div>
               {:else}
                 <div class="mt-2 space-y-2">
                   {#each nodeList as node}
-                    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-sm">
+                    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs">
                       <div class="flex items-center justify-between gap-3">
                         <div class="font-medium text-gray-100">{node.name}</div>
                         <span class={`rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.2em] ${node.status === 2 ? 'bg-emerald-500/20 text-emerald-200' : 'bg-gray-800 text-gray-300'}`}>
                           {node.status === 2 ? 'running' : 'stopped'}
                         </span>
                       </div>
-                      <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400">
+                      <div class="mt-2 grid grid-cols-2 gap-1.5 text-[11px] text-gray-400">
                         <div>Type: {node.type}</div>
                         <div>Console: {node.console}</div>
                         <div>CPU: {node.cpu}</div>
@@ -395,20 +478,20 @@
             <div class="mt-6">
               <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Networks</div>
               {#if networkList.length === 0}
-                <div class="mt-2 rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-sm text-gray-500">
+                <div class="mt-2 rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-500">
                   No networks in this lab.
                 </div>
               {:else}
                 <div class="mt-2 space-y-2">
                   {#each networkList as network}
-                    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-sm">
+                    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs">
                       <div class="flex items-center justify-between gap-3">
                         <div class="font-medium text-gray-100">{network.name}</div>
                         <span class="rounded-full bg-blue-500/20 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-blue-200">
                           {network.type}
                         </span>
                       </div>
-                      <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-gray-400">
+                      <div class="mt-2 grid grid-cols-2 gap-1.5 text-[11px] text-gray-400">
                         <div>ID: {network.id}</div>
                         <div>Links: {network.count ?? 0}</div>
                         <div>Visible: {network.visibility ? 'yes' : 'no'}</div>
@@ -429,65 +512,87 @@
         </SvelteFlowProvider>
       </div>
 
-      {#if consoleWindow}
-        <section
-          class="pointer-events-auto fixed z-40 flex overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
-          style={`left: ${consoleWindow.x}px; top: ${consoleWindow.y}px; width: ${consoleWindow.width}px; height: ${consoleWindow.height}px;`}
+      {#each [...consoleWindows].sort((left, right) => left.zIndex - right.zIndex) as consoleWindow (consoleWindow.id)}
+        <div
+          role="dialog"
+          tabindex="-1"
+          aria-label={`Console window for ${consoleWindow.nodeName}`}
+          class="pointer-events-auto fixed flex overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
+          style={`left: ${consoleWindow.x}px; top: ${consoleWindow.y}px; width: ${consoleWindow.width}px; height: ${consoleWindow.minimized ? CONSOLE_HEADER_HEIGHT : consoleWindow.height}px; z-index: ${consoleWindow.zIndex};`}
+          on:mousedown={() => focusConsoleWindow(consoleWindow.id)}
         >
           <div class="flex h-full w-full flex-col">
             <div
               role="toolbar"
               aria-label={`Console window controls for ${consoleWindow.nodeName}`}
               tabindex="-1"
-              class={`flex items-center justify-between border-b border-gray-800 px-4 py-3 ${consoleWindow.maximized ? 'cursor-default' : 'cursor-move'}`}
-              on:mousedown={beginConsoleDrag}
+              class={`flex items-center justify-between border-b border-gray-800 px-3 py-2 ${consoleWindow.maximized ? 'cursor-default' : 'cursor-move'}`}
+              on:mousedown={(event) => beginConsoleDrag(consoleWindow.id, event)}
             >
-              <div>
-                <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">HTML5 Console</div>
-                <div class="mt-1 text-sm font-medium text-gray-100">{consoleWindow.nodeName}</div>
+              <div class="flex items-center gap-3">
+                <div class="flex items-center gap-2">
+                  <button
+                    class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
+                    aria-label={`Close ${consoleWindow.nodeName}`}
+                    on:click={() => closeConsole(consoleWindow.id)}
+                  ></button>
+                  <button
+                    class="h-3 w-3 rounded-full bg-amber-300 transition hover:bg-amber-200"
+                    aria-label={`${consoleWindow.minimized ? 'Restore' : 'Minimize'} ${consoleWindow.nodeName}`}
+                    on:click={() => toggleConsoleMinimize(consoleWindow.id)}
+                  ></button>
+                  <button
+                    class="h-3 w-3 rounded-full bg-emerald-400 transition hover:bg-emerald-300"
+                    aria-label={`${consoleWindow.maximized ? 'Restore' : 'Maximize'} ${consoleWindow.nodeName}`}
+                    on:click={() => toggleConsoleMaximize(consoleWindow.id)}
+                  ></button>
+                </div>
+                <div>
+                  <div class="text-[9px] uppercase tracking-[0.24em] text-gray-500">HTML5 Console</div>
+                  <div class="mt-0.5 text-xs font-medium text-gray-100">{consoleWindow.nodeName}</div>
+                </div>
               </div>
               <div class="flex items-center gap-2">
-                <label class="sr-only" for="console-node-select">Console target</label>
+                <label class="sr-only" for={`console-node-select-${consoleWindow.id}`}>Console target</label>
                 <select
-                  id="console-node-select"
-                  class="rounded-md border border-gray-700 bg-gray-900 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 outline-none hover:border-blue-500"
+                  id={`console-node-select-${consoleWindow.id}`}
+                  class="rounded-md border border-gray-700 bg-gray-900 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
                   value={consoleWindow.nodeId}
-                  on:change={handleConsoleNodeChange}
+                  on:change={(event) => handleConsoleNodeChange(consoleWindow.id, event)}
                 >
                   {#each runningConsoleNodes as node}
                     <option value={node.id}>{node.name}</option>
                   {/each}
                 </select>
-                <button class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-blue-500 hover:text-white" on:click={reloadConsole}>
+                <button
+                  class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
+                  on:click={() => reloadConsole(consoleWindow.id)}
+                >
                   Reload
-                </button>
-                <button class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-blue-500 hover:text-white" on:click={toggleConsoleMaximize}>
-                  {consoleWindow.maximized ? 'Restore' : 'Maximize'}
-                </button>
-                <button class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-red-500 hover:text-white" on:click={closeConsole}>
-                  Close
                 </button>
               </div>
             </div>
-            <div class="min-h-0 flex-1 bg-gray-950">
-              {#key consoleWindow.requestId}
-                <iframe
-                  title={`Guacamole console for ${consoleWindow.nodeName}`}
-                  src={consoleWindow.src}
-                  class="h-full w-full border-0"
-                ></iframe>
-              {/key}
-            </div>
+            {#if !consoleWindow.minimized}
+              <div class="min-h-0 flex-1 bg-gray-950">
+                {#key consoleWindow.requestId}
+                  <iframe
+                    title={`Guacamole console for ${consoleWindow.nodeName}`}
+                    src={consoleWindow.src}
+                    class="h-full w-full border-0"
+                  ></iframe>
+                {/key}
+              </div>
+            {/if}
           </div>
-          {#if !consoleWindow.maximized}
+          {#if !consoleWindow.maximized && !consoleWindow.minimized}
             <button
-              class="absolute bottom-0 right-0 h-6 w-6 cursor-nwse-resize bg-transparent"
+              class="absolute bottom-0 right-0 h-5 w-5 cursor-nwse-resize bg-transparent"
               aria-label="Resize console window"
-              on:mousedown={beginConsoleResize}
+              on:mousedown={(event) => beginConsoleResize(consoleWindow.id, event)}
             ></button>
           {/if}
-        </section>
-      {/if}
+        </div>
+      {/each}
     </div>
   {/if}
 </div>
