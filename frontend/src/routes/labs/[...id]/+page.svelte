@@ -7,10 +7,11 @@
   import { toastStore } from '$lib/stores/toasts';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
-  import type { LabMeta, NetworkData, NodeData, TopologyLink } from '$lib/types';
+  import type { FolderListing, LabListItem, LabMeta, NetworkData, NodeData, TopologyLink } from '$lib/types';
 
   let labId = '';
   let labMeta: LabMeta | null = null;
+  let rootLabs: LabListItem[] = [];
   let nodes: Record<string, NodeData> = {};
   let networks: Record<string, NetworkData> = {};
   let topology: TopologyLink[] = [];
@@ -33,16 +34,19 @@
   };
 
   const CONSOLE_HEADER_HEIGHT = 56;
+  const preferredLabPath = '/alpine-docker-demo.json';
 
   let consoleWorkspace: ConsoleWorkspaceState | null = null;
   let activeConsoleTabState: ConsoleTab | null = null;
   let consoleTabCounter = 0;
   let summaryCollapsed = false;
   let inventoryCollapsed = false;
+  let lastLoadedRoute = '';
   let dragState: { startX: number; startY: number; originX: number; originY: number } | null = null;
   let resizeState: { startX: number; startY: number; width: number; height: number } | null = null;
 
   $: labId = $page.params.id ?? '';
+  $: isLabIndexRoute = labId === '';
   $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
   $: networkList = Object.values(networks).sort((a, b) => a.id - b.id);
   $: runningConsoleNodes = nodeList.filter((node) => node.status === 2);
@@ -58,10 +62,42 @@
   onMount(async () => {
     if (!$authStore.authenticated) {
       goto('/login');
-      return;
     }
-    await loadLab();
   });
+
+  $: {
+    const routeKey = isLabIndexRoute ? 'labs-index' : `lab:${labId}`;
+    if ($authStore.authenticated && routeKey !== lastLoadedRoute) {
+      lastLoadedRoute = routeKey;
+      void (isLabIndexRoute ? loadLabIndex() : loadLab());
+    }
+  }
+
+  async function loadLabIndex() {
+    loading = true;
+    error = '';
+
+    try {
+      const data = await apiGetData<FolderListing>('/folders/');
+      rootLabs = [...(data.labs || [])].sort((left, right) => {
+        const leftPreferred = left.path === preferredLabPath;
+        const rightPreferred = right.path === preferredLabPath;
+        if (leftPreferred !== rightPreferred) {
+          return leftPreferred ? -1 : 1;
+        }
+        return left.file.localeCompare(right.file);
+      });
+      labMeta = null;
+      nodes = {};
+      networks = {};
+      topology = [];
+      consoleWorkspace = null;
+    } catch (e) {
+      error = e instanceof ApiError ? e.message : 'Unable to load labs.';
+    } finally {
+      loading = false;
+    }
+  }
 
   async function loadLab() {
     loading = true;
@@ -101,6 +137,10 @@
     } finally {
       loading = false;
     }
+  }
+
+  function openLabFromIndex(lab: LabListItem) {
+    goto(`/labs${lab.path}`);
   }
 
   function nextConsoleTabId(): number {
@@ -403,9 +443,15 @@
   <header class="flex h-14 shrink-0 items-center justify-between border-b border-gray-700 bg-gray-800 px-4">
     <div class="flex items-center gap-4">
       <button on:click={() => goto('/labs')} class="text-gray-400 hover:text-white">← Back</button>
-      <span class="font-bold">{labMeta?.name || labId}</span>
+      <span class="font-bold">{isLabIndexRoute ? 'Labs' : labMeta?.name || labId}</span>
     </div>
-    <div class="text-sm text-gray-400">{Object.keys(nodes).length} nodes · {Object.keys(networks).length} networks</div>
+    <div class="text-sm text-gray-400">
+      {#if isLabIndexRoute}
+        {rootLabs.length} labs
+      {:else}
+        {Object.keys(nodes).length} nodes · {Object.keys(networks).length} networks
+      {/if}
+    </div>
   </header>
 
   {#if loading}
@@ -423,12 +469,36 @@
   {:else if error}
     <div class="flex flex-1 items-center justify-center p-6">
       <div class="max-w-xl rounded-xl border border-red-500/30 bg-red-500/10 p-5 text-red-100">
-        <div class="font-medium">Unable to load lab</div>
+        <div class="font-medium">{isLabIndexRoute ? 'Unable to load labs' : 'Unable to load lab'}</div>
         <p class="mt-2 text-sm text-red-100/80">{error}</p>
-        <button class="mt-4 rounded-md border border-red-400/40 px-3 py-2 text-xs uppercase tracking-[0.2em] text-red-100 hover:bg-red-500/10" on:click={loadLab}>
+        <button
+          class="mt-4 rounded-md border border-red-400/40 px-3 py-2 text-xs uppercase tracking-[0.2em] text-red-100 hover:bg-red-500/10"
+          on:click={isLabIndexRoute ? loadLabIndex : loadLab}
+        >
           Retry
         </button>
       </div>
+    </div>
+  {:else if isLabIndexRoute}
+    <div class="flex-1 overflow-auto p-6">
+      {#if rootLabs.length === 0}
+        <div class="rounded-xl border border-gray-800 bg-gray-900 p-6 text-sm text-gray-400">
+          No labs were returned by the backend yet.
+        </div>
+      {:else}
+        <div class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {#each rootLabs as lab}
+            <button
+              on:click={() => openLabFromIndex(lab)}
+              class="rounded-lg border border-gray-700 bg-gray-800 p-4 text-left transition hover:border-blue-500 hover:bg-gray-700"
+            >
+              <div class="font-medium">{lab.file.replace('.json', '').replace('.unl', '')}</div>
+              <div class="mt-2 text-xs uppercase tracking-[0.2em] text-gray-500">{lab.path}</div>
+              <div class="mt-3 text-sm text-gray-500">{lab.mtime}</div>
+            </button>
+          {/each}
+        </div>
+      {/if}
     </div>
   {:else}
     <div class="relative flex flex-1 gap-3 overflow-hidden p-4">

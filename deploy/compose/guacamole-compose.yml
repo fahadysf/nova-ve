@@ -26,6 +26,7 @@ services:
     environment:
       GUACD_HOSTNAME: guacd
       WEBAPP_CONTEXT: html5
+      BAN_ENABLED: "false"
       POSTGRESQL_ENABLED: "true"
       POSTGRESQL_HOSTNAME: guacdb
       POSTGRESQL_DATABASE: guacdb
