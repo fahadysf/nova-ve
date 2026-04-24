@@ -117,4 +117,10 @@ Detailed architecture studies of legacy platform are in `./research/`:
 
 ## License
 
-Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>. All rights reserved.
+Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>.
+
+This repository is licensed under `PolyForm Noncommercial License 1.0.0`.
+See [LICENSE](LICENSE) for the full text.
+
+Commercial use is not granted under the public repository license.
+Commercial licensing requires a separate agreement from the copyright holder.

@@ -1,3 +1,8 @@
+/*
+ * Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
+ * SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
+ */
+
 (function () {
   function suppressKnownClientNoise() {
     var knownMessage = "Cannot read properties of undefined (reading 'bind')";

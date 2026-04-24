@@ -1,3 +1,6 @@
+<!-- Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com> -->
+<!-- SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0 -->
+
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { onMount } from 'svelte';
