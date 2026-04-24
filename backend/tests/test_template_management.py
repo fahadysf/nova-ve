@@ -1,5 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
+import subprocess
 
 import pytest
 from starlette.datastructures import UploadFile
@@ -132,3 +133,36 @@ async def test_create_node_uses_template_defaults_and_validates_image(prepared_t
     )
     assert missing_image_response["code"] == 400
     assert "not available" in missing_image_response["message"]
+
+
+@pytest.mark.asyncio
+async def test_list_images_includes_local_docker_images(monkeypatch, patched_template_settings):
+    _write_text(
+        patched_template_settings.TEMPLATES_DIR / "docker" / "docker.yml",
+        """type: docker
+name: Docker Host
+cpu: 1
+ram: 1024
+ethernet: 1
+console: rdp
+icon: Server.png
+cpulimit: 1
+""",
+    )
+
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+        assert "docker" in cmd[0]
+        return SimpleNamespace(
+            returncode=0,
+            stdout="nova-ve-alpine-telnet:latest\npostgres:16-alpine\n<none>:<none>\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    current_user = SimpleNamespace(username="admin", role="admin")
+    images_response = await listing.list_images("docker", "docker", current_user=current_user)
+
+    assert images_response["code"] == 200
+    assert "nova-ve-alpine-telnet:latest" in images_response["data"]
+    assert images_response["data"]["nova-ve-alpine-telnet:latest"]["source"] == "docker"
