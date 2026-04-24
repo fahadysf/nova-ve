@@ -15,7 +15,7 @@ async def get_current_user(
     db: AsyncSession = Depends(get_db),
 ) -> UserRead:
     """Dependency to extract and validate session cookie or JWT Bearer token."""
-    # Try cookie session first (legacy platform browser compatibility)
+    # Try cookie session first for browser compatibility with the legacy platform.
     session_cookie = request.cookies.get("nova_session")
     user_cookie = request.cookies.get("nova_user")
 

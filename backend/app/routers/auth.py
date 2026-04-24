@@ -124,7 +124,7 @@ async def register(
 async def get_auth(
     current_user: UserRead = Depends(get_current_user),
 ):
-    """Legacy endpoint — kept for legacy platform compatibility."""
+    """Legacy endpoint — kept for compatibility with the upstream API contract."""
     return {
         "code": 200,
         "status": "success",
