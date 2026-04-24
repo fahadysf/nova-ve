@@ -7,6 +7,7 @@ Usage:
 
 import asyncio
 import os
+import secrets
 import sys
 from pathlib import Path
 
@@ -18,11 +19,13 @@ from app.database import async_session_maker
 from app.services.auth_service import AuthService
 from app.core.constants import UserRole
 
+GENERATED_ADMIN_PASSWORD = secrets.token_urlsafe(18)
+
 
 def get_default_admin() -> dict[str, str | UserRole]:
     return {
         "username": os.getenv("NOVA_VE_ADMIN_USERNAME", "admin"),
-        "password": os.getenv("NOVA_VE_ADMIN_PASSWORD", "admin"),
+        "password": os.getenv("NOVA_VE_ADMIN_PASSWORD", GENERATED_ADMIN_PASSWORD),
         "email": os.getenv("NOVA_VE_ADMIN_EMAIL", "admin@nova-ve.local"),
         "name": os.getenv("NOVA_VE_ADMIN_NAME", "Administrator"),
         "role": UserRole.ADMIN,
@@ -34,6 +37,11 @@ async def seed_admin_user(db: AsyncSession) -> None:
     default_admin = get_default_admin()
     user = await auth_service.create_user(**default_admin)
     print(f"[seed] Created admin user: {user.username}")
+    if "NOVA_VE_ADMIN_PASSWORD" not in os.environ:
+        print(
+            "[seed] Generated bootstrap admin password because NOVA_VE_ADMIN_PASSWORD "
+            f"was not set: {default_admin['password']}"
+        )
 
 
 async def seed() -> None:

@@ -9,8 +9,6 @@ LABS_DIR="${LOCAL_ROOT}/labs"
 IMAGES_DIR="${LOCAL_ROOT}/images"
 TMP_DIR="${LOCAL_ROOT}/tmp"
 GUACAMOLE_STATE_DIR="${LOCAL_ROOT}/guacamole"
-ADMIN_PASSWORD="${NOVA_VE_ADMIN_PASSWORD:-admin}"
-SECRET_KEY="${SECRET_KEY:-dev-secret-key-do-not-use-in-production}"
 
 detect_docker_host() {
   if [[ -n "${DOCKER_HOST:-}" ]]; then
@@ -33,9 +31,18 @@ print(secrets.token_hex(16))
 PY
 }
 
+generate_password() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(18))
+PY
+}
+
 DOCKER_HOST_VALUE="$(detect_docker_host)"
+ADMIN_PASSWORD="${NOVA_VE_ADMIN_PASSWORD:-$(generate_password)}"
+SECRET_KEY="${SECRET_KEY:-$(generate_password)}"
 GUACAMOLE_SECRET="${GUACAMOLE_JSON_SECRET_KEY:-$(generate_secret)}"
-GUACAMOLE_DB_PASSWORD="${GUACAMOLE_DB_PASSWORD:-guacuser}"
+GUACAMOLE_DB_PASSWORD="${GUACAMOLE_DB_PASSWORD:-$(generate_password)}"
 
 mkdir -p "${LOCAL_ROOT}" "${LABS_DIR}" "${IMAGES_DIR}" "${TMP_DIR}" "${GUACAMOLE_STATE_DIR}/db"
 cp -f "${REPO_ROOT}/backend/labs/alpine-docker-demo.json" "${LABS_DIR}/alpine-docker-demo.json"
@@ -76,6 +83,8 @@ cat <<EOF
 Prepared local Rancher Desktop environment.
 Env file: ${ENV_FILE}
 Labs dir: ${LABS_DIR}
+Bootstrap admin username: ${NOVA_VE_ADMIN_USERNAME:-admin}
+Bootstrap admin password: ${ADMIN_PASSWORD}
 Run backend: NOVA_VE_ENV_FILE=${ENV_FILE} ${REPO_ROOT}/deploy/scripts/run-local-backend.sh
 Run frontend: NOVA_VE_BACKEND_ORIGIN=http://127.0.0.1:8000 NOVA_VE_FRONTEND_PORT=5174 ${REPO_ROOT}/deploy/scripts/run-local-frontend.sh
 EOF

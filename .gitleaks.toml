@@ -1,0 +1,21 @@
+title = "nova-ve gitleaks configuration"
+
+[allowlist]
+description = "Allow known placeholders, generated examples, and build artifacts"
+paths = [
+  '''^frontend/package-lock\.json$''',
+  '''^frontend/build/''',
+  '''^frontend/\.svelte-kit/''',
+  '''^backend/\.venv/''',
+  '''^\.git/''',
+]
+regexes = [
+  '''change-me-in-production''',
+  '''<set-a-db-password>''',
+  '''<generate-a-local-dev-secret>''',
+  '''<your-local-password>''',
+  '''<test-password>''',
+  '''postgresql\+asyncpg://nova:nova@db:5432/novadb''',
+  '''postgresql\+asyncpg://nova:nova@127\.0\.0\.1:5432/novadb''',
+  '''postgresql\+asyncpg://guacuser:guacuser@127\.0\.0\.1:5433/guacdb''',
+]

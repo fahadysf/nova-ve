@@ -67,7 +67,7 @@ Open Issues:    #4 (Node Lifecycle), #5 (Frontend API), #6 (Canvas), #7 (Templat
 | 5 | Frontend API integration | HIGH | MED | `frontend/src/lib/stores/`, `frontend/src/routes/labs/` |
 | 6 | Interactive topology canvas | HIGH | MED | `frontend/src/lib/components/canvas/` |
 | 7 | Template and image management | MED | MED | `routers/templates.py` (new), `models/template.py` (new) |
-| 8 | Console access (telnet/rdp/HTML5) | MED | HIGH | `routers/console.py` (new), Guacamole integration |
+| 8 | Console access (telnet/rdp/HTML5) | MED | HIGH | implemented in `backend/app/routers/labs.py`, `backend/app/services/html5_service.py`, frontend lab page + Guacamole integration |
 | 9 | Testing + CI pipeline | MED | LOW | `backend/tests/`, `.github/workflows/ci.yml` |
 
 
@@ -88,7 +88,7 @@ Every open issue (#4–#10) has a comment with:
 
 ### Prerequisites
 - Ubuntu 26.04 LTS is the project base OS for deployment and system integration
-- Python 3.12 (NOT 3.14 — `pydantic-core` will fail to build)
+- Python 3.14 host-native on Ubuntu 26.04
 - Node.js 22+ (for frontend)
 - Docker & Docker Compose (for PostgreSQL)
 
@@ -108,7 +108,7 @@ alembic upgrade head
 
 # 4. Seed admin user
 python -m scripts.seed
-# Output: "Created admin user: admin / admin"
+# Output includes the configured username and, if needed, a generated bootstrap password
 
 # 5. Frontend dependencies (already installed)
 cd ../frontend
@@ -130,9 +130,9 @@ docker compose up -d db
 ### .env File Location
 The `.env` file is at `backend/.env` (NOT project root). pydantic-settings reads from the working directory. Current contents:
 ```
-SECRET_KEY=dev-secret-key-do-not-use-in-production
+SECRET_KEY=<generate-a-local-dev-secret>
 DEBUG=True
-DATABASE_URL=postgresql+asyncpg://nova:nova@localhost:5432/novadb
+DATABASE_URL=postgresql+asyncpg://nova:<set-a-db-password>@localhost:5432/novadb
 REDIS_URL=redis://localhost:6379/0
 BASE_DATA_DIR=./data
 LABS_DIR=./labs
@@ -160,7 +160,7 @@ nova-ve/
 │   └── 13_clean_room_design.md         # ← Architecture blueprint
 │
 ├── backend/
-│   ├── .venv/             # Python 3.12 virtualenv
+│   ├── .venv/             # Python virtualenv
 │   ├── .env               # Local dev config (pydantic-settings)
 │   ├── alembic/           # Migrations
 │   │   ├── env.py         # Async alembic config
@@ -298,7 +298,7 @@ cd frontend && npm run check
 # Login and get JWT
 TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin"}' | jq -r '.access_token')
+  -d '{"username":"admin","password":"<your-local-password>"}' | jq -r '.access_token')
 
 # Use JWT for authenticated requests
 curl -s http://localhost:8000/api/auth/me \
@@ -384,7 +384,7 @@ def safe_path(filename: str) -> Path:
 | Auth 401 on frontend | Missing `credentials: 'include'` on fetch | Always include it on API calls |
 | `.env` not loaded | File in wrong location | Must be at `backend/.env`, not project root |
 | Permission denied on `/var/lib` | Default `LABS_DIR` points to system path | Use `backend/.env` with `LABS_DIR=./labs` |
-| Python 3.14 build failure | `pydantic-core` uses PyO3 (max 3.13) | Always use Python 3.12 |
+| Ubuntu 26.04 Python drift | Host ships Python 3.14 | Use host-native `python3` across deployment/dev scripts |
 
 ---
 
