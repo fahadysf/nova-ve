@@ -1,15 +1,12 @@
 import hashlib
 import secrets
-from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
 import httpx
 from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.config import get_settings
-from app.database import async_session_maker
-from app.models.html5_session import Html5Session
 from app.schemas.user import UserRead
 
 
@@ -23,7 +20,6 @@ def _guacamole_engine(database_url: str):
 
 
 class GuacamoleDatabaseService:
-    AUTH_CACHE_KEY = "__guac_auth__"
     ROOT_GROUP_NAME = "nova-ve"
 
     def __init__(self) -> None:
@@ -63,10 +59,10 @@ class GuacamoleDatabaseService:
             )
             await self._ensure_connection_permission(conn, entity_id, connection_id)
 
-        auth_token = await self._get_cached_auth_token(username)
-        if not auth_token:
-            auth_token = await self._request_auth_token(username, password)
-            await self._cache_auth_token(username, auth_token)
+        # Guacamole auth tokens are webapp-memory state and become invalid on
+        # every Guacamole restart. Always mint a fresh token for launcher URLs
+        # to avoid stale-token redirects/login failures after deploys/restarts.
+        auth_token = await self._request_auth_token(username, password)
 
         client_identifier = self._client_identifier(connection_id)
         return f"{self._public_path()}#/client/{client_identifier}?token={auth_token}"
@@ -363,32 +359,6 @@ class GuacamoleDatabaseService:
             ),
             {"entity_id": entity_id, "connection_id": connection_id},
         )
-
-    async def _get_cached_auth_token(self, username: str) -> str | None:
-        async with async_session_maker() as session:
-            session_row = await session.get(Html5Session, {"username": username, "connection_id": self.AUTH_CACHE_KEY})
-            if not session_row or not session_row.token or not session_row.expires_at:
-                return None
-            if session_row.expires_at <= datetime.now(UTC).replace(tzinfo=None):
-                return None
-            return session_row.token
-
-    async def _cache_auth_token(self, username: str, token: str) -> None:
-        expires_at = (datetime.now(UTC) + timedelta(minutes=55)).replace(tzinfo=None)
-        async with async_session_maker() as session:
-            session_row = await session.get(Html5Session, {"username": username, "connection_id": self.AUTH_CACHE_KEY})
-            if session_row is None:
-                session_row = Html5Session(
-                    username=username,
-                    connection_id=self.AUTH_CACHE_KEY,
-                    token=token,
-                    expires_at=expires_at,
-                )
-                session.add(session_row)
-            else:
-                session_row.token = token
-                session_row.expires_at = expires_at
-            await session.commit()
 
     async def _request_auth_token(self, username: str, password: str) -> str:
         async with httpx.AsyncClient(timeout=10.0) as client:
