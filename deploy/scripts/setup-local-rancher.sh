@@ -58,10 +58,10 @@ IMAGES_DIR=${IMAGES_DIR}
 TMP_DIR=${TMP_DIR}
 DOCKER_HOST=${DOCKER_HOST_VALUE}
 GUACAMOLE_PUBLIC_PATH=/html5/
-GUACAMOLE_INTERNAL_URL=http://127.0.0.1:8081/html5/
+GUACAMOLE_INTERNAL_URL=http://127.0.0.1:18081/html5/
 GUACAMOLE_TARGET_HOST=host.docker.internal
 GUACAMOLE_STATE_DIR=${GUACAMOLE_STATE_DIR}
-GUACAMOLE_DATABASE_URL=postgresql+asyncpg://guacuser:${GUACAMOLE_DB_PASSWORD}@127.0.0.1:5433/guacdb
+GUACAMOLE_DATABASE_URL=postgresql+asyncpg://guacuser:${GUACAMOLE_DB_PASSWORD}@127.0.0.1:15433/guacdb
 GUACAMOLE_DATA_SOURCE=postgresql
 GUACAMOLE_JSON_SECRET_KEY=${GUACAMOLE_SECRET}
 GUACAMOLE_DB_PASSWORD=${GUACAMOLE_DB_PASSWORD}
@@ -79,7 +79,7 @@ docker compose up -d db
 NOVA_VE_ENV_FILE="${ENV_FILE}" "${REPO_ROOT}/deploy/scripts/run-migrations.sh"
 NOVA_VE_ENV_FILE="${ENV_FILE}" "${REPO_ROOT}/deploy/scripts/run-seed.sh"
 "${REPO_ROOT}/deploy/scripts/build-demo-images.sh"
-NOVA_VE_ENV_FILE="${ENV_FILE}" "${REPO_ROOT}/deploy/scripts/run-guacamole.sh"
+NOVA_VE_ENV_FILE="${ENV_FILE}" NOVA_VE_GUAC_COMPOSE_FILE="${REPO_ROOT}/deploy/compose/guacamole-local-compose.yml" "${REPO_ROOT}/deploy/scripts/run-guacamole.sh"
 
 cat <<EOF
 Prepared local Rancher Desktop environment.
@@ -88,5 +88,6 @@ Labs dir: ${LABS_DIR}
 Bootstrap admin username: ${NOVA_VE_ADMIN_USERNAME:-admin}
 Bootstrap admin password: ${ADMIN_PASSWORD}
 Run backend: NOVA_VE_ENV_FILE=${ENV_FILE} ${REPO_ROOT}/deploy/scripts/run-local-backend.sh
-Run frontend: NOVA_VE_BACKEND_ORIGIN=http://127.0.0.1:8000 NOVA_VE_FRONTEND_PORT=5174 ${REPO_ROOT}/deploy/scripts/run-local-frontend.sh
+Run frontend (dev): NOVA_VE_BACKEND_ORIGIN=http://127.0.0.1:8000 NOVA_VE_HTML5_ORIGIN=http://127.0.0.1:18081 NOVA_VE_FRONTEND_PORT=5174 ${REPO_ROOT}/deploy/scripts/run-local-frontend.sh
+Run local front door: ${REPO_ROOT}/deploy/scripts/run-local-caddy.sh
 EOF

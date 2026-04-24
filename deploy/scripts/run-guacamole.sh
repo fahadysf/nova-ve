@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${NOVA_VE_ENV_FILE:-/etc/nova-ve/backend.env}"
-COMPOSE_FILE="${REPO_ROOT}/deploy/compose/guacamole-compose.yml"
+COMPOSE_FILE="${NOVA_VE_GUAC_COMPOSE_FILE:-${REPO_ROOT}/deploy/compose/guacamole-compose.yml}"
 GUAC_PATCH_JS="${REPO_ROOT}/deploy/guacamole/nova-ve-guac-patch.js"
 GUAC_FONT_DIR="${REPO_ROOT}/deploy/guacamole/fonts"
 
@@ -25,7 +25,7 @@ if [[ -z "${GUACAMOLE_DB_PASSWORD:-}" ]]; then
 fi
 
 state_dir="${GUACAMOLE_STATE_DIR:-/var/lib/nova-ve/guacamole}"
-mkdir -p "${state_dir}/db"
+mkdir -p "${state_dir}"
 
 wait_for_container() {
   local service="$1"
@@ -103,9 +103,9 @@ install_guacd_fonts() {
     return 1
   fi
 
-  docker exec "${container_id}" sh -lc "mkdir -p '${target_dir}'"
+  docker exec -u 0 "${container_id}" sh -lc "mkdir -p '${target_dir}'"
   docker cp "${GUAC_FONT_DIR}/." "${container_id}:${target_dir}/"
-  docker exec "${container_id}" sh -lc "fc-cache -f '${target_dir}' >/dev/null 2>&1 || fc-cache -f >/dev/null 2>&1"
+  docker exec -u 0 "${container_id}" sh -lc "fc-cache -f '${target_dir}' >/dev/null 2>&1 || fc-cache -f >/dev/null 2>&1"
 }
 
 docker compose -f "${COMPOSE_FILE}" up -d --pull missing guacdb

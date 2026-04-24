@@ -1,0 +1,39 @@
+services:
+  guacdb:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: guacdb
+      POSTGRES_USER: guacuser
+      POSTGRES_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
+    volumes:
+      - nova-ve-local-guacdb:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:15433:5432"
+
+  guacd:
+    image: guacamole/guacd:1.6.0
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  guacamole:
+    image: guacamole/guacamole:1.6.0
+    restart: unless-stopped
+    depends_on:
+      - guacd
+      - guacdb
+    environment:
+      GUACD_HOSTNAME: guacd
+      WEBAPP_CONTEXT: html5
+      BAN_ENABLED: "false"
+      POSTGRESQL_ENABLED: "true"
+      POSTGRESQL_HOSTNAME: guacdb
+      POSTGRESQL_DATABASE: guacdb
+      POSTGRESQL_USERNAME: guacuser
+      POSTGRESQL_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
+    ports:
+      - "127.0.0.1:18081:8080"
+
+volumes:
+  nova-ve-local-guacdb:
