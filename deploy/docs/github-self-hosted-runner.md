@@ -34,7 +34,7 @@ sudo bash deploy/scripts/install-github-runner-prereqs.sh
 That installs:
 
 - Docker Engine + Compose plugin
-- Python `3.12` + `venv`
+- Host-native Ubuntu `26.04` `python3` + `venv`
 - Node.js + npm
 - git, curl, jq, and build prerequisites
 

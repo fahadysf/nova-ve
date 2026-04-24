@@ -20,17 +20,18 @@ if [[ "$(uname -m)" != "x86_64" ]]; then
 fi
 
 apt-get update
-apt-get install -y \
+apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
   git \
   jq \
   build-essential \
   libpq-dev \
+  python3-dev \
   docker.io \
   docker-compose-plugin \
-  python3.12 \
-  python3.12-venv \
+  python3 \
+  python3-venv \
   nodejs \
   npm
 
