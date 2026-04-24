@@ -1,5 +1,8 @@
 from dataclasses import dataclass
 from pathlib import Path
+import os
+import shutil
+import subprocess
 from typing import Any
 
 import yaml
@@ -65,15 +68,18 @@ class TemplateService:
 
     def list_images(self, template_type: str, template_key: str) -> dict[str, dict[str, Any]]:
         self.get_template(template_type, template_key)
-        image_root = self.images_dir / template_type
-        if not image_root.exists():
-            return {}
-
         images: dict[str, dict[str, Any]] = {}
-        for child in sorted(image_root.iterdir()):
-            image_info = self._image_info(child)
-            if image_info:
-                images[image_info["image"]] = image_info
+
+        if template_type == "docker":
+            images.update(self._docker_image_catalog())
+
+        image_root = self.images_dir / template_type
+        if image_root.exists():
+            for child in sorted(image_root.iterdir()):
+                image_info = self._image_info(child)
+                if image_info:
+                    images[image_info["image"]] = image_info
+
         return images
 
     def validate_node_request(self, template_type: str, template_key: str, image_name: str) -> TemplateDefinition:
@@ -164,6 +170,39 @@ class TemplateService:
                 "path": str(path),
             }
         return None
+
+    def _docker_image_catalog(self) -> dict[str, dict[str, Any]]:
+        docker_binary = shutil.which("docker")
+        if not docker_binary:
+            return {}
+
+        env = os.environ.copy()
+        if getattr(self.settings, "DOCKER_HOST", ""):
+            env["DOCKER_HOST"] = self.settings.DOCKER_HOST
+
+        command = [
+            docker_binary,
+            "image",
+            "ls",
+            "--format",
+            "{{.Repository}}:{{.Tag}}",
+        ]
+        result = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
+        if result.returncode != 0:
+            return {}
+
+        images: dict[str, dict[str, Any]] = {}
+        for line in result.stdout.splitlines():
+            image_name = line.strip()
+            if not image_name or image_name.endswith(":<none>") or image_name.startswith("<none>:"):
+                continue
+            images[image_name] = {
+                "image": image_name,
+                "files": [],
+                "path": image_name,
+                "source": "docker",
+            }
+        return images
 
     @staticmethod
     def _default_icon(template_type: str) -> str:

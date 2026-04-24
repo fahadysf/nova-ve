@@ -179,18 +179,16 @@
             `/list/images/${templateType}/${template.template}`,
             { suppressToast: true }
           );
-          const firstImage = Object.values(imagesResponse.data ?? {})[0];
-          if (!firstImage) {
-            continue;
+          for (const image of Object.values(imagesResponse.data ?? {})) {
+            nodeItems.push({
+              kind: 'node',
+              title: template.name,
+              subtitle: `${templateType} · ${image.image}`,
+              type: templateType,
+              template: template.template,
+              image: image.image
+            });
           }
-          nodeItems.push({
-            kind: 'node',
-            title: template.name,
-            subtitle: `${templateType} · ${firstImage.image}`,
-            type: templateType,
-            template: template.template,
-            image: firstImage.image
-          });
         }
       }
       paletteItems = [
@@ -591,6 +589,22 @@
 
     await createNodeAt(position, payload);
   }
+
+  async function addPaletteItem(item: (typeof paletteItems)[number]) {
+    const viewport = typeof window !== 'undefined'
+      ? screenToFlowPosition(
+          { x: Math.round(window.innerWidth * 0.5), y: Math.round(window.innerHeight * 0.5) },
+          { snapToGrid: true }
+        )
+      : { x: 200, y: 200 };
+
+    if (item.kind === 'network') {
+      await createNetworkAt(viewport, item.networkType);
+      return;
+    }
+
+    await createNodeAt(viewport, item);
+  }
 </script>
 
 <div class="relative h-full w-full flex-1">
@@ -670,6 +684,7 @@
                 type="button"
                 draggable="true"
                 class="block w-56 rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                on:click={() => addPaletteItem(item)}
                 on:dragstart={(event) => {
                   event.dataTransfer?.setData('application/nova-ve-palette', paletteDragData(item));
                   if (event.dataTransfer) {
