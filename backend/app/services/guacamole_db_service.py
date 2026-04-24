@@ -379,9 +379,19 @@ class GuacamoleDatabaseService:
     async def _auth_token(self, username: str, password: str) -> str:
         cache_key = (self.settings.GUACAMOLE_INTERNAL_URL.strip(), username)
         cached = _AUTH_TOKEN_CACHE.get(cache_key)
-        if cached:
+        if cached and await self._token_is_valid(cached):
             return cached
 
         auth_token = await self._request_auth_token(username, password)
         _AUTH_TOKEN_CACHE[cache_key] = auth_token
         return auth_token
+
+    async def _token_is_valid(self, auth_token: str) -> bool:
+        data_source = self.settings.GUACAMOLE_DATA_SOURCE
+        url = self._internal_url(f"/api/session/data/{data_source}/self/effectivePermissions")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(url, params={"token": auth_token})
+        except httpx.HTTPError:
+            return False
+        return response.status_code < 400
