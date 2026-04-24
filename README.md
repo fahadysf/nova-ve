@@ -112,13 +112,6 @@ nova-ve/
 └── README.md
 ```
 
-## Research
-
-Detailed architecture studies of legacy platform are in `./research/`:
-- `01_overview.md` — legacy platform architecture overview
-- `12_runtime_api_observations.md` — Live API behavior documentation
-- `13_clean_room_design.md` — Design decisions for this project
-
 ## License
 
 Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>.

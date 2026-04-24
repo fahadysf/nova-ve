@@ -50,7 +50,7 @@ Open Issues:    #4 (Node Lifecycle), #5 (Frontend API), #6 (Canvas), #7 (Templat
 
 1. **Pick an open GitHub issue** — Start from the lowest number (#4 is next)
 2. **Read the issue comment** — Each issue has an implementation notes comment with expected endpoints and design considerations
-3. **Read the research docs** — `research/12_runtime_api_observations.md` has the legacy platform API spec; `research/13_clean_room_design.md` has architecture guidance
+3. **Read the issue scope and current code** — use the active issue, README.md / CONTRIBUTING.md, and current implementation as the primary guide
 4. **Read README.md / CONTRIBUTING.md** — Coding conventions, file organization, auth patterns
 5. **Implement** — Write code following existing patterns
 6. **Test** — Use curl or FastAPI docs. Test both happy path and error cases.
@@ -155,10 +155,6 @@ nova-ve/
 ├── README.md / CONTRIBUTING.md              # ← READ THIS for conventions
 ├── HANDOFF.md             # ← YOU ARE HERE
 ├── docker-compose.yml     # PostgreSQL + backend + frontend services
-├── research/              # 13 docs — THE SPEC for legacy platform behavior
-│   ├── 12_runtime_api_observations.md  # ← Primary reference for API shapes
-│   └── 13_clean_room_design.md         # ← Architecture blueprint
-│
 ├── backend/
 │   ├── .venv/             # Python virtualenv
 │   ├── .env               # Local dev config (pydantic-settings)
@@ -396,7 +392,7 @@ def safe_path(filename: str) -> Path:
    - This is the highest priority open issue
    - Requires QEMU/KVM subprocess management
    - Will need a new `services/qemu_service.py`
-   - See `research/06_virtualization.md` for QEMU invocation patterns
+   - Follow the current runtime-service implementation and issue scope for QEMU invocation patterns
 
 2. **#5 — Frontend API Integration**
    - Wire up the SvelteKit frontend to real backend endpoints
@@ -425,9 +421,9 @@ def safe_path(filename: str) -> Path:
 
 | Resource | Location | Purpose |
 |----------|----------|---------|
-| legacy platform API spec | `research/12_runtime_api_observations.md` | Exact request/response shapes |
-| Architecture blueprint | `research/13_clean_room_design.md` | Stack choices, roadmap, models |
-| Virtualization details | `research/06_virtualization.md` | QEMU args, Docker, networking |
+| Project conventions | `README.md / CONTRIBUTING.md` | Coding standards, workflow, pitfalls |
+| Current architecture | current codebase | Runtime behavior, API surface, deployment behavior |
+| Open issues | GitHub issues | Active requirements and follow-on work |
 | Agent conventions | `README.md / CONTRIBUTING.md` | Coding standards, workflow, pitfalls |
 | GitHub Issues | `gh issue list` | Tracks all work items |
 
