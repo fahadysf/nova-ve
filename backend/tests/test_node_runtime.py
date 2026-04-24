@@ -10,7 +10,7 @@ import psutil
 import pytest
 
 from app.routers import labs
-from app.services.guacamole_db_service import GuacamoleDatabaseService
+from app.services.guacamole_db_service import GuacamoleDatabaseService, _AUTH_TOKEN_CACHE
 from app.services.html5_service import Html5SessionService
 from app.services.node_runtime_service import NodeRuntimeService
 
@@ -20,6 +20,13 @@ def reset_runtime_registry():
     NodeRuntimeService.reset_registry()
     yield
     NodeRuntimeService.reset_registry()
+
+
+@pytest.fixture(autouse=True)
+def reset_guacamole_token_cache():
+    _AUTH_TOKEN_CACHE.clear()
+    yield
+    _AUTH_TOKEN_CACHE.clear()
 
 
 @pytest.fixture()
@@ -39,6 +46,7 @@ def runtime_settings(tmp_path):
         DOCKER_HOST="unix:///var/run/docker.sock",
         GUACAMOLE_DATABASE_URL="",
         GUACAMOLE_DATA_SOURCE="postgresql",
+        GUACAMOLE_INTERNAL_URL="http://127.0.0.1:8081/html5/",
         GUACAMOLE_JSON_SECRET_KEY="4c0b569e4c96df157eee1b65dd0e4d41",
         GUACAMOLE_PUBLIC_PATH="/html5/",
         GUACAMOLE_TARGET_HOST="host.docker.internal",
@@ -417,6 +425,57 @@ def test_html5_connection_parameters_include_terminal_font_defaults(monkeypatch)
     assert params["port"] == "2323"
     assert params["font-name"] == "Roboto Mono"
     assert params["font-size"] == "10"
+
+
+@pytest.mark.asyncio
+async def test_guacamole_auth_token_reuses_cached_token_when_valid(monkeypatch, runtime_settings):
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = runtime_settings.GUACAMOLE_DATABASE_URL
+
+    async def fake_request_auth_token(username: str, password: str) -> str:
+        assert username == "admin"
+        assert password == "pw"
+        return "fresh-token"
+
+    async def fake_token_is_valid(token: str) -> bool:
+        return token == "cached-token"
+
+    monkeypatch.setattr(service, "_request_auth_token", fake_request_auth_token)
+    monkeypatch.setattr(service, "_token_is_valid", fake_token_is_valid)
+
+    _AUTH_TOKEN_CACHE[(service.settings.GUACAMOLE_INTERNAL_URL.strip(), "admin")] = "cached-token"
+    token = await service._auth_token("admin", "pw")
+
+    assert token == "cached-token"
+
+
+@pytest.mark.asyncio
+async def test_guacamole_auth_token_refreshes_when_cached_token_is_invalid(monkeypatch, runtime_settings):
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = runtime_settings.GUACAMOLE_DATABASE_URL
+
+    calls = []
+
+    async def fake_request_auth_token(username: str, password: str) -> str:
+        calls.append((username, password))
+        return "fresh-token"
+
+    async def fake_token_is_valid(token: str) -> bool:
+        return False
+
+    monkeypatch.setattr(service, "_request_auth_token", fake_request_auth_token)
+    monkeypatch.setattr(service, "_token_is_valid", fake_token_is_valid)
+
+    cache_key = (service.settings.GUACAMOLE_INTERNAL_URL.strip(), "admin")
+    _AUTH_TOKEN_CACHE[cache_key] = "stale-token"
+
+    token = await service._auth_token("admin", "pw")
+
+    assert token == "fresh-token"
+    assert calls == [("admin", "pw")]
+    assert _AUTH_TOKEN_CACHE[cache_key] == "fresh-token"
 
 
 @pytest.mark.asyncio
