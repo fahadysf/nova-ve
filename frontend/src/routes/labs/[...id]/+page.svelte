@@ -664,16 +664,19 @@
                   <button
                     class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
                     aria-label="Close console workspace"
+                    on:mousedown|stopPropagation
                     on:click={() => (consoleWorkspace = null)}
                   ></button>
                   <button
                     class="h-3 w-3 rounded-full bg-amber-300 transition hover:bg-amber-200"
                     aria-label={consoleWorkspace.minimized ? 'Restore console workspace' : 'Minimize console workspace'}
+                    on:mousedown|stopPropagation
                     on:click={toggleConsoleMinimize}
                   ></button>
                   <button
                     class="h-3 w-3 rounded-full bg-emerald-400 transition hover:bg-emerald-300"
                     aria-label={consoleWorkspace.maximized ? 'Restore console workspace' : 'Maximize console workspace'}
+                    on:mousedown|stopPropagation
                     on:click={toggleConsoleMaximize}
                   ></button>
                 </div>
@@ -688,6 +691,8 @@
                   id="console-node-select"
                   class="rounded-md border border-gray-700 bg-gray-900 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
                   value={activeConsoleTabState?.nodeId ?? ''}
+                  on:mousedown|stopPropagation
+                  on:click|stopPropagation
                   on:change={handleConsoleNodeChange}
                 >
                   <option value="" disabled selected={activeConsoleTabState == null}>Select</option>
@@ -697,6 +702,7 @@
                 </select>
                 <button
                   class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
+                  on:mousedown|stopPropagation
                   on:click={reloadConsole}
                   disabled={activeConsoleTabState == null}
                 >
@@ -712,6 +718,7 @@
                       <button
                         type="button"
                         class="px-3 py-1.5 text-[10px] uppercase tracking-[0.18em]"
+                        on:mousedown|stopPropagation
                         on:click={() => selectConsoleTab(tab.id)}
                       >
                         {tab.nodeName}
@@ -720,6 +727,7 @@
                         type="button"
                         class="pr-2 text-gray-500 hover:text-red-400"
                         aria-label={`Close ${tab.nodeName}`}
+                        on:mousedown|stopPropagation
                         on:click={() => closeConsole(tab.id)}
                       >
                         ×
