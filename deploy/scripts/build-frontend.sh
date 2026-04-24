@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 FRONTEND_ROOT="${NOVA_VE_FRONTEND_ROOT:-/var/lib/nova-ve/www}"
 
 cd "${REPO_ROOT}/frontend"
-if [[ -f package-lock.json ]]; then
+if git ls-files --error-unmatch package-lock.json >/dev/null 2>&1; then
   npm ci
 else
   npm install
