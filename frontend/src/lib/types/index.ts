@@ -24,7 +24,13 @@ export interface UserRead {
 export type AuthLoginResponse = UserRead;
 
 export interface FolderEntry {
+  name: string;
   path: string;
+  mtime?: string;
+  umtime?: number;
+  spy?: number;
+  lock?: boolean;
+  shared?: number;
 }
 
 export interface LabListItem {
