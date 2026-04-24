@@ -306,15 +306,7 @@ class GuacamoleDatabaseService:
             {"connection_id": connection_id},
         )
 
-        params = {
-            "hostname": host,
-            "port": str(port),
-        }
-        if protocol == "rdp":
-            params["ignore-cert"] = "true"
-            params["security"] = "any"
-        else:
-            params["disable-auth"] = "true"
+        params = self._connection_parameters(host=host, port=port, protocol=protocol)
 
         for parameter_name, parameter_value in params.items():
             await conn.execute(
@@ -336,6 +328,24 @@ class GuacamoleDatabaseService:
             )
 
         return connection_id
+
+    def _connection_parameters(self, *, host: str, port: int, protocol: str) -> dict[str, str]:
+        params = {
+            "hostname": host,
+            "port": str(port),
+        }
+        if protocol == "rdp":
+            params["ignore-cert"] = "true"
+            params["security"] = "any"
+            return params
+
+        params["disable-auth"] = "true"
+
+        if protocol == "telnet":
+            params["font-name"] = self.settings.GUACAMOLE_TERMINAL_FONT_NAME
+            params["font-size"] = str(self.settings.GUACAMOLE_TERMINAL_FONT_SIZE)
+
+        return params
 
     async def _ensure_connection_permission(self, conn, entity_id: int, connection_id: int) -> None:
         await conn.execute(

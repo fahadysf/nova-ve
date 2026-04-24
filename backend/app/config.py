@@ -58,6 +58,8 @@ class Settings(BaseSettings):
     GUACAMOLE_DATA_SOURCE: str = "postgresql"
     GUACAMOLE_JSON_SECRET_KEY: str = ""
     GUACAMOLE_JSON_EXPIRE_SECONDS: int = 300
+    GUACAMOLE_TERMINAL_FONT_NAME: str = "Roboto Mono"
+    GUACAMOLE_TERMINAL_FONT_SIZE: int = 10
 
     class Config:
         env_file = ".env"

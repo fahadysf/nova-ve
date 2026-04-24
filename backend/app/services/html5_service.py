@@ -197,4 +197,8 @@ class Html5SessionService:
         if protocol == "rdp":
             parameters["ignore-cert"] = "true"
             parameters["security"] = "any"
+        if protocol == "telnet":
+            settings = get_settings()
+            parameters["font-name"] = settings.GUACAMOLE_TERMINAL_FONT_NAME
+            parameters["font-size"] = str(settings.GUACAMOLE_TERMINAL_FONT_SIZE)
         return parameters
