@@ -1,5 +1,9 @@
 # nova-ve
 
+> [!WARNING]
+> Pre-Alpha Development Version: this project is not fit for actual lab use yet.
+> Expect incomplete features, broken workflows, and data/runtime instability.
+
 A clean-room network virtualization environment inspired by legacy platform, built with modern tooling.
 
 ## Stack
@@ -119,8 +123,5 @@ Detailed architecture studies of legacy platform are in `./research/`:
 
 Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>.
 
-This repository is licensed under `PolyForm Noncommercial License 1.0.0`.
-See [LICENSE](LICENSE) for the full text.
-
-Commercial use is not granted under the public repository license.
-Commercial licensing requires a separate agreement from the copyright holder.
+This repository is licensed under the `Apache License 2.0`.
+See [LICENSE](LICENSE) and [NOTICE](NOTICE).
