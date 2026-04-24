@@ -3,7 +3,7 @@
 > **Date:** 2026-04-21  
 > **Last commit:** `d9be8d1` on `main`  
 > **Status:** Issues #1, #2, #3, #10 closed. Issues #4–#9 open.  
-> **Read this first, then README.md / CONTRIBUTING.md for conventions.**
+> **Read this first, then `README.md` and `CONTRIBUTING.md` for conventions.**
 
 ---
 
@@ -50,11 +50,11 @@ Open Issues:    #4 (Node Lifecycle), #5 (Frontend API), #6 (Canvas), #7 (Templat
 
 1. **Pick an open GitHub issue** — Start from the lowest number (#4 is next)
 2. **Read the issue comment** — Each issue has an implementation notes comment with expected endpoints and design considerations
-3. **Read the issue scope and current code** — use the active issue, README.md / CONTRIBUTING.md, and current implementation as the primary guide
-4. **Read README.md / CONTRIBUTING.md** — Coding conventions, file organization, auth patterns
+3. **Read the issue scope and current code** — use the active issue, `README.md`, `CONTRIBUTING.md`, and current implementation as the primary guide
+4. **Read the project docs** — `README.md` and `CONTRIBUTING.md` cover conventions, file organization, and auth patterns
 5. **Implement** — Write code following existing patterns
 6. **Test** — Use curl or FastAPI docs. Test both happy path and error cases.
-7. **Add implementation notes to the GitHub issue** — Use the template in README.md / CONTRIBUTING.md §12
+7. **Add implementation notes to the GitHub issue** — Follow the implementation-note structure used elsewhere in the repo
 8. **Commit** — Reference the issue: `feat(scope): description. Closes #N`
 9. **Push** — `git push origin main`
 10. **Close the issue** — With a detailed comment explaining what was built
@@ -152,7 +152,8 @@ COOKIE_SAMESITE=lax
 
 ```
 nova-ve/
-├── README.md / CONTRIBUTING.md              # ← READ THIS for conventions
+├── README.md              # Project overview and setup
+├── CONTRIBUTING.md        # Contributor workflow and expectations
 ├── HANDOFF.md             # ← YOU ARE HERE
 ├── docker-compose.yml     # PostgreSQL + backend + frontend services
 ├── backend/
@@ -341,7 +342,7 @@ async def create_thing(
 # 4. See LabService for the reference implementation
 ```
 
-### legacy platform Response Format
+### Legacy-Compatible Response Format
 ```python
 # ALWAYS wrap responses like this:
 return {
@@ -421,17 +422,17 @@ def safe_path(filename: str) -> Path:
 
 | Resource | Location | Purpose |
 |----------|----------|---------|
-| Project conventions | `README.md / CONTRIBUTING.md` | Coding standards, workflow, pitfalls |
+| Project conventions | `README.md` / `CONTRIBUTING.md` | Coding standards, workflow, pitfalls |
 | Current architecture | current codebase | Runtime behavior, API surface, deployment behavior |
 | Open issues | GitHub issues | Active requirements and follow-on work |
-| Agent conventions | `README.md / CONTRIBUTING.md` | Coding standards, workflow, pitfalls |
+| Agent conventions | `README.md` / `CONTRIBUTING.md` | Coding standards, workflow, pitfalls |
 | GitHub Issues | `gh issue list` | Tracks all work items |
 
 ---
 
 ## 11. Contact / Context
 
-- **Repo:** `fahadysf/nova-ve` (private GitHub)
+- **Repo:** `fahadysf/nova-ve`
 - **Branch:** `main` (trunk-based development)
 - **Commits:** Push directly to `main` (solo project)
 - **DB:** PostgreSQL 16 via Docker Compose on port 5432
@@ -441,4 +442,4 @@ def safe_path(filename: str) -> Path:
 
 ---
 
-*End of handoff. Read README.md / CONTRIBUTING.md next, then pick an issue and start building.*
+*End of handoff. Read `README.md` and `CONTRIBUTING.md` next, then pick an issue and start building.*

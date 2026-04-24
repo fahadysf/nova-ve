@@ -4,7 +4,7 @@
 > Pre-Alpha Development Version: this project is not fit for actual lab use yet.
 > Expect incomplete features, broken workflows, and data/runtime instability.
 
-A clean-room network virtualization environment inspired by legacy platform, built with modern tooling.
+A clean-room network virtualization environment built with modern tooling.
 
 ## Stack
 

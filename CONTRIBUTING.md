@@ -20,7 +20,7 @@ Direct pushes to the upstream repository are reserved for project maintainers.
 ## Before You Start
 
 - Read [README.md](README.md)
-- Read [README.md / CONTRIBUTING.md](README.md / CONTRIBUTING.md) for project context and conventions
+- Read [README.md](README.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for project context and conventions
 - Review the relevant documents in `research/` before changing API behavior
 - Prefer discussing large changes in an issue before starting implementation
 
@@ -30,7 +30,7 @@ Direct pushes to the upstream repository are reserved for project maintainers.
 - Do not mix unrelated changes in one pull request
 - Do not add new dependencies without strong justification
 - Preserve the clean-room approach
-  - do not copy code from legacy platform or other proprietary sources
+  - do not copy code from upstream proprietary platforms or other incompatible sources
   - work from observed behavior, public docs, and original implementation only
 - Never commit secrets, credentials, or private keys
 
