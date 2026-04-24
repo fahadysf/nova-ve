@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ENV_FILE="${NOVA_VE_ENV_FILE:-/etc/nova-ve/backend.env}"
 COMPOSE_FILE="${REPO_ROOT}/deploy/compose/guacamole-compose.yml"
 GUAC_PATCH_JS="${REPO_ROOT}/deploy/guacamole/nova-ve-guac-patch.js"
+GUAC_FONT_DIR="${REPO_ROOT}/deploy/guacamole/fonts"
 
 if [[ ! -f "${ENV_FILE}" ]]; then
   echo "Missing ${ENV_FILE}" >&2
@@ -93,6 +94,20 @@ patch_guacamole_webapp() {
   "
 }
 
+install_guacd_fonts() {
+  local container_id="$1"
+  local target_dir="/usr/local/share/fonts/nova-ve"
+
+  if [[ ! -d "${GUAC_FONT_DIR}" ]]; then
+    echo "Missing ${GUAC_FONT_DIR}" >&2
+    return 1
+  fi
+
+  docker exec "${container_id}" sh -lc "mkdir -p '${target_dir}'"
+  docker cp "${GUAC_FONT_DIR}/." "${container_id}:${target_dir}/"
+  docker exec "${container_id}" sh -lc "fc-cache -f '${target_dir}' >/dev/null 2>&1 || fc-cache -f >/dev/null 2>&1"
+}
+
 docker compose -f "${COMPOSE_FILE}" up -d --pull missing guacdb
 guacdb_container="$(wait_for_container guacdb 30)"
 schema_file="$(mktemp)"
@@ -110,5 +125,7 @@ if [[ "$(docker exec "${guacdb_container}" psql -U guacuser -d guacdb -Atqc "sel
 fi
 
 docker compose -f "${COMPOSE_FILE}" up -d --pull missing
+guacd_container="$(wait_for_container guacd 30)"
+install_guacd_fonts "${guacd_container}"
 guacamole_container="$(wait_for_container guacamole 30)"
 patch_guacamole_webapp "${guacamole_container}"

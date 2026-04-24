@@ -43,6 +43,8 @@ def runtime_settings(tmp_path):
         GUACAMOLE_PUBLIC_PATH="/html5/",
         GUACAMOLE_TARGET_HOST="host.docker.internal",
         GUACAMOLE_JSON_EXPIRE_SECONDS=300,
+        GUACAMOLE_TERMINAL_FONT_NAME="Roboto Mono",
+        GUACAMOLE_TERMINAL_FONT_SIZE=10,
     )
 
 
@@ -382,6 +384,39 @@ def test_guacamole_connection_name_remains_unique_for_long_keys():
     key_two = service._connection_name(user, prefix + "beta", "telnet")
 
     assert key_one != key_two
+
+
+def test_guacamole_db_connection_parameters_include_terminal_font_defaults():
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = SimpleNamespace(
+        GUACAMOLE_TERMINAL_FONT_NAME="Roboto Mono",
+        GUACAMOLE_TERMINAL_FONT_SIZE=10,
+    )
+
+    params = service._connection_parameters(host="host.docker.internal", port=2323, protocol="telnet")
+
+    assert params["hostname"] == "host.docker.internal"
+    assert params["port"] == "2323"
+    assert params["disable-auth"] == "true"
+    assert params["font-name"] == "Roboto Mono"
+    assert params["font-size"] == "10"
+
+
+def test_html5_connection_parameters_include_terminal_font_defaults(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.html5_service.get_settings",
+        lambda: SimpleNamespace(
+            GUACAMOLE_TERMINAL_FONT_NAME="Roboto Mono",
+            GUACAMOLE_TERMINAL_FONT_SIZE=10,
+        ),
+    )
+
+    params = Html5SessionService._connection_parameters("host.docker.internal", 2323, "telnet")
+
+    assert params["hostname"] == "host.docker.internal"
+    assert params["port"] == "2323"
+    assert params["font-name"] == "Roboto Mono"
+    assert params["font-size"] == "10"
 
 
 @pytest.mark.asyncio
