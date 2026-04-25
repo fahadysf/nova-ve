@@ -171,3 +171,78 @@ async def test_update_topology_route_is_not_shadowed_by_update_lab(monkeypatch, 
         assert payload["message"] == "Topology saved successfully."
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_node_catalog_and_batch_routes_are_available(monkeypatch, patched_route_settings):
+    monkeypatch.setattr(
+        "app.services.template_service.TemplateService._docker_image_catalog",
+        lambda _self: {
+            "nova-ve-alpine-telnet:latest": {
+                "image": "nova-ve-alpine-telnet:latest",
+                "files": [],
+                "path": "nova-ve-alpine-telnet:latest",
+                "source": "docker",
+            }
+        },
+    )
+    docker_template_dir = patched_route_settings.TEMPLATES_DIR / "docker"
+    docker_template_dir.mkdir(parents=True, exist_ok=True)
+    (docker_template_dir / "docker.yml").write_text(
+        """type: docker
+name: Docker Host
+description: Demo docker node
+cpu: 1
+ram: 1024
+ethernet: 1
+console: rdp
+icon: Server.png
+cpulimit: 1
+"""
+    )
+    lab_path = patched_route_settings.LABS_DIR / "catalog-probe.json"
+    lab_path.write_text(
+        """{
+  "id": "catalog-probe",
+  "meta": {"name": "catalog-probe"},
+  "nodes": {},
+  "networks": {},
+  "topology": []
+}"""
+    )
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        username="admin",
+        role="admin",
+        html5=True,
+        folder="/",
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        catalog_response = await client.get("/api/labs/catalog-probe.json/node-catalog")
+        assert catalog_response.status_code == 200
+        catalog_payload = catalog_response.json()
+        assert catalog_payload["code"] == 200
+        assert "templates" in catalog_payload["data"]
+        assert "runtime_editability" in catalog_payload["data"]
+
+        batch_response = await client.post(
+            "/api/labs/catalog-probe.json/nodes/batch",
+            json={
+                "name_prefix": "docker-node",
+                "count": 2,
+                "type": "docker",
+                "template": "docker",
+                "image": "nova-ve-alpine-telnet:latest",
+                "left": 100,
+                "top": 200,
+            },
+        )
+        assert batch_response.status_code == 200
+        batch_payload = batch_response.json()
+        assert batch_payload["code"] == 200
+        assert len(batch_payload["data"]["nodes"]) == 2
+        assert batch_payload["data"]["nodes"][0]["name"] == "docker-node-1"
+
+    app.dependency_overrides.clear()
