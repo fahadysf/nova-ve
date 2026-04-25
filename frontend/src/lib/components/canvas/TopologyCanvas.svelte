@@ -30,6 +30,7 @@
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData };
+    changed: { reason: string };
   }>();
 
   const nodeTypes = {
@@ -250,6 +251,7 @@
 
   function recalculateNetworks() {
     const usage = new Map<number, number>();
+    const nextNetworks = { ...localNetworks };
 
     for (const node of Object.values(localNodes)) {
       for (const iface of node.interfaces ?? []) {
@@ -259,19 +261,22 @@
       }
     }
 
-    for (const [networkKey, network] of Object.entries(localNetworks)) {
+    for (const [networkKey, network] of Object.entries(nextNetworks)) {
       const count = usage.get(Number(networkKey)) ?? 0;
       network.count = count;
       if (!network.visibility && count === 0) {
-        delete localNetworks[networkKey];
+        delete nextNetworks[networkKey];
       }
     }
+
+    localNetworks = nextNetworks;
   }
 
   function pushLink(link: TopologyLink) {
     localTopology = [...localTopology, link];
     recalculateNetworks();
     scheduleSave();
+    dispatch('changed', { reason: 'topology' });
   }
 
   function createNodeToNodeLink(sourceId: number, targetId: number) {
@@ -291,7 +296,9 @@
     const networkId = nextNetworkId();
     sourceNode.interfaces[sourceInterface.index].network_id = networkId;
     targetNode.interfaces[targetInterface.index].network_id = networkId;
-    localNetworks[String(networkId)] = {
+    localNetworks = {
+      ...localNetworks,
+      [String(networkId)]: {
       id: networkId,
       name: `Net-${sourceNode.name}-${targetNode.name}`,
       type: 'bridge',
@@ -306,7 +313,9 @@
       label: '',
       smart: 0,
       count: 2
+      }
     };
+    localNodes = { ...localNodes };
 
     pushLink({
       type: 'ethernet',
@@ -361,6 +370,7 @@
     }
 
     node.interfaces[interfaceInfo.index].network_id = networkId;
+    localNodes = { ...localNodes };
 
     pushLink({
       type: 'ethernet',
@@ -441,11 +451,13 @@
     if (decoded.type === 'node' && localNodes[String(decoded.id)]) {
       localNodes[String(decoded.id)].left = Math.round(movedNode.position.x);
       localNodes[String(decoded.id)].top = Math.round(movedNode.position.y);
+      localNodes = { ...localNodes };
     }
 
     if (decoded.type === 'network' && localNetworks[String(decoded.id)]) {
       localNetworks[String(decoded.id)].left = Math.round(movedNode.position.x);
       localNetworks[String(decoded.id)].top = Math.round(movedNode.position.y);
+      localNetworks = { ...localNetworks };
     }
 
     scheduleSave();
@@ -477,6 +489,7 @@
       }
     }
 
+    localNodes = { ...localNodes };
     localTopology = localTopology.filter((_, currentIndex) => currentIndex !== index);
     recalculateNetworks();
     scheduleSave();
@@ -501,11 +514,15 @@
 
     if (action === 'delete') {
       await apiRequest(`/labs/${labId}/nodes/${decoded.id}`, { method: 'DELETE' });
-      delete localNodes[String(decoded.id)];
+      const nextNodes = { ...localNodes };
+      delete nextNodes[String(decoded.id)];
+      localNodes = nextNodes;
       localTopology = localTopology.filter(
         (link) => link.source !== `node${decoded.id}` && link.destination !== `node${decoded.id}`
       );
       recalculateNetworks();
+      scheduleSave();
+      dispatch('changed', { reason: 'node-delete' });
       return;
     }
 
@@ -516,6 +533,8 @@
     if (action === 'stop' || action === 'wipe') {
       node.status = 0;
     }
+    localNodes = { ...localNodes };
+    dispatch('changed', { reason: `node-${action}` });
   }
 
   async function handleNetworkDelete(targetId: string) {
@@ -526,7 +545,9 @@
     }
 
     await apiRequest(`/labs/${labId}/networks/${decoded.id}`, { method: 'DELETE' });
-    delete localNetworks[String(decoded.id)];
+    const nextNetworks = { ...localNetworks };
+    delete nextNetworks[String(decoded.id)];
+    localNetworks = nextNetworks;
     localTopology = localTopology.filter((link) => link.network_id !== decoded.id);
     for (const node of Object.values(localNodes)) {
       for (const iface of node.interfaces) {
@@ -535,6 +556,9 @@
         }
       }
     }
+    localNodes = { ...localNodes };
+    scheduleSave();
+    dispatch('changed', { reason: 'network-delete' });
   }
 
   async function createNetworkAt(position: { x: number; y: number }, networkType = 'bridge') {
@@ -547,7 +571,11 @@
         top: Math.round(position.y)
       }
     });
-    localNetworks[String(response.data.id)] = response.data;
+    localNetworks = {
+      ...localNetworks,
+      [String(response.data.id)]: response.data
+    };
+    dispatch('changed', { reason: 'network-create' });
   }
 
   async function createNodeAt(
@@ -565,7 +593,11 @@
         top: Math.round(position.y)
       }
     });
-    localNodes[String(response.data.id)] = response.data;
+    localNodes = {
+      ...localNodes,
+      [String(response.data.id)]: response.data
+    };
+    dispatch('changed', { reason: 'node-create' });
   }
 
   function paletteDragData(item: (typeof paletteItems)[number]): string {
@@ -742,21 +774,27 @@
 
   {#if menu}
     <div
+      role="menu"
+      tabindex="-1"
       class="fixed z-30 min-w-44 rounded-xl border border-gray-700 bg-gray-900/95 p-2 shadow-xl"
       style={`left: ${menu.x}px; top: ${menu.y}px;`}
+      on:mousedown|stopPropagation
+      on:mouseup|stopPropagation
+      on:click|stopPropagation
     >
       {#if menu?.targetType === 'node'}
-        <button class="menu-item" on:click={() => handleNodeAction('start', menu?.targetId ?? '')}>Start</button>
-        <button class="menu-item" on:click={() => handleNodeAction('stop', menu?.targetId ?? '')}>Stop</button>
-        <button class="menu-item" on:click={() => handleNodeAction('wipe', menu?.targetId ?? '')}>Wipe</button>
-        <button class="menu-item" on:click={() => handleNodeAction('console', menu?.targetId ?? '')}>Console</button>
-        <button class="menu-item text-red-200" on:click={() => handleNodeAction('delete', menu?.targetId ?? '')}>Delete Node</button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('start', menu?.targetId ?? '')}>Start</button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('stop', menu?.targetId ?? '')}>Stop</button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('wipe', menu?.targetId ?? '')}>Wipe</button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '')}>Console</button>
+        <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNodeAction('delete', menu?.targetId ?? '')}>Delete Node</button>
       {:else if menu?.targetType === 'network'}
-        <button class="menu-item text-red-200" on:click={() => handleNetworkDelete(menu?.targetId ?? '')}>Delete Network</button>
+        <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNetworkDelete(menu?.targetId ?? '')}>Delete Network</button>
       {:else}
         <button
+          type="button"
           class="menu-item text-red-200"
-          on:click={() => {
+          on:click|preventDefault|stopPropagation={() => {
             if (menu?.targetId) {
               deleteLink(menu.targetId);
             }
