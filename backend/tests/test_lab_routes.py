@@ -49,6 +49,17 @@ def patched_route_settings(monkeypatch, route_settings):
 
 @pytest.mark.asyncio
 async def test_delete_node_route_is_not_shadowed_by_delete_lab(monkeypatch, patched_route_settings):
+    monkeypatch.setattr(
+        "app.services.template_service.TemplateService._docker_image_catalog",
+        lambda _self: {
+            "nova-ve-alpine-telnet:latest": {
+                "image": "nova-ve-alpine-telnet:latest",
+                "files": [],
+                "path": "nova-ve-alpine-telnet:latest",
+                "source": "docker",
+            }
+        },
+    )
     docker_template_dir = patched_route_settings.TEMPLATES_DIR / "docker"
     docker_template_dir.mkdir(parents=True, exist_ok=True)
     (docker_template_dir / "docker.yml").write_text(
@@ -62,6 +73,8 @@ icon: Server.png
 cpulimit: 1
 """
     )
+    docker_image_dir = patched_route_settings.IMAGES_DIR / "docker" / "nova-ve-alpine-telnet:latest"
+    docker_image_dir.mkdir(parents=True, exist_ok=True)
 
     lab_path = patched_route_settings.LABS_DIR / "delete-probe.json"
     lab_path.write_text(
@@ -95,10 +108,66 @@ cpulimit: 1
             },
         )
         assert create_response.status_code == 200
+        create_payload = create_response.json()
+        assert create_payload["code"] == 200
         delete_response = await client.delete("/api/labs/delete-probe.json/nodes/1")
         assert delete_response.status_code == 200
         payload = delete_response.json()
         assert payload["code"] == 200
         assert payload["message"] == "Node deleted successfully."
+
+    app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_update_topology_route_is_not_shadowed_by_update_lab(monkeypatch, patched_route_settings):
+    lab_path = patched_route_settings.LABS_DIR / "topology-probe.json"
+    lab_path.write_text(
+        """{
+  "id": "topology-probe",
+  "meta": {"name": "topology-probe"},
+  "nodes": {
+    "1": {
+      "id": 1,
+      "name": "node-1",
+      "type": "docker",
+      "template": "docker",
+      "image": "nova-ve-alpine-telnet:latest",
+      "console": "rdp",
+      "status": 0,
+      "cpu": 1,
+      "ram": 1024,
+      "ethernet": 1,
+      "left": 100,
+      "top": 100,
+      "icon": "Server.png",
+      "interfaces": [{"name": "eth0", "network_id": 0}]
+    }
+  },
+  "networks": {},
+  "topology": []
+}"""
+    )
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        username="admin",
+        role="admin",
+        html5=True,
+        folder="/",
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.put(
+            "/api/labs/topology-probe.json/topology",
+            json={
+                "topology": [{"source": "node1", "destination": "network1", "network_id": 1}],
+                "nodes": {"1": {"left": 180, "top": 220}},
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["code"] == 200
+        assert payload["message"] == "Topology saved successfully."
 
     app.dependency_overrides.clear()

@@ -4,7 +4,7 @@
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -142,7 +142,7 @@ async def create_lab(
     }
 
 
-@router.put("/{lab_path:path}")
+@router.put("/{lab_path:path}/meta")
 async def update_lab(
     lab_path: str,
     request: LabMetaUpdate,
@@ -229,7 +229,7 @@ async def get_topology(
 @router.put("/{lab_path:path}/topology")
 async def update_topology(
     lab_path: str,
-    payload: dict | list,
+    payload: dict | list = Body(...),
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
@@ -1139,4 +1139,3 @@ async def delete_lab(
         "status": "success",
         "message": "Lab has been deleted (60023).",
     }
-
