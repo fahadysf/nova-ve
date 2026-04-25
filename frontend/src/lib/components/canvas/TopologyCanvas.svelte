@@ -754,7 +754,7 @@
     <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" class="canvas-minimap" />
 
     <Panel position="top-left">
-      <div class="rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.24em] text-gray-500 shadow-lg shadow-black/20">
+      <div class="rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-500 shadow-lg shadow-black/20">
         {#if saveState === 'saving'}
           Saving topology…
         {:else if saveState === 'saved'}
@@ -801,7 +801,7 @@
                     <ChevronLeft class="h-4 w-4" />
                   </button>
                 {/if}
-                <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">
+                <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">
                   {#if addMenuStep === 'kind'}
                     Add element
                   {:else if addMenuKind === 'node'}
@@ -905,10 +905,10 @@
 
   {#if selectedEdgeId}
     <div class="absolute bottom-4 left-4 z-20 rounded-xl border border-gray-700 bg-gray-900/95 p-3 text-xs text-gray-200 shadow-lg shadow-black/20 backdrop-blur">
-      <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Selected Link</div>
+      <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Selected Link</div>
       <button
         type="button"
-        class="mt-3 rounded-md border border-red-400/40 px-3 py-2 uppercase tracking-[0.2em] text-red-100 hover:bg-red-500/10"
+        class="mt-3 rounded-md border border-red-400/40 px-3 py-2 uppercase tracking-[0.05em] text-red-100 hover:bg-red-500/10"
         on:click={() => {
           if (selectedEdgeId) {
             deleteLink(selectedEdgeId);

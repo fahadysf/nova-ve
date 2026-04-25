@@ -491,18 +491,18 @@
       <div class="text-sm text-gray-400">{rootLabs.length} labs</div>
     </header>
   {:else}
-    <header class="shrink-0 px-3 pt-3">
-      <div class="flex items-start justify-between gap-3 rounded-2xl border border-gray-800 bg-gray-900/95 px-4 py-3">
+    <header class="shrink-0 px-3 pt-2">
+      <div class="flex items-start justify-between gap-3 rounded-2xl border border-gray-800 bg-gray-900/95 px-4 py-1">
         <div class="min-w-0 flex items-start gap-3">
           <button
             on:click={() => goto('/labs')}
-            class="inline-flex items-center rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 transition hover:border-blue-500/50 hover:text-white"
+            class="inline-flex items-center rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500/50 hover:text-white"
           >
             ← Labs
           </button>
           <div class="min-w-0">
-            <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500">Lab Editor</div>
-            <div class="mt-2 flex flex-wrap items-center gap-2">
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab Editor</div>
+            <div class="flex flex-wrap items-center gap-[0.15rem]">
               <h1 class="truncate text-lg font-semibold tracking-tight text-gray-100">{labMeta?.name || labId}</h1>
               <span class={`${chromePillClass} ${runningNodeCount ? 'border-emerald-500/30 text-emerald-200' : ''}`}>
                 {runningNodeCount} running
@@ -516,7 +516,7 @@
 
         <div class="hidden shrink-0 items-center gap-2 md:flex">
           <div class="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
-            <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">
               {labRefreshInFlight ? 'Refreshing lab' : 'Editor shell'}
             </div>
             <div class="mt-1 text-[11px] text-gray-300">
@@ -524,7 +524,7 @@
             </div>
           </div>
           <div class="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2 text-right">
-            <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Operator</div>
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Operator</div>
             <div class="mt-1 text-[11px] text-gray-200">{currentUserLabel}</div>
           </div>
         </div>
@@ -550,7 +550,7 @@
         <div class="font-medium">{isLabIndexRoute ? 'Unable to load labs' : 'Unable to load lab'}</div>
         <p class="mt-2 text-sm text-red-100/80">{error}</p>
         <button
-          class="mt-4 rounded-md border border-red-400/40 px-3 py-2 text-xs uppercase tracking-[0.2em] text-red-100 hover:bg-red-500/10"
+          class="mt-4 rounded-md border border-red-400/40 px-3 py-2 text-xs uppercase tracking-[0.05em] text-red-100 hover:bg-red-500/10"
           on:click={isLabIndexRoute ? loadLabIndex : loadLab}
         >
           Retry
@@ -571,7 +571,7 @@
               class="rounded-lg border border-gray-700 bg-gray-800 p-4 text-left transition hover:border-blue-500 hover:bg-gray-700"
             >
               <div class="font-medium">{lab.file.replace('.json', '').replace('.unl', '')}</div>
-              <div class="mt-2 text-xs uppercase tracking-[0.2em] text-gray-500">{lab.path}</div>
+              <div class="mt-2 text-xs uppercase tracking-[0.05em] text-gray-500">{lab.path}</div>
               <div class="mt-3 text-sm text-gray-500">{lab.mtime}</div>
             </button>
           {/each}
@@ -597,13 +597,13 @@
                 >
                   <ChevronsRight class="h-3.5 w-3.5" />
                 </button>
-                <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500 [writing-mode:vertical-rl]">
+                <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500 [writing-mode:vertical-rl]">
                   Rail
                 </div>
               </div>
             {:else}
               <div class="flex w-full items-center justify-between gap-2">
-                <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500">Lab Rail</div>
+                <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab Rail</div>
                 <div class="flex items-center gap-1.5">
                   <button
                     type="button"
@@ -644,7 +644,7 @@
                     {:else}
                       <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
                     {/if}
-                    <span class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Summary</span>
+                    <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Summary</span>
                   </button>
                 </div>
 
@@ -691,7 +691,7 @@
                     {:else}
                       <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
                     {/if}
-                    <span class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Inventory</span>
+                    <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Inventory</span>
                   </button>
                   <div class="text-[10px] uppercase tracking-[0.18em] text-gray-600">
                     {nodeList.length}n · {networkList.length}net
@@ -713,7 +713,7 @@
                           {:else}
                             <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
                           {/if}
-                          <span class="text-[10px] uppercase tracking-[0.2em] text-gray-500">Nodes</span>
+                          <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Nodes</span>
                         </button>
                         <span class="text-[10px] text-gray-600">{nodeList.length}</span>
                       </div>
@@ -772,7 +772,7 @@
                           {:else}
                             <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
                           {/if}
-                          <span class="text-[10px] uppercase tracking-[0.2em] text-gray-500">Networks</span>
+                          <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Networks</span>
                         </button>
                         <span class="text-[10px] text-gray-600">{networkList.length}</span>
                       </div>
@@ -865,7 +865,7 @@
                   ></button>
                 </div>
                 <div>
-                  <div class="text-[9px] uppercase tracking-[0.24em] text-gray-500">HTML5 Console Workspace</div>
+                  <div class="text-[9px] uppercase tracking-[0.05em] text-gray-500">HTML5 Console Workspace</div>
                   <div class="mt-0.5 text-xs font-medium text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</div>
                   <div class="mt-1 font-mono text-[10px] text-gray-500">{labMeta?.path || labId}</div>
                 </div>
