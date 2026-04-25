@@ -60,12 +60,26 @@
     'inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 transition hover:border-blue-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
   const compactActionButtonClass =
     'inline-flex items-center rounded-md border border-gray-800 bg-gray-950/80 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 transition hover:border-blue-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
+  const chromePillClass =
+    'inline-flex items-center rounded-full border border-gray-700/80 bg-gray-950/80 px-2.5 py-1 text-[9px] uppercase tracking-[0.18em] text-gray-300';
+  const inventoryCardClass =
+    'rounded-xl border border-gray-800 bg-gray-900/80 p-2.5 transition hover:border-gray-700';
 
   $: labId = $page.params.id ?? '';
   $: isLabIndexRoute = labId === '';
   $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
   $: networkList = Object.values(networks).sort((a, b) => a.id - b.id);
   $: runningConsoleNodes = nodeList.filter((node) => node.status === 2);
+  $: runningNodeCount = runningConsoleNodes.length;
+  $: currentUserLabel = $authStore.user?.name || $authStore.user?.username || 'Operator';
+  $: consoleTabCount = consoleWorkspace?.tabs.length ?? 0;
+  $: summaryStats = [
+    { label: 'Nodes', value: String(nodeList.length) },
+    { label: 'Running', value: String(runningNodeCount) },
+    { label: 'Networks', value: String(networkList.length) },
+    { label: 'CPU', value: String(nodeList.reduce((total, node) => total + (node.cpu ?? 0), 0)) },
+    { label: 'RAM', value: `${nodeList.reduce((total, node) => total + (node.ram ?? 0), 0)} MB` }
+  ];
   $: {
     const workspace = consoleWorkspace;
     if (!workspace || workspace.activeTabId == null) {
@@ -467,20 +481,56 @@
 
 <svelte:window on:mousemove={handleWindowPointerMove} on:mouseup={stopWindowPointerTracking} />
 
-<div class="flex h-screen flex-1 flex-col overflow-hidden">
-  <header class="flex h-14 shrink-0 items-center justify-between border-b border-gray-700 bg-gray-800 px-4">
-    <div class="flex items-center gap-4">
-      <button on:click={() => goto('/labs')} class="text-gray-400 hover:text-white">← Back</button>
-      <span class="font-bold">{isLabIndexRoute ? 'Labs' : labMeta?.name || labId}</span>
-    </div>
-    <div class="text-sm text-gray-400">
-      {#if isLabIndexRoute}
-        {rootLabs.length} labs
-      {:else}
-        {Object.keys(nodes).length} nodes · {Object.keys(networks).length} networks
-      {/if}
-    </div>
-  </header>
+<div class="flex h-screen flex-1 flex-col overflow-hidden bg-gray-900">
+  {#if isLabIndexRoute}
+    <header class="flex h-14 shrink-0 items-center justify-between border-b border-gray-700 bg-gray-800 px-4">
+      <div class="flex items-center gap-4">
+        <button on:click={() => goto('/labs')} class="text-gray-400 hover:text-white">← Back</button>
+        <span class="font-bold">Labs</span>
+      </div>
+      <div class="text-sm text-gray-400">{rootLabs.length} labs</div>
+    </header>
+  {:else}
+    <header class="shrink-0 px-3 pt-3">
+      <div class="flex items-start justify-between gap-3 rounded-2xl border border-gray-800 bg-gray-900/95 px-4 py-3">
+        <div class="min-w-0 flex items-start gap-3">
+          <button
+            on:click={() => goto('/labs')}
+            class="inline-flex items-center rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 transition hover:border-blue-500/50 hover:text-white"
+          >
+            ← Labs
+          </button>
+          <div class="min-w-0">
+            <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500">Lab Editor</div>
+            <div class="mt-2 flex flex-wrap items-center gap-2">
+              <h1 class="truncate text-lg font-semibold tracking-tight text-gray-100">{labMeta?.name || labId}</h1>
+              <span class={`${chromePillClass} ${runningNodeCount ? 'border-emerald-500/30 text-emerald-200' : ''}`}>
+                {runningNodeCount} running
+              </span>
+              <span class={chromePillClass}>{networkList.length} networks</span>
+              <span class={chromePillClass}>{consoleTabCount} consoles</span>
+            </div>
+            <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{labMeta?.path || labId}</div>
+          </div>
+        </div>
+
+        <div class="hidden shrink-0 items-center gap-2 md:flex">
+          <div class="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
+            <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">
+              {labRefreshInFlight ? 'Refreshing lab' : 'Editor shell'}
+            </div>
+            <div class="mt-1 text-[11px] text-gray-300">
+              {consoleTabCount ? `${consoleTabCount} console tab${consoleTabCount === 1 ? '' : 's'} active` : 'Console workspace idle'}
+            </div>
+          </div>
+          <div class="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2 text-right">
+            <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Operator</div>
+            <div class="mt-1 text-[11px] text-gray-200">{currentUserLabel}</div>
+          </div>
+        </div>
+      </div>
+    </header>
+  {/if}
 
   {#if loading}
     <div class="grid flex-1 gap-3 p-4 lg:grid-cols-[15rem_1fr]">
@@ -535,7 +585,7 @@
         style={`width: ${railCollapsed ? '3.5rem' : '15rem'};`}
       >
         <div class="flex h-full flex-col">
-          <div class="flex items-center justify-between border-b border-gray-800 px-3 py-2.5">
+          <div class="flex items-center justify-between border-b border-gray-800 px-3.5 py-3">
             {#if railCollapsed}
               <div class="flex w-full flex-col items-center gap-2">
                 <button
@@ -581,8 +631,8 @@
 
           {#if !railCollapsed}
             <div class="min-h-0 space-y-3 overflow-y-auto p-3 text-xs">
-              <section class="rounded-xl border border-gray-800 bg-gray-950/55">
-                <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3 py-2">
+              <section class="rounded-2xl border border-gray-800 bg-gray-950/70">
+                <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3.5 py-2.5">
                   <button
                     type="button"
                     class="flex min-w-0 flex-1 items-center gap-2 text-left text-gray-200"
@@ -599,7 +649,15 @@
                 </div>
 
                 {#if railSections.summary}
-                  <div class="space-y-3 px-3 py-2.5">
+                  <div class="space-y-3 px-3.5 py-3">
+                    <div class="grid grid-cols-2 gap-2">
+                      {#each summaryStats as stat}
+                        <div class="rounded-xl border border-gray-800 bg-gray-900/70 px-2.5 py-2">
+                          <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">{stat.label}</div>
+                          <div class="mt-1 text-[11px] font-medium text-gray-100">{stat.value}</div>
+                        </div>
+                      {/each}
+                    </div>
                     <div>
                       <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Owner</div>
                       <div class="mt-1 text-[11px] text-gray-100">{labMeta?.owner || 'n/a'}</div>
@@ -610,7 +668,7 @@
                     </div>
                     <div>
                       <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Path</div>
-                      <div class="mt-1 break-all text-[11px] text-gray-300">{labMeta?.path || labId}</div>
+                      <div class="mt-1 break-all font-mono text-[11px] text-gray-300">{labMeta?.path || labId}</div>
                     </div>
                     <div>
                       <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Description</div>
@@ -620,8 +678,8 @@
                 {/if}
               </section>
 
-              <section class="rounded-xl border border-gray-800 bg-gray-950/55">
-                <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3 py-2">
+              <section class="rounded-2xl border border-gray-800 bg-gray-950/70">
+                <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3.5 py-2.5">
                   <button
                     type="button"
                     class="flex min-w-0 flex-1 items-center gap-2 text-left text-gray-200"
@@ -641,8 +699,8 @@
                 </div>
 
                 {#if railSections.inventory}
-                  <div class="space-y-2 px-3 py-2.5">
-                    <div class="rounded-lg border border-gray-800 bg-gray-950/70">
+                  <div class="space-y-2.5 px-3.5 py-3">
+                    <div class="rounded-xl border border-gray-800 bg-gray-950/70">
                       <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-2.5 py-2">
                         <button
                           type="button"
@@ -664,9 +722,9 @@
                         {#if nodeList.length === 0}
                           <div class="px-2.5 py-2 text-[11px] text-gray-500">No nodes in this lab.</div>
                         {:else}
-                          <div class="space-y-1.5 px-2.5 py-2">
+                          <div class="space-y-2 px-2.5 py-2.5">
                             {#each nodeList as node}
-                              <div class="rounded-lg border border-gray-800 bg-gray-900/70 p-2">
+                              <div class={inventoryCardClass}>
                                 <div class="flex items-start justify-between gap-2">
                                   <div class="min-w-0">
                                     <div class="truncate text-[11px] font-medium text-gray-100">{node.name}</div>
@@ -684,7 +742,8 @@
                                   <div>NIC {node.interfaces?.length ?? 0}</div>
                                   <div>ID {node.id}</div>
                                 </div>
-                                <div class="mt-2">
+                                <div class="mt-2 flex items-center justify-between gap-2 border-t border-gray-800/80 pt-2">
+                                  <div class="font-mono text-[10px] text-gray-500">{node.template}</div>
                                   <button
                                     class={compactActionButtonClass}
                                     on:click={() => openConsole(node)}
@@ -700,7 +759,7 @@
                       {/if}
                     </div>
 
-                    <div class="rounded-lg border border-gray-800 bg-gray-950/70">
+                    <div class="rounded-xl border border-gray-800 bg-gray-950/70">
                       <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-2.5 py-2">
                         <button
                           type="button"
@@ -722,9 +781,9 @@
                         {#if networkList.length === 0}
                           <div class="px-2.5 py-2 text-[11px] text-gray-500">No networks in this lab.</div>
                         {:else}
-                          <div class="space-y-1.5 px-2.5 py-2">
+                          <div class="space-y-2 px-2.5 py-2.5">
                             {#each networkList as network}
-                              <div class="rounded-lg border border-gray-800 bg-gray-900/70 p-2">
+                              <div class={inventoryCardClass}>
                                 <div class="flex items-start justify-between gap-2">
                                   <div class="min-w-0">
                                     <div class="truncate text-[11px] font-medium text-gray-100">{network.name}</div>
@@ -781,7 +840,7 @@
               role="toolbar"
               aria-label="Console workspace controls"
               tabindex="-1"
-              class={`flex items-center justify-between border-b border-gray-800 px-3 py-2 ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
+              class={`flex items-center justify-between border-b border-gray-800 bg-gray-900/95 px-3.5 py-2.5 backdrop-blur ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
               on:mousedown={beginConsoleDrag}
             >
               <div class="flex items-center gap-3">
@@ -808,13 +867,14 @@
                 <div>
                   <div class="text-[9px] uppercase tracking-[0.24em] text-gray-500">HTML5 Console Workspace</div>
                   <div class="mt-0.5 text-xs font-medium text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</div>
+                  <div class="mt-1 font-mono text-[10px] text-gray-500">{labMeta?.path || labId}</div>
                 </div>
               </div>
               <div class="flex items-center gap-2">
                 <label class="sr-only" for="console-node-select">Console target</label>
                 <select
                   id="console-node-select"
-                  class="rounded-md border border-gray-700 bg-gray-900 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
+                  class="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
                   value={activeConsoleTabState?.nodeId ?? ''}
                   on:mousedown|stopPropagation
                   on:click|stopPropagation
@@ -826,7 +886,7 @@
                   {/each}
                 </select>
                 <button
-                  class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
+                  class="rounded-md border border-gray-700 bg-gray-950 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
                   on:mousedown|stopPropagation
                   on:click={reloadConsole}
                   disabled={activeConsoleTabState == null}
@@ -837,7 +897,7 @@
             </div>
             {#if !consoleWorkspace.minimized}
               <div class="flex min-h-0 flex-1 flex-col bg-gray-950">
-                <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-900/80 px-3 py-2">
+                <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-950/90 px-3.5 py-2">
                   {#each consoleWorkspace.tabs as tab}
                     <div class={`flex items-center gap-1 rounded-md border ${tab.id === consoleWorkspace.activeTabId ? 'border-blue-500 bg-blue-500/10 text-white' : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-blue-500 hover:text-white'}`}>
                       <button
@@ -860,7 +920,7 @@
                     </div>
                   {/each}
                 </div>
-                <div class="relative min-h-0 flex-1 bg-gray-950">
+                <div class="relative min-h-0 flex-1 border-t border-gray-950 bg-black">
                   {#each consoleWorkspace.tabs as tab (tab.id)}
                     <div
                       role="presentation"
