@@ -190,7 +190,7 @@
 
     busy = true;
     try {
-      await apiRequest(`/labs${lab.path}`, { method: 'DELETE' });
+      await apiRequest(`/labs/_${lab.path}`, { method: 'DELETE' });
       toastStore.push('Lab deleted.');
       await fetchContents(currentFolder);
     } catch (_error) {

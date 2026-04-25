@@ -198,45 +198,6 @@ async def update_lab(
     }
 
 
-@router.delete("/{lab_path:path}")
-async def delete_lab(
-    lab_path: str,
-    current_user: UserRead = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    lab_service = LabService(db)
-    try:
-        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-    except PermissionError as e:
-        return {
-            "code": 403,
-            "status": "fail",
-            "message": str(e),
-        }
-    lab = await lab_service.get_lab_by_filename(scoped_path)
-
-    if not lab:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
-
-    if lab.owner != current_user.username and current_user.role != "admin":
-        return {
-            "code": 403,
-            "status": "fail",
-            "message": "Access denied.",
-        }
-
-    await lab_service.delete_lab(lab)
-    return {
-        "code": 200,
-        "status": "success",
-        "message": "Lab has been deleted (60023).",
-    }
-
-
 @router.get("/{lab_path:path}/topology")
 async def get_topology(
     lab_path: str,
@@ -1139,3 +1100,43 @@ async def get_lab(
         "message": "Lab has been loaded (60020).",
         "data": meta,
     }
+
+
+@router.delete("/_/{lab_path:path}")
+async def delete_lab(
+    lab_path: str,
+    current_user: UserRead = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    lab_service = LabService(db)
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+    lab = await lab_service.get_lab_by_filename(scoped_path)
+
+    if not lab:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+
+    if lab.owner != current_user.username and current_user.role != "admin":
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": "Access denied.",
+        }
+
+    await lab_service.delete_lab(lab)
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Lab has been deleted (60023).",
+    }
+

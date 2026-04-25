@@ -47,6 +47,7 @@
   let lastLoadedRoute = '';
   let dragState: { startX: number; startY: number; originX: number; originY: number } | null = null;
   let resizeState: { startX: number; startY: number; width: number; height: number } | null = null;
+  let labRefreshInFlight = false;
 
   $: labId = $page.params.id ?? '';
   $: isLabIndexRoute = labId === '';
@@ -103,6 +104,8 @@
   }
 
   async function loadLab() {
+    if (labRefreshInFlight) return;
+    labRefreshInFlight = true;
     loading = true;
     error = '';
 
@@ -139,6 +142,13 @@
       error = e instanceof ApiError ? e.message : 'Unable to load the lab.';
     } finally {
       loading = false;
+      labRefreshInFlight = false;
+    }
+  }
+
+  async function refreshLabFromCanvas() {
+    if (!isLabIndexRoute) {
+      await loadLab();
     }
   }
 
@@ -638,7 +648,14 @@
 
       <div class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
         <SvelteFlowProvider>
-          <TopologyCanvas labId={labId} {nodes} {networks} {topology} on:console={(event) => openConsole(event.detail.node)} />
+          <TopologyCanvas
+            labId={labId}
+            {nodes}
+            {networks}
+            {topology}
+            on:console={(event) => openConsole(event.detail.node)}
+            on:changed={refreshLabFromCanvas}
+          />
         </SvelteFlowProvider>
       </div>
 
