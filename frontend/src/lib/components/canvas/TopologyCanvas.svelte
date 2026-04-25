@@ -829,7 +829,7 @@
                   on:click={() => openAddKind('node')}
                 >
                   <div class="text-[11px] font-medium text-gray-100">Node</div>
-                  <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">
+                  <div class="mt-1 text-[10px] uppercase tracking-[0.05em] text-gray-500">
                     Choose a template and image
                   </div>
                 </button>
@@ -839,7 +839,7 @@
                   on:click={() => openAddKind('network')}
                 >
                   <div class="text-[11px] font-medium text-gray-100">Network</div>
-                  <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">
+                  <div class="mt-1 text-[10px] uppercase tracking-[0.05em] text-gray-500">
                     Choose a network container type
                   </div>
                 </button>
@@ -860,7 +860,7 @@
                       on:click={() => addItemFromMenu(item)}
                     >
                       <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
-                      <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">{item.subtitle}</div>
+                      <div class="mt-1 text-[10px] uppercase tracking-[0.05em] text-gray-500">{item.subtitle}</div>
                     </button>
                   {/each}
                 {/if}
@@ -877,7 +877,7 @@
                       on:click={() => addItemFromMenu(item)}
                     >
                       <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
-                      <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">{item.subtitle}</div>
+                      <div class="mt-1 text-[10px] uppercase tracking-[0.05em] text-gray-500">{item.subtitle}</div>
                     </button>
                   {/each}
                 {/if}
@@ -1008,7 +1008,7 @@
     padding: 0.6rem 0.75rem;
     text-align: left;
     font-size: 0.7rem;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.05em;
     text-transform: uppercase;
     color: rgb(229 231 235);
   }
