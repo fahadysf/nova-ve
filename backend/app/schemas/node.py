@@ -47,8 +47,27 @@ class NodeCreate(BaseModel):
     cpu: int = 1
     ram: int = 1024
     ethernet: int = 1
+    delay: int = 0
     left: int = 0
     top: int = 0
+    icon: Optional[str] = None
+
+
+class NodeBatchCreate(BaseModel):
+    name_prefix: str = Field(default="Node")
+    count: int = Field(default=1, ge=1, le=24)
+    placement: Literal["grid", "row"] = "grid"
+    type: Literal["qemu", "docker", "iol", "dynamips"] = "qemu"
+    template: str
+    image: str
+    console: Literal["telnet", "vnc", "rdp"] = "telnet"
+    cpu: int = 1
+    ram: int = 1024
+    ethernet: int = 1
+    delay: int = 0
+    left: int = 0
+    top: int = 0
+    icon: Optional[str] = None
 
 
 class NodeUpdate(BaseModel):
@@ -56,6 +75,9 @@ class NodeUpdate(BaseModel):
     cpu: Optional[int] = None
     ram: Optional[int] = None
     ethernet: Optional[int] = None
+    image: Optional[str] = None
+    console: Optional[Literal["telnet", "vnc", "rdp"]] = None
+    delay: Optional[int] = None
     left: Optional[int] = None
     top: Optional[int] = None
     icon: Optional[str] = None

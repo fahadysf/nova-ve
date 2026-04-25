@@ -206,6 +206,100 @@ cpulimit: 1
 
 
 @pytest.mark.asyncio
+async def test_node_update_enforces_running_state_editability(patched_settings, monkeypatch):
+    lab_path = patched_settings.LABS_DIR / "running" / "lab.json"
+    _write_lab(
+        patched_settings.TEMPLATES_DIR / "qemu" / "csr.yml",
+        """type: qemu
+name: Cisco CSR1000v
+cpu: 2
+ram: 4096
+ethernet: 4
+console: telnet
+icon: Router.png
+cpulimit: 1
+""",
+    )
+    image_dir = patched_settings.IMAGES_DIR / "qemu" / "csr1000v"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "hda.qcow2").write_text("image")
+    alt_image_dir = patched_settings.IMAGES_DIR / "qemu" / "csr1000v-alt"
+    alt_image_dir.mkdir(parents=True, exist_ok=True)
+    (alt_image_dir / "hda.qcow2").write_text("alt-image")
+    _write_lab(
+        lab_path,
+        """{
+  "id": "running-lab",
+  "meta": {"name": "running"},
+  "nodes": {
+    "1": {
+      "id": 1,
+      "name": "router-1",
+      "type": "qemu",
+      "template": "csr",
+      "image": "csr1000v",
+      "console": "telnet",
+      "status": 0,
+      "delay": 0,
+      "cpu": 2,
+      "ram": 4096,
+      "ethernet": 2,
+      "cpulimit": 1,
+      "uuid": "11111111-1111-1111-1111-111111111111",
+      "firstmac": "50:00:00:01:00:00",
+      "left": 100,
+      "top": 100,
+      "icon": "Router.png",
+      "width": "0",
+      "config": false,
+      "config_list": [],
+      "sat": 0,
+      "computed_sat": 0,
+      "interfaces": [{"name": "Gi1", "network_id": 0}, {"name": "Gi2", "network_id": 0}]
+    }
+  },
+  "networks": {},
+  "topology": []
+}""",
+    )
+
+    current_user = SimpleNamespace(username="admin", role="admin")
+
+    monkeypatch.setattr("app.routers.labs._node_is_running", lambda _lab_data, _node_id: True)
+    blocked = await labs.update_node(
+        "running/lab.json",
+        1,
+        NodeUpdate(cpu=4, image="csr1000v-alt"),
+        current_user=current_user,
+    )
+    assert blocked["code"] == 400
+    assert "Stop the node before changing" in blocked["message"]
+
+    allowed = await labs.update_node(
+        "running/lab.json",
+        1,
+        NodeUpdate(name="router-renamed", icon="Server.png"),
+        current_user=current_user,
+    )
+    assert allowed["code"] == 200
+    assert allowed["data"]["name"] == "router-renamed"
+    assert allowed["data"]["icon"] == "Server.png"
+
+    monkeypatch.setattr("app.routers.labs._node_is_running", lambda _lab_data, _node_id: False)
+    stopped = await labs.update_node(
+        "running/lab.json",
+        1,
+        NodeUpdate(cpu=4, image="csr1000v-alt", delay=5, ethernet=3),
+        current_user=current_user,
+    )
+    assert stopped["code"] == 200
+    assert stopped["data"]["cpu"] == 4
+    assert stopped["data"]["image"] == "csr1000v-alt"
+    assert stopped["data"]["delay"] == 5
+    assert len(stopped["data"]["interfaces"]) == 3
+
+
+@pytest.mark.asyncio
 async def test_folder_rename_and_delete_propagate_to_lab_records(patched_settings):
     _write_lab(patched_settings.LABS_DIR / "labs" / "edge" / "lab-a.json", "{}")
 
@@ -347,6 +441,7 @@ def test_lab_route_order_keeps_catch_all_last():
     ]
     assert get_route_paths[-1] == "/api/labs/{lab_path:path}"
     assert get_route_paths.index("/api/labs/{lab_path:path}/nodes") < get_route_paths.index("/api/labs/{lab_path:path}")
+    assert get_route_paths.index("/api/labs/{lab_path:path}/node-catalog") < get_route_paths.index("/api/labs/{lab_path:path}")
 
     put_route_paths = [
         route.path

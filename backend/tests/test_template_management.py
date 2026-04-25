@@ -6,8 +6,9 @@ import pytest
 from starlette.datastructures import UploadFile
 
 from app.routers import labs, listing
-from app.schemas.node import NodeCreate
+from app.schemas.node import NodeBatchCreate, NodeCreate
 from app.services.lab_service import LabService
+from app.services.template_service import TemplateService
 
 
 def _write_text(path: Path, content: str) -> None:
@@ -97,6 +98,10 @@ async def test_list_templates_images_and_upload(prepared_template_data):
     assert upload_response["data"]["image"] == "csr1000v-alt"
     assert (prepared_template_data.IMAGES_DIR / "qemu" / "csr1000v-alt" / "disk2.qcow2").exists()
 
+    catalog = TemplateService().build_node_catalog()
+    assert catalog["templates"][0]["defaults"]["icon"] == "Router.png"
+    assert "Router.png" in catalog["icon_options"]
+
 
 @pytest.mark.asyncio
 async def test_create_node_uses_template_defaults_and_validates_image(prepared_template_data):
@@ -117,6 +122,7 @@ async def test_create_node_uses_template_defaults_and_validates_image(prepared_t
     assert create_response["data"]["ram"] == 4096
     assert create_response["data"]["ethernet"] == 4
     assert create_response["data"]["icon"] == "Router.png"
+    assert create_response["data"]["delay"] == 0
 
     lab_data = LabService.read_lab_json_static("demo.json")
     assert lab_data["nodes"]["1"]["image"] == "csr1000v"
@@ -133,6 +139,33 @@ async def test_create_node_uses_template_defaults_and_validates_image(prepared_t
     )
     assert missing_image_response["code"] == 400
     assert "not available" in missing_image_response["message"]
+
+
+@pytest.mark.asyncio
+async def test_batch_create_uses_prefix_positions_and_optional_icon(prepared_template_data):
+    current_user = SimpleNamespace(username="admin", role="admin")
+
+    create_response = await labs.create_nodes_batch(
+        "demo.json",
+        NodeBatchCreate(
+            name_prefix="csr",
+            count=3,
+            type="qemu",
+            template="csr",
+            image="csr1000v",
+            left=100,
+            top=120,
+            icon="Server.png",
+        ),
+        current_user=current_user,
+    )
+    assert create_response["code"] == 200
+    created = create_response["data"]["nodes"]
+    assert [node["name"] for node in created] == ["csr-1", "csr-2", "csr-3"]
+    assert created[0]["left"] == 100
+    assert created[1]["left"] == 280
+    assert created[2]["left"] == 460
+    assert all(node["icon"] == "Server.png" for node in created)
 
 
 @pytest.mark.asyncio

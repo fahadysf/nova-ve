@@ -22,6 +22,7 @@ class TemplateDefinition:
     key: str
     type: str
     name: str
+    description: str
     icon: str
     cpu: int
     ram: int
@@ -36,6 +37,7 @@ class TemplateDefinition:
             "template": self.key,
             "type": self.type,
             "name": self.name,
+            "description": self.description,
             "icon": self.icon,
             "cpu": self.cpu,
             "ram": self.ram,
@@ -91,6 +93,50 @@ class TemplateService:
             )
         return template
 
+    def list_icon_options(self) -> list[str]:
+        icons = {
+            "Router.png",
+            "Server.png",
+        }
+        for template in self._load_templates():
+            icon = str(template.icon).strip()
+            if icon:
+                icons.add(icon)
+        return sorted(icons)
+
+    def build_node_catalog(self) -> dict[str, Any]:
+        templates: list[dict[str, Any]] = []
+        icon_options = self.list_icon_options()
+        for template in self._load_templates():
+            images = list(self.list_images(template.type, template.key).values())
+            default_image = images[0]["image"] if images else ""
+            templates.append(
+                {
+                    "key": template.key,
+                    "type": template.type,
+                    "name": template.name,
+                    "description": template.description,
+                    "defaults": {
+                        "type": template.type,
+                        "template": template.key,
+                        "image": default_image,
+                        "icon": template.icon,
+                        "cpu": template.cpu,
+                        "ram": template.ram,
+                        "ethernet": template.ethernet,
+                        "console": template.console,
+                        "delay": 0,
+                        "cpulimit": template.cpulimit,
+                    },
+                    "images": images,
+                    "icon_options": icon_options,
+                }
+            )
+        return {
+            "templates": templates,
+            "icon_options": icon_options,
+        }
+
     async def upload_image(
         self,
         template_type: str,
@@ -135,6 +181,7 @@ class TemplateService:
                     key=key,
                     type=template_type,
                     name=str(payload.get("name") or key),
+                    description=str(payload.get("description") or ""),
                     icon=str(payload.get("icon") or self._default_icon(template_type)),
                     cpu=int(payload.get("cpu", 1)),
                     ram=int(payload.get("ram", 1024)),

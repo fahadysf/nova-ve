@@ -61,6 +61,7 @@ export interface NodeData {
   image: string;
   console: 'telnet' | 'vnc' | 'rdp';
   status: 0 | 2;
+  delay: number;
   cpu: number;
   ram: number;
   ethernet: number;
@@ -71,9 +72,56 @@ export interface NodeData {
   width?: string;
   uuid?: string;
   firstmac?: string;
+  cpulimit?: number;
   url?: string;
   cpu_usage?: number;
   ram_usage?: number;
+}
+
+export interface NodeCatalogImage {
+  image: string;
+  files?: string[];
+  path?: string;
+  source?: string;
+}
+
+export interface NodeCatalogDefaults {
+  type: 'qemu' | 'docker' | 'iol' | 'dynamips';
+  template: string;
+  image: string;
+  icon: string;
+  cpu: number;
+  ram: number;
+  ethernet: number;
+  console: 'telnet' | 'vnc' | 'rdp';
+  delay: number;
+  cpulimit: number;
+}
+
+export interface NodeCatalogTemplate {
+  key: string;
+  type: 'qemu' | 'docker' | 'iol' | 'dynamips';
+  name: string;
+  description: string;
+  defaults: NodeCatalogDefaults;
+  images: NodeCatalogImage[];
+  icon_options: string[];
+}
+
+export interface NodeCatalog {
+  templates: NodeCatalogTemplate[];
+  icon_options: string[];
+  create_fields: string[];
+  edit_fields: string[];
+  runtime_editability: {
+    always: string[];
+    stopped_only: string[];
+    immutable: string[];
+  };
+}
+
+export interface NodeBatchCreateResult {
+  nodes: NodeData[];
 }
 
 export interface NetworkData {

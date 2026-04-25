@@ -8,7 +8,6 @@
   import { ChevronLeft, Lock, LockOpen, Plus } from 'lucide-svelte';
   import {
     Background,
-    ControlButton,
     Controls,
     MiniMap,
     Panel,
@@ -21,30 +20,30 @@
   import '@xyflow/svelte/dist/style.css';
   import { apiRequest } from '$lib/api';
   import CustomNode from '$lib/components/canvas/CustomNode.svelte';
+  import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
   import NetworkNode from '$lib/components/canvas/NetworkNode.svelte';
   import { toastStore } from '$lib/stores/toasts';
-  import type { NetworkData, NodeData, NodeInterface, TopologyLink } from '$lib/types';
+  import type {
+    NetworkData,
+    NodeBatchCreateResult,
+    NodeCatalog,
+    NodeData,
+    NodeInterface,
+    TopologyLink
+  } from '$lib/types';
 
   export let labId: string;
   export let nodes: Record<string, NodeData> = {};
   export let networks: Record<string, NetworkData> = {};
   export let topology: TopologyLink[] = [];
 
-  type PaletteNodeItem = {
-    kind: 'node';
-    title: string;
-    subtitle: string;
-    type: string;
-    template: string;
-    image: string;
-  };
   type PaletteNetworkItem = {
     kind: 'network';
     title: string;
     subtitle: string;
     networkType: string;
   };
-  type PaletteItem = PaletteNodeItem | PaletteNetworkItem;
+  type PaletteItem = PaletteNetworkItem;
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData };
@@ -71,11 +70,16 @@
   let selectedEdgeId: string | null = null;
   let paletteLoading = true;
   let paletteItems: PaletteItem[] = [];
-  let nodePaletteItems: PaletteNodeItem[] = [];
   let networkPaletteItems: PaletteNetworkItem[] = [];
   let addMenuStep: 'closed' | 'kind' | 'item' = 'closed';
-  let addMenuKind: PaletteItem['kind'] | null = null;
+  let addMenuKind: 'network' | null = null;
   let canvasLocked = false;
+  let nodeCatalog: NodeCatalog | null = null;
+  let nodeModalOpen = false;
+  let nodeModalMode: 'create' | 'edit' = 'create';
+  let nodeModalNode: NodeData | null = null;
+  let nodeModalSubmitting = false;
+  let nodeCreateAnchor = { x: 200, y: 200 };
   let menu:
     | {
         x: number;
@@ -112,7 +116,6 @@
     syncLocalState();
   }
 
-  $: nodePaletteItems = paletteItems.filter((item): item is PaletteNodeItem => item.kind === 'node');
   $: networkPaletteItems = paletteItems.filter(
     (item): item is PaletteNetworkItem => item.kind === 'network'
   );
@@ -199,7 +202,44 @@
     closeAddMenu();
   }
 
-  function openAddKind(kind: PaletteItem['kind']) {
+  function openCreateNodeModal() {
+    nodeCreateAnchor =
+      typeof window !== 'undefined'
+        ? screenToFlowPosition(
+            { x: Math.round(window.innerWidth * 0.5), y: Math.round(window.innerHeight * 0.5) },
+            { snapToGrid: true }
+          )
+        : { x: 200, y: 200 };
+    closeAddMenu();
+    closeMenu();
+    nodeModalMode = 'create';
+    nodeModalNode = null;
+    nodeModalOpen = true;
+  }
+
+  function openEditNodeModal(targetId: string) {
+    const decoded = decodeId(targetId);
+    if (!decoded || decoded.type !== 'node') {
+      return;
+    }
+
+    const node = localNodes[String(decoded.id)];
+    if (!node) {
+      return;
+    }
+
+    closeMenu();
+    nodeModalMode = 'edit';
+    nodeModalNode = deepClone(node);
+    nodeModalOpen = true;
+  }
+
+  function openAddKind(kind: 'node' | 'network') {
+    if (kind === 'node') {
+      openCreateNodeModal();
+      return;
+    }
+
     addMenuKind = kind;
     addMenuStep = 'item';
   }
@@ -224,31 +264,11 @@
 
   onMount(async () => {
     try {
-      const nodeItems: Array<(typeof paletteItems)[number]> = [];
-      for (const templateType of ['qemu', 'docker']) {
-        const templatesResponse = await apiRequest<Record<string, { name: string; template: string }>>(
-          `/list/templates/${templateType}`,
-          { suppressToast: true }
-        );
-        for (const template of Object.values(templatesResponse.data ?? {})) {
-          const imagesResponse = await apiRequest<Record<string, { image: string }>>(
-            `/list/images/${templateType}/${template.template}`,
-            { suppressToast: true }
-          );
-          for (const image of Object.values(imagesResponse.data ?? {})) {
-            nodeItems.push({
-              kind: 'node',
-              title: template.name,
-              subtitle: `${templateType} · ${image.image}`,
-              type: templateType,
-              template: template.template,
-              image: image.image
-            });
-          }
-        }
-      }
+      const catalogResponse = await apiRequest<NodeCatalog>(`/labs/${labId}/node-catalog`, {
+        suppressToast: true
+      });
+      nodeCatalog = catalogResponse.data;
       paletteItems = [
-        ...nodeItems,
         { kind: 'network', title: 'Bridge Network', subtitle: 'bridge', networkType: 'bridge' }
       ];
     } catch (_error) {
@@ -592,6 +612,10 @@
     dispatch('changed', { reason: `node-${action}` });
   }
 
+  function handleEditNode(targetId: string) {
+    openEditNodeModal(targetId);
+  }
+
   async function handleNetworkDelete(targetId: string) {
     closeMenu();
     const decoded = decodeId(targetId);
@@ -633,28 +657,6 @@
     dispatch('changed', { reason: 'network-create' });
   }
 
-  async function createNodeAt(
-    position: { x: number; y: number },
-    payload: PaletteNodeItem
-  ) {
-    const response = await apiRequest<NodeData>(`/labs/${labId}/nodes`, {
-      method: 'POST',
-      body: {
-        name: `${payload.title}-${Object.keys(localNodes).length + 1}`,
-        type: payload.type,
-        template: payload.template,
-        image: payload.image,
-        left: Math.round(position.x),
-        top: Math.round(position.y)
-      }
-    });
-    localNodes = {
-      ...localNodes,
-      [String(response.data.id)]: response.data
-    };
-    dispatch('changed', { reason: 'node-create' });
-  }
-
   async function addPaletteItem(item: PaletteItem) {
     const viewport = typeof window !== 'undefined'
       ? screenToFlowPosition(
@@ -668,12 +670,78 @@
       return;
     }
 
-    await createNodeAt(viewport, item);
+    closeAddMenu();
   }
 
-  async function addItemFromMenu(item: PaletteItem) {
-    await addPaletteItem(item);
-    closeAddMenu();
+  async function handleNodeModalSubmit(
+    event: CustomEvent<
+      | {
+          mode: 'create';
+          payload: {
+            type: NodeData['type'];
+            template: string;
+            image: string;
+            name_prefix: string;
+            count: number;
+            placement: 'grid' | 'row';
+            icon: string;
+            cpu: number;
+            ram: number;
+            ethernet: number;
+            console: NodeData['console'];
+            delay: number;
+          };
+        }
+      | {
+          mode: 'edit';
+          nodeId: number;
+          payload: {
+            name: string;
+            image: string;
+            icon: string;
+            cpu: number;
+            ram: number;
+            ethernet: number;
+            console: NodeData['console'];
+            delay: number;
+          };
+        }
+    >
+  ) {
+    nodeModalSubmitting = true;
+    try {
+      if (event.detail.mode === 'create') {
+        const response = await apiRequest<NodeBatchCreateResult>(`/labs/${labId}/nodes/batch`, {
+          method: 'POST',
+          body: {
+            ...event.detail.payload,
+            left: Math.round(nodeCreateAnchor.x),
+            top: Math.round(nodeCreateAnchor.y),
+          }
+        });
+        const nextNodes = { ...localNodes };
+        for (const node of response.data.nodes) {
+          nextNodes[String(node.id)] = node;
+        }
+        localNodes = nextNodes;
+        dispatch('changed', { reason: 'node-create' });
+      } else {
+        const response = await apiRequest<NodeData>(`/labs/${labId}/nodes/${event.detail.nodeId}`, {
+          method: 'PUT',
+          body: event.detail.payload,
+        });
+        localNodes = {
+          ...localNodes,
+          [String(response.data.id)]: response.data,
+        };
+        dispatch('changed', { reason: 'node-edit' });
+      }
+
+      nodeModalOpen = false;
+      nodeModalNode = null;
+    } finally {
+      nodeModalSubmitting = false;
+    }
   }
 </script>
 
@@ -738,18 +806,6 @@
   >
     <Background patternColor="#374151" gap={20} />
     <Controls position="bottom-left" showLock={false} class="canvas-controls">
-      <ControlButton
-        class="canvas-controls__button"
-        on:click={toggleCanvasLock}
-        title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
-        aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
-      >
-        {#if canvasLocked}
-          <Lock class="h-3.5 w-3.5" />
-        {:else}
-          <LockOpen class="h-3.5 w-3.5" />
-        {/if}
-      </ControlButton>
     </Controls>
     <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" class="canvas-minimap" />
 
@@ -785,6 +841,19 @@
     {#if addMenuStep !== 'closed'}
       <Panel position="bottom-left">
         <div class="ml-14 flex items-end gap-3">
+          <button
+            type="button"
+            class="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-gray-700 bg-gray-900/95 text-gray-200 shadow-2xl shadow-black/30 transition hover:border-blue-500/40 hover:text-white"
+            on:click={toggleCanvasLock}
+            title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
+            aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
+          >
+            {#if canvasLocked}
+              <Lock class="h-4 w-4" />
+            {:else}
+              <LockOpen class="h-4 w-4" />
+            {/if}
+          </button>
           <div class="w-72 overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl shadow-black/30 backdrop-blur">
             <div class="flex items-center justify-between border-b border-gray-800 px-3 py-2">
               <div class="flex items-center gap-2">
@@ -804,8 +873,6 @@
                 <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">
                   {#if addMenuStep === 'kind'}
                     Add element
-                  {:else if addMenuKind === 'node'}
-                    Choose node
                   {:else}
                     Choose network
                   {/if}
@@ -843,27 +910,6 @@
                     Choose a network container type
                   </div>
                 </button>
-              {:else if addMenuKind === 'node'}
-                {#if paletteLoading}
-                  <div class="rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
-                    Loading templates…
-                  </div>
-                {:else if nodePaletteItems.length === 0}
-                  <div class="rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
-                    No node templates are available.
-                  </div>
-                {:else}
-                  {#each nodePaletteItems as item}
-                    <button
-                      type="button"
-                      class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left transition hover:border-blue-500/40 hover:bg-gray-900"
-                      on:click={() => addItemFromMenu(item)}
-                    >
-                      <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
-                      <div class="mt-1 text-[10px] uppercase tracking-[0.05em] text-gray-500">{item.subtitle}</div>
-                    </button>
-                  {/each}
-                {/if}
               {:else}
                 {#if networkPaletteItems.length === 0}
                   <div class="rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
@@ -874,7 +920,7 @@
                     <button
                       type="button"
                       class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left transition hover:border-blue-500/40 hover:bg-gray-900"
-                      on:click={() => addItemFromMenu(item)}
+                      on:click={() => addPaletteItem(item)}
                     >
                       <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
                       <div class="mt-1 text-[10px] uppercase tracking-[0.05em] text-gray-500">{item.subtitle}</div>
@@ -888,7 +934,20 @@
       </Panel>
     {:else}
       <Panel position="bottom-left">
-        <div class="ml-14">
+        <div class="ml-14 flex items-center gap-3">
+          <button
+            type="button"
+            class="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-gray-700 bg-gray-900/95 text-gray-200 shadow-2xl shadow-black/30 transition hover:border-blue-500/40 hover:text-white"
+            on:click={toggleCanvasLock}
+            title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
+            aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
+          >
+            {#if canvasLocked}
+              <Lock class="h-4 w-4" />
+            {:else}
+              <LockOpen class="h-4 w-4" />
+            {/if}
+          </button>
           <button
             type="button"
             class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-100 shadow-2xl shadow-black/30 transition hover:bg-blue-500/25"
@@ -940,6 +999,7 @@
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('stop', menu?.targetId ?? '')}>Stop</button>
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('wipe', menu?.targetId ?? '')}>Wipe</button>
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '')}>Console</button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleEditNode(menu?.targetId ?? '')}>Edit Node</button>
         <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNodeAction('delete', menu?.targetId ?? '')}>Delete Node</button>
       {:else if menu?.targetType === 'network'}
         <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNetworkDelete(menu?.targetId ?? '')}>Delete Network</button>
@@ -960,6 +1020,19 @@
       {/if}
     </div>
   {/if}
+
+  <NodeConfigModal
+    open={nodeModalOpen}
+    mode={nodeModalMode}
+    catalog={nodeCatalog}
+    node={nodeModalNode}
+    submitting={nodeModalSubmitting}
+    on:cancel={() => {
+      nodeModalOpen = false;
+      nodeModalNode = null;
+    }}
+    on:submit={handleNodeModalSubmit}
+  />
 </div>
 
 <style>

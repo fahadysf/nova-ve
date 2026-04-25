@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.dependencies import get_current_user
 from app.schemas.lab import LabMetaCreate, LabMetaUpdate
 from app.schemas.network import NetworkCreate, NetworkUpdate
-from app.schemas.node import NodeCreate, NodeUpdate
+from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionError, Html5SessionService
@@ -22,6 +22,32 @@ from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeServi
 from app.services.template_service import TemplateError, TemplateService
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
+
+NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top"}
+NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "delay"}
+NODE_FIELDS_MUTABLE = NODE_FIELDS_EDITABLE_WHILE_RUNNING | NODE_FIELDS_EDITABLE_WHILE_STOPPED | {"config"}
+NODE_CREATE_FIELDS = [
+    "template",
+    "image",
+    "name_prefix",
+    "count",
+    "icon",
+    "cpu",
+    "ram",
+    "ethernet",
+    "console",
+    "delay",
+]
+NODE_EDIT_FIELDS = [
+    "name",
+    "icon",
+    "image",
+    "cpu",
+    "ram",
+    "ethernet",
+    "console",
+    "delay",
+]
 
 
 def _read_lab_data(lab_path: str) -> dict:
@@ -78,6 +104,89 @@ def _first_mac_for_node(node_id: int) -> str:
 def _html5_launcher_url(lab_path: str, node_id: int) -> str:
     quoted_path = quote(lab_path.strip("/"), safe="/")
     return f"/api/labs/{quoted_path}/nodes/{node_id}/html5"
+
+
+def _node_is_running(lab_data: dict, node_id: int) -> bool:
+    lab_id = str(lab_data.get("id", "")).strip()
+    if not lab_id:
+        return False
+    node = lab_data.get("nodes", {}).get(str(node_id))
+    if not node:
+        return False
+    enriched = NodeRuntimeService().enrich_node(lab_id, node_id, node)
+    return int(enriched.get("status", 0)) == 2
+
+
+def _validate_node_update_request(node: dict, request: NodeUpdate, node_running: bool) -> str | None:
+    requested_fields = set(request.model_dump(exclude_unset=True).keys())
+    invalid_fields = requested_fields - NODE_FIELDS_MUTABLE
+    if invalid_fields:
+        invalid_list = ", ".join(sorted(invalid_fields))
+        return f"Unsupported node field update: {invalid_list}."
+
+    if node_running:
+        blocked_fields = sorted(field for field in requested_fields if field in NODE_FIELDS_EDITABLE_WHILE_STOPPED)
+        if blocked_fields:
+            blocked_list = ", ".join(blocked_fields)
+            return f"Stop the node before changing: {blocked_list}."
+
+    if "image" in requested_fields:
+        try:
+            TemplateService().validate_node_request(
+                str(node.get("type", "qemu")),
+                str(node.get("template", "")),
+                str(request.image or ""),
+            )
+        except TemplateError as exc:
+            return str(exc)
+
+    return None
+
+
+def _node_position(index: int, left: int, top: int, placement: str) -> tuple[int, int]:
+    if placement == "row":
+        return left + (index * 180), top
+
+    columns = 4
+    return left + ((index % columns) * 180), top + ((index // columns) * 140)
+
+
+def _build_node_payload(
+    *,
+    node_id: int,
+    request: NodeCreate | NodeBatchCreate,
+    template,
+    name: str,
+    left: int,
+    top: int,
+) -> dict:
+    provided_fields = request.model_fields_set
+    ethernet = request.ethernet if "ethernet" in provided_fields else template.ethernet
+    return {
+        "id": node_id,
+        "name": name,
+        "type": request.type,
+        "template": request.template,
+        "image": request.image,
+        "console": request.console if "console" in provided_fields else template.console,
+        "status": 0,
+        "delay": request.delay if "delay" in provided_fields else 0,
+        "cpu": request.cpu if "cpu" in provided_fields else template.cpu,
+        "ram": request.ram if "ram" in provided_fields else template.ram,
+        "ethernet": ethernet,
+        "cpulimit": template.cpulimit,
+        "uuid": str(uuid.uuid4()) if request.type == "qemu" else None,
+        "firstmac": _first_mac_for_node(node_id) if request.type == "qemu" else None,
+        "left": left,
+        "top": top,
+        "icon": request.icon if "icon" in provided_fields and request.icon else template.icon,
+        "width": "0",
+        "config": False,
+        "config_list": [],
+        "sat": 0,
+        "computed_sat": 0,
+        "interfaces": _default_interfaces(request.type, ethernet),
+    }
 
 
 @router.post("/")
@@ -307,6 +416,42 @@ async def list_nodes(
     }
 
 
+@router.get("/{lab_path:path}/node-catalog")
+async def node_catalog(
+    lab_path: str,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    catalog = TemplateService().build_node_catalog()
+    catalog["create_fields"] = NODE_CREATE_FIELDS
+    catalog["edit_fields"] = NODE_EDIT_FIELDS
+    catalog["runtime_editability"] = {
+        "always": sorted(NODE_FIELDS_EDITABLE_WHILE_RUNNING),
+        "stopped_only": sorted(NODE_FIELDS_EDITABLE_WHILE_STOPPED),
+        "immutable": ["type", "template", "uuid"],
+    }
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Node catalog loaded successfully.",
+        "data": catalog,
+    }
+
+
 @router.post("/{lab_path:path}/nodes")
 async def create_node(
     lab_path: str,
@@ -344,35 +489,14 @@ async def create_node(
             "message": str(exc),
         }
 
-    provided_fields = request.model_fields_set
-    node = {
-        "id": next_id,
-        "name": request.name,
-        "type": request.type,
-        "template": request.template,
-        "image": request.image,
-        "console": request.console if "console" in provided_fields else template.console,
-        "status": 0,
-        "delay": 0,
-        "cpu": request.cpu if "cpu" in provided_fields else template.cpu,
-        "ram": request.ram if "ram" in provided_fields else template.ram,
-        "ethernet": request.ethernet if "ethernet" in provided_fields else template.ethernet,
-        "cpulimit": template.cpulimit,
-        "uuid": str(uuid.uuid4()) if request.type == "qemu" else None,
-        "firstmac": _first_mac_for_node(next_id) if request.type == "qemu" else None,
-        "left": request.left,
-        "top": request.top,
-        "icon": template.icon,
-        "width": "0",
-        "config": False,
-        "config_list": [],
-        "sat": 0,
-        "computed_sat": 0,
-        "interfaces": _default_interfaces(
-            request.type,
-            request.ethernet if "ethernet" in provided_fields else template.ethernet,
-        ),
-    }
+    node = _build_node_payload(
+        node_id=next_id,
+        request=request,
+        template=template,
+        name=request.name,
+        left=request.left,
+        top=request.top,
+    )
     nodes[str(next_id)] = node
     LabService.write_lab_json_static(scoped_path, data)
 
@@ -381,6 +505,69 @@ async def create_node(
         "status": "success",
         "message": "Node created successfully.",
         "data": node,
+    }
+
+
+@router.post("/{lab_path:path}/nodes/batch")
+async def create_nodes_batch(
+    lab_path: str,
+    request: NodeBatchCreate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    nodes = data.setdefault("nodes", {})
+    next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
+    try:
+        template = TemplateService().validate_node_request(
+            request.type,
+            request.template,
+            request.image,
+        )
+    except TemplateError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+
+    created_nodes = []
+    for index in range(request.count):
+        node_id = next_id + index
+        left, top = _node_position(index, request.left, request.top, request.placement)
+        node = _build_node_payload(
+            node_id=node_id,
+            request=request,
+            template=template,
+            name=f"{request.name_prefix}-{index + 1}",
+            left=left,
+            top=top,
+        )
+        nodes[str(node_id)] = node
+        created_nodes.append(node)
+
+    LabService.write_lab_json_static(scoped_path, data)
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Nodes created successfully.",
+        "data": {
+            "nodes": created_nodes,
+        },
     }
 
 
@@ -454,6 +641,18 @@ async def update_node(
             "code": 404,
             "status": "fail",
             "message": "Node does not exist.",
+        }
+
+    validation_error = _validate_node_update_request(
+        node,
+        request,
+        _node_is_running(data, node_id),
+    )
+    if validation_error:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": validation_error,
         }
 
     for field, value in request.model_dump(exclude_unset=True).items():
