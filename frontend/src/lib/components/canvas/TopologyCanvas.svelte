@@ -766,21 +766,18 @@
     </Panel>
 
     <Panel position="top-right">
-      <div class="space-y-1.5 rounded-xl border border-gray-700 bg-gray-900/95 p-3 text-xs shadow-lg shadow-black/20 backdrop-blur">
-        <div class="flex items-center gap-2">
-          <span class="h-3 w-3 rounded-full bg-emerald-500"></span>
+      <div class="space-y-1 rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs shadow-lg shadow-black/20 backdrop-blur">
+        <div class="flex items-center gap-1.5">
+          <span class="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
           <span class="text-gray-200">Running</span>
         </div>
-        <div class="flex items-center gap-2">
-          <span class="h-3 w-3 rounded-full bg-gray-500"></span>
+        <div class="flex items-center gap-1.5">
+          <span class="h-2.5 w-2.5 rounded-full bg-gray-500"></span>
           <span class="text-gray-200">Stopped</span>
         </div>
-        <div class="flex items-center gap-2">
-          <span class="h-3 w-3 rounded-full bg-blue-500"></span>
+        <div class="flex items-center gap-1.5">
+          <span class="h-2.5 w-2.5 rounded-full bg-blue-500"></span>
           <span class="text-gray-200">Network</span>
-        </div>
-        <div class="border-t border-gray-800 pt-2 text-[10px] uppercase tracking-[0.24em] text-gray-500">
-          Drag nodes, connect handles, right-click for actions
         </div>
       </div>
     </Panel>
