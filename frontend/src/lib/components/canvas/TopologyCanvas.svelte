@@ -88,7 +88,7 @@
   const nodeColor = (node: Node) => {
     if (node.type === 'network') return '#3b82f6';
     if (node.data?.status === 2) return '#10b981';
-    return '#6b7280';
+    return '#4b5563';
   };
 
   function deepClone<T>(value: T): T {
@@ -130,7 +130,8 @@
           icon: node.icon,
           status: node.status,
           type: node.type,
-          template: node.template
+          template: node.template,
+          console: node.console
         },
         style: `width: ${node.width ? parseInt(node.width, 10) + 60 : 104}px;`
       });
@@ -145,7 +146,8 @@
         data: {
           label: network.name,
           icon: network.icon,
-          type: 'network'
+          type: 'network',
+          count: network.count ?? 0
         },
         style: `width: ${network.width ? network.width + 40 : 110}px;`
       });
@@ -167,7 +169,10 @@
       type: 'default',
       animated: false,
       style: `stroke: ${link.color || '#9ca3af'}; stroke-width: ${parseInt(link.width || '1', 10)}px;`,
-      labelStyle: 'fill: #d1d5db; font-size: 10px;'
+      labelStyle: 'fill: #d1d5db; font-size: 10px; font-family: var(--font-mono);',
+      labelBgStyle: 'fill: rgba(3, 7, 18, 0.92);',
+      labelBgPadding: [4, 2],
+      labelBgBorderRadius: 4
     }));
   }
 
@@ -732,9 +737,9 @@
     }}
   >
     <Background patternColor="#374151" gap={20} />
-    <Controls position="bottom-left" showLock={false}>
+    <Controls position="bottom-left" showLock={false} class="canvas-controls">
       <ControlButton
-        class="svelte-flow__controls-interactive"
+        class="canvas-controls__button"
         on:click={toggleCanvasLock}
         title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
         aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
@@ -746,10 +751,10 @@
         {/if}
       </ControlButton>
     </Controls>
-    <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" />
+    <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" class="canvas-minimap" />
 
     <Panel position="top-left">
-      <div class="rounded-full border border-gray-800 bg-gray-900/90 px-3 py-1.5 text-[10px] uppercase tracking-[0.24em] text-gray-500 shadow-lg">
+      <div class="rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.24em] text-gray-500 shadow-lg shadow-black/20">
         {#if saveState === 'saving'}
           Saving topology…
         {:else if saveState === 'saved'}
@@ -761,20 +766,20 @@
     </Panel>
 
     <Panel position="top-right">
-      <div class="space-y-1 rounded-lg border border-gray-700 bg-gray-800 p-3 text-xs">
+      <div class="space-y-1.5 rounded-xl border border-gray-700 bg-gray-900/95 p-3 text-xs shadow-lg shadow-black/20 backdrop-blur">
         <div class="flex items-center gap-2">
           <span class="h-3 w-3 rounded-full bg-emerald-500"></span>
-          <span>Running</span>
+          <span class="text-gray-200">Running</span>
         </div>
         <div class="flex items-center gap-2">
           <span class="h-3 w-3 rounded-full bg-gray-500"></span>
-          <span>Stopped</span>
+          <span class="text-gray-200">Stopped</span>
         </div>
         <div class="flex items-center gap-2">
           <span class="h-3 w-3 rounded-full bg-blue-500"></span>
-          <span>Network</span>
+          <span class="text-gray-200">Network</span>
         </div>
-        <div class="pt-2 text-[10px] uppercase tracking-[0.24em] text-gray-500">
+        <div class="border-t border-gray-800 pt-2 text-[10px] uppercase tracking-[0.24em] text-gray-500">
           Drag nodes, connect handles, right-click for actions
         </div>
       </div>
@@ -783,13 +788,13 @@
     {#if addMenuStep !== 'closed'}
       <Panel position="bottom-left">
         <div class="ml-14 flex items-end gap-3">
-          <div class="w-72 overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl">
+          <div class="w-72 overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl shadow-black/30 backdrop-blur">
             <div class="flex items-center justify-between border-b border-gray-800 px-3 py-2">
               <div class="flex items-center gap-2">
                 {#if addMenuStep === 'item'}
                   <button
                     type="button"
-                    class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 hover:border-blue-500/40 hover:text-white"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 transition hover:border-blue-500/40 hover:text-white"
                     aria-label="Back to add categories"
                     on:click={() => {
                       addMenuStep = 'kind';
@@ -811,7 +816,7 @@
               </div>
               <button
                 type="button"
-                class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 hover:border-blue-500/40 hover:text-white"
+                class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 transition hover:border-blue-500/40 hover:text-white"
                 aria-label="Close add menu"
                 on:click={closeAddMenu}
               >
@@ -823,7 +828,7 @@
               {#if addMenuStep === 'kind'}
                 <button
                   type="button"
-                  class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                  class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left transition hover:border-blue-500/40 hover:bg-gray-900"
                   on:click={() => openAddKind('node')}
                 >
                   <div class="text-[11px] font-medium text-gray-100">Node</div>
@@ -833,7 +838,7 @@
                 </button>
                 <button
                   type="button"
-                  class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                  class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left transition hover:border-blue-500/40 hover:bg-gray-900"
                   on:click={() => openAddKind('network')}
                 >
                   <div class="text-[11px] font-medium text-gray-100">Network</div>
@@ -854,7 +859,7 @@
                   {#each nodePaletteItems as item}
                     <button
                       type="button"
-                      class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                      class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left transition hover:border-blue-500/40 hover:bg-gray-900"
                       on:click={() => addItemFromMenu(item)}
                     >
                       <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
@@ -871,7 +876,7 @@
                   {#each networkPaletteItems as item}
                     <button
                       type="button"
-                      class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                      class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left transition hover:border-blue-500/40 hover:bg-gray-900"
                       on:click={() => addItemFromMenu(item)}
                     >
                       <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
@@ -889,7 +894,7 @@
         <div class="ml-14">
           <button
             type="button"
-            class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-100 shadow-2xl transition hover:bg-blue-500/25"
+            class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-100 shadow-2xl shadow-black/30 transition hover:bg-blue-500/25"
             aria-label="Open add element menu"
             aria-expanded="false"
             on:click={toggleAddMenu}
@@ -902,7 +907,7 @@
   </SvelteFlow>
 
   {#if selectedEdgeId}
-    <div class="absolute bottom-4 left-4 z-20 rounded-xl border border-gray-700 bg-gray-900/95 p-3 text-xs text-gray-200 shadow-lg">
+    <div class="absolute bottom-4 left-4 z-20 rounded-xl border border-gray-700 bg-gray-900/95 p-3 text-xs text-gray-200 shadow-lg shadow-black/20 backdrop-blur">
       <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Selected Link</div>
       <button
         type="button"
@@ -923,13 +928,16 @@
     <div
       role="menu"
       tabindex="-1"
-      class="fixed z-30 min-w-44 rounded-xl border border-gray-700 bg-gray-900/95 p-2 shadow-xl"
+      class="fixed z-30 min-w-52 rounded-xl border border-gray-700 bg-gray-900/95 p-2 shadow-xl shadow-black/30 backdrop-blur"
       style={`left: ${menu.x}px; top: ${menu.y}px;`}
       on:keydown|stopPropagation={() => {}}
       on:mousedown|stopPropagation
       on:mouseup|stopPropagation
       on:click|stopPropagation
     >
+      <div class="px-2 py-1 text-[9px] uppercase tracking-[0.22em] text-gray-500">
+        {menu.targetType === 'node' ? 'Node actions' : menu.targetType === 'network' ? 'Network actions' : 'Link actions'}
+      </div>
       {#if menu?.targetType === 'node'}
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('start', menu?.targetId ?? '')}>Start</button>
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('stop', menu?.targetId ?? '')}>Stop</button>
@@ -958,13 +966,53 @@
 </div>
 
 <style>
+  :global(.canvas-controls) {
+    display: flex;
+    gap: 0.35rem;
+    border-radius: 9999px;
+    border: 1px solid rgb(55 65 81 / 0.95);
+    background: rgb(17 24 39 / 0.95);
+    padding: 0.25rem;
+    box-shadow: 0 20px 40px -20px rgb(0 0 0 / 0.65);
+  }
+
+  :global(.canvas-controls button),
+  :global(.canvas-controls__button) {
+    border-radius: 0.5rem;
+    border: 1px solid rgb(31 41 55 / 1);
+    background: rgb(3 7 18 / 0.85);
+    color: rgb(209 213 219 / 1);
+    transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
+  }
+
+  :global(.canvas-controls button:hover),
+  :global(.canvas-controls__button:hover) {
+    border-color: rgb(59 130 246 / 0.45);
+    color: white;
+    background: rgb(17 24 39 / 1);
+  }
+
+  :global(.canvas-minimap) {
+    overflow: hidden;
+    border-radius: 0.75rem;
+    border: 1px solid rgb(55 65 81 / 1);
+    background: rgb(17 24 39 / 0.92);
+    box-shadow: 0 20px 40px -20px rgb(0 0 0 / 0.65);
+  }
+
+  :global(.canvas-minimap svg) {
+    background: transparent;
+  }
+
   .menu-item {
     display: block;
     width: 100%;
     border-radius: 0.5rem;
-    padding: 0.45rem 0.65rem;
+    padding: 0.6rem 0.75rem;
     text-align: left;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
     color: rgb(229 231 235);
   }
 
