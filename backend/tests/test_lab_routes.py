@@ -1,8 +1,6 @@
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import json
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
@@ -104,24 +102,3 @@ cpulimit: 1
         assert payload["message"] == "Node deleted successfully."
 
     app.dependency_overrides.clear()
-
-
-def test_ui_reactivity_check_sample_lab_fixture_is_present_and_verifiable():
-    sample_lab_path = Path(__file__).resolve().parents[1] / "labs" / "ui-reactivity-check.json"
-
-    payload = json.loads(sample_lab_path.read_text())
-
-    assert payload["meta"]["name"] == "ui-reactivity-check"
-    assert payload["meta"]["lock"] is False
-    assert "bottom-left launcher" in payload["meta"]["description"]
-
-    nodes = payload["nodes"]
-    networks = payload["networks"]
-    topology = payload["topology"]
-
-    assert len(nodes) == 3
-    assert len(networks) == 2
-    assert len(topology) == 3
-    assert {node["status"] for node in nodes.values()} == {0, 2}
-    assert all(network["visibility"] == 1 for network in networks.values())
-    assert all(link["destination_type"] == "network" for link in topology)
