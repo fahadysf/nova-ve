@@ -5,9 +5,10 @@
   import { createEventDispatcher } from 'svelte';
   import { onMount } from 'svelte';
   import { writable } from 'svelte/store';
-  import { ChevronLeft, Plus } from 'lucide-svelte';
+  import { ChevronLeft, Lock, LockOpen, Plus } from 'lucide-svelte';
   import {
     Background,
+    ControlButton,
     Controls,
     MiniMap,
     Panel,
@@ -74,6 +75,7 @@
   let networkPaletteItems: PaletteNetworkItem[] = [];
   let addMenuStep: 'closed' | 'kind' | 'item' = 'closed';
   let addMenuKind: PaletteItem['kind'] | null = null;
+  let canvasLocked = false;
   let menu:
     | {
         x: number;
@@ -195,6 +197,12 @@
   function openAddKind(kind: PaletteItem['kind']) {
     addMenuKind = kind;
     addMenuStep = 'item';
+  }
+
+  function toggleCanvasLock() {
+    canvasLocked = !canvasLocked;
+    closeMenu();
+    closeAddMenu();
   }
 
   function eventPoint(event: MouseEvent | TouchEvent): { x: number; y: number } {
@@ -670,11 +678,23 @@
     edges={edgesStore}
     {nodeTypes}
     fitView
-    nodesConnectable
+    nodesConnectable={!canvasLocked}
+    nodesDraggable={!canvasLocked}
+    elementsSelectable={!canvasLocked}
     onconnect={onConnect}
     colorMode="dark"
     minZoom={0.1}
     maxZoom={2}
+    panOnDrag={!canvasLocked}
+    panOnScroll={!canvasLocked}
+    panActivationKey={canvasLocked ? null : undefined}
+    zoomOnScroll={!canvasLocked}
+    zoomOnPinch={!canvasLocked}
+    zoomOnDoubleClick={!canvasLocked}
+    zoomActivationKey={canvasLocked ? null : undefined}
+    selectionOnDrag={!canvasLocked}
+    autoPanOnConnect={!canvasLocked}
+    autoPanOnNodeDrag={!canvasLocked}
     defaultEdgeOptions={{ type: 'default' }}
     on:nodedragstop={handleNodeDragStop}
     on:edgeclick={(event: CustomEvent<{ edge: Edge }>) => {
@@ -712,7 +732,20 @@
     }}
   >
     <Background patternColor="#374151" gap={20} />
-    <Controls />
+    <Controls position="bottom-left" showLock={false}>
+      <ControlButton
+        class="svelte-flow__controls-interactive"
+        on:click={toggleCanvasLock}
+        title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
+        aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
+      >
+        {#if canvasLocked}
+          <Lock class="h-3.5 w-3.5" />
+        {:else}
+          <LockOpen class="h-3.5 w-3.5" />
+        {/if}
+      </ControlButton>
+    </Controls>
     <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" />
 
     <Panel position="top-left">
@@ -747,9 +780,9 @@
       </div>
     </Panel>
 
-    <Panel position="bottom-right">
-      <div class="flex items-end gap-3">
-        {#if addMenuStep !== 'closed'}
+    {#if addMenuStep !== 'closed'}
+      <Panel position="bottom-left">
+        <div class="ml-14 flex items-end gap-3">
           <div class="w-72 overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl">
             <div class="flex items-center justify-between border-b border-gray-800 px-3 py-2">
               <div class="flex items-center gap-2">
@@ -849,19 +882,23 @@
               {/if}
             </div>
           </div>
-        {/if}
-
-        <button
-          type="button"
-          class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-100 shadow-2xl transition hover:bg-blue-500/25"
-          aria-label={addMenuStep === 'closed' ? 'Open add element menu' : 'Close add element menu'}
-          aria-expanded={addMenuStep !== 'closed'}
-          on:click={toggleAddMenu}
-        >
-          <Plus class="h-5 w-5" />
-        </button>
-      </div>
-    </Panel>
+        </div>
+      </Panel>
+    {:else}
+      <Panel position="bottom-left">
+        <div class="ml-14">
+          <button
+            type="button"
+            class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-100 shadow-2xl transition hover:bg-blue-500/25"
+            aria-label="Open add element menu"
+            aria-expanded="false"
+            on:click={toggleAddMenu}
+          >
+            <Plus class="h-5 w-5" />
+          </button>
+        </div>
+      </Panel>
+    {/if}
   </SvelteFlow>
 
   {#if selectedEdgeId}
