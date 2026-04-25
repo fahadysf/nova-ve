@@ -5,6 +5,7 @@
   import { onMount, tick } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
+  import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-svelte';
   import { authStore } from '$lib/stores/auth';
   import { apiGetData, ApiError } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
@@ -28,6 +29,7 @@
     src: string;
     requestId: number;
   };
+  type RailSectionKey = 'summary' | 'inventory' | 'nodes' | 'networks';
   type ConsoleWorkspaceState = ConsoleBounds & {
     tabs: ConsoleTab[];
     activeTabId: number | null;
@@ -42,12 +44,21 @@
   let consoleWorkspace: ConsoleWorkspaceState | null = null;
   let activeConsoleTabState: ConsoleTab | null = null;
   let consoleTabCounter = 0;
-  let summaryCollapsed = false;
-  let inventoryCollapsed = false;
+  let railSections: Record<RailSectionKey, boolean> = {
+    summary: true,
+    inventory: true,
+    nodes: true,
+    networks: true
+  };
   let lastLoadedRoute = '';
   let dragState: { startX: number; startY: number; originX: number; originY: number } | null = null;
   let resizeState: { startX: number; startY: number; width: number; height: number } | null = null;
   let labRefreshInFlight = false;
+
+  const compactIconButtonClass =
+    'inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 transition hover:border-blue-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
+  const compactActionButtonClass =
+    'inline-flex items-center rounded-md border border-gray-800 bg-gray-950/80 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 transition hover:border-blue-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
 
   $: labId = $page.params.id ?? '';
   $: isLabIndexRoute = labId === '';
@@ -441,12 +452,11 @@
     resizeState = null;
   }
 
-  function toggleSummaryCollapsed() {
-    summaryCollapsed = !summaryCollapsed;
-  }
-
-  function toggleInventoryCollapsed() {
-    inventoryCollapsed = !inventoryCollapsed;
+  function toggleRailSection(section: RailSectionKey) {
+    railSections = {
+      ...railSections,
+      [section]: !railSections[section]
+    };
   }
 </script>
 
@@ -468,7 +478,7 @@
   </header>
 
   {#if loading}
-    <div class="grid flex-1 gap-4 p-6 lg:grid-cols-[18rem_1fr]">
+    <div class="grid flex-1 gap-3 p-4 lg:grid-cols-[15rem_1fr]">
       <div class="animate-pulse rounded-2xl border border-gray-800 bg-gray-900 p-5">
         <div class="h-5 w-2/3 rounded bg-gray-700"></div>
         <div class="mt-4 h-3 w-full rounded bg-gray-800"></div>
@@ -514,136 +524,194 @@
       {/if}
     </div>
   {:else}
-    <div class="relative flex flex-1 gap-3 overflow-hidden p-4">
-      <aside class="shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 transition-[width] duration-200" style={`width: ${summaryCollapsed ? '3.5rem' : '15rem'}`}>
-        {#if summaryCollapsed}
-          <button class="flex h-full w-full flex-col items-center justify-between px-2 py-4 text-[10px] uppercase tracking-[0.3em] text-gray-500 hover:text-white" on:click={toggleSummaryCollapsed}>
-            <span>»</span>
-            <span class="console-rail-label">Lab Summary</span>
-            <span></span>
-          </button>
-        {:else}
-          <div class="p-4">
-            <div class="flex items-center justify-between">
-              <h2 class="text-sm uppercase tracking-[0.24em] text-gray-500">Lab Summary</h2>
-              <button class="rounded-md border border-gray-700 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-blue-500 hover:text-white" on:click={toggleSummaryCollapsed}>
-                Collapse
-              </button>
-            </div>
-            <div class="mt-3 space-y-3 text-xs">
-              <div>
-                <div class="text-gray-500">Owner</div>
-                <div class="mt-1 text-gray-100">{labMeta?.owner || 'n/a'}</div>
-              </div>
-              <div>
-                <div class="text-gray-500">Author</div>
-                <div class="mt-1 text-gray-100">{labMeta?.author || 'n/a'}</div>
-              </div>
-              <div>
-                <div class="text-gray-500">Path</div>
-                <div class="mt-1 break-all text-gray-300">{labMeta?.path || labId}</div>
-              </div>
-              <div>
-                <div class="text-gray-500">Description</div>
-                <div class="mt-1 text-gray-300">{labMeta?.description || 'No description set.'}</div>
-              </div>
-            </div>
+    <div class="relative flex flex-1 gap-2.5 overflow-hidden p-3">
+      <aside class="min-h-0 shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/95" style="width: 15rem;">
+        <div class="flex h-full flex-col">
+          <div class="flex items-center justify-between border-b border-gray-800 px-3 py-2.5">
+            <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500">Lab Rail</div>
+            <button
+              type="button"
+              class={compactIconButtonClass}
+              aria-label="Refresh lab"
+              title="Refresh lab"
+              on:click={loadLab}
+              disabled={labRefreshInFlight}
+            >
+              <RefreshCw class={`h-3.5 w-3.5 ${labRefreshInFlight ? 'animate-spin' : ''}`} />
+            </button>
           </div>
-        {/if}
-      </aside>
 
-      <aside class="shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900 transition-[width] duration-200" style={`width: ${inventoryCollapsed ? '3.5rem' : '19rem'}`}>
-        {#if inventoryCollapsed}
-          <button class="flex h-full w-full flex-col items-center justify-between px-2 py-4 text-[10px] uppercase tracking-[0.3em] text-gray-500 hover:text-white" on:click={toggleInventoryCollapsed}>
-            <span>»</span>
-            <span class="console-rail-label">Inventory</span>
-            <span></span>
-          </button>
-        {:else}
-          <div class="p-4">
-            <div class="flex items-center justify-between">
-              <h2 class="text-sm uppercase tracking-[0.24em] text-gray-500">Inventory</h2>
-              <div class="flex items-center gap-2">
+          <div class="min-h-0 space-y-3 overflow-y-auto p-3 text-xs">
+            <section class="rounded-xl border border-gray-800 bg-gray-950/55">
+              <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3 py-2">
                 <button
-                  class="rounded-md border border-gray-700 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-blue-500 hover:text-white"
-                  on:click={loadLab}
+                  type="button"
+                  class="flex min-w-0 flex-1 items-center gap-2 text-left text-gray-200"
+                  aria-label={railSections.summary ? 'Collapse summary section' : 'Expand summary section'}
+                  on:click={() => toggleRailSection('summary')}
                 >
-                  Refresh
-                </button>
-                <button class="rounded-md border border-gray-700 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-blue-500 hover:text-white" on:click={toggleInventoryCollapsed}>
-                  Collapse
+                  {#if railSections.summary}
+                    <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
+                  {:else}
+                    <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
+                  {/if}
+                  <span class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Summary</span>
                 </button>
               </div>
-            </div>
 
-            <div class="mt-4">
-              <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Nodes</div>
-              {#if nodeList.length === 0}
-                <div class="mt-2 rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-500">
-                  No nodes in this lab.
-                </div>
-              {:else}
-                <div class="mt-2 space-y-2">
-                  {#each nodeList as node}
-                    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs">
-                      <div class="flex items-center justify-between gap-3">
-                        <div class="font-medium text-gray-100">{node.name}</div>
-                        <span class={`rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.2em] ${node.status === 2 ? 'bg-emerald-500/20 text-emerald-200' : 'bg-gray-800 text-gray-300'}`}>
-                          {node.status === 2 ? 'running' : 'stopped'}
-                        </span>
-                      </div>
-                      <div class="mt-2 grid grid-cols-2 gap-1.5 text-[11px] text-gray-400">
-                        <div>Type: {node.type}</div>
-                        <div>Console: {node.console}</div>
-                        <div>CPU: {node.cpu}</div>
-                        <div>RAM: {node.ram} MB</div>
-                        <div>NICs: {node.interfaces?.length ?? 0}</div>
-                        <div>ID: {node.id}</div>
-                      </div>
-                      <div class="mt-3 flex items-center gap-2">
-                        <button
-                          class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 hover:border-blue-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
-                          on:click={() => openConsole(node)}
-                          disabled={node.status !== 2}
-                        >
-                          Open Console
-                        </button>
-                      </div>
-                    </div>
-                  {/each}
+              {#if railSections.summary}
+                <div class="space-y-3 px-3 py-2.5">
+                  <div>
+                    <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Owner</div>
+                    <div class="mt-1 text-[11px] text-gray-100">{labMeta?.owner || 'n/a'}</div>
+                  </div>
+                  <div>
+                    <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Author</div>
+                    <div class="mt-1 text-[11px] text-gray-100">{labMeta?.author || 'n/a'}</div>
+                  </div>
+                  <div>
+                    <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Path</div>
+                    <div class="mt-1 break-all text-[11px] text-gray-300">{labMeta?.path || labId}</div>
+                  </div>
+                  <div>
+                    <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Description</div>
+                    <div class="mt-1 text-[11px] leading-5 text-gray-300">{labMeta?.description || 'No description set.'}</div>
+                  </div>
                 </div>
               {/if}
-            </div>
+            </section>
 
-            <div class="mt-6">
-              <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Networks</div>
-              {#if networkList.length === 0}
-                <div class="mt-2 rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs text-gray-500">
-                  No networks in this lab.
+            <section class="rounded-xl border border-gray-800 bg-gray-950/55">
+              <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3 py-2">
+                <button
+                  type="button"
+                  class="flex min-w-0 flex-1 items-center gap-2 text-left text-gray-200"
+                  aria-label={railSections.inventory ? 'Collapse inventory section' : 'Expand inventory section'}
+                  on:click={() => toggleRailSection('inventory')}
+                >
+                  {#if railSections.inventory}
+                    <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
+                  {:else}
+                    <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
+                  {/if}
+                  <span class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Inventory</span>
+                </button>
+                <div class="text-[10px] uppercase tracking-[0.18em] text-gray-600">
+                  {nodeList.length}n · {networkList.length}net
                 </div>
-              {:else}
-                <div class="mt-2 space-y-2">
-                  {#each networkList as network}
-                    <div class="rounded-xl border border-gray-800 bg-gray-950/60 p-3 text-xs">
-                      <div class="flex items-center justify-between gap-3">
-                        <div class="font-medium text-gray-100">{network.name}</div>
-                        <span class="rounded-full bg-blue-500/20 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-blue-200">
-                          {network.type}
-                        </span>
-                      </div>
-                      <div class="mt-2 grid grid-cols-2 gap-1.5 text-[11px] text-gray-400">
-                        <div>ID: {network.id}</div>
-                        <div>Links: {network.count ?? 0}</div>
-                        <div>Visible: {network.visibility ? 'yes' : 'no'}</div>
-                        <div>Left/Top: {network.left}, {network.top}</div>
-                      </div>
+              </div>
+
+              {#if railSections.inventory}
+                <div class="space-y-2 px-3 py-2.5">
+                  <div class="rounded-lg border border-gray-800 bg-gray-950/70">
+                    <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-2.5 py-2">
+                      <button
+                        type="button"
+                        class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        aria-label={railSections.nodes ? 'Collapse nodes section' : 'Expand nodes section'}
+                        on:click={() => toggleRailSection('nodes')}
+                      >
+                        {#if railSections.nodes}
+                          <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
+                        {:else}
+                          <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
+                        {/if}
+                        <span class="text-[10px] uppercase tracking-[0.2em] text-gray-500">Nodes</span>
+                      </button>
+                      <span class="text-[10px] text-gray-600">{nodeList.length}</span>
                     </div>
-                  {/each}
+
+                    {#if railSections.nodes}
+                      {#if nodeList.length === 0}
+                        <div class="px-2.5 py-2 text-[11px] text-gray-500">No nodes in this lab.</div>
+                      {:else}
+                        <div class="space-y-1.5 px-2.5 py-2">
+                          {#each nodeList as node}
+                            <div class="rounded-lg border border-gray-800 bg-gray-900/70 p-2">
+                              <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0">
+                                  <div class="truncate text-[11px] font-medium text-gray-100">{node.name}</div>
+                                  <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">
+                                    {node.type} · {node.console}
+                                  </div>
+                                </div>
+                                <span class={`rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-[0.16em] ${node.status === 2 ? 'bg-emerald-500/20 text-emerald-200' : 'bg-gray-800 text-gray-300'}`}>
+                                  {node.status === 2 ? 'run' : 'stop'}
+                                </span>
+                              </div>
+                              <div class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-gray-400">
+                                <div>CPU {node.cpu}</div>
+                                <div>RAM {node.ram}</div>
+                                <div>NIC {node.interfaces?.length ?? 0}</div>
+                                <div>ID {node.id}</div>
+                              </div>
+                              <div class="mt-2">
+                                <button
+                                  class={compactActionButtonClass}
+                                  on:click={() => openConsole(node)}
+                                  disabled={node.status !== 2}
+                                >
+                                  Console
+                                </button>
+                              </div>
+                            </div>
+                          {/each}
+                        </div>
+                      {/if}
+                    {/if}
+                  </div>
+
+                  <div class="rounded-lg border border-gray-800 bg-gray-950/70">
+                    <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-2.5 py-2">
+                      <button
+                        type="button"
+                        class="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        aria-label={railSections.networks ? 'Collapse networks section' : 'Expand networks section'}
+                        on:click={() => toggleRailSection('networks')}
+                      >
+                        {#if railSections.networks}
+                          <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
+                        {:else}
+                          <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
+                        {/if}
+                        <span class="text-[10px] uppercase tracking-[0.2em] text-gray-500">Networks</span>
+                      </button>
+                      <span class="text-[10px] text-gray-600">{networkList.length}</span>
+                    </div>
+
+                    {#if railSections.networks}
+                      {#if networkList.length === 0}
+                        <div class="px-2.5 py-2 text-[11px] text-gray-500">No networks in this lab.</div>
+                      {:else}
+                        <div class="space-y-1.5 px-2.5 py-2">
+                          {#each networkList as network}
+                            <div class="rounded-lg border border-gray-800 bg-gray-900/70 p-2">
+                              <div class="flex items-start justify-between gap-2">
+                                <div class="min-w-0">
+                                  <div class="truncate text-[11px] font-medium text-gray-100">{network.name}</div>
+                                  <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">{network.type}</div>
+                                </div>
+                                <span class="rounded-full bg-blue-500/20 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.16em] text-blue-200">
+                                  {network.count ?? 0}
+                                </span>
+                              </div>
+                              <div class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-gray-400">
+                                <div>ID {network.id}</div>
+                                <div>Links {network.count ?? 0}</div>
+                                <div>Visible {network.visibility ? 'yes' : 'no'}</div>
+                                <div>{network.left}, {network.top}</div>
+                              </div>
+                            </div>
+                          {/each}
+                        </div>
+                      {/if}
+                    {/if}
+                  </div>
                 </div>
               {/if}
-            </div>
+            </section>
           </div>
-        {/if}
+        </div>
       </aside>
 
       <div class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">

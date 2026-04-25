@@ -5,6 +5,7 @@
   import { createEventDispatcher } from 'svelte';
   import { onMount } from 'svelte';
   import { writable } from 'svelte/store';
+  import { ChevronLeft, Plus } from 'lucide-svelte';
   import {
     Background,
     Controls,
@@ -27,6 +28,22 @@
   export let nodes: Record<string, NodeData> = {};
   export let networks: Record<string, NetworkData> = {};
   export let topology: TopologyLink[] = [];
+
+  type PaletteNodeItem = {
+    kind: 'node';
+    title: string;
+    subtitle: string;
+    type: string;
+    template: string;
+    image: string;
+  };
+  type PaletteNetworkItem = {
+    kind: 'network';
+    title: string;
+    subtitle: string;
+    networkType: string;
+  };
+  type PaletteItem = PaletteNodeItem | PaletteNetworkItem;
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData };
@@ -52,10 +69,11 @@
   let saveState: 'idle' | 'saving' | 'saved' = 'idle';
   let selectedEdgeId: string | null = null;
   let paletteLoading = true;
-  let paletteItems: Array<
-    | { kind: 'node'; title: string; subtitle: string; type: string; template: string; image: string }
-    | { kind: 'network'; title: string; subtitle: string; networkType: string }
-  > = [];
+  let paletteItems: PaletteItem[] = [];
+  let nodePaletteItems: PaletteNodeItem[] = [];
+  let networkPaletteItems: PaletteNetworkItem[] = [];
+  let addMenuStep: 'closed' | 'kind' | 'item' = 'closed';
+  let addMenuKind: PaletteItem['kind'] | null = null;
   let menu:
     | {
         x: number;
@@ -91,6 +109,11 @@
   $: if (!Object.keys(localNodes).length && !Object.keys(localNetworks).length && !localTopology.length) {
     syncLocalState();
   }
+
+  $: nodePaletteItems = paletteItems.filter((item): item is PaletteNodeItem => item.kind === 'node');
+  $: networkPaletteItems = paletteItems.filter(
+    (item): item is PaletteNetworkItem => item.kind === 'network'
+  );
 
   function buildFlowNodes(): Node[] {
     const flowNodes: Node[] = [];
@@ -153,6 +176,25 @@
 
   function closeMenu() {
     menu = null;
+  }
+
+  function closeAddMenu() {
+    addMenuStep = 'closed';
+    addMenuKind = null;
+  }
+
+  function toggleAddMenu() {
+    if (addMenuStep === 'closed') {
+      addMenuStep = 'kind';
+      return;
+    }
+
+    closeAddMenu();
+  }
+
+  function openAddKind(kind: PaletteItem['kind']) {
+    addMenuKind = kind;
+    addMenuStep = 'item';
   }
 
   function eventPoint(event: MouseEvent | TouchEvent): { x: number; y: number } {
@@ -580,7 +622,7 @@
 
   async function createNodeAt(
     position: { x: number; y: number },
-    payload: { type: string; template: string; image: string; title: string }
+    payload: PaletteNodeItem
   ) {
     const response = await apiRequest<NodeData>(`/labs/${labId}/nodes`, {
       method: 'POST',
@@ -600,29 +642,7 @@
     dispatch('changed', { reason: 'node-create' });
   }
 
-  function paletteDragData(item: (typeof paletteItems)[number]): string {
-    return JSON.stringify(item);
-  }
-
-  async function handleCanvasDrop(event: DragEvent) {
-    event.preventDefault();
-    const raw = event.dataTransfer?.getData('application/nova-ve-palette');
-    if (!raw) {
-      return;
-    }
-
-    const payload = JSON.parse(raw) as (typeof paletteItems)[number];
-    const position = screenToFlowPosition({ x: event.clientX, y: event.clientY }, { snapToGrid: true });
-
-    if (payload.kind === 'network') {
-      await createNetworkAt(position, payload.networkType);
-      return;
-    }
-
-    await createNodeAt(position, payload);
-  }
-
-  async function addPaletteItem(item: (typeof paletteItems)[number]) {
+  async function addPaletteItem(item: PaletteItem) {
     const viewport = typeof window !== 'undefined'
       ? screenToFlowPosition(
           { x: Math.round(window.innerWidth * 0.5), y: Math.round(window.innerHeight * 0.5) },
@@ -636,6 +656,11 @@
     }
 
     await createNodeAt(viewport, item);
+  }
+
+  async function addItemFromMenu(item: PaletteItem) {
+    await addPaletteItem(item);
+    closeAddMenu();
   }
 </script>
 
@@ -655,11 +680,13 @@
     on:edgeclick={(event: CustomEvent<{ edge: Edge }>) => {
       selectedEdgeId = event.detail.edge.id;
       closeMenu();
+      closeAddMenu();
     }}
     on:edgecontextmenu={(event: CustomEvent<{ edge: Edge; event: MouseEvent | TouchEvent }>) => {
       event.detail.event.preventDefault();
       const point = eventPoint(event.detail.event);
       selectedEdgeId = event.detail.edge.id;
+      closeAddMenu();
       menu = {
         x: point.x,
         y: point.y,
@@ -670,6 +697,7 @@
     on:nodecontextmenu={(event: CustomEvent<{ node: Node; event: MouseEvent | TouchEvent }>) => {
       event.detail.event.preventDefault();
       const point = eventPoint(event.detail.event);
+      closeAddMenu();
       menu = {
         x: point.x,
         y: point.y,
@@ -680,56 +708,22 @@
     on:paneclick={() => {
       selectedEdgeId = null;
       closeMenu();
+      closeAddMenu();
     }}
-    on:dragover={(event) => {
-      event.preventDefault();
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = 'move';
-      }
-    }}
-    on:drop={handleCanvasDrop}
   >
     <Background patternColor="#374151" gap={20} />
     <Controls />
     <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" />
 
     <Panel position="top-left">
-      <div class="space-y-3 rounded-lg border border-gray-700 bg-gray-900/95 p-3 text-xs text-gray-300">
-        <div class="uppercase tracking-[0.24em] text-gray-500">
-          {#if saveState === 'saving'}
-            Saving topology…
-          {:else if saveState === 'saved'}
-            Topology saved
-          {:else}
-            Topology editor
-          {/if}
-        </div>
-        <div class="space-y-2 border-t border-gray-800 pt-3">
-          <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Palette</div>
-          {#if paletteLoading}
-            <div class="rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
-              Loading templates…
-            </div>
-          {:else}
-            {#each paletteItems as item}
-              <button
-                type="button"
-                draggable="true"
-                class="block w-56 rounded-md border border-gray-800 bg-gray-950/80 px-3 py-2 text-left hover:border-blue-500/40 hover:bg-gray-900"
-                on:click={() => addPaletteItem(item)}
-                on:dragstart={(event) => {
-                  event.dataTransfer?.setData('application/nova-ve-palette', paletteDragData(item));
-                  if (event.dataTransfer) {
-                    event.dataTransfer.effectAllowed = 'move';
-                  }
-                }}
-              >
-                <div class="font-medium text-gray-100">{item.title}</div>
-                <div class="mt-1 text-[11px] uppercase tracking-[0.2em] text-gray-500">{item.subtitle}</div>
-              </button>
-            {/each}
-          {/if}
-        </div>
+      <div class="rounded-full border border-gray-800 bg-gray-900/90 px-3 py-1.5 text-[10px] uppercase tracking-[0.24em] text-gray-500 shadow-lg">
+        {#if saveState === 'saving'}
+          Saving topology…
+        {:else if saveState === 'saved'}
+          Topology saved
+        {:else}
+          Topology editor
+        {/if}
       </div>
     </Panel>
 
@@ -750,6 +744,122 @@
         <div class="pt-2 text-[10px] uppercase tracking-[0.24em] text-gray-500">
           Drag nodes, connect handles, right-click for actions
         </div>
+      </div>
+    </Panel>
+
+    <Panel position="bottom-right">
+      <div class="flex items-end gap-3">
+        {#if addMenuStep !== 'closed'}
+          <div class="w-72 overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl">
+            <div class="flex items-center justify-between border-b border-gray-800 px-3 py-2">
+              <div class="flex items-center gap-2">
+                {#if addMenuStep === 'item'}
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 hover:border-blue-500/40 hover:text-white"
+                    aria-label="Back to add categories"
+                    on:click={() => {
+                      addMenuStep = 'kind';
+                      addMenuKind = null;
+                    }}
+                  >
+                    <ChevronLeft class="h-4 w-4" />
+                  </button>
+                {/if}
+                <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">
+                  {#if addMenuStep === 'kind'}
+                    Add element
+                  {:else if addMenuKind === 'node'}
+                    Choose node
+                  {:else}
+                    Choose network
+                  {/if}
+                </div>
+              </div>
+              <button
+                type="button"
+                class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 hover:border-blue-500/40 hover:text-white"
+                aria-label="Close add menu"
+                on:click={closeAddMenu}
+              >
+                ×
+              </button>
+            </div>
+
+            <div class="max-h-80 space-y-2 overflow-y-auto p-2">
+              {#if addMenuStep === 'kind'}
+                <button
+                  type="button"
+                  class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                  on:click={() => openAddKind('node')}
+                >
+                  <div class="text-[11px] font-medium text-gray-100">Node</div>
+                  <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">
+                    Choose a template and image
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                  on:click={() => openAddKind('network')}
+                >
+                  <div class="text-[11px] font-medium text-gray-100">Network</div>
+                  <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">
+                    Choose a network container type
+                  </div>
+                </button>
+              {:else if addMenuKind === 'node'}
+                {#if paletteLoading}
+                  <div class="rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
+                    Loading templates…
+                  </div>
+                {:else if nodePaletteItems.length === 0}
+                  <div class="rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
+                    No node templates are available.
+                  </div>
+                {:else}
+                  {#each nodePaletteItems as item}
+                    <button
+                      type="button"
+                      class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                      on:click={() => addItemFromMenu(item)}
+                    >
+                      <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
+                      <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">{item.subtitle}</div>
+                    </button>
+                  {/each}
+                {/if}
+              {:else}
+                {#if networkPaletteItems.length === 0}
+                  <div class="rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2 text-[11px] text-gray-500">
+                    No network types are available.
+                  </div>
+                {:else}
+                  {#each networkPaletteItems as item}
+                    <button
+                      type="button"
+                      class="block w-full rounded-xl border border-gray-800 bg-gray-950/80 px-3 py-2.5 text-left hover:border-blue-500/40 hover:bg-gray-900"
+                      on:click={() => addItemFromMenu(item)}
+                    >
+                      <div class="text-[11px] font-medium text-gray-100">{item.title}</div>
+                      <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">{item.subtitle}</div>
+                    </button>
+                  {/each}
+                {/if}
+              {/if}
+            </div>
+          </div>
+        {/if}
+
+        <button
+          type="button"
+          class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-100 shadow-2xl transition hover:bg-blue-500/25"
+          aria-label={addMenuStep === 'closed' ? 'Open add element menu' : 'Close add element menu'}
+          aria-expanded={addMenuStep !== 'closed'}
+          on:click={toggleAddMenu}
+        >
+          <Plus class="h-5 w-5" />
+        </button>
       </div>
     </Panel>
   </SvelteFlow>
@@ -778,6 +888,7 @@
       tabindex="-1"
       class="fixed z-30 min-w-44 rounded-xl border border-gray-700 bg-gray-900/95 p-2 shadow-xl"
       style={`left: ${menu.x}px; top: ${menu.y}px;`}
+      on:keydown|stopPropagation={() => {}}
       on:mousedown|stopPropagation
       on:mouseup|stopPropagation
       on:click|stopPropagation
@@ -814,7 +925,7 @@
     display: block;
     width: 100%;
     border-radius: 0.5rem;
-    padding: 0.6rem 0.8rem;
+    padding: 0.45rem 0.65rem;
     text-align: left;
     font-size: 0.75rem;
     color: rgb(229 231 235);
