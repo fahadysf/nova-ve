@@ -225,9 +225,9 @@
     <div class="space-y-6">
       <section class="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-gray-800 bg-gray-900/95 px-5 py-4">
         <div>
-          <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500">Labs Browser</div>
+          <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Labs Browser</div>
           <h1 class="mt-3 text-xl font-semibold tracking-tight text-gray-100">Labs</h1>
-          <div class="mt-3 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.2em] text-gray-500">
+          <div class="mt-3 flex flex-wrap items-center gap-2 text-[10px] uppercase tracking-[0.05em] text-gray-500">
             <button class="transition hover:text-white" on:click={goToRoot}>Root</button>
             {#if currentFolder}
               <span>/</span>
@@ -248,21 +248,21 @@
 
         <div class="flex flex-wrap items-center gap-2">
           <button
-            class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 transition hover:border-blue-500 hover:text-white disabled:opacity-40"
+            class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white disabled:opacity-40"
             disabled={!currentFolder || busy}
             on:click={goUp}
           >
             Up
           </button>
           <button
-            class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 transition hover:border-blue-500 hover:text-white disabled:opacity-40"
+            class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white disabled:opacity-40"
             disabled={busy}
             on:click={createFolder}
           >
             New Folder
           </button>
           <button
-            class="rounded-md border border-blue-500 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-blue-200 transition hover:bg-blue-500/10 disabled:opacity-40"
+            class="rounded-md border border-blue-500 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-blue-200 transition hover:bg-blue-500/10 disabled:opacity-40"
             disabled={busy}
             on:click={createLab}
           >
@@ -274,7 +274,7 @@
       {#if loading}
         <div class="space-y-6">
           <section class="space-y-3">
-            <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Folders</div>
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Folders</div>
             <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
               {#each Array.from({ length: 3 }) as _}
                 <div class="animate-pulse rounded-lg border border-gray-800 bg-gray-800 p-4" aria-hidden="true">
@@ -287,7 +287,7 @@
           </section>
 
           <section class="space-y-3">
-            <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Labs</div>
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Labs</div>
             <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
               {#each Array.from({ length: 3 }) as _}
                 <div class="animate-pulse rounded-lg border border-gray-800 bg-gray-800 p-4" aria-hidden="true">
@@ -304,7 +304,7 @@
           <div class="font-medium">Unable to load labs</div>
           <p class="mt-2 text-red-100/80">{error}</p>
           <button
-            class="mt-4 rounded-md border border-red-400/40 px-3 py-2 text-xs uppercase tracking-[0.2em] text-red-100 hover:bg-red-500/10"
+            class="mt-4 rounded-md border border-red-400/40 px-3 py-2 text-xs uppercase tracking-[0.05em] text-red-100 hover:bg-red-500/10"
             on:click={() => fetchContents(currentFolder)}
           >
             Retry
@@ -312,7 +312,7 @@
         </div>
       {:else}
         <section class="space-y-3">
-          <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Folders</div>
+          <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Folders</div>
           {#if folders.length === 0}
             <div class="rounded-lg border border-gray-800 bg-gray-800 p-4 text-sm text-gray-400">
               No folders in {currentFolderLabel || '/'}.
@@ -331,20 +331,20 @@
                   </button>
                   <div class="mt-4 flex flex-wrap gap-2">
                     <button
-                      class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+                      class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
                       on:click={() => openFolder(folder)}
                     >
                       Open
                     </button>
                     <button
-                      class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 transition hover:border-blue-500 hover:text-white disabled:opacity-40"
+                      class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white disabled:opacity-40"
                       disabled={isStaticFolder}
                       on:click={() => renameFolder(folder)}
                     >
                       Rename
                     </button>
                     <button
-                      class="rounded-md border border-red-500/40 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-red-200 transition hover:bg-red-500/10 disabled:opacity-40"
+                      class="rounded-md border border-red-500/40 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-red-200 transition hover:bg-red-500/10 disabled:opacity-40"
                       disabled={isStaticFolder}
                       on:click={() => deleteFolder(folder)}
                     >
@@ -358,7 +358,7 @@
         </section>
 
         <section class="space-y-3">
-          <div class="text-[10px] uppercase tracking-[0.24em] text-gray-500">Labs</div>
+          <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Labs</div>
           {#if labs.length === 0}
             <div class="rounded-lg border border-gray-800 bg-gray-800 p-4 text-sm text-gray-400">
               No labs in {currentFolderLabel || '/'}.
@@ -374,13 +374,13 @@
                   </button>
                   <div class="mt-4 flex flex-wrap gap-2">
                     <button
-                      class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+                      class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
                       on:click={() => openLab(lab)}
                     >
                       Open
                     </button>
                     <button
-                      class="rounded-md border border-red-500/40 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-red-200 transition hover:bg-red-500/10"
+                      class="rounded-md border border-red-500/40 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-red-200 transition hover:bg-red-500/10"
                       on:click={() => deleteLab(lab)}
                     >
                       Delete

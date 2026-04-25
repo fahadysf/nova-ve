@@ -24,7 +24,7 @@
 <div class="flex flex-1 items-center justify-center bg-gray-900 px-4 py-10">
   <div class="w-full max-w-sm rounded-xl border border-gray-700 bg-gray-800 px-8 py-8 shadow-2xl shadow-black/30">
     <div class="text-center">
-      <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500">Operator Access</div>
+      <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Operator Access</div>
       <h1 class="mt-4 text-2xl font-bold tracking-tight text-gray-100">nova-ve</h1>
       <p class="mt-3 text-sm text-gray-400">
         Sign in to manage labs, launch nodes, and open console sessions.

@@ -29,7 +29,7 @@
   <div class="flex items-start gap-2">
     <span class={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${running ? 'bg-emerald-500' : 'bg-gray-500'}`}></span>
     <div class="min-w-0 flex-1">
-      <div class="text-[9px] uppercase tracking-[0.2em] text-gray-500">{typeLabel}</div>
+      <div class="text-[9px] uppercase tracking-[0.05em] text-gray-500">{typeLabel}</div>
       <div class="mt-1 truncate text-[11px] font-semibold tracking-tight text-gray-100">{data.label}</div>
       <div class="mt-1 flex items-center justify-between gap-2">
         <span class="truncate font-mono text-[10px] text-gray-400">{data.template || data.console || 'template'}</span>
