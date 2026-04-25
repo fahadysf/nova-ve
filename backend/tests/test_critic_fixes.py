@@ -347,3 +347,11 @@ def test_lab_route_order_keeps_catch_all_last():
     ]
     assert get_route_paths[-1] == "/api/labs/{lab_path:path}"
     assert get_route_paths.index("/api/labs/{lab_path:path}/nodes") < get_route_paths.index("/api/labs/{lab_path:path}")
+
+    put_route_paths = [
+        route.path
+        for route in labs.router.routes
+        if "PUT" in getattr(route, "methods", set())
+    ]
+    assert "/api/labs/{lab_path:path}/topology" in put_route_paths
+    assert "/api/labs/{lab_path:path}/meta" in put_route_paths

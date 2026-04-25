@@ -69,7 +69,7 @@ For Docker-backed local lab testing on macOS with Rancher Desktop:
 
 3. **Run the frontend**
    ```bash
-   NOVA_VE_BACKEND_ORIGIN=http://127.0.0.1:8000 NOVA_VE_HTML5_ORIGIN=http://127.0.0.1:8081 NOVA_VE_FRONTEND_PORT=5174 ./deploy/scripts/run-local-frontend.sh
+   NOVA_VE_BACKEND_ORIGIN=http://127.0.0.1:8000 NOVA_VE_HTML5_ORIGIN=http://127.0.0.1:18081 NOVA_VE_FRONTEND_PORT=5174 ./deploy/scripts/run-local-frontend.sh
    ```
 
 4. **Open** `http://127.0.0.1:5174` (or the next free port if `5174` is already in use)
