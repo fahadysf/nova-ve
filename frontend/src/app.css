@@ -1,0 +1,205 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@font-face {
+  font-family: 'Inter Tight';
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url('/fonts/design-system/InterTight-Variable.woff2') format('woff2-variations');
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url('/fonts/design-system/JetBrainsMono-Variable.woff2') format('woff2-variations');
+}
+
+:root {
+  color-scheme: dark;
+
+  /* Typography */
+  --font-sans: 'Inter Tight', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
+    sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    'Liberation Mono', monospace;
+
+  --fs-9: 9px;
+  --fs-10: 10px;
+  --fs-11: 11px;
+  --fs-12: 12px;
+  --fs-13: 13px;
+  --fs-14: 14px;
+  --fs-16: 16px;
+  --fs-18: 18px;
+  --fs-20: 20px;
+  --fs-24: 24px;
+
+  --lh-tight: 1.15;
+  --lh-snug: 1.25;
+  --lh-base: 1.45;
+  --lh-relaxed: 1.6;
+
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0;
+  --tracking-wide: 0.05em;
+  --tracking-eyebrow: 0.2em;
+
+  /* Surface palette */
+  --gray-50: #f9fafb;
+  --gray-100: #f3f4f6;
+  --gray-200: #e5e7eb;
+  --gray-300: #d1d5db;
+  --gray-400: #9ca3af;
+  --gray-500: #6b7280;
+  --gray-600: #4b5563;
+  --gray-700: #374151;
+  --gray-800: #1f2937;
+  --gray-900: #111827;
+  --gray-950: #030712;
+
+  --blue-200: #bfdbfe;
+  --blue-400: #60a5fa;
+  --blue-500: #3b82f6;
+  --blue-600: #2563eb;
+
+  --emerald-200: #a7f3d0;
+  --emerald-400: #34d399;
+  --emerald-500: #10b981;
+
+  --amber-300: #fcd34d;
+
+  --red-200: #fecaca;
+  --red-400: #f87171;
+  --red-500: #ef4444;
+
+  --sky-200: #bae6fd;
+  --sky-500: #0ea5e9;
+
+  /* Semantic tokens */
+  --bg-app: var(--gray-900);
+  --bg-canvas: var(--gray-950);
+  --surface-1: var(--gray-800);
+  --surface-2: var(--gray-900);
+  --surface-3: rgb(17 24 39 / 0.95);
+  --overlay: rgb(17 24 39 / 0.7);
+
+  --border-subtle: var(--gray-800);
+  --border-default: var(--gray-700);
+  --border-strong: var(--gray-600);
+  --border-focus: var(--blue-500);
+  --border-danger: rgb(239 68 68 / 0.4);
+
+  --fg-1: var(--gray-100);
+  --fg-2: var(--gray-300);
+  --fg-3: var(--gray-400);
+  --fg-4: var(--gray-500);
+  --fg-mute: var(--gray-600);
+  --fg-on-accent: #ffffff;
+
+  --accent: var(--blue-500);
+  --accent-hover: var(--blue-400);
+  --accent-press: var(--blue-600);
+  --accent-soft: rgb(59 130 246 / 0.1);
+  --accent-ring: rgb(59 130 246 / 0.4);
+
+  --status-running-fg: var(--emerald-200);
+  --status-running-bg: rgb(16 185 129 / 0.2);
+  --status-running-dot: var(--emerald-500);
+  --status-stopped-fg: var(--gray-300);
+  --status-stopped-bg: var(--gray-800);
+  --status-stopped-dot: var(--gray-500);
+  --status-network-fg: var(--blue-200);
+  --status-network-bg: rgb(59 130 246 / 0.2);
+  --status-network-dot: var(--blue-500);
+
+  --toast-error-bg: rgb(239 68 68 / 0.1);
+  --toast-error-bd: rgb(239 68 68 / 0.4);
+  --toast-error-fg: var(--red-200);
+  --toast-success-bg: rgb(16 185 129 / 0.1);
+  --toast-success-bd: rgb(16 185 129 / 0.4);
+  --toast-success-fg: var(--emerald-200);
+  --toast-info-bg: rgb(14 165 233 / 0.1);
+  --toast-info-bd: rgb(14 165 233 / 0.4);
+  --toast-info-fg: var(--sky-200);
+
+  --canvas-grid: var(--gray-700);
+  --edge-default: var(--gray-400);
+  --edge-label-fg: var(--gray-300);
+
+  --tl-close: var(--red-400);
+  --tl-min: var(--amber-300);
+  --tl-max: var(--emerald-400);
+
+  /* Shared sizing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+
+  --shadow-card: none;
+  --shadow-dialog: 0 25px 50px -12px rgb(0 0 0 / 0.35);
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    font-size: var(--fs-14);
+    line-height: var(--lh-base);
+    background: var(--bg-app);
+    color: var(--fg-1);
+    accent-color: var(--accent);
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  body {
+    @apply m-0 h-full w-full;
+    min-height: 100%;
+    background: var(--bg-app);
+    color: var(--fg-1);
+    font-family: var(--font-sans);
+  }
+
+  #svelte,
+  [data-sveltekit-preload-data] {
+    min-height: 100%;
+  }
+
+  body,
+  button,
+  input,
+  select,
+  textarea {
+    font-family: inherit;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+  }
+
+  ::selection {
+    background: var(--accent-soft);
+    color: var(--fg-1);
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
