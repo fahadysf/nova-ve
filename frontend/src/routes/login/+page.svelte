@@ -21,36 +21,48 @@
   }
 </script>
 
-<div class="flex-1 flex items-center justify-center bg-gray-900">
-  <div class="bg-gray-800 p-8 rounded-lg shadow-lg w-96 border border-gray-700">
-    <h1 class="text-2xl font-bold mb-6 text-center">nova-ve</h1>
-    <form on:submit|preventDefault={handleLogin} class="space-y-4">
+<div class="flex flex-1 items-center justify-center bg-gray-900 px-4 py-10">
+  <div class="w-full max-w-sm rounded-xl border border-gray-700 bg-gray-800 px-8 py-8 shadow-2xl shadow-black/30">
+    <div class="text-center">
+      <div class="text-[10px] uppercase tracking-[0.28em] text-gray-500">Operator Access</div>
+      <h1 class="mt-4 text-2xl font-bold tracking-tight text-gray-100">nova-ve</h1>
+      <p class="mt-3 text-sm text-gray-400">
+        Sign in to manage labs, launch nodes, and open console sessions.
+      </p>
+    </div>
+
+    <form on:submit|preventDefault={handleLogin} class="mt-8 space-y-4">
       <div>
-        <label for="username" class="block text-sm text-gray-400 mb-1">Username</label>
+        <label for="username" class="mb-1 block text-[13px] text-gray-400">Username</label>
         <input
           id="username"
           type="text"
           bind:value={username}
-          class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-blue-500"
+          class="w-full rounded border border-gray-600 bg-gray-700 px-3 py-2 text-sm text-gray-100 outline-none transition focus:border-blue-500"
           required
         />
       </div>
+
       <div>
-        <label for="password" class="block text-sm text-gray-400 mb-1">Password</label>
+        <label for="password" class="mb-1 block text-[13px] text-gray-400">Password</label>
         <input
           id="password"
           type="password"
           bind:value={password}
-          class="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-blue-500"
+          class="w-full rounded border border-gray-600 bg-gray-700 px-3 py-2 text-sm text-gray-100 outline-none transition focus:border-blue-500"
           required
         />
       </div>
+
       {#if error}
-        <div class="text-red-400 text-sm">{error}</div>
+        <div class="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">
+          {error}
+        </div>
       {/if}
+
       <button
         type="submit"
-        class="w-full py-2 bg-blue-600 hover:bg-blue-500 rounded font-semibold transition"
+        class="w-full rounded bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-500"
       >
         Login
       </button>
