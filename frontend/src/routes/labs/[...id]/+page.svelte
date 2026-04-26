@@ -30,6 +30,14 @@
     requestId: number;
   };
   type RailSectionKey = 'summary' | 'inventory' | 'nodes' | 'networks';
+  type CanvasChangeDetail = {
+    reason: string;
+    nodeId?: number;
+    node?: NodeData;
+    nodes?: Record<string, NodeData>;
+    networks?: Record<string, NetworkData>;
+    topology?: TopologyLink[];
+  };
   type ConsoleWorkspaceState = ConsoleBounds & {
     tabs: ConsoleTab[];
     activeTabId: number | null;
@@ -129,11 +137,14 @@
     }
   }
 
-  async function loadLab() {
+  async function loadLab(options: { blocking?: boolean } = {}) {
+    const blocking = options.blocking ?? true;
     if (labRefreshInFlight) return;
     labRefreshInFlight = true;
-    loading = true;
-    error = '';
+    if (blocking) {
+      loading = true;
+      error = '';
+    }
 
     try {
       const [meta, nodeData, networkData, topologyData] = await Promise.all([
@@ -165,17 +176,92 @@
           : null;
       }
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Unable to load the lab.';
+      if (blocking) {
+        error = e instanceof ApiError ? e.message : 'Unable to load the lab.';
+      } else {
+        toastStore.push(e instanceof ApiError ? e.message : 'Unable to refresh the lab state.');
+      }
     } finally {
-      loading = false;
+      if (blocking) {
+        loading = false;
+      }
       labRefreshInFlight = false;
     }
   }
 
-  async function refreshLabFromCanvas() {
-    if (!isLabIndexRoute) {
-      await loadLab();
+  function syncNodeFromCanvas(nodeId: number, node: NodeData) {
+    nodes = {
+      ...nodes,
+      [String(nodeId)]: node,
+    };
+  }
+
+  function removeConsoleTabForNode(nodeId: number) {
+    const tabId = consoleWorkspace?.tabs.find((tab) => tab.nodeId === nodeId)?.id;
+    if (tabId != null) {
+      closeConsole(tabId);
     }
+  }
+
+  async function refreshLabFromCanvas(
+    event?: CustomEvent<CanvasChangeDetail>
+  ) {
+    const detail = event?.detail;
+    const reason = detail?.reason;
+    const nodeId = detail?.nodeId;
+    const node = detail?.node;
+
+    if (detail?.nodes) {
+      nodes = detail.nodes;
+    }
+    if (detail?.networks) {
+      networks = detail.networks;
+    }
+    if (detail?.topology) {
+      topology = detail.topology;
+    }
+
+    if (reason === 'node-start' && nodeId != null && node) {
+      syncNodeFromCanvas(nodeId, node);
+      return;
+    }
+
+    if ((reason === 'node-stop' || reason === 'node-wipe') && nodeId != null && node) {
+      syncNodeFromCanvas(nodeId, node);
+      removeConsoleTabForNode(nodeId);
+      return;
+    }
+
+    if (reason === 'node-edit' && nodeId != null && node) {
+      syncNodeFromCanvas(nodeId, node);
+      return;
+    }
+
+    if (reason === 'node-delete' && nodeId != null) {
+      removeConsoleTabForNode(nodeId);
+      return;
+    }
+
+    if (
+      reason === 'topology' ||
+      reason === 'node-create' ||
+      reason === 'network-create' ||
+      reason === 'network-delete'
+    ) {
+      return;
+    }
+
+    if (!isLabIndexRoute) {
+      await loadLab({ blocking: false });
+    }
+  }
+
+  async function retryCurrentView() {
+    await (isLabIndexRoute ? loadLabIndex() : loadLab());
+  }
+
+  async function refreshLabManually() {
+    await loadLab();
   }
 
   function openLabFromIndex(lab: LabListItem) {
@@ -551,7 +637,7 @@
         <p class="mt-2 text-sm text-red-100/80">{error}</p>
         <button
           class="mt-4 rounded-md border border-red-400/40 px-3 py-2 text-xs uppercase tracking-[0.05em] text-red-100 hover:bg-red-500/10"
-          on:click={isLabIndexRoute ? loadLabIndex : loadLab}
+          on:click={retryCurrentView}
         >
           Retry
         </button>
@@ -610,7 +696,7 @@
                     class={compactIconButtonClass}
                     aria-label="Refresh lab"
                     title="Refresh lab"
-                    on:click={loadLab}
+                    on:click={refreshLabManually}
                     disabled={labRefreshInFlight}
                   >
                     <RefreshCw class={`h-3.5 w-3.5 ${labRefreshInFlight ? 'animate-spin' : ''}`} />

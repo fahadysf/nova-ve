@@ -5,4 +5,4 @@ icon: Server.png
 cpu: 1
 ram: 1024
 ethernet: 1
-console: rdp
+console: telnet

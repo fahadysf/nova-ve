@@ -177,7 +177,7 @@ name: Docker Host
 cpu: 1
 ram: 1024
 ethernet: 1
-console: rdp
+console: telnet
 icon: Server.png
 cpulimit: 1
 """,

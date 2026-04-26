@@ -68,7 +68,7 @@ name: Docker Host
 cpu: 1
 ram: 1024
 ethernet: 1
-console: rdp
+console: telnet
 icon: Server.png
 cpulimit: 1
 """
@@ -133,7 +133,7 @@ async def test_update_topology_route_is_not_shadowed_by_update_lab(monkeypatch, 
       "type": "docker",
       "template": "docker",
       "image": "nova-ve-alpine-telnet:latest",
-      "console": "rdp",
+      "console": "telnet",
       "status": 0,
       "cpu": 1,
       "ram": 1024,
@@ -195,7 +195,7 @@ description: Demo docker node
 cpu: 1
 ram: 1024
 ethernet: 1
-console: rdp
+console: telnet
 icon: Server.png
 cpulimit: 1
 """

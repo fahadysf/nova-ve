@@ -47,7 +47,14 @@
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData };
-    changed: { reason: string };
+    changed: {
+      reason: string;
+      nodeId?: number;
+      node?: NodeData;
+      nodes?: Record<string, NodeData>;
+      networks?: Record<string, NetworkData>;
+      topology?: TopologyLink[];
+    };
   }>();
 
   const nodeTypes = {
@@ -97,6 +104,13 @@
 
   function deepClone<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
+  }
+
+  function dispatchCanvasChange(reason: string, detail: Record<string, unknown> = {}) {
+    dispatch('changed', {
+      reason,
+      ...detail,
+    });
   }
 
   function syncLocalState() {
@@ -351,7 +365,11 @@
     localTopology = [...localTopology, link];
     recalculateNetworks();
     scheduleSave();
-    dispatch('changed', { reason: 'topology' });
+    dispatchCanvasChange('topology', {
+      nodes: deepClone(localNodes),
+      networks: deepClone(localNetworks),
+      topology: deepClone(localTopology),
+    });
   }
 
   function createNodeToNodeLink(sourceId: number, targetId: number) {
@@ -568,6 +586,11 @@
     localTopology = localTopology.filter((_, currentIndex) => currentIndex !== index);
     recalculateNetworks();
     scheduleSave();
+    dispatchCanvasChange('topology', {
+      nodes: deepClone(localNodes),
+      networks: deepClone(localNetworks),
+      topology: deepClone(localTopology),
+    });
   }
 
   async function handleNodeAction(action: 'start' | 'stop' | 'wipe' | 'delete' | 'console', targetId: string) {
@@ -597,7 +620,12 @@
       );
       recalculateNetworks();
       scheduleSave();
-      dispatch('changed', { reason: 'node-delete' });
+      dispatchCanvasChange('node-delete', {
+        nodeId: decoded.id,
+        nodes: deepClone(localNodes),
+        networks: deepClone(localNetworks),
+        topology: deepClone(localTopology),
+      });
       return;
     }
 
@@ -609,7 +637,11 @@
       node.status = 0;
     }
     localNodes = { ...localNodes };
-    dispatch('changed', { reason: `node-${action}` });
+    dispatchCanvasChange(`node-${action}`, {
+      reason: `node-${action}`,
+      nodeId: decoded.id,
+      node: deepClone(node),
+    });
   }
 
   function handleEditNode(targetId: string) {
@@ -637,7 +669,11 @@
     }
     localNodes = { ...localNodes };
     scheduleSave();
-    dispatch('changed', { reason: 'network-delete' });
+    dispatchCanvasChange('network-delete', {
+      nodes: deepClone(localNodes),
+      networks: deepClone(localNetworks),
+      topology: deepClone(localTopology),
+    });
   }
 
   async function createNetworkAt(position: { x: number; y: number }, networkType = 'bridge') {
@@ -654,7 +690,9 @@
       ...localNetworks,
       [String(response.data.id)]: response.data
     };
-    dispatch('changed', { reason: 'network-create' });
+    dispatchCanvasChange('network-create', {
+      networks: deepClone(localNetworks),
+    });
   }
 
   async function addPaletteItem(item: PaletteItem) {
@@ -724,7 +762,9 @@
           nextNodes[String(node.id)] = node;
         }
         localNodes = nextNodes;
-        dispatch('changed', { reason: 'node-create' });
+        dispatchCanvasChange('node-create', {
+          nodes: deepClone(localNodes),
+        });
       } else {
         const response = await apiRequest<NodeData>(`/labs/${labId}/nodes/${event.detail.nodeId}`, {
           method: 'PUT',
@@ -734,7 +774,10 @@
           ...localNodes,
           [String(response.data.id)]: response.data,
         };
-        dispatch('changed', { reason: 'node-edit' });
+        dispatchCanvasChange('node-edit', {
+          nodeId: response.data.id,
+          node: deepClone(response.data),
+        });
       }
 
       nodeModalOpen = false;
