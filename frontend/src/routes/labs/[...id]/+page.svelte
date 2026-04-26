@@ -5,7 +5,7 @@
   import { onMount, tick } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, RefreshCw } from 'lucide-svelte';
+  import { ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, Monitor, RefreshCw } from 'lucide-svelte';
   import { authStore } from '$lib/stores/auth';
   import { apiGetData, ApiError } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
@@ -77,7 +77,7 @@
   $: isLabIndexRoute = labId === '';
   $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
   $: networkList = Object.values(networks).sort((a, b) => a.id - b.id);
-  $: runningConsoleNodes = nodeList.filter((node) => node.status === 2);
+  $: runningConsoleNodes = nodeList.filter((node) => node.status === 2 && !node.transientStatus);
   $: runningNodeCount = runningConsoleNodes.length;
   $: currentUserLabel = $authStore.user?.name || $authStore.user?.username || 'Operator';
   $: consoleTabCount = consoleWorkspace?.tabs.length ?? 0;
@@ -203,6 +203,19 @@
     }
   }
 
+  function nodeStatusLabel(node: NodeData): string {
+    if (node.transientStatus === 'starting') return 'starting';
+    if (node.transientStatus === 'stopping') return 'stopping';
+    return node.status === 2 ? 'run' : 'stop';
+  }
+
+  function nodeStatusClass(node: NodeData): string {
+    if (node.transientStatus) {
+      return 'bg-amber-300/20 text-amber-200';
+    }
+    return node.status === 2 ? 'bg-emerald-500/20 text-emerald-200' : 'bg-gray-800 text-gray-300';
+  }
+
   async function refreshLabFromCanvas(
     event?: CustomEvent<CanvasChangeDetail>
   ) {
@@ -226,9 +239,19 @@
       return;
     }
 
+    if (reason === 'node-start-pending' && nodeId != null && node) {
+      syncNodeFromCanvas(nodeId, node);
+      return;
+    }
+
     if ((reason === 'node-stop' || reason === 'node-wipe') && nodeId != null && node) {
       syncNodeFromCanvas(nodeId, node);
       removeConsoleTabForNode(nodeId);
+      return;
+    }
+
+    if ((reason === 'node-stop-pending' || reason === 'node-wipe-pending') && nodeId != null && node) {
+      syncNodeFromCanvas(nodeId, node);
       return;
     }
 
@@ -377,7 +400,7 @@
   }
 
   async function openConsole(node: NodeData) {
-    if (node.status !== 2) {
+    if (node.status !== 2 || node.transientStatus) {
       toastStore.push('Start the node before opening the HTML5 console.');
       return;
     }
@@ -818,8 +841,8 @@
                                       {node.type} · {node.console}
                                     </div>
                                   </div>
-                                  <span class={`rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-[0.16em] ${node.status === 2 ? 'bg-emerald-500/20 text-emerald-200' : 'bg-gray-800 text-gray-300'}`}>
-                                    {node.status === 2 ? 'run' : 'stop'}
+                                  <span class={`rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-[0.05em] ${nodeStatusClass(node)}`}>
+                                    {nodeStatusLabel(node)}
                                   </span>
                                 </div>
                                 <div class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-gray-400">
@@ -831,11 +854,14 @@
                                 <div class="mt-2 flex items-center justify-between gap-2 border-t border-gray-800/80 pt-2">
                                   <div class="font-mono text-[10px] text-gray-500">{node.template}</div>
                                   <button
-                                    class={compactActionButtonClass}
+                                    type="button"
+                                    class={compactIconButtonClass}
+                                    aria-label={`Open console for ${node.name}`}
+                                    title="Open console"
                                     on:click={() => openConsole(node)}
-                                    disabled={node.status !== 2}
+                                    disabled={node.status !== 2 || !!node.transientStatus}
                                   >
-                                    Console
+                                    <Monitor class="h-3.5 w-3.5" />
                                   </button>
                                 </div>
                               </div>

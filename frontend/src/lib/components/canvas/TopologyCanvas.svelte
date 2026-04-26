@@ -100,6 +100,9 @@
   let nodeModalNode: NodeData | null = null;
   let nodeModalSubmitting = false;
   let nodeCreateAnchor = { x: 200, y: 200 };
+  let nodeActionSequence = 0;
+  const nodeActionTokens = new Map<number, number>();
+  const nodeActionPollSchedule = [0, 250, 500, 1000, 2000];
   let menu:
     | {
         x: number;
@@ -124,6 +127,61 @@
       reason,
       ...detail,
     });
+  }
+
+  function pause(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  async function settleNodeAction(
+    nodeId: number,
+    token: number,
+    action: 'start' | 'stop' | 'wipe',
+    targetStatus: 0 | 2,
+    transientStatus: 'starting' | 'stopping'
+  ) {
+    for (const delayMs of nodeActionPollSchedule) {
+      if (nodeActionTokens.get(nodeId) !== token) {
+        return false;
+      }
+
+      if (delayMs > 0) {
+        await pause(delayMs);
+      }
+
+      const response = await apiRequest<Record<string, NodeData>>(`/labs/${labId}/nodes`, {
+        suppressToast: true,
+      });
+      const refreshedNode = response.data?.[String(nodeId)];
+      if (!refreshedNode) {
+        return false;
+      }
+
+      const nextNode =
+        refreshedNode.status === targetStatus
+          ? refreshedNode
+          : { ...refreshedNode, transientStatus };
+
+      localNodes = {
+        ...localNodes,
+        [String(nodeId)]: nextNode,
+      };
+      publishFlowState();
+      dispatchCanvasChange(
+        refreshedNode.status === targetStatus ? `node-${action}` : `node-${action}-pending`,
+        {
+          nodeId,
+          node: deepClone(nextNode),
+          nodes: deepClone(localNodes),
+        }
+      );
+
+      if (refreshedNode.status === targetStatus) {
+        return true;
+      }
+    }
+
+    return false;
   }
 
   function syncLocalState() {
@@ -164,6 +222,7 @@
           label: node.name,
           icon: node.icon,
           status: node.status,
+          transientStatus: node.transientStatus,
           type: node.type,
           template: node.template,
           console: node.console
@@ -664,21 +723,58 @@
       return;
     }
 
-    await apiRequest(`/labs/${labId}/nodes/${decoded.id}/${action}`);
     if (action === 'start') {
-      node.status = 2;
+      node.transientStatus = 'starting';
     }
     if (action === 'stop' || action === 'wipe') {
-      node.status = 0;
+      node.transientStatus = 'stopping';
     }
+    const token = ++nodeActionSequence;
+    nodeActionTokens.set(decoded.id, token);
     localNodes = { ...localNodes };
     publishFlowState();
-    dispatchCanvasChange(`node-${action}`, {
-      reason: `node-${action}`,
+    dispatchCanvasChange(`node-${action}-pending`, {
       nodeId: decoded.id,
       node: deepClone(node),
       nodes: deepClone(localNodes),
     });
+
+    try {
+      await apiRequest(`/labs/${labId}/nodes/${decoded.id}/${action}`);
+      const targetStatus = action === 'start' ? 2 : 0;
+      const settled = await settleNodeAction(
+        decoded.id,
+        token,
+        action,
+        targetStatus,
+        action === 'start' ? 'starting' : 'stopping'
+      );
+      if (settled) {
+        nodeActionTokens.delete(decoded.id);
+        return;
+      }
+
+      delete node.transientStatus;
+      localNodes = { ...localNodes };
+      publishFlowState();
+      dispatchCanvasChange('node-edit', {
+        nodeId: decoded.id,
+        node: deepClone(node),
+        nodes: deepClone(localNodes),
+      });
+      nodeActionTokens.delete(decoded.id);
+    } catch (error) {
+      delete node.transientStatus;
+      localNodes = { ...localNodes };
+      publishFlowState();
+      dispatchCanvasChange('node-edit', {
+        nodeId: decoded.id,
+        node: deepClone(node),
+        nodes: deepClone(localNodes),
+      });
+      nodeActionTokens.delete(decoded.id);
+      throw error;
+    }
   }
 
   function handleEditNode(targetId: string) {
