@@ -259,19 +259,37 @@ Modes:
 - `create`
 - `edit`
 
+#### Field order (canonical)
+
+The first decision the user makes in the modal is **node type**. Everything else
+is downstream of that choice.
+
+1. **Node type tabs** — a top-of-modal row of four icon tabs: `qemu`, `docker`,
+   `iol`, `dynamips`. The currently-selected type is highlighted; types with
+   no available templates render as disabled. In edit mode the row is rendered
+   but locked, since type is immutable after create.
+2. **Template** — a dropdown filtered to the templates of the active type. The
+   dropdown must NOT mix templates of different types in a single flat list.
+3. **Image / Icon / Console**, **CPU / RAM / Ethernets**, **Delay /
+   Placement**, then per-type extras.
+
 Behavior:
 
 - user clicks `+`
 - user picks `Node`
 - a centered overlay modal opens
 - the modal loads the node catalog/capabilities
+- the user picks the node type from the top tab row
+- the template dropdown reflows to show only that type's templates and
+  auto-selects the first one
 - the modal supports:
-  - template selection
+  - template selection (filtered by chosen type)
   - image selection
   - node name prefix
   - number of nodes
   - icon selection
   - CPU / RAM / ethernet / console / delay
+  - per-type extras as declared by the catalog's `extras_schema`
   - preview of runtime-locked fields in edit mode
 - edit mode is launched from a new `Edit Node` context-menu action
 
