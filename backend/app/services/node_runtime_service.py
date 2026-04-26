@@ -279,9 +279,9 @@ class NodeRuntimeService:
             cmd += ["-cpu", "max"]
 
         if console_mode == "vnc":
-            cmd += ["-vnc", f"127.0.0.1:{console_port - 5900}"]
+            cmd += ["-vnc", f":{console_port - 5900}"]
         else:
-            cmd += ["-serial", f"telnet:127.0.0.1:{console_port},server,nowait"]
+            cmd += ["-serial", f"telnet::{console_port},server,nowait"]
 
         for index in range(int(node.get("ethernet", 0))):
             cmd += [
