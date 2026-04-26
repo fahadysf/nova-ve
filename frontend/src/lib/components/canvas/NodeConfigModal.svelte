@@ -400,7 +400,7 @@
                   <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Template</div>
                   <select
                     bind:value={selectedTemplateId}
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                     on:change={onTemplateChange}
                   >
                     {#each visibleTemplates as template}
@@ -413,7 +413,7 @@
                   <input
                     bind:value={namePrefix}
                     on:input={() => markDirty('namePrefix')}
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                   />
                 </label>
                 <label class="block">
@@ -423,7 +423,7 @@
                     type="number"
                     min="1"
                     max="24"
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                   />
                 </label>
               {:else}
@@ -432,7 +432,7 @@
                   <input
                     value={selectedTemplate ? `${selectedTemplate.name} (${selectedTemplate.type})` : `${node?.template ?? ''}`}
                     disabled
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-400"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-400"
                   />
                 </label>
                 <label class="block md:col-span-2">
@@ -440,7 +440,7 @@
                   <input
                     bind:value={name}
                     on:input={() => markDirty('name')}
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                   />
                 </label>
               {/if}
@@ -453,7 +453,7 @@
                   bind:value={image}
                   on:change={() => markDirty('image')}
                   disabled={isStoppedOnly('image')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 >
                   {#each selectedTemplate?.images ?? [] as imageOption}
                     <option value={imageOption.image}>{imageOption.image}</option>
@@ -466,7 +466,7 @@
                 <select
                   bind:value={icon}
                   on:change={() => markDirty('icon')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                 >
                   {#each selectedTemplate?.icon_options ?? catalog.icon_options as iconOption}
                     <option value={iconOption}>{iconOption}</option>
@@ -480,7 +480,7 @@
                   bind:value={consoleMode}
                   on:change={() => markDirty('consoleMode')}
                   disabled={isStoppedOnly('console')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 >
                   <option value="telnet">telnet</option>
                   <option value="vnc">vnc</option>
@@ -498,7 +498,7 @@
                   type="number"
                   min="1"
                   disabled={isStoppedOnly('cpu')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
               </label>
               <label class="block">
@@ -510,7 +510,7 @@
                   min="128"
                   step="128"
                   disabled={isStoppedOnly('ram')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
               </label>
               <label class="block">
@@ -521,7 +521,7 @@
                   type="number"
                   min="1"
                   disabled={isStoppedOnly('ethernet')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
               </label>
             </div>
@@ -535,7 +535,7 @@
                   type="number"
                   min="0"
                   disabled={isStoppedOnly('delay')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
               </label>
               {#if mode === 'create'}
@@ -543,7 +543,7 @@
                   <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Placement</div>
                   <select
                     bind:value={placement}
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                   >
                     <option value="grid">grid</option>
                     <option value="row">row</option>
@@ -569,7 +569,7 @@
                             placeholder={field.placeholder ?? ''}
                             disabled={isExtraDisabled(field)}
                             rows="3"
-                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                           ></textarea>
                         {:else}
                           <div class="space-y-2">
@@ -621,7 +621,7 @@
                             value={String(extras[field.key] ?? '')}
                             on:change={(event) => setExtra(field.key, (event.target as HTMLSelectElement).value)}
                             disabled={isExtraDisabled(field)}
-                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                           >
                             {#each field.options ?? [] as option}
                               <option value={option.value}>{option.label ?? option.value}</option>
@@ -634,13 +634,13 @@
                             on:input={(event) => setExtra(field.key, Number((event.target as HTMLInputElement).value))}
                             disabled={isExtraDisabled(field)}
                             placeholder={field.placeholder ?? ''}
-                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                           />
                         {:else if field.type === 'readonly'}
                           <input
                             value={String(extras[field.key] ?? '')}
                             disabled
-                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-400"
+                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-400"
                           />
                         {:else}
                           <input
@@ -648,7 +648,7 @@
                             on:input={(event) => setExtra(field.key, (event.target as HTMLInputElement).value)}
                             disabled={isExtraDisabled(field)}
                             placeholder={field.placeholder ?? ''}
-                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                           />
                         {/if}
                         {#if field.description}
