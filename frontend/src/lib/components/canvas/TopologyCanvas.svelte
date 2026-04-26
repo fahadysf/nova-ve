@@ -5,10 +5,23 @@
   import { createEventDispatcher } from 'svelte';
   import { onMount } from 'svelte';
   import { writable } from 'svelte/store';
-  import { ChevronLeft, Lock, LockOpen, Plus } from 'lucide-svelte';
+  import {
+    ChevronLeft,
+    Eraser,
+    LocateFixed,
+    Lock,
+    LockOpen,
+    Monitor,
+    Pencil,
+    Play,
+    Plus,
+    Square,
+    Trash2,
+    ZoomIn,
+    ZoomOut,
+  } from 'lucide-svelte';
   import {
     Background,
-    Controls,
     MiniMap,
     Panel,
     SvelteFlow,
@@ -61,7 +74,7 @@
     device: CustomNode,
     network: NetworkNode
   } as unknown as Record<string, never>;
-  const { screenToFlowPosition } = useSvelteFlow();
+  const { fitView, screenToFlowPosition, zoomIn, zoomOut } = useSvelteFlow();
 
   const nodesStore = writable<Node[]>([]);
   const edgesStore = writable<Edge[]>([]);
@@ -117,6 +130,11 @@
     localNodes = deepClone(nodes);
     localNetworks = deepClone(networks);
     localTopology = deepClone(topology);
+  }
+
+  function publishFlowState() {
+    nodesStore.set(buildFlowNodes());
+    edgesStore.set(buildFlowEdges());
   }
 
   $: if (nodes !== lastNodesRef || networks !== lastNetworksRef || topology !== lastTopologyRef) {
@@ -194,8 +212,7 @@
   }
 
   $: {
-    nodesStore.set(buildFlowNodes());
-    edgesStore.set(buildFlowEdges());
+    publishFlowState();
   }
 
   function closeMenu() {
@@ -262,6 +279,21 @@
     canvasLocked = !canvasLocked;
     closeMenu();
     closeAddMenu();
+  }
+
+  async function handleZoomIn() {
+    if (canvasLocked) return;
+    await zoomIn({ duration: 120 });
+  }
+
+  async function handleZoomOut() {
+    if (canvasLocked) return;
+    await zoomOut({ duration: 120 });
+  }
+
+  async function handleFitView() {
+    if (canvasLocked) return;
+    await fitView({ duration: 180, padding: 0.2 });
   }
 
   function eventPoint(event: MouseEvent | TouchEvent): { x: number; y: number } {
@@ -364,6 +396,7 @@
   function pushLink(link: TopologyLink) {
     localTopology = [...localTopology, link];
     recalculateNetworks();
+    publishFlowState();
     scheduleSave();
     dispatchCanvasChange('topology', {
       nodes: deepClone(localNodes),
@@ -585,6 +618,7 @@
     localNodes = { ...localNodes };
     localTopology = localTopology.filter((_, currentIndex) => currentIndex !== index);
     recalculateNetworks();
+    publishFlowState();
     scheduleSave();
     dispatchCanvasChange('topology', {
       nodes: deepClone(localNodes),
@@ -619,6 +653,7 @@
         (link) => link.source !== `node${decoded.id}` && link.destination !== `node${decoded.id}`
       );
       recalculateNetworks();
+      publishFlowState();
       scheduleSave();
       dispatchCanvasChange('node-delete', {
         nodeId: decoded.id,
@@ -637,10 +672,12 @@
       node.status = 0;
     }
     localNodes = { ...localNodes };
+    publishFlowState();
     dispatchCanvasChange(`node-${action}`, {
       reason: `node-${action}`,
       nodeId: decoded.id,
       node: deepClone(node),
+      nodes: deepClone(localNodes),
     });
   }
 
@@ -668,6 +705,7 @@
       }
     }
     localNodes = { ...localNodes };
+    publishFlowState();
     scheduleSave();
     dispatchCanvasChange('network-delete', {
       nodes: deepClone(localNodes),
@@ -690,6 +728,7 @@
       ...localNetworks,
       [String(response.data.id)]: response.data
     };
+    publishFlowState();
     dispatchCanvasChange('network-create', {
       networks: deepClone(localNetworks),
     });
@@ -762,6 +801,7 @@
           nextNodes[String(node.id)] = node;
         }
         localNodes = nextNodes;
+        publishFlowState();
         dispatchCanvasChange('node-create', {
           nodes: deepClone(localNodes),
         });
@@ -774,9 +814,11 @@
           ...localNodes,
           [String(response.data.id)]: response.data,
         };
+        publishFlowState();
         dispatchCanvasChange('node-edit', {
           nodeId: response.data.id,
           node: deepClone(response.data),
+          nodes: deepClone(localNodes),
         });
       }
 
@@ -848,8 +890,6 @@
     }}
   >
     <Background patternColor="#374151" gap={20} />
-    <Controls position="bottom-left" showLock={false} class="canvas-controls">
-    </Controls>
     <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" class="canvas-minimap" />
 
     <Panel position="top-left">
@@ -881,12 +921,42 @@
       </div>
     </Panel>
 
-    {#if addMenuStep !== 'closed'}
-      <Panel position="bottom-left">
-        <div class="ml-14 flex items-end gap-3">
+    <Panel position="bottom-left">
+      <div class="flex items-end gap-3">
+        <div class="flex flex-col gap-2 rounded-[1.4rem] border border-gray-700 bg-gray-900/95 p-1.5 shadow-2xl shadow-black/30 backdrop-blur">
           <button
             type="button"
-            class="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-gray-700 bg-gray-900/95 text-gray-200 shadow-2xl shadow-black/30 transition hover:border-blue-500/40 hover:text-white"
+            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            on:click={handleZoomIn}
+            title="zoom in"
+            aria-label="zoom in"
+            disabled={canvasLocked}
+          >
+            <ZoomIn class="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            on:click={handleZoomOut}
+            title="zoom out"
+            aria-label="zoom out"
+            disabled={canvasLocked}
+          >
+            <ZoomOut class="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            on:click={handleFitView}
+            title="center content"
+            aria-label="center content"
+            disabled={canvasLocked}
+          >
+            <LocateFixed class="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white"
             on:click={toggleCanvasLock}
             title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
             aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
@@ -897,6 +967,9 @@
               <LockOpen class="h-4 w-4" />
             {/if}
           </button>
+        </div>
+
+        {#if addMenuStep !== 'closed'}
           <div class="w-72 overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl shadow-black/30 backdrop-blur">
             <div class="flex items-center justify-between border-b border-gray-800 px-3 py-2">
               <div class="flex items-center gap-2">
@@ -973,24 +1046,7 @@
               {/if}
             </div>
           </div>
-        </div>
-      </Panel>
-    {:else}
-      <Panel position="bottom-left">
-        <div class="ml-14 flex items-center gap-3">
-          <button
-            type="button"
-            class="inline-flex h-10 w-10 items-center justify-center rounded-2xl border border-gray-700 bg-gray-900/95 text-gray-200 shadow-2xl shadow-black/30 transition hover:border-blue-500/40 hover:text-white"
-            on:click={toggleCanvasLock}
-            title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
-            aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
-          >
-            {#if canvasLocked}
-              <Lock class="h-4 w-4" />
-            {:else}
-              <LockOpen class="h-4 w-4" />
-            {/if}
-          </button>
+        {:else}
           <button
             type="button"
             class="inline-flex h-12 w-12 items-center justify-center rounded-full border border-blue-500/40 bg-blue-500/15 text-blue-100 shadow-2xl shadow-black/30 transition hover:bg-blue-500/25"
@@ -1000,9 +1056,9 @@
           >
             <Plus class="h-5 w-5" />
           </button>
-        </div>
-      </Panel>
-    {/if}
+        {/if}
+      </div>
+    </Panel>
   </SvelteFlow>
 
   {#if selectedEdgeId}
@@ -1038,14 +1094,28 @@
         {menu.targetType === 'node' ? 'Node actions' : menu.targetType === 'network' ? 'Network actions' : 'Link actions'}
       </div>
       {#if menu?.targetType === 'node'}
-        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('start', menu?.targetId ?? '')}>Start</button>
-        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('stop', menu?.targetId ?? '')}>Stop</button>
-        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('wipe', menu?.targetId ?? '')}>Wipe</button>
-        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '')}>Console</button>
-        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleEditNode(menu?.targetId ?? '')}>Edit Node</button>
-        <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNodeAction('delete', menu?.targetId ?? '')}>Delete Node</button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('start', menu?.targetId ?? '')}>
+          <span>Start</span><Play class="h-3.5 w-3.5 text-gray-400" />
+        </button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('stop', menu?.targetId ?? '')}>
+          <span>Stop</span><Square class="h-3.5 w-3.5 text-gray-400" />
+        </button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('wipe', menu?.targetId ?? '')}>
+          <span>Wipe</span><Eraser class="h-3.5 w-3.5 text-gray-400" />
+        </button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '')}>
+          <span>Console</span><Monitor class="h-3.5 w-3.5 text-gray-400" />
+        </button>
+        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleEditNode(menu?.targetId ?? '')}>
+          <span>Edit Node</span><Pencil class="h-3.5 w-3.5 text-gray-400" />
+        </button>
+        <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNodeAction('delete', menu?.targetId ?? '')}>
+          <span>Delete Node</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
+        </button>
       {:else if menu?.targetType === 'network'}
-        <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNetworkDelete(menu?.targetId ?? '')}>Delete Network</button>
+        <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNetworkDelete(menu?.targetId ?? '')}>
+          <span>Delete Network</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
+        </button>
       {:else}
         <button
           type="button"
@@ -1058,7 +1128,7 @@
             closeMenu();
           }}
         >
-          Delete Link
+          <span>Delete Link</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
       {/if}
     </div>
@@ -1079,32 +1149,6 @@
 </div>
 
 <style>
-  :global(.canvas-controls) {
-    display: flex;
-    gap: 0.35rem;
-    border-radius: 9999px;
-    border: 1px solid rgb(55 65 81 / 0.95);
-    background: rgb(17 24 39 / 0.95);
-    padding: 0.25rem;
-    box-shadow: 0 20px 40px -20px rgb(0 0 0 / 0.65);
-  }
-
-  :global(.canvas-controls button),
-  :global(.canvas-controls__button) {
-    border-radius: 0.5rem;
-    border: 1px solid rgb(31 41 55 / 1);
-    background: rgb(3 7 18 / 0.85);
-    color: rgb(209 213 219 / 1);
-    transition: border-color 120ms ease, color 120ms ease, background-color 120ms ease;
-  }
-
-  :global(.canvas-controls button:hover),
-  :global(.canvas-controls__button:hover) {
-    border-color: rgb(59 130 246 / 0.45);
-    color: white;
-    background: rgb(17 24 39 / 1);
-  }
-
   :global(.canvas-minimap) {
     overflow: hidden;
     border-radius: 0.75rem;
@@ -1118,7 +1162,10 @@
   }
 
   .menu-item {
-    display: block;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
     width: 100%;
     border-radius: 0.5rem;
     padding: 0.6rem 0.75rem;
