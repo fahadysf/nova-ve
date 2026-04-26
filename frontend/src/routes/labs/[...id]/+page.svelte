@@ -61,9 +61,26 @@
   const CONSOLE_MIN_WIDTH = 760;
   const CONSOLE_MIN_HEIGHT = 504;
   const CONSOLE_CANVAS_INSET = 16;
+  const CONSOLE_MODE_COOKIE = 'novaVeConsoleMode';
   const preferredLabPath = '/alpine-docker-demo.json';
 
+  function readConsoleModeCookie(): ConsoleMode {
+    if (typeof document === 'undefined') return 'tabbed';
+    const match = document.cookie
+      .split('; ')
+      .find((entry) => entry.startsWith(`${CONSOLE_MODE_COOKIE}=`));
+    const value = match?.split('=')[1];
+    return value === 'floating' ? 'floating' : 'tabbed';
+  }
+
+  function writeConsoleModeCookie(mode: ConsoleMode) {
+    if (typeof document === 'undefined') return;
+    const oneYear = 60 * 60 * 24 * 365;
+    document.cookie = `${CONSOLE_MODE_COOKIE}=${mode}; path=/; max-age=${oneYear}; SameSite=Lax`;
+  }
+
   let consoleWorkspace: ConsoleWorkspaceState | null = null;
+  let consoleMode: ConsoleMode = 'tabbed';
   let activeConsoleTabState: ConsoleTab | null = null;
   let consoleTabCounter = 0;
   let canvasContainerEl: HTMLDivElement | null = null;
@@ -117,6 +134,7 @@
   }
 
   onMount(async () => {
+    consoleMode = readConsoleModeCookie();
     if (!$authStore.authenticated) {
       goto('/login');
     }
@@ -420,7 +438,7 @@
       maximized: existingWorkspace?.maximized ?? false,
       minimized: false,
       restoreBounds: existingWorkspace?.restoreBounds ?? bounds,
-      mode: existingWorkspace?.mode ?? 'tabbed',
+      mode: existingWorkspace?.mode ?? consoleMode,
       zStack: existingWorkspace?.zStack ?? []
     };
   }
@@ -442,7 +460,15 @@
   }
 
   function setConsoleMode(mode: ConsoleMode) {
-    if (!consoleWorkspace || consoleWorkspace.mode === mode) return;
+    if (consoleMode === mode) return;
+    consoleMode = mode;
+    writeConsoleModeCookie(mode);
+    if (!consoleWorkspace || consoleWorkspace.mode === mode) {
+      if (consoleWorkspace) {
+        consoleWorkspace = { ...consoleWorkspace, mode };
+      }
+      return;
+    }
     let zStack = consoleWorkspace.zStack;
     let tabs = consoleWorkspace.tabs;
     if (mode === 'floating') {
@@ -462,8 +488,7 @@
   }
 
   function toggleConsoleMode() {
-    if (!consoleWorkspace) return;
-    setConsoleMode(consoleWorkspace.mode === 'tabbed' ? 'floating' : 'tabbed');
+    setConsoleMode(consoleMode === 'tabbed' ? 'floating' : 'tabbed');
   }
 
   function updateFloatingWindow(tabId: number, patch: Partial<FloatingWindowState>) {
@@ -854,12 +879,12 @@
                 {runningNodeCount} running
               </span>
               <span class={chromePillClass}>{networkList.length} networks</span>
-              {#if !consoleWorkspace || consoleWorkspace.mode === 'tabbed'}
+              {#if consoleMode === 'tabbed'}
                 <span class={chromePillClass}>{consoleTabCount} consoles</span>
               {/if}
             </div>
             <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{labMeta?.path || labId}</div>
-            {#if consoleWorkspace?.mode === 'floating' && consoleWorkspace.tabs.length}
+            {#if consoleMode === 'floating' && consoleWorkspace && consoleWorkspace.tabs.length}
               <div class="mt-1 flex flex-wrap items-center gap-1">
                 {#each consoleWorkspace.tabs as tab}
                   {@const topId = consoleWorkspace.zStack[consoleWorkspace.zStack.length - 1]}
@@ -890,19 +915,17 @@
             <div class="inline-flex items-center rounded-md border border-gray-800 bg-gray-900/80 p-0.5">
               <button
                 type="button"
-                class={`rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] transition ${(!consoleWorkspace || consoleWorkspace.mode === 'tabbed') ? 'bg-blue-500/20 text-white' : 'text-gray-400 hover:text-white'}`}
-                aria-pressed={!consoleWorkspace || consoleWorkspace.mode === 'tabbed'}
+                class={`rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] transition ${consoleMode === 'tabbed' ? 'bg-blue-500/20 text-white' : 'text-gray-400 hover:text-white'}`}
+                aria-pressed={consoleMode === 'tabbed'}
                 on:click={() => setConsoleMode('tabbed')}
-                disabled={!consoleWorkspace}
               >
                 Tabbed
               </button>
               <button
                 type="button"
-                class={`rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] transition ${consoleWorkspace?.mode === 'floating' ? 'bg-blue-500/20 text-white' : 'text-gray-400 hover:text-white'}`}
-                aria-pressed={consoleWorkspace?.mode === 'floating'}
+                class={`rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] transition ${consoleMode === 'floating' ? 'bg-blue-500/20 text-white' : 'text-gray-400 hover:text-white'}`}
+                aria-pressed={consoleMode === 'floating'}
                 on:click={() => setConsoleMode('floating')}
-                disabled={!consoleWorkspace}
               >
                 Floating
               </button>
