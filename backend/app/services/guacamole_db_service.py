@@ -78,6 +78,8 @@ class GuacamoleDatabaseService:
 
         auth_token = await self._auth_token(username, password)
 
+        await self._disconnect_active_for_connection(auth_token, connection_id)
+
         client_identifier = self._client_identifier(connection_id)
         return f"{self._public_path()}#/client/{client_identifier}?token={auth_token}"
 
@@ -385,6 +387,33 @@ class GuacamoleDatabaseService:
         auth_token = await self._request_auth_token(username, password)
         _AUTH_TOKEN_CACHE[cache_key] = auth_token
         return auth_token
+
+    async def _disconnect_active_for_connection(self, auth_token: str, connection_id: int) -> None:
+        # Telnet `,server,nowait` accepts multiple TCP clients but routes serial I/O to one;
+        # a stale guacd tunnel left behind by a torn-down WebSocket will silently swallow new
+        # opens. Before issuing a fresh URL, ask Guacamole to terminate any active tunnels
+        # for this connection so the new client lands on a clean socket.
+        target_id = str(connection_id)
+        data_source = self.settings.GUACAMOLE_DATA_SOURCE
+        list_url = self._internal_url(f"/api/session/data/{data_source}/activeConnections")
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                response = await client.get(list_url, params={"token": auth_token})
+                if response.status_code >= 400:
+                    return
+                active = response.json() or {}
+                stale_ids = [
+                    str(tunnel_id)
+                    for tunnel_id, tunnel in active.items()
+                    if str((tunnel or {}).get("connectionIdentifier", "")) == target_id
+                ]
+                if not stale_ids:
+                    return
+                patch_url = self._internal_url(f"/api/session/data/{data_source}/activeConnections")
+                patch_body = [{"op": "remove", "path": f"/{tid}"} for tid in stale_ids]
+                await client.patch(patch_url, params={"token": auth_token}, json=patch_body)
+        except httpx.HTTPError:
+            return
 
     async def _token_is_valid(self, auth_token: str) -> bool:
         data_source = self.settings.GUACAMOLE_DATA_SOURCE
