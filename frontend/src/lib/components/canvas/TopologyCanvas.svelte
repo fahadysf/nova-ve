@@ -49,6 +49,8 @@
   export let nodes: Record<string, NodeData> = {};
   export let networks: Record<string, NetworkData> = {};
   export let topology: TopologyLink[] = [];
+  export let consoleSelectorWindows: ConsoleSelectorWindow[] = [];
+  export let consoleMinimizedWindows: ConsoleMinimizedBar[] = [];
 
   type PaletteNetworkItem = {
     kind: 'network';
@@ -57,9 +59,23 @@
     networkType: string;
   };
   type PaletteItem = PaletteNetworkItem;
+  type ConsoleSelectorWindow = {
+    id: number;
+    nodeName: string;
+    isFront: boolean;
+    isMinimized: boolean;
+  };
+  type ConsoleMinimizedBar = {
+    id: number;
+    nodeName: string;
+  };
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData };
+    'console-select': { tabId: number };
+    'console-restore': { tabId: number };
+    'console-close': { tabId: number };
+    'console-maximize': { tabId: number };
     changed: {
       reason: string;
       nodeId?: number;
@@ -1001,19 +1017,68 @@
     </Panel>
 
     <Panel position="top-right">
-      <div class="space-y-1 rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs shadow-lg shadow-black/20 backdrop-blur">
-        <div class="flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
-          <span class="text-gray-200">Running</span>
+      <div class="flex flex-col items-end gap-2">
+        <div class="space-y-1 rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs shadow-lg shadow-black/20 backdrop-blur">
+          <div class="flex items-center gap-1.5">
+            <span class="h-2.5 w-2.5 rounded-full bg-emerald-500"></span>
+            <span class="text-gray-200">Running</span>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="h-2.5 w-2.5 rounded-full bg-gray-500"></span>
+            <span class="text-gray-200">Stopped</span>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <span class="h-2.5 w-2.5 rounded-full bg-blue-500"></span>
+            <span class="text-gray-200">Network</span>
+          </div>
         </div>
-        <div class="flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-gray-500"></span>
-          <span class="text-gray-200">Stopped</span>
-        </div>
-        <div class="flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-blue-500"></span>
-          <span class="text-gray-200">Network</span>
-        </div>
+        {#if consoleSelectorWindows.length}
+          <div class="rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs shadow-lg shadow-black/20 backdrop-blur">
+            <div class="text-[9px] uppercase tracking-[0.18em] text-gray-500">Console selector</div>
+            <div class="mt-1.5 flex max-w-[14rem] flex-col items-stretch gap-1">
+              {#each consoleSelectorWindows as window (window.id)}
+                <button
+                  type="button"
+                  class={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-left text-[10px] transition ${window.isFront && !window.isMinimized ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-100' : 'border-gray-700 bg-gray-950/80 text-gray-300 hover:border-blue-500 hover:text-white'}`}
+                  aria-label={`Bring ${window.nodeName} console to front`}
+                  title={window.isMinimized ? `Restore ${window.nodeName}` : `Bring ${window.nodeName} to front`}
+                  on:click={() => dispatch('console-select', { tabId: window.id })}
+                >
+                  <span class={`inline-block h-1.5 w-1.5 rounded-full ${window.isMinimized ? 'bg-amber-300' : 'bg-emerald-400'}`}></span>
+                  <span class="truncate">{window.nodeName}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
+        {/if}
+        {#each consoleMinimizedWindows as window (window.id)}
+          <div class="flex items-center gap-2.5 rounded-2xl border border-gray-700 bg-gray-900/95 px-3 py-1 shadow-lg shadow-black/20 backdrop-blur">
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
+                aria-label={`Close ${window.nodeName} console`}
+                on:click={() => dispatch('console-close', { tabId: window.id })}
+              ></button>
+              <button
+                type="button"
+                class="h-3 w-3 rounded-full bg-amber-300 transition hover:bg-amber-200"
+                aria-label={`Restore ${window.nodeName} console`}
+                on:click={() => dispatch('console-restore', { tabId: window.id })}
+              ></button>
+              <button
+                type="button"
+                class="h-3 w-3 rounded-full bg-emerald-400 transition hover:bg-emerald-300"
+                aria-label={`Maximize ${window.nodeName} console`}
+                on:click={() => dispatch('console-maximize', { tabId: window.id })}
+              ></button>
+            </div>
+            <div class="flex items-baseline gap-2">
+              <span class="text-[9px] uppercase tracking-[0.05em] text-gray-500">Console</span>
+              <span class="whitespace-nowrap text-sm font-semibold leading-none text-gray-100">{window.nodeName}</span>
+            </div>
+          </div>
+        {/each}
       </div>
     </Panel>
 
