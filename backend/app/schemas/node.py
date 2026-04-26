@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, Literal, List
+from typing import Any, Dict, Optional, Literal, List
 from uuid import UUID
 
 
@@ -26,6 +26,7 @@ class NodeBase(BaseModel):
     config_list: List[str] = Field(default_factory=list)
     sat: int = 0
     computed_sat: int = 0
+    extras: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NodeRead(NodeBase):
@@ -51,6 +52,7 @@ class NodeCreate(BaseModel):
     left: int = 0
     top: int = 0
     icon: Optional[str] = None
+    extras: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NodeBatchCreate(BaseModel):
@@ -68,6 +70,7 @@ class NodeBatchCreate(BaseModel):
     left: int = 0
     top: int = 0
     icon: Optional[str] = None
+    extras: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NodeUpdate(BaseModel):
@@ -82,3 +85,4 @@ class NodeUpdate(BaseModel):
     top: Optional[int] = None
     icon: Optional[str] = None
     config: Optional[str] = None
+    extras: Optional[Dict[str, Any]] = None

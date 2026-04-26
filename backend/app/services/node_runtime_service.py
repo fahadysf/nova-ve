@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import socket
@@ -17,6 +18,19 @@ from typing import Any, Iterator
 import psutil
 
 from app.config import get_settings
+
+
+_DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
+
+
+def _node_extras(node: dict[str, Any]) -> dict[str, Any]:
+    extras = node.get("extras")
+    return dict(extras) if isinstance(extras, dict) else {}
+
+
+def _extra_str(extras: dict[str, Any], key: str, default: str = "") -> str:
+    value = extras.get(key, default)
+    return "" if value is None else str(value).strip()
 
 
 class NodeRuntimeError(Exception):
@@ -241,9 +255,13 @@ class NodeRuntimeService:
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
 
     def _start_qemu_node(self, lab_id: str, node: dict[str, Any]) -> dict[str, Any]:
-        qemu_binary = self._resolve_binary(self.settings.QEMU_BINARY)
+        extras = _node_extras(node)
+        qemu_arch = _extra_str(extras, "qemu_arch") or "x86_64"
+        qemu_binary = self._resolve_qemu_binary(qemu_arch)
         if not qemu_binary:
-            raise NodeRuntimeError(f"QEMU binary not found: {self.settings.QEMU_BINARY}")
+            raise NodeRuntimeError(
+                f"QEMU binary not found for arch {qemu_arch}: {self.settings.QEMU_BINARY}"
+            )
 
         work_dir = self._work_dir(lab_id, node["id"])
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -268,7 +286,7 @@ class NodeRuntimeService:
             "-name",
             str(node.get("name", f"node-{node['id']}")),
             "-uuid",
-            str(node.get("uuid") or f"{lab_id}-{node['id']}"),
+            str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node['id']}"),
             "-drive",
             f"file={overlay_path},if=virtio,cache=writeback,format=qcow2",
         ]
@@ -283,16 +301,25 @@ class NodeRuntimeService:
         else:
             cmd += ["-serial", f"telnet::{console_port},server,nowait"]
 
+        nic_model = _extra_str(extras, "qemu_nic") or "e1000"
+        first_mac = node.get("firstmac") or extras.get("firstmac")
         for index in range(int(node.get("ethernet", 0))):
             cmd += [
                 "-netdev",
                 f"user,id=net{index}",
                 "-device",
-                f"e1000,netdev=net{index},mac={self._mac_for_index(node.get('firstmac'), index)}",
+                f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}",
             ]
 
         if iso_path:
             cmd += ["-cdrom", str(iso_path), "-boot", "order=dc"]
+
+        extra_args = _extra_str(extras, "qemu_options")
+        if extra_args:
+            try:
+                cmd += shlex.split(extra_args)
+            except ValueError as exc:
+                raise NodeRuntimeError(f"Invalid qemu_options: {exc}") from exc
 
         with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
             process = subprocess.Popen(
@@ -338,6 +365,7 @@ class NodeRuntimeService:
         console_port = self._allocate_console_port(console_mode)
         container_name = self._container_name(lab_id, node["id"])
         network_specs = self._docker_network_specs(lab_data, node)
+        extras = _node_extras(node)
 
         for spec in network_specs:
             self._ensure_docker_network(docker_binary, spec)
@@ -360,6 +388,28 @@ class NodeRuntimeService:
             "-p",
             f"{console_port}:{self._container_console_port(console_mode)}",
         ]
+
+        restart_policy = _extra_str(extras, "restart_policy")
+        if restart_policy and restart_policy != "no":
+            if restart_policy not in _DOCKER_RESTART_POLICIES:
+                raise NodeRuntimeError(f"Invalid restart_policy: {restart_policy}")
+            cmd += ["--restart", restart_policy]
+
+        for entry in extras.get("environment") or []:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("key", "")).strip()
+            if not key:
+                continue
+            value = str(entry.get("value", ""))
+            cmd += ["-e", f"{key}={value}"]
+
+        extra_args = _extra_str(extras, "extra_args")
+        if extra_args:
+            try:
+                cmd += shlex.split(extra_args)
+            except ValueError as exc:
+                raise NodeRuntimeError(f"Invalid extra_args: {exc}") from exc
 
         if network_specs:
             cmd += [
@@ -691,6 +741,13 @@ class NodeRuntimeService:
         if Path(binary).exists():
             return binary
         return shutil.which(binary)
+
+    def _resolve_qemu_binary(self, arch: str) -> str | None:
+        configured = self.settings.QEMU_BINARY
+        if not arch or arch == "x86_64":
+            return self._resolve_binary(configured)
+        candidate = f"qemu-system-{arch}"
+        return self._resolve_binary(candidate) or self._resolve_binary(configured)
 
     @staticmethod
     def _container_console_port(console_mode: str) -> int:
