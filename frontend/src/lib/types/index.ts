@@ -61,6 +61,7 @@ export interface NodeData {
   image: string;
   console: 'telnet' | 'vnc' | 'rdp';
   status: 0 | 2;
+  transientStatus?: 'starting' | 'stopping';
   delay: number;
   cpu: number;
   ram: number;
