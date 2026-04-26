@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import os
 import shutil
@@ -11,6 +11,273 @@ from app.config import get_settings
 
 
 SUPPORTED_TEMPLATE_TYPES = {"qemu", "docker", "iol", "dynamips"}
+
+
+QEMU_NIC_OPTIONS = [
+    {"value": "virtio-net-pci", "label": "virtio-net-pci"},
+    {"value": "e1000", "label": "e1000"},
+    {"value": "e1000e", "label": "e1000e"},
+    {"value": "rtl8139", "label": "rtl8139"},
+    {"value": "vmxnet3", "label": "vmxnet3"},
+    {"value": "pcnet", "label": "pcnet"},
+]
+
+QEMU_ARCH_OPTIONS = [
+    {"value": "x86_64", "label": "x86_64"},
+    {"value": "aarch64", "label": "aarch64"},
+    {"value": "i386", "label": "i386"},
+]
+
+DOCKER_RESTART_OPTIONS = [
+    {"value": "no", "label": "no"},
+    {"value": "on-failure", "label": "on-failure"},
+    {"value": "unless-stopped", "label": "unless-stopped"},
+    {"value": "always", "label": "always"},
+]
+
+IOL_CONFIG_OPTIONS = [
+    {"value": "Unconfigured", "label": "Unconfigured"},
+    {"value": "Saved", "label": "Saved"},
+    {"value": "Exported", "label": "Exported"},
+]
+
+DYNAMIPS_NPE_OPTIONS = [
+    {"value": "npe-100", "label": "npe-100"},
+    {"value": "npe-150", "label": "npe-150"},
+    {"value": "npe-175", "label": "npe-175"},
+    {"value": "npe-200", "label": "npe-200"},
+    {"value": "npe-225", "label": "npe-225"},
+    {"value": "npe-300", "label": "npe-300"},
+    {"value": "npe-400", "label": "npe-400"},
+    {"value": "npe-g1", "label": "npe-g1"},
+    {"value": "npe-g2", "label": "npe-g2"},
+]
+
+DYNAMIPS_MIDPLANE_OPTIONS = [
+    {"value": "std", "label": "std"},
+    {"value": "vxr", "label": "vxr"},
+]
+
+DYNAMIPS_C7200_SLOT_OPTIONS = [
+    {"value": "", "label": "(empty)"},
+    {"value": "C7200-IO-FE", "label": "C7200-IO-FE"},
+    {"value": "C7200-IO-2FE", "label": "C7200-IO-2FE"},
+    {"value": "C7200-IO-GE-E", "label": "C7200-IO-GE-E"},
+    {"value": "PA-FE-TX", "label": "PA-FE-TX"},
+    {"value": "PA-2FE-TX", "label": "PA-2FE-TX"},
+    {"value": "PA-GE", "label": "PA-GE"},
+    {"value": "PA-4E", "label": "PA-4E"},
+    {"value": "PA-8E", "label": "PA-8E"},
+    {"value": "PA-4T+", "label": "PA-4T+"},
+    {"value": "PA-8T", "label": "PA-8T"},
+    {"value": "PA-A1", "label": "PA-A1"},
+    {"value": "PA-POS-OC3", "label": "PA-POS-OC3"},
+]
+
+
+def _qemu_extras_schema() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "qemu_arch",
+            "label": "QEMU arch",
+            "type": "select",
+            "options": QEMU_ARCH_OPTIONS,
+            "default": "x86_64",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "qemu_nic",
+            "label": "NIC model",
+            "type": "select",
+            "options": QEMU_NIC_OPTIONS,
+            "default": "e1000",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "qemu_version",
+            "label": "QEMU version",
+            "type": "text",
+            "default": "",
+            "placeholder": "(auto)",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "qemu_options",
+            "label": "Extra qemu args",
+            "type": "textarea",
+            "default": "",
+            "placeholder": "-nographic -enable-kvm",
+            "description": "Appended to the qemu command line.",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "uuid",
+            "label": "UUID",
+            "type": "text",
+            "default": "",
+            "placeholder": "(auto-generated)",
+            "stoppedOnly": True,
+        },
+        {
+            "key": "firstmac",
+            "label": "First MAC",
+            "type": "text",
+            "default": "",
+            "placeholder": "(auto-generated)",
+            "stoppedOnly": True,
+        },
+        {
+            "key": "cpulimit",
+            "label": "CPU limit",
+            "type": "number",
+            "default": 1,
+            "stoppedOnly": True,
+        },
+    ]
+
+
+def _docker_extras_schema() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "cpulimit",
+            "label": "CPU limit",
+            "type": "number",
+            "default": 1,
+            "stoppedOnly": True,
+        },
+        {
+            "key": "restart_policy",
+            "label": "Restart policy",
+            "type": "select",
+            "options": DOCKER_RESTART_OPTIONS,
+            "default": "no",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "environment",
+            "label": "Environment variables",
+            "type": "env",
+            "default": [],
+            "description": "Passed as -e KEY=value to docker run.",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "extra_args",
+            "label": "Extra docker args",
+            "type": "textarea",
+            "default": "",
+            "placeholder": "--privileged --cap-add=NET_ADMIN",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+    ]
+
+
+def _iol_extras_schema() -> list[dict[str, Any]]:
+    return [
+        {
+            "key": "serial",
+            "label": "Serial groups",
+            "type": "number",
+            "default": 0,
+            "description": "Each group adds 4 serial interfaces.",
+            "stoppedOnly": True,
+        },
+        {
+            "key": "nvram",
+            "label": "NVRAM (KB)",
+            "type": "number",
+            "default": 1024,
+            "stoppedOnly": True,
+        },
+        {
+            "key": "config",
+            "label": "Config",
+            "type": "select",
+            "options": IOL_CONFIG_OPTIONS,
+            "default": "Unconfigured",
+            "stoppedOnly": True,
+        },
+        {
+            "key": "idle_pc",
+            "label": "Idle PC",
+            "type": "text",
+            "default": "",
+            "placeholder": "0x...",
+            "stoppedOnly": True,
+        },
+    ]
+
+
+def _dynamips_c7200_extras_schema() -> list[dict[str, Any]]:
+    schema: list[dict[str, Any]] = []
+    for index in range(7):
+        schema.append(
+            {
+                "key": f"slot{index}",
+                "label": f"Slot {index}",
+                "type": "select",
+                "options": DYNAMIPS_C7200_SLOT_OPTIONS,
+                "default": "C7200-IO-FE" if index == 0 else "",
+                "stoppedOnly": True,
+                "runtime": True,
+            }
+        )
+    schema += [
+        {
+            "key": "nvram",
+            "label": "NVRAM (KB)",
+            "type": "number",
+            "default": 128,
+            "stoppedOnly": True,
+        },
+        {
+            "key": "npe",
+            "label": "NPE",
+            "type": "select",
+            "options": DYNAMIPS_NPE_OPTIONS,
+            "default": "npe-400",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "midplane",
+            "label": "Midplane",
+            "type": "select",
+            "options": DYNAMIPS_MIDPLANE_OPTIONS,
+            "default": "vxr",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
+            "key": "idlepc",
+            "label": "Idle PC",
+            "type": "text",
+            "default": "",
+            "placeholder": "0x...",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+    ]
+    return schema
+
+
+def _extras_schema_for(template_type: str) -> list[dict[str, Any]]:
+    if template_type == "qemu":
+        return _qemu_extras_schema()
+    if template_type == "docker":
+        return _docker_extras_schema()
+    if template_type == "iol":
+        return _iol_extras_schema()
+    if template_type == "dynamips":
+        return _dynamips_c7200_extras_schema()
+    return []
 
 
 class TemplateError(Exception):
@@ -29,7 +296,8 @@ class TemplateDefinition:
     ethernet: int
     console: str
     cpulimit: int
-    raw: dict[str, Any]
+    extras: dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
 
     def as_response(self) -> dict[str, Any]:
         return {
@@ -44,6 +312,7 @@ class TemplateDefinition:
             "ethernet": self.ethernet,
             "console": self.console,
             "cpulimit": self.cpulimit,
+            "extras": dict(self.extras),
         }
 
 
@@ -110,6 +379,8 @@ class TemplateService:
         for template in self._load_templates():
             images = list(self.list_images(template.type, template.key).values())
             default_image = images[0]["image"] if images else ""
+            extras_schema = _extras_schema_for(template.type)
+            defaults_extras = self._compose_extras(extras_schema, template.extras)
             templates.append(
                 {
                     "key": template.key,
@@ -127,15 +398,31 @@ class TemplateService:
                         "console": template.console,
                         "delay": 0,
                         "cpulimit": template.cpulimit,
+                        "extras": defaults_extras,
                     },
                     "images": images,
                     "icon_options": icon_options,
+                    "extras_schema": extras_schema,
                 }
             )
         return {
             "templates": templates,
             "icon_options": icon_options,
         }
+
+    def template_extras(self, template_type: str, template_key: str) -> dict[str, Any]:
+        """Return the merged default extras (schema defaults + YAML overrides) for a template."""
+        template = self.get_template(template_type, template_key)
+        return self._compose_extras(_extras_schema_for(template_type), template.extras)
+
+    @staticmethod
+    def _compose_extras(schema: list[dict[str, Any]], yaml_overrides: dict[str, Any]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for field in schema:
+            result[field["key"]] = field.get("default")
+        for key, value in (yaml_overrides or {}).items():
+            result[key] = value
+        return result
 
     async def upload_image(
         self,
@@ -176,6 +463,9 @@ class TemplateService:
                 continue
 
             key = template_path.stem
+            yaml_extras = payload.get("extras") or {}
+            if not isinstance(yaml_extras, dict):
+                yaml_extras = {}
             templates.append(
                 TemplateDefinition(
                     key=key,
@@ -188,6 +478,7 @@ class TemplateService:
                     ethernet=int(payload.get("ethernet", 1)),
                     console=str(payload.get("console") or self._default_console(template_type)),
                     cpulimit=int(payload.get("cpulimit", 1)),
+                    extras=dict(yaml_extras),
                     raw=payload,
                 )
             )

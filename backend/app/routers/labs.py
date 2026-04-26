@@ -24,7 +24,7 @@ from app.services.template_service import TemplateError, TemplateService
 router = APIRouter(prefix="/api/labs", tags=["labs"])
 
 NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top"}
-NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "delay"}
+NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "delay", "extras"}
 NODE_FIELDS_MUTABLE = NODE_FIELDS_EDITABLE_WHILE_RUNNING | NODE_FIELDS_EDITABLE_WHILE_STOPPED | {"config"}
 NODE_CREATE_FIELDS = [
     "template",
@@ -37,6 +37,7 @@ NODE_CREATE_FIELDS = [
     "ethernet",
     "console",
     "delay",
+    "extras",
 ]
 NODE_EDIT_FIELDS = [
     "name",
@@ -47,6 +48,7 @@ NODE_EDIT_FIELDS = [
     "ethernet",
     "console",
     "delay",
+    "extras",
 ]
 
 
@@ -162,6 +164,16 @@ def _build_node_payload(
 ) -> dict:
     provided_fields = request.model_fields_set
     ethernet = request.ethernet if "ethernet" in provided_fields else template.ethernet
+    template_extras = TemplateService().template_extras(request.type, request.template)
+    request_extras = dict(getattr(request, "extras", None) or {})
+    merged_extras = {**template_extras, **request_extras}
+
+    if request.type == "qemu":
+        if not merged_extras.get("uuid"):
+            merged_extras["uuid"] = str(uuid.uuid4())
+        if not merged_extras.get("firstmac"):
+            merged_extras["firstmac"] = _first_mac_for_node(node_id)
+
     return {
         "id": node_id,
         "name": name,
@@ -175,8 +187,8 @@ def _build_node_payload(
         "ram": request.ram if "ram" in provided_fields else template.ram,
         "ethernet": ethernet,
         "cpulimit": template.cpulimit,
-        "uuid": str(uuid.uuid4()) if request.type == "qemu" else None,
-        "firstmac": _first_mac_for_node(node_id) if request.type == "qemu" else None,
+        "uuid": merged_extras.get("uuid") if request.type == "qemu" else None,
+        "firstmac": merged_extras.get("firstmac") if request.type == "qemu" else None,
         "left": left,
         "top": top,
         "icon": request.icon if "icon" in provided_fields and request.icon else template.icon,
@@ -186,6 +198,7 @@ def _build_node_payload(
         "sat": 0,
         "computed_sat": 0,
         "interfaces": _default_interfaces(request.type, ethernet),
+        "extras": merged_extras,
     }
 
 

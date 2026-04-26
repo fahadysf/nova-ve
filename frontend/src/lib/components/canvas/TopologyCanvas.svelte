@@ -879,6 +879,7 @@
             ethernet: number;
             console: NodeData['console'];
             delay: number;
+            extras: Record<string, unknown>;
           };
         }
       | {
@@ -893,6 +894,7 @@
             ethernet: number;
             console: NodeData['console'];
             delay: number;
+            extras: Record<string, unknown>;
           };
         }
     >

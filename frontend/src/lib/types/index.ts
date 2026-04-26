@@ -77,6 +77,7 @@ export interface NodeData {
   url?: string;
   cpu_usage?: number;
   ram_usage?: number;
+  extras?: Record<string, unknown>;
 }
 
 export interface NodeCatalogImage {
@@ -97,6 +98,24 @@ export interface NodeCatalogDefaults {
   console: 'telnet' | 'vnc' | 'rdp';
   delay: number;
   cpulimit: number;
+  extras?: Record<string, unknown>;
+}
+
+export interface NodeCatalogExtraFieldOption {
+  value: string;
+  label?: string;
+}
+
+export interface NodeCatalogExtraField {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'select' | 'textarea' | 'env' | 'readonly';
+  default?: unknown;
+  options?: NodeCatalogExtraFieldOption[];
+  placeholder?: string;
+  description?: string;
+  stoppedOnly?: boolean;
+  runtime?: boolean;
 }
 
 export interface NodeCatalogTemplate {
@@ -107,6 +126,7 @@ export interface NodeCatalogTemplate {
   defaults: NodeCatalogDefaults;
   images: NodeCatalogImage[];
   icon_options: string[];
+  extras_schema?: NodeCatalogExtraField[];
 }
 
 export interface NodeCatalog {
