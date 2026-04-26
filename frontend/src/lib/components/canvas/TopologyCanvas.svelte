@@ -1019,48 +1019,48 @@
 
     <Panel position="bottom-left">
       <div class="flex items-end gap-3">
-        <div class="flex flex-col gap-2 rounded-[1.4rem] border border-gray-700 bg-gray-900/95 p-1.5 shadow-2xl shadow-black/30 backdrop-blur">
+        <div class="flex flex-col gap-1 rounded-2xl border border-gray-700 bg-gray-900/95 p-1 shadow-2xl shadow-black/30 backdrop-blur">
           <button
             type="button"
-            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             on:click={handleZoomIn}
             title="zoom in"
             aria-label="zoom in"
             disabled={canvasLocked}
           >
-            <ZoomIn class="h-4 w-4" />
+            <ZoomIn class="h-5 w-5" />
           </button>
           <button
             type="button"
-            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             on:click={handleZoomOut}
             title="zoom out"
             aria-label="zoom out"
             disabled={canvasLocked}
           >
-            <ZoomOut class="h-4 w-4" />
+            <ZoomOut class="h-5 w-5" />
           </button>
           <button
             type="button"
-            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+            class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
             on:click={handleFitView}
             title="center content"
             aria-label="center content"
             disabled={canvasLocked}
           >
-            <LocateFixed class="h-4 w-4" />
+            <LocateFixed class="h-5 w-5" />
           </button>
           <button
             type="button"
-            class="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white"
+            class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-800 bg-gray-950/80 text-gray-200 transition hover:border-blue-500/40 hover:text-white"
             on:click={toggleCanvasLock}
             title={canvasLocked ? 'unlock canvas' : 'lock canvas'}
             aria-label={canvasLocked ? 'unlock canvas' : 'lock canvas'}
           >
             {#if canvasLocked}
-              <Lock class="h-4 w-4" />
+              <Lock class="h-5 w-5" />
             {:else}
-              <LockOpen class="h-4 w-4" />
+              <LockOpen class="h-5 w-5" />
             {/if}
           </button>
         </div>
@@ -1179,14 +1179,14 @@
     <div
       role="menu"
       tabindex="-1"
-      class="fixed z-30 min-w-52 rounded-xl border border-gray-700 bg-gray-900/95 p-2 shadow-xl shadow-black/30 backdrop-blur"
+      class="fixed z-30 min-w-44 rounded-lg border border-gray-700 bg-gray-900/95 p-1 shadow-xl shadow-black/30 backdrop-blur"
       style={`left: ${menu.x}px; top: ${menu.y}px;`}
       on:keydown|stopPropagation={() => {}}
       on:mousedown|stopPropagation
       on:mouseup|stopPropagation
       on:click|stopPropagation
     >
-      <div class="px-2 py-1 text-[9px] uppercase tracking-[0.22em] text-gray-500">
+      <div class="px-1.5 py-0.5 text-[9px] uppercase tracking-[0.22em] text-gray-500">
         {menu.targetType === 'node' ? 'Node actions' : menu.targetType === 'network' ? 'Network actions' : 'Link actions'}
       </div>
       {#if menu?.targetType === 'node'}
@@ -1261,10 +1261,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 0.75rem;
+    gap: 0.5rem;
     width: 100%;
-    border-radius: 0.5rem;
-    padding: 0.6rem 0.75rem;
+    border-radius: 0.375rem;
+    padding: 0.35rem 0.55rem;
     text-align: left;
     font-size: 0.7rem;
     letter-spacing: 0.05em;
