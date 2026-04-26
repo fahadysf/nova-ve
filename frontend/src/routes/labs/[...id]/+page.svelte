@@ -520,8 +520,12 @@
     };
   }
 
-  function beginConsoleDrag(event: MouseEvent) {
+  function beginConsoleDrag(event: PointerEvent) {
     if (!consoleWorkspace || consoleWorkspace.maximized) return;
+    if (event.button !== 0) return;
+    const target = event.currentTarget as HTMLElement | null;
+    target?.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
     focusConsoleWorkspace();
     dragState = {
       startX: event.clientX,
@@ -531,9 +535,13 @@
     };
   }
 
-  function beginConsoleResize(event: MouseEvent) {
+  function beginConsoleResize(event: PointerEvent) {
     if (!consoleWorkspace || consoleWorkspace.maximized || consoleWorkspace.minimized) return;
+    if (event.button !== 0) return;
     event.stopPropagation();
+    const target = event.currentTarget as HTMLElement | null;
+    target?.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
     focusConsoleWorkspace();
     resizeState = {
       startX: event.clientX,
@@ -543,7 +551,7 @@
     };
   }
 
-  function handleWindowPointerMove(event: MouseEvent) {
+  function handleWindowPointerMove(event: PointerEvent) {
     if (dragState && consoleWorkspace) {
       const drag = dragState;
       consoleWorkspace = {
@@ -588,7 +596,11 @@
   }
 </script>
 
-<svelte:window on:mousemove={handleWindowPointerMove} on:mouseup={stopWindowPointerTracking} />
+<svelte:window
+  on:pointermove={handleWindowPointerMove}
+  on:pointerup={stopWindowPointerTracking}
+  on:pointercancel={stopWindowPointerTracking}
+/>
 
 <div class="flex h-screen flex-1 flex-col overflow-hidden bg-gray-900">
   {#if isLabIndexRoute}
@@ -945,7 +957,7 @@
           aria-label="Console workspace"
           class="pointer-events-auto fixed flex overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
           style={`left: ${consoleWorkspace.x}px; top: ${consoleWorkspace.y}px; width: ${consoleWorkspace.width}px; height: ${consoleWorkspace.minimized ? CONSOLE_HEADER_HEIGHT : consoleWorkspace.height}px; z-index: 50;`}
-          on:mousedown={focusConsoleWorkspace}
+          on:pointerdown={focusConsoleWorkspace}
         >
           <div class="flex h-full w-full flex-col">
             <div
@@ -953,26 +965,26 @@
               aria-label="Console workspace controls"
               tabindex="-1"
               class={`flex items-center justify-between border-b border-gray-800 bg-gray-900/95 px-3.5 py-2.5 backdrop-blur ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
-              on:mousedown={beginConsoleDrag}
+              on:pointerdown={beginConsoleDrag}
             >
               <div class="flex items-center gap-3">
                 <div class="flex items-center gap-2">
                   <button
                     class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
                     aria-label="Close console workspace"
-                    on:mousedown|stopPropagation
+                    on:pointerdown|stopPropagation
                     on:click={() => (consoleWorkspace = null)}
                   ></button>
                   <button
                     class="h-3 w-3 rounded-full bg-amber-300 transition hover:bg-amber-200"
                     aria-label={consoleWorkspace.minimized ? 'Restore console workspace' : 'Minimize console workspace'}
-                    on:mousedown|stopPropagation
+                    on:pointerdown|stopPropagation
                     on:click={toggleConsoleMinimize}
                   ></button>
                   <button
                     class="h-3 w-3 rounded-full bg-emerald-400 transition hover:bg-emerald-300"
                     aria-label={consoleWorkspace.maximized ? 'Restore console workspace' : 'Maximize console workspace'}
-                    on:mousedown|stopPropagation
+                    on:pointerdown|stopPropagation
                     on:click={toggleConsoleMaximize}
                   ></button>
                 </div>
@@ -988,7 +1000,7 @@
                   id="console-node-select"
                   class="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
                   value={activeConsoleTabState?.nodeId ?? ''}
-                  on:mousedown|stopPropagation
+                  on:pointerdown|stopPropagation
                   on:click|stopPropagation
                   on:change={handleConsoleNodeChange}
                 >
@@ -999,7 +1011,7 @@
                 </select>
                 <button
                   class="rounded-md border border-gray-700 bg-gray-950 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
-                  on:mousedown|stopPropagation
+                  on:pointerdown|stopPropagation
                   on:click={reloadConsole}
                   disabled={activeConsoleTabState == null}
                 >
@@ -1015,7 +1027,7 @@
                       <button
                         type="button"
                         class="px-3 py-1.5 text-[10px] uppercase tracking-[0.18em]"
-                        on:mousedown|stopPropagation
+                        on:pointerdown|stopPropagation
                         on:click={() => selectConsoleTab(tab.id)}
                       >
                         {tab.nodeName}
@@ -1024,7 +1036,7 @@
                         type="button"
                         class="pr-2 text-gray-500 hover:text-red-400"
                         aria-label={`Close ${tab.nodeName}`}
-                        on:mousedown|stopPropagation
+                        on:pointerdown|stopPropagation
                         on:click={() => closeConsole(tab.id)}
                       >
                         ×
@@ -1067,7 +1079,7 @@
             <button
               class="absolute bottom-0 right-0 h-5 w-5 cursor-nwse-resize bg-transparent"
               aria-label="Resize console workspace"
-              on:mousedown={beginConsoleResize}
+              on:pointerdown={beginConsoleResize}
             ></button>
           {/if}
         </div>
