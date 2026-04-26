@@ -55,7 +55,6 @@
     zStack: number[];
   };
 
-  const CONSOLE_HEADER_HEIGHT = 40;
   // Roboto Mono at 10pt in Guacamole renders cells of ~9px × 18px. Reserve
   // enough room for 80 cols × 24 rows plus the floating window header.
   const CONSOLE_MIN_WIDTH = 760;
@@ -117,6 +116,63 @@
   $: runningNodeCount = runningConsoleNodes.length;
   $: currentUserLabel = $authStore.user?.name || $authStore.user?.username || 'Operator';
   $: consoleTabCount = consoleWorkspace?.tabs.length ?? 0;
+  $: consoleSelectorWindows =
+    consoleMode === 'floating' && consoleWorkspace
+      ? (() => {
+          const stack = consoleWorkspace.zStack;
+          const topId = stack.length ? stack[stack.length - 1] : null;
+          return consoleWorkspace.tabs.map((tab) => ({
+            id: tab.id,
+            nodeName: tab.nodeName,
+            isFront: tab.id === topId,
+            isMinimized: tab.floating.minimized
+          }));
+        })()
+      : [];
+  // Sentinel id used by tabbed-mode minimized capsule (tab ids start at 1).
+  const TABBED_WORKSPACE_BAR_ID = -1;
+  $: consoleMinimizedWindows = (() => {
+    if (!consoleWorkspace) return [];
+    if (consoleMode === 'tabbed') {
+      return consoleWorkspace.minimized
+        ? [{ id: TABBED_WORKSPACE_BAR_ID, nodeName: activeConsoleTabState?.nodeName ?? 'Console' }]
+        : [];
+    }
+    return consoleWorkspace.tabs
+      .filter((tab) => tab.floating.minimized)
+      .map((tab) => ({ id: tab.id, nodeName: tab.nodeName }));
+  })();
+
+  function handleConsoleRestore(tabId: number) {
+    if (tabId === TABBED_WORKSPACE_BAR_ID) {
+      if (consoleWorkspace?.minimized) toggleConsoleMinimize();
+      focusConsoleWorkspace();
+      return;
+    }
+    updateFloatingWindow(tabId, { minimized: false });
+    bringFloatingWindowToFront(tabId);
+    setTimeout(() => focusGuacamoleWindow(tabId), 0);
+  }
+  function handleConsoleClose(tabId: number) {
+    if (tabId === TABBED_WORKSPACE_BAR_ID) {
+      consoleWorkspace = null;
+      return;
+    }
+    closeFloatingWindow(tabId);
+  }
+  function handleConsoleMaximizeFromBar(tabId: number) {
+    if (tabId === TABBED_WORKSPACE_BAR_ID) {
+      if (!consoleWorkspace) return;
+      if (consoleWorkspace.minimized) toggleConsoleMinimize();
+      if (!consoleWorkspace.maximized) toggleConsoleMaximize();
+      focusConsoleWorkspace();
+      return;
+    }
+    updateFloatingWindow(tabId, { minimized: false });
+    const tab = consoleWorkspace?.tabs.find((candidate) => candidate.id === tabId);
+    if (tab && !tab.floating.maximized) toggleFloatingMaximize(tabId);
+    setTimeout(() => focusGuacamoleWindow(tabId), 0);
+  }
   $: summaryStats = [
     { label: 'Nodes', value: String(nodeList.length) },
     { label: 'Running', value: String(runningNodeCount) },
@@ -884,28 +940,6 @@
               {/if}
             </div>
             <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{labMeta?.path || labId}</div>
-            {#if consoleMode === 'floating' && consoleWorkspace && consoleWorkspace.tabs.length}
-              <div class="mt-1 flex flex-wrap items-center gap-1">
-                {#each consoleWorkspace.tabs as tab}
-                  {@const topId = consoleWorkspace.zStack[consoleWorkspace.zStack.length - 1]}
-                  {@const isFront = tab.id === topId && !tab.floating.minimized}
-                  <button
-                    type="button"
-                    class={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] uppercase tracking-[0.18em] transition ${isFront ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-100' : 'border-gray-700 bg-gray-950/80 text-gray-300 hover:border-blue-500 hover:text-white'}`}
-                    aria-label={`Bring ${tab.nodeName} console to front`}
-                    title={tab.floating.minimized ? `Restore ${tab.nodeName}` : `Bring ${tab.nodeName} to front`}
-                    on:click={() => {
-                      updateFloatingWindow(tab.id, { minimized: false });
-                      bringFloatingWindowToFront(tab.id);
-                      setTimeout(() => focusGuacamoleWindow(tab.id), 0);
-                    }}
-                  >
-                    <span class={`inline-block h-1.5 w-1.5 rounded-full ${tab.floating.minimized ? 'bg-amber-300' : 'bg-emerald-400'}`}></span>
-                    <span class="normal-case tracking-normal">{tab.nodeName}</span>
-                  </button>
-                {/each}
-              </div>
-            {/if}
           </div>
         </div>
 
@@ -1231,7 +1265,18 @@
             {nodes}
             {networks}
             {topology}
+            {consoleSelectorWindows}
+            {consoleMinimizedWindows}
             on:console={(event) => openConsole(event.detail.node)}
+            on:console-select={(event) => {
+              const tabId = event.detail.tabId;
+              updateFloatingWindow(tabId, { minimized: false });
+              bringFloatingWindowToFront(tabId);
+              setTimeout(() => focusGuacamoleWindow(tabId), 0);
+            }}
+            on:console-restore={(event) => handleConsoleRestore(event.detail.tabId)}
+            on:console-close={(event) => handleConsoleClose(event.detail.tabId)}
+            on:console-maximize={(event) => handleConsoleMaximizeFromBar(event.detail.tabId)}
             on:changed={refreshLabFromCanvas}
           />
         </SvelteFlowProvider>
@@ -1242,8 +1287,8 @@
           role="dialog"
           tabindex="-1"
           aria-label="Console workspace"
-          class="pointer-events-auto fixed flex overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
-          style={`left: ${consoleWorkspace.x}px; top: ${consoleWorkspace.y}px; width: ${consoleWorkspace.width}px; height: ${consoleWorkspace.minimized ? CONSOLE_HEADER_HEIGHT : consoleWorkspace.height}px; z-index: 50;`}
+          class="pointer-events-auto fixed overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
+          style={`left: ${consoleWorkspace.x}px; top: ${consoleWorkspace.y}px; width: ${consoleWorkspace.width}px; height: ${consoleWorkspace.height}px; z-index: 50; display: ${consoleWorkspace.minimized ? 'none' : 'flex'};`}
           on:pointerdown={focusConsoleWorkspace}
         >
           <div class="flex h-full w-full flex-col">
@@ -1251,7 +1296,7 @@
               role="toolbar"
               aria-label="Console workspace controls"
               tabindex="-1"
-              class={`flex items-center justify-between border-b border-gray-800 bg-gray-900/95 px-3 py-1 backdrop-blur ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
+              class={`flex items-center justify-between gap-3 border-b border-gray-800 bg-gray-900/95 px-3 py-1 backdrop-blur ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
               on:pointerdown={beginConsoleDrag}
             >
               <div class="flex items-center gap-2.5">
@@ -1277,7 +1322,7 @@
                 </div>
                 <div class="flex items-baseline gap-2">
                   <span class="text-[9px] uppercase tracking-[0.05em] text-gray-500">Console</span>
-                  <span class="text-sm font-semibold leading-none text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</span>
+                  <span class="whitespace-nowrap text-sm font-semibold leading-none text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</span>
                 </div>
               </div>
               <div class="flex items-center gap-2">
@@ -1308,61 +1353,59 @@
                 </button>
               </div>
             </div>
-            {#if !consoleWorkspace.minimized}
-              <div class="flex min-h-0 flex-1 flex-col bg-gray-950">
-                <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-950/90 px-3 py-1">
-                  {#each consoleWorkspace.tabs as tab}
-                    <div class={`flex items-center gap-0.5 rounded-md border ${tab.id === consoleWorkspace.activeTabId ? 'border-blue-500 bg-blue-500/10 text-white' : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-blue-500 hover:text-white'}`}>
-                      <button
-                        type="button"
-                        class="px-2 py-0.5 text-[10px] uppercase tracking-[0.18em]"
-                        on:pointerdown|stopPropagation
-                        on:click={() => selectConsoleTab(tab.id)}
-                      >
-                        {tab.nodeName}
-                      </button>
-                      <button
-                        type="button"
-                        class="pr-1.5 text-gray-500 hover:text-red-400"
-                        aria-label={`Close ${tab.nodeName}`}
-                        on:pointerdown|stopPropagation
-                        on:click={() => closeConsole(tab.id)}
-                      >
-                        ×
-                      </button>
-                    </div>
-                  {/each}
-                </div>
-                <div class="relative min-h-0 flex-1 border-t border-gray-950 bg-black">
-                  {#each consoleWorkspace.tabs as tab (tab.id)}
-                    <div
-                      role="presentation"
-                      class={`absolute inset-0 h-full w-full ${tab.id === consoleWorkspace.activeTabId ? 'block' : 'hidden'}`}
-                      on:mouseenter={() => {
-                        if (consoleWorkspace?.activeTabId !== tab.id) {
-                          selectConsoleTab(tab.id);
-                        } else {
+            <div class="flex min-h-0 flex-1 flex-col bg-gray-950">
+              <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-950/90 px-3 py-1">
+                {#each consoleWorkspace.tabs as tab}
+                  <div class={`flex items-center gap-0.5 rounded-md border ${tab.id === consoleWorkspace.activeTabId ? 'border-blue-500 bg-blue-500/10 text-white' : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-blue-500 hover:text-white'}`}>
+                    <button
+                      type="button"
+                      class="px-2 py-0.5 text-[10px] uppercase tracking-[0.18em]"
+                      on:pointerdown|stopPropagation
+                      on:click={() => selectConsoleTab(tab.id)}
+                    >
+                      {tab.nodeName}
+                    </button>
+                    <button
+                      type="button"
+                      class="pr-1.5 text-gray-500 hover:text-red-400"
+                      aria-label={`Close ${tab.nodeName}`}
+                      on:pointerdown|stopPropagation
+                      on:click={() => closeConsole(tab.id)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                {/each}
+              </div>
+              <div class="relative min-h-0 flex-1 border-t border-gray-950 bg-black">
+                {#each consoleWorkspace.tabs as tab (tab.id)}
+                  <div
+                    role="presentation"
+                    class={`absolute inset-0 h-full w-full ${tab.id === consoleWorkspace.activeTabId ? 'block' : 'hidden'}`}
+                    on:mouseenter={() => {
+                      if (consoleWorkspace?.activeTabId !== tab.id) {
+                        selectConsoleTab(tab.id);
+                      } else {
+                        focusGuacamoleWindow(tab.id);
+                      }
+                    }}
+                  >
+                    <iframe
+                      title={`Guacamole console for ${tab.nodeName}`}
+                      src={tab.src}
+                      data-console-tab-id={tab.id}
+                      tabindex="-1"
+                      class="h-full w-full border-0"
+                      on:load={() => {
+                        if (consoleWorkspace?.activeTabId === tab.id) {
                           focusGuacamoleWindow(tab.id);
                         }
                       }}
-                    >
-                      <iframe
-                        title={`Guacamole console for ${tab.nodeName}`}
-                        src={tab.src}
-                        data-console-tab-id={tab.id}
-                        tabindex="-1"
-                        class="h-full w-full border-0"
-                        on:load={() => {
-                          if (consoleWorkspace?.activeTabId === tab.id) {
-                            focusGuacamoleWindow(tab.id);
-                          }
-                        }}
-                      ></iframe>
-                    </div>
-                  {/each}
-                </div>
+                    ></iframe>
+                  </div>
+                {/each}
               </div>
-            {/if}
+            </div>
           </div>
           {#if !consoleWorkspace.maximized && !consoleWorkspace.minimized}
             <button
@@ -1380,8 +1423,8 @@
             role="dialog"
             tabindex="-1"
             aria-label={`Console window for ${tab.nodeName}`}
-            class="pointer-events-auto fixed flex overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
-            style={`left: ${tab.floating.x}px; top: ${tab.floating.y}px; width: ${tab.floating.width}px; height: ${tab.floating.minimized ? CONSOLE_HEADER_HEIGHT : tab.floating.height}px; z-index: ${zIndex};`}
+            class="pointer-events-auto fixed overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
+            style={`left: ${tab.floating.x}px; top: ${tab.floating.y}px; width: ${tab.floating.width}px; height: ${tab.floating.height}px; z-index: ${zIndex}; display: ${tab.floating.minimized ? 'none' : 'flex'};`}
             on:pointerdown={() => {
               bringFloatingWindowToFront(tab.id);
               setTimeout(() => focusGuacamoleWindow(tab.id), 0);
@@ -1392,7 +1435,7 @@
                 role="toolbar"
                 aria-label={`Controls for ${tab.nodeName} console`}
                 tabindex="-1"
-                class={`flex items-center justify-between border-b border-gray-800 bg-gray-900/95 px-3 py-1 backdrop-blur ${tab.floating.maximized ? 'cursor-default' : 'cursor-move'}`}
+                class={`flex items-center justify-between gap-3 border-b border-gray-800 bg-gray-900/95 px-3 py-1 backdrop-blur ${tab.floating.maximized ? 'cursor-default' : 'cursor-move'}`}
                 on:pointerdown={(event) => beginFloatingDrag(event, tab.id)}
               >
                 <div class="flex items-center gap-2.5">
@@ -1418,7 +1461,7 @@
                   </div>
                   <div class="flex items-baseline gap-2">
                     <span class="text-[9px] uppercase tracking-[0.05em] text-gray-500">Console</span>
-                    <span class="text-sm font-semibold leading-none text-gray-100">{tab.nodeName}</span>
+                    <span class="whitespace-nowrap text-sm font-semibold leading-none text-gray-100">{tab.nodeName}</span>
                   </div>
                 </div>
                 <div class="flex items-center gap-2">
@@ -1434,22 +1477,20 @@
                   </button>
                 </div>
               </div>
-              {#if !tab.floating.minimized}
-                <div
-                  role="presentation"
-                  class="relative min-h-0 flex-1 border-t border-gray-950 bg-black"
-                  on:mouseenter={() => focusGuacamoleWindow(tab.id)}
-                >
-                  <iframe
-                    title={`Guacamole console for ${tab.nodeName}`}
-                    src={tab.src}
-                    data-console-tab-id={tab.id}
-                    tabindex="-1"
-                    class="h-full w-full border-0"
-                    on:load={() => focusGuacamoleWindow(tab.id)}
-                  ></iframe>
-                </div>
-              {/if}
+              <div
+                role="presentation"
+                class="relative min-h-0 flex-1 border-t border-gray-950 bg-black"
+                on:mouseenter={() => focusGuacamoleWindow(tab.id)}
+              >
+                <iframe
+                  title={`Guacamole console for ${tab.nodeName}`}
+                  src={tab.src}
+                  data-console-tab-id={tab.id}
+                  tabindex="-1"
+                  class="h-full w-full border-0"
+                  on:load={() => focusGuacamoleWindow(tab.id)}
+                ></iframe>
+              </div>
             </div>
             {#if !tab.floating.maximized && !tab.floating.minimized}
               <button
