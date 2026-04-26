@@ -47,11 +47,17 @@
   };
 
   const CONSOLE_HEADER_HEIGHT = 56;
+  // Roboto Mono at 10pt in Guacamole renders cells of ~9px × 18px. Reserve
+  // enough room for 80 cols × 24 rows plus the floating window header.
+  const CONSOLE_MIN_WIDTH = 760;
+  const CONSOLE_MIN_HEIGHT = 504;
+  const CONSOLE_CANVAS_INSET = 16;
   const preferredLabPath = '/alpine-docker-demo.json';
 
   let consoleWorkspace: ConsoleWorkspaceState | null = null;
   let activeConsoleTabState: ConsoleTab | null = null;
   let consoleTabCounter = 0;
+  let canvasContainerEl: HTMLDivElement | null = null;
   let railCollapsed = false;
   let railSections: Record<RailSectionKey, boolean> = {
     summary: true,
@@ -299,15 +305,18 @@
   function defaultConsoleBounds(windowOffset = consoleWorkspace?.tabs.length ?? 0): ConsoleBounds {
     const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1440;
     const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 900;
-    const width = Math.max(480, Math.min(700, Math.round(viewportWidth * 0.38)));
-    const height = Math.max(320, Math.min(520, Math.round(viewportHeight * 0.42)));
+    const canvasRect = canvasContainerEl?.getBoundingClientRect();
+    const anchorX = canvasRect ? canvasRect.left + CONSOLE_CANVAS_INSET : 24;
+    const anchorY = canvasRect ? canvasRect.top + CONSOLE_CANVAS_INSET : 88;
+    const width = Math.max(CONSOLE_MIN_WIDTH, Math.min(820, Math.round(viewportWidth * 0.5)));
+    const height = Math.max(CONSOLE_MIN_HEIGHT, Math.min(560, Math.round(viewportHeight * 0.55)));
     const offset = Math.min(windowOffset, 6) * 28;
 
     return {
       width,
       height,
-      x: Math.max(24, viewportWidth - width - 32 - offset),
-      y: Math.max(72, 88 + offset)
+      x: Math.max(16, anchorX + offset),
+      y: Math.max(56, anchorY + offset)
     };
   }
 
@@ -317,16 +326,16 @@
     return {
       x: 24,
       y: 72,
-      width: Math.max(720, viewportWidth - 48),
-      height: Math.max(480, viewportHeight - 96)
+      width: Math.max(CONSOLE_MIN_WIDTH, viewportWidth - 48),
+      height: Math.max(CONSOLE_MIN_HEIGHT, viewportHeight - 96)
     };
   }
 
   function clampConsoleBounds(bounds: ConsoleBounds): ConsoleBounds {
     const viewportWidth = typeof window !== 'undefined' ? window.innerWidth : 1440;
     const viewportHeight = typeof window !== 'undefined' ? window.innerHeight : 900;
-    const width = Math.min(Math.max(520, bounds.width), viewportWidth - 32);
-    const height = Math.min(Math.max(360, bounds.height), viewportHeight - 96);
+    const width = Math.min(Math.max(CONSOLE_MIN_WIDTH, bounds.width), Math.max(CONSOLE_MIN_WIDTH, viewportWidth - 32));
+    const height = Math.min(Math.max(CONSOLE_MIN_HEIGHT, bounds.height), Math.max(CONSOLE_MIN_HEIGHT, viewportHeight - 96));
 
     return {
       width,
@@ -937,7 +946,7 @@
         </div>
       </aside>
 
-      <div class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
+      <div bind:this={canvasContainerEl} class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
         <SvelteFlowProvider>
           <TopologyCanvas
             labId={labId}
