@@ -22,13 +22,20 @@
   let loading = true;
   let error = '';
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
+  type FloatingWindowState = ConsoleBounds & {
+    maximized: boolean;
+    minimized: boolean;
+    restoreBounds: ConsoleBounds | null;
+  };
   type ConsoleTab = {
     id: number;
     nodeId: number;
     nodeName: string;
     src: string;
     requestId: number;
+    floating: FloatingWindowState;
   };
+  type ConsoleMode = 'tabbed' | 'floating';
   type RailSectionKey = 'summary' | 'inventory' | 'nodes' | 'networks';
   type CanvasChangeDetail = {
     reason: string;
@@ -44,6 +51,8 @@
     maximized: boolean;
     minimized: boolean;
     restoreBounds: ConsoleBounds | null;
+    mode: ConsoleMode;
+    zStack: number[];
   };
 
   const CONSOLE_HEADER_HEIGHT = 40;
@@ -66,8 +75,12 @@
     networks: true
   };
   let lastLoadedRoute = '';
-  let dragState: { startX: number; startY: number; originX: number; originY: number } | null = null;
-  let resizeState: { startX: number; startY: number; width: number; height: number } | null = null;
+  let dragState:
+    | { startX: number; startY: number; originX: number; originY: number; windowId: number | null }
+    | null = null;
+  let resizeState:
+    | { startX: number; startY: number; width: number; height: number; windowId: number | null }
+    | null = null;
   let labRefreshInFlight = false;
 
   const compactIconButtonClass =
@@ -172,10 +185,12 @@
             ...tab,
             nodeName: nodeData[String(tab.nodeId)]?.name || tab.nodeName
           }));
+        const survivingIds = new Set(tabs.map((tab) => tab.id));
         consoleWorkspace = tabs.length
           ? {
               ...consoleWorkspace,
               tabs,
+              zStack: consoleWorkspace.zStack.filter((id) => survivingIds.has(id)),
               activeTabId:
                 tabs.find((tab) => tab.id === priorActiveTabId)?.id ?? tabs[0].id
             }
@@ -404,8 +419,132 @@
       activeTabId: existingWorkspace?.activeTabId ?? null,
       maximized: existingWorkspace?.maximized ?? false,
       minimized: false,
-      restoreBounds: existingWorkspace?.restoreBounds ?? bounds
+      restoreBounds: existingWorkspace?.restoreBounds ?? bounds,
+      mode: existingWorkspace?.mode ?? 'tabbed',
+      zStack: existingWorkspace?.zStack ?? []
     };
+  }
+
+  function defaultFloatingWindowBounds(offsetIndex: number): FloatingWindowState {
+    const base = defaultConsoleBounds(offsetIndex);
+    return {
+      ...base,
+      maximized: false,
+      minimized: false,
+      restoreBounds: base
+    };
+  }
+
+  function bringFloatingWindowToFront(tabId: number) {
+    if (!consoleWorkspace) return;
+    const zStack = [...consoleWorkspace.zStack.filter((id) => id !== tabId), tabId];
+    consoleWorkspace = { ...consoleWorkspace, zStack, activeTabId: tabId };
+  }
+
+  function setConsoleMode(mode: ConsoleMode) {
+    if (!consoleWorkspace || consoleWorkspace.mode === mode) return;
+    let zStack = consoleWorkspace.zStack;
+    let tabs = consoleWorkspace.tabs;
+    if (mode === 'floating') {
+      // Ensure every open tab has positioned floating bounds and a z-stack entry.
+      const seen = new Set(zStack);
+      tabs = tabs.map((tab, index) => ({
+        ...tab,
+        floating: tab.floating ?? defaultFloatingWindowBounds(index)
+      }));
+      const newOrder = [
+        ...zStack.filter((id) => tabs.some((tab) => tab.id === id)),
+        ...tabs.filter((tab) => !seen.has(tab.id)).map((tab) => tab.id)
+      ];
+      zStack = newOrder;
+    }
+    consoleWorkspace = { ...consoleWorkspace, mode, tabs, zStack };
+  }
+
+  function toggleConsoleMode() {
+    if (!consoleWorkspace) return;
+    setConsoleMode(consoleWorkspace.mode === 'tabbed' ? 'floating' : 'tabbed');
+  }
+
+  function updateFloatingWindow(tabId: number, patch: Partial<FloatingWindowState>) {
+    if (!consoleWorkspace) return;
+    consoleWorkspace = {
+      ...consoleWorkspace,
+      tabs: consoleWorkspace.tabs.map((tab) =>
+        tab.id === tabId ? { ...tab, floating: { ...tab.floating, ...patch } } : tab
+      )
+    };
+  }
+
+  function toggleFloatingMaximize(tabId: number) {
+    if (!consoleWorkspace) return;
+    const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    bringFloatingWindowToFront(tabId);
+    if (tab.floating.maximized) {
+      const restored = clampConsoleBounds(tab.floating.restoreBounds ?? defaultConsoleBounds());
+      updateFloatingWindow(tabId, { ...restored, maximized: false, minimized: false, restoreBounds: restored });
+      return;
+    }
+    const currentBounds: ConsoleBounds = {
+      x: tab.floating.x,
+      y: tab.floating.y,
+      width: tab.floating.width,
+      height: tab.floating.height
+    };
+    updateFloatingWindow(tabId, {
+      ...maximizedConsoleBounds(),
+      maximized: true,
+      minimized: false,
+      restoreBounds: currentBounds
+    });
+  }
+
+  function toggleFloatingMinimize(tabId: number) {
+    if (!consoleWorkspace) return;
+    const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab) return;
+    const minimized = !tab.floating.minimized;
+    updateFloatingWindow(tabId, {
+      minimized,
+      maximized: minimized ? false : tab.floating.maximized
+    });
+  }
+
+  function reloadFloatingConsole(tabId: number) {
+    if (!consoleWorkspace) return;
+    bringFloatingWindowToFront(tabId);
+    consoleWorkspace = {
+      ...consoleWorkspace,
+      tabs: consoleWorkspace.tabs.map((tab) =>
+        tab.id === tabId
+          ? {
+              ...tab,
+              src: `/api/labs/${labId}/nodes/${tab.nodeId}/html5?ts=${Date.now()}`,
+              requestId: Date.now(),
+              floating: { ...tab.floating, minimized: false }
+            }
+          : tab
+      )
+    };
+    setTimeout(() => focusGuacamoleWindow(tabId), 0);
+  }
+
+  function closeFloatingWindow(tabId: number) {
+    if (!consoleWorkspace) return;
+    const tabs = consoleWorkspace.tabs.filter((tab) => tab.id !== tabId);
+    if (!tabs.length) {
+      consoleWorkspace = null;
+      dragState = null;
+      resizeState = null;
+      return;
+    }
+    const zStack = consoleWorkspace.zStack.filter((id) => id !== tabId);
+    const activeTabId =
+      tabId === consoleWorkspace.activeTabId
+        ? zStack[zStack.length - 1] ?? tabs[tabs.length - 1].id
+        : consoleWorkspace.activeTabId;
+    consoleWorkspace = { ...consoleWorkspace, tabs, zStack, activeTabId };
   }
 
   async function openConsole(node: NodeData) {
@@ -416,23 +555,33 @@
 
     const existingTab = consoleWorkspace?.tabs.find((tab) => tab.nodeId === node.id);
     if (existingTab) {
-      replaceConsoleWindow((workspace) => ({ ...workspace, minimized: false, activeTabId: existingTab.id }));
+      if (consoleWorkspace?.mode === 'floating') {
+        updateFloatingWindow(existingTab.id, { minimized: false });
+        bringFloatingWindowToFront(existingTab.id);
+      } else {
+        replaceConsoleWindow((workspace) => ({ ...workspace, minimized: false, activeTabId: existingTab.id }));
+      }
       await tick();
       focusGuacamoleWindow(existingTab.id);
       return;
     }
 
+    await tick();
+    const nextWorkspace = buildConsoleWorkspace(consoleWorkspace ?? undefined);
+    const offsetIndex = nextWorkspace.tabs.length;
     const nextTab: ConsoleTab = {
       id: nextConsoleTabId(),
       nodeId: node.id,
       nodeName: node.name,
       src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}`,
-      requestId: Date.now()
+      requestId: Date.now(),
+      floating: defaultFloatingWindowBounds(offsetIndex)
     };
-    await tick();
-    const nextWorkspace = buildConsoleWorkspace(consoleWorkspace ?? undefined);
     nextWorkspace.tabs = [...nextWorkspace.tabs, nextTab];
     nextWorkspace.activeTabId = nextTab.id;
+    if (nextWorkspace.mode === 'floating') {
+      nextWorkspace.zStack = [...nextWorkspace.zStack, nextTab.id];
+    }
     consoleWorkspace = nextWorkspace;
     await tick();
     focusGuacamoleWindow(nextTab.id);
@@ -470,9 +619,10 @@
       resizeState = null;
       return;
     }
+    const zStack = consoleWorkspace.zStack.filter((id) => id !== tabId);
     const activeTabId =
       tabId === consoleWorkspace.activeTabId ? tabs[tabs.length - 1].id : consoleWorkspace.activeTabId;
-    consoleWorkspace = { ...consoleWorkspace, tabs, activeTabId };
+    consoleWorkspace = { ...consoleWorkspace, tabs, zStack, activeTabId };
   }
 
   async function reloadConsole() {
@@ -540,7 +690,8 @@
       startX: event.clientX,
       startY: event.clientY,
       originX: consoleWorkspace.x,
-      originY: consoleWorkspace.y
+      originY: consoleWorkspace.y,
+      windowId: null
     };
   }
 
@@ -556,35 +707,100 @@
       startX: event.clientX,
       startY: event.clientY,
       width: consoleWorkspace.width,
-      height: consoleWorkspace.height
+      height: consoleWorkspace.height,
+      windowId: null
+    };
+  }
+
+  function beginFloatingDrag(event: PointerEvent, tabId: number) {
+    if (!consoleWorkspace) return;
+    const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.floating.maximized) return;
+    if (event.button !== 0) return;
+    const target = event.currentTarget as HTMLElement | null;
+    target?.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    bringFloatingWindowToFront(tabId);
+    setTimeout(() => focusGuacamoleWindow(tabId), 0);
+    dragState = {
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: tab.floating.x,
+      originY: tab.floating.y,
+      windowId: tabId
+    };
+  }
+
+  function beginFloatingResize(event: PointerEvent, tabId: number) {
+    if (!consoleWorkspace) return;
+    const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === tabId);
+    if (!tab || tab.floating.maximized || tab.floating.minimized) return;
+    if (event.button !== 0) return;
+    event.stopPropagation();
+    const target = event.currentTarget as HTMLElement | null;
+    target?.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+    bringFloatingWindowToFront(tabId);
+    resizeState = {
+      startX: event.clientX,
+      startY: event.clientY,
+      width: tab.floating.width,
+      height: tab.floating.height,
+      windowId: tabId
     };
   }
 
   function handleWindowPointerMove(event: PointerEvent) {
     if (dragState && consoleWorkspace) {
       const drag = dragState;
-      consoleWorkspace = {
-        ...consoleWorkspace,
-        ...clampConsoleBounds({
-          x: drag.originX + (event.clientX - drag.startX),
-          y: drag.originY + (event.clientY - drag.startY),
-          width: consoleWorkspace.width,
-          height: consoleWorkspace.height
-        })
-      };
+      if (drag.windowId == null) {
+        consoleWorkspace = {
+          ...consoleWorkspace,
+          ...clampConsoleBounds({
+            x: drag.originX + (event.clientX - drag.startX),
+            y: drag.originY + (event.clientY - drag.startY),
+            width: consoleWorkspace.width,
+            height: consoleWorkspace.height
+          })
+        };
+      } else {
+        const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === drag.windowId);
+        if (tab) {
+          const next = clampConsoleBounds({
+            x: drag.originX + (event.clientX - drag.startX),
+            y: drag.originY + (event.clientY - drag.startY),
+            width: tab.floating.width,
+            height: tab.floating.height
+          });
+          updateFloatingWindow(drag.windowId, next);
+        }
+      }
     }
 
     if (resizeState && consoleWorkspace) {
       const resize = resizeState;
-      consoleWorkspace = {
-        ...consoleWorkspace,
-        ...clampConsoleBounds({
-          x: consoleWorkspace.x,
-          y: consoleWorkspace.y,
-          width: resize.width + (event.clientX - resize.startX),
-          height: resize.height + (event.clientY - resize.startY)
-        })
-      };
+      if (resize.windowId == null) {
+        consoleWorkspace = {
+          ...consoleWorkspace,
+          ...clampConsoleBounds({
+            x: consoleWorkspace.x,
+            y: consoleWorkspace.y,
+            width: resize.width + (event.clientX - resize.startX),
+            height: resize.height + (event.clientY - resize.startY)
+          })
+        };
+      } else {
+        const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === resize.windowId);
+        if (tab) {
+          const next = clampConsoleBounds({
+            x: tab.floating.x,
+            y: tab.floating.y,
+            width: resize.width + (event.clientX - resize.startX),
+            height: resize.height + (event.clientY - resize.startY)
+          });
+          updateFloatingWindow(resize.windowId, next);
+        }
+      }
     }
   }
 
@@ -638,19 +854,58 @@
                 {runningNodeCount} running
               </span>
               <span class={chromePillClass}>{networkList.length} networks</span>
-              <span class={chromePillClass}>{consoleTabCount} consoles</span>
+              {#if !consoleWorkspace || consoleWorkspace.mode === 'tabbed'}
+                <span class={chromePillClass}>{consoleTabCount} consoles</span>
+              {/if}
             </div>
             <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{labMeta?.path || labId}</div>
+            {#if consoleWorkspace?.mode === 'floating' && consoleWorkspace.tabs.length}
+              <div class="mt-1 flex flex-wrap items-center gap-1">
+                {#each consoleWorkspace.tabs as tab}
+                  {@const topId = consoleWorkspace.zStack[consoleWorkspace.zStack.length - 1]}
+                  {@const isFront = tab.id === topId && !tab.floating.minimized}
+                  <button
+                    type="button"
+                    class={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[9px] uppercase tracking-[0.18em] transition ${isFront ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-100' : 'border-gray-700 bg-gray-950/80 text-gray-300 hover:border-blue-500 hover:text-white'}`}
+                    aria-label={`Bring ${tab.nodeName} console to front`}
+                    title={tab.floating.minimized ? `Restore ${tab.nodeName}` : `Bring ${tab.nodeName} to front`}
+                    on:click={() => {
+                      updateFloatingWindow(tab.id, { minimized: false });
+                      bringFloatingWindowToFront(tab.id);
+                      setTimeout(() => focusGuacamoleWindow(tab.id), 0);
+                    }}
+                  >
+                    <span class={`inline-block h-1.5 w-1.5 rounded-full ${tab.floating.minimized ? 'bg-amber-300' : 'bg-emerald-400'}`}></span>
+                    <span class="normal-case tracking-normal">{tab.nodeName}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </div>
         </div>
 
         <div class="hidden shrink-0 items-center gap-2 md:flex">
-          <div class="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
-            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">
-              {labRefreshInFlight ? 'Refreshing lab' : 'Editor shell'}
-            </div>
-            <div class="mt-1 text-[11px] text-gray-300">
-              {consoleTabCount ? `${consoleTabCount} console tab${consoleTabCount === 1 ? '' : 's'} active` : 'Console workspace idle'}
+          <div class="flex flex-col gap-1 rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Console layout</div>
+            <div class="inline-flex items-center rounded-md border border-gray-800 bg-gray-900/80 p-0.5">
+              <button
+                type="button"
+                class={`rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] transition ${(!consoleWorkspace || consoleWorkspace.mode === 'tabbed') ? 'bg-blue-500/20 text-white' : 'text-gray-400 hover:text-white'}`}
+                aria-pressed={!consoleWorkspace || consoleWorkspace.mode === 'tabbed'}
+                on:click={() => setConsoleMode('tabbed')}
+                disabled={!consoleWorkspace}
+              >
+                Tabbed
+              </button>
+              <button
+                type="button"
+                class={`rounded px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] transition ${consoleWorkspace?.mode === 'floating' ? 'bg-blue-500/20 text-white' : 'text-gray-400 hover:text-white'}`}
+                aria-pressed={consoleWorkspace?.mode === 'floating'}
+                on:click={() => setConsoleMode('floating')}
+                disabled={!consoleWorkspace}
+              >
+                Floating
+              </button>
             </div>
           </div>
           <div class="rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2 text-right">
@@ -959,7 +1214,7 @@
         </SvelteFlowProvider>
       </div>
 
-      {#if consoleWorkspace}
+      {#if consoleWorkspace && consoleWorkspace.mode === 'tabbed'}
         <div
           role="dialog"
           tabindex="-1"
@@ -1094,6 +1349,94 @@
             ></button>
           {/if}
         </div>
+      {:else if consoleWorkspace && consoleWorkspace.mode === 'floating'}
+        {#each consoleWorkspace.tabs as tab (tab.id)}
+          {@const stackIndex = consoleWorkspace.zStack.indexOf(tab.id)}
+          {@const zIndex = 50 + (stackIndex < 0 ? 0 : stackIndex)}
+          <div
+            role="dialog"
+            tabindex="-1"
+            aria-label={`Console window for ${tab.nodeName}`}
+            class="pointer-events-auto fixed flex overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
+            style={`left: ${tab.floating.x}px; top: ${tab.floating.y}px; width: ${tab.floating.width}px; height: ${tab.floating.minimized ? CONSOLE_HEADER_HEIGHT : tab.floating.height}px; z-index: ${zIndex};`}
+            on:pointerdown={() => {
+              bringFloatingWindowToFront(tab.id);
+              setTimeout(() => focusGuacamoleWindow(tab.id), 0);
+            }}
+          >
+            <div class="flex h-full w-full flex-col">
+              <div
+                role="toolbar"
+                aria-label={`Controls for ${tab.nodeName} console`}
+                tabindex="-1"
+                class={`flex items-center justify-between border-b border-gray-800 bg-gray-900/95 px-3 py-1 backdrop-blur ${tab.floating.maximized ? 'cursor-default' : 'cursor-move'}`}
+                on:pointerdown={(event) => beginFloatingDrag(event, tab.id)}
+              >
+                <div class="flex items-center gap-2.5">
+                  <div class="flex items-center gap-2">
+                    <button
+                      class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
+                      aria-label={`Close ${tab.nodeName} console`}
+                      on:pointerdown|stopPropagation
+                      on:click={() => closeFloatingWindow(tab.id)}
+                    ></button>
+                    <button
+                      class="h-3 w-3 rounded-full bg-amber-300 transition hover:bg-amber-200"
+                      aria-label={tab.floating.minimized ? `Restore ${tab.nodeName} console` : `Minimize ${tab.nodeName} console`}
+                      on:pointerdown|stopPropagation
+                      on:click={() => toggleFloatingMinimize(tab.id)}
+                    ></button>
+                    <button
+                      class="h-3 w-3 rounded-full bg-emerald-400 transition hover:bg-emerald-300"
+                      aria-label={tab.floating.maximized ? `Restore ${tab.nodeName} console` : `Maximize ${tab.nodeName} console`}
+                      on:pointerdown|stopPropagation
+                      on:click={() => toggleFloatingMaximize(tab.id)}
+                    ></button>
+                  </div>
+                  <div class="flex items-baseline gap-2">
+                    <span class="text-[9px] uppercase tracking-[0.05em] text-gray-500">Console</span>
+                    <span class="text-sm font-semibold leading-none text-gray-100">{tab.nodeName}</span>
+                  </div>
+                </div>
+                <div class="flex items-center gap-2">
+                  <button
+                    type="button"
+                    aria-label={`Reload ${tab.nodeName} console`}
+                    title="Reload console"
+                    class="inline-flex items-center justify-center rounded-md border border-gray-700 bg-gray-950 px-1.5 py-[3px] text-gray-300 hover:border-blue-500 hover:text-white"
+                    on:pointerdown|stopPropagation
+                    on:click={() => reloadFloatingConsole(tab.id)}
+                  >
+                    <RefreshCw class="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+              {#if !tab.floating.minimized}
+                <div
+                  role="presentation"
+                  class="relative min-h-0 flex-1 border-t border-gray-950 bg-black"
+                  on:mouseenter={() => focusGuacamoleWindow(tab.id)}
+                >
+                  <iframe
+                    title={`Guacamole console for ${tab.nodeName}`}
+                    src={tab.src}
+                    data-console-tab-id={tab.id}
+                    tabindex="-1"
+                    class="h-full w-full border-0"
+                    on:load={() => focusGuacamoleWindow(tab.id)}
+                  ></iframe>
+                </div>
+              {/if}
+            </div>
+            {#if !tab.floating.maximized && !tab.floating.minimized}
+              <button
+                class="absolute bottom-0 right-0 h-5 w-5 cursor-nwse-resize bg-transparent"
+                aria-label={`Resize ${tab.nodeName} console`}
+                on:pointerdown={(event) => beginFloatingResize(event, tab.id)}
+              ></button>
+            {/if}
+          </div>
+        {/each}
       {/if}
     </div>
   {/if}
