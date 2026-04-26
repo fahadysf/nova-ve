@@ -999,7 +999,7 @@
                 </div>
                 <div>
                   <div class="text-[9px] uppercase tracking-[0.05em] text-gray-500">HTML5 Console Workspace</div>
-                  <div class="mt-0.5 text-xs font-medium text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</div>
+                  <div class="mt-0.5 text-sm font-semibold text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</div>
                   <div class="mt-1 font-mono text-[10px] text-gray-500">{labMeta?.path || labId}</div>
                 </div>
               </div>
