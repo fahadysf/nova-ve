@@ -46,7 +46,7 @@
     restoreBounds: ConsoleBounds | null;
   };
 
-  const CONSOLE_HEADER_HEIGHT = 56;
+  const CONSOLE_HEADER_HEIGHT = 40;
   // Roboto Mono at 10pt in Guacamole renders cells of ~9px × 18px. Reserve
   // enough room for 80 cols × 24 rows plus the floating window header.
   const CONSOLE_MIN_WIDTH = 760;
@@ -973,10 +973,10 @@
               role="toolbar"
               aria-label="Console workspace controls"
               tabindex="-1"
-              class={`flex items-center justify-between border-b border-gray-800 bg-gray-900/95 px-3.5 py-2.5 backdrop-blur ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
+              class={`flex items-center justify-between border-b border-gray-800 bg-gray-900/95 px-3 py-1 backdrop-blur ${consoleWorkspace.maximized ? 'cursor-default' : 'cursor-move'}`}
               on:pointerdown={beginConsoleDrag}
             >
-              <div class="flex items-center gap-3">
+              <div class="flex items-center gap-2.5">
                 <div class="flex items-center gap-2">
                   <button
                     class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
@@ -997,17 +997,16 @@
                     on:click={toggleConsoleMaximize}
                   ></button>
                 </div>
-                <div>
-                  <div class="text-[9px] uppercase tracking-[0.05em] text-gray-500">HTML5 Console Workspace</div>
-                  <div class="mt-0.5 text-sm font-semibold text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</div>
-                  <div class="mt-1 font-mono text-[10px] text-gray-500">{labMeta?.path || labId}</div>
+                <div class="flex items-baseline gap-2">
+                  <span class="text-[9px] uppercase tracking-[0.05em] text-gray-500">Console</span>
+                  <span class="text-sm font-semibold leading-none text-gray-100">{activeConsoleTabState?.nodeName || 'No console selected'}</span>
                 </div>
               </div>
               <div class="flex items-center gap-2">
                 <label class="sr-only" for="console-node-select">Console target</label>
                 <select
                   id="console-node-select"
-                  class="rounded-md border border-gray-700 bg-gray-950 px-2 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
+                  class="rounded-md border border-gray-700 bg-gray-950 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
                   value={activeConsoleTabState?.nodeId ?? ''}
                   on:pointerdown|stopPropagation
                   on:click|stopPropagation
@@ -1019,7 +1018,7 @@
                   {/each}
                 </select>
                 <button
-                  class="rounded-md border border-gray-700 bg-gray-950 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
+                  class="rounded-md border border-gray-700 bg-gray-950 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
                   on:pointerdown|stopPropagation
                   on:click={reloadConsole}
                   disabled={activeConsoleTabState == null}
