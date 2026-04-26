@@ -1006,7 +1006,7 @@
                 <label class="sr-only" for="console-node-select">Console target</label>
                 <select
                   id="console-node-select"
-                  class="rounded-md border border-gray-700 bg-gray-950 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
+                  class="rounded-md border border-gray-700 bg-gray-950 px-2 py-[3px] text-[10px] uppercase tracking-[0.18em] text-gray-300 outline-none hover:border-blue-500"
                   value={activeConsoleTabState?.nodeId ?? ''}
                   on:pointerdown|stopPropagation
                   on:click|stopPropagation
@@ -1018,23 +1018,26 @@
                   {/each}
                 </select>
                 <button
-                  class="rounded-md border border-gray-700 bg-gray-950 px-2.5 py-0.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 hover:border-blue-500 hover:text-white"
+                  type="button"
+                  aria-label="Reload console"
+                  title="Reload console"
+                  class="inline-flex items-center justify-center rounded-md border border-gray-700 bg-gray-950 px-1.5 py-[3px] text-gray-300 hover:border-blue-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
                   on:pointerdown|stopPropagation
                   on:click={reloadConsole}
                   disabled={activeConsoleTabState == null}
                 >
-                  Reload
+                  <RefreshCw class="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>
             {#if !consoleWorkspace.minimized}
               <div class="flex min-h-0 flex-1 flex-col bg-gray-950">
-                <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-950/90 px-3.5 py-2">
+                <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-950/90 px-3 py-1">
                   {#each consoleWorkspace.tabs as tab}
-                    <div class={`flex items-center gap-1 rounded-md border ${tab.id === consoleWorkspace.activeTabId ? 'border-blue-500 bg-blue-500/10 text-white' : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-blue-500 hover:text-white'}`}>
+                    <div class={`flex items-center gap-0.5 rounded-md border ${tab.id === consoleWorkspace.activeTabId ? 'border-blue-500 bg-blue-500/10 text-white' : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-blue-500 hover:text-white'}`}>
                       <button
                         type="button"
-                        class="px-3 py-1.5 text-[10px] uppercase tracking-[0.18em]"
+                        class="px-2 py-0.5 text-[10px] uppercase tracking-[0.18em]"
                         on:pointerdown|stopPropagation
                         on:click={() => selectConsoleTab(tab.id)}
                       >
@@ -1042,7 +1045,7 @@
                       </button>
                       <button
                         type="button"
-                        class="pr-2 text-gray-500 hover:text-red-400"
+                        class="pr-1.5 text-gray-500 hover:text-red-400"
                         aria-label={`Close ${tab.nodeName}`}
                         on:pointerdown|stopPropagation
                         on:click={() => closeConsole(tab.id)}
