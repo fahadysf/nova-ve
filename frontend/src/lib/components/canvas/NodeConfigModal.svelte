@@ -3,6 +3,8 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import type { ComponentType } from 'svelte';
+  import { Container, Cpu, HardDrive, Network } from 'lucide-svelte';
   import type {
     NodeCatalog,
     NodeCatalogExtraField,
@@ -16,10 +18,11 @@
   export let node: NodeData | null = null;
   export let submitting = false;
 
+  type NodeTypeKey = NodeData['type'];
   type ExtrasMap = Record<string, unknown>;
 
   type CreateSubmitPayload = {
-    type: NodeCatalogTemplate['type'];
+    type: NodeTypeKey;
     template: string;
     image: string;
     name_prefix: string;
@@ -51,6 +54,14 @@
     submit: { mode: 'create'; payload: CreateSubmitPayload } | { mode: 'edit'; nodeId: number; payload: EditSubmitPayload };
   }>();
 
+  const NODE_TYPES: ReadonlyArray<{ key: NodeTypeKey; label: string; icon: ComponentType }> = [
+    { key: 'qemu', label: 'QEMU', icon: Cpu },
+    { key: 'docker', label: 'Docker', icon: Container },
+    { key: 'iol', label: 'IOL', icon: Network },
+    { key: 'dynamips', label: 'Dynamips', icon: HardDrive },
+  ];
+
+  let selectedType: NodeTypeKey = 'qemu';
   let selectedTemplateId = '';
   let name = '';
   let namePrefix = '';
@@ -75,9 +86,24 @@
     return (catalog?.templates ?? []).find((template) => templateId(template) === templateValue);
   }
 
-  function firstTemplateId(): string {
-    const template = (catalog?.templates ?? []).find((item) => item.images.length > 0) ?? catalog?.templates?.[0];
-    return template ? templateId(template) : '';
+  function templatesForType(type: NodeTypeKey): NodeCatalogTemplate[] {
+    return (catalog?.templates ?? []).filter((template) => template.type === type);
+  }
+
+  function firstAvailableType(): NodeTypeKey {
+    for (const entry of NODE_TYPES) {
+      if (templatesForType(entry.key).length > 0) {
+        return entry.key;
+      }
+    }
+    return 'qemu';
+  }
+
+  function firstTemplateIdOfType(type: NodeTypeKey): string {
+    const candidates = templatesForType(type);
+    const withImage = candidates.find((template) => template.images.length > 0);
+    const chosen = withImage ?? candidates[0];
+    return chosen ? templateId(chosen) : '';
   }
 
   function extrasSchemaFor(template: NodeCatalogTemplate | undefined): NodeCatalogExtraField[] {
@@ -113,7 +139,8 @@
       const matchingTemplate = catalog.templates.find(
         (template) => template.type === node.type && template.key === node.template
       );
-      selectedTemplateId = matchingTemplate ? templateId(matchingTemplate) : firstTemplateId();
+      selectedType = node.type;
+      selectedTemplateId = matchingTemplate ? templateId(matchingTemplate) : firstTemplateIdOfType(node.type);
       name = node.name;
       namePrefix = node.name;
       image = node.image;
@@ -132,7 +159,8 @@
       return;
     }
 
-    const templateValue = firstTemplateId();
+    selectedType = firstAvailableType();
+    const templateValue = firstTemplateIdOfType(selectedType);
     selectedTemplateId = templateValue;
     name = '';
     count = 1;
@@ -203,14 +231,13 @@
 
   function envEntries(value: unknown): Array<{ key: string; value: string }> {
     if (Array.isArray(value)) {
-      return value
-        .map((entry) => {
-          if (entry && typeof entry === 'object') {
-            const obj = entry as { key?: string; value?: string };
-            return { key: String(obj.key ?? ''), value: String(obj.value ?? '') };
-          }
-          return { key: '', value: '' };
-        });
+      return value.map((entry) => {
+        if (entry && typeof entry === 'object') {
+          const obj = entry as { key?: string; value?: string };
+          return { key: String(obj.key ?? ''), value: String(obj.value ?? '') };
+        }
+        return { key: '', value: '' };
+      });
     }
     return [];
   }
@@ -236,6 +263,19 @@
     }
     next[index] = { ...next[index], [field]: value };
     envSet(key, next);
+  }
+
+  function selectType(type: NodeTypeKey) {
+    if (mode === 'edit' || type === selectedType) {
+      return;
+    }
+    if (templatesForType(type).length === 0) {
+      return;
+    }
+    selectedType = type;
+    selectedTemplateId = firstTemplateIdOfType(type);
+    applyTemplateDefaults(templateForId(selectedTemplateId), { force: true });
+    resetDirty();
   }
 
   function submitForm() {
@@ -288,6 +328,7 @@
   }
 
   $: selectedTemplate = templateForId(selectedTemplateId);
+  $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
   $: if (open && catalog && signature !== lastSignature) {
     lastSignature = signature;
@@ -302,7 +343,7 @@
       tabindex="-1"
       aria-modal="true"
       aria-label={mode === 'edit' ? 'Edit node' : 'Add node'}
-      class="flex max-h-[calc(100vh-2rem)] w-full max-w-xl flex-col overflow-hidden rounded-[1.4rem] border border-slate-700 bg-slate-950/95 shadow-2xl shadow-black/40"
+      class="flex max-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col overflow-hidden rounded-[1.4rem] border border-slate-700 bg-slate-950/95 shadow-2xl shadow-black/40"
     >
       <div class="flex items-center justify-between border-b border-slate-800 px-5 py-4">
         <div>
@@ -330,47 +371,43 @@
       {#if !catalog}
         <div class="px-5 py-10 text-sm text-slate-400">Loading node catalog…</div>
       {:else}
-        <form
-          class="flex flex-1 flex-col overflow-hidden"
-          on:submit|preventDefault={submitForm}
-        >
-          <div class="flex-1 space-y-4 overflow-y-auto px-5 py-5">
-            {#if mode === 'create'}
-              <label class="block">
-                <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Template</div>
-                <select
-                  bind:value={selectedTemplateId}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
-                  on:change={onTemplateChange}
+        <form class="flex flex-1 flex-col overflow-hidden" on:submit|preventDefault={submitForm}>
+          <div class="flex-1 space-y-5 overflow-y-auto px-5 py-5">
+            <div class="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {#each NODE_TYPES as entry}
+                {@const available = templatesForType(entry.key).length > 0}
+                {@const active = entry.key === selectedType}
+                <button
+                  type="button"
+                  class="flex flex-col items-center gap-1.5 rounded-2xl border px-3 py-3 transition
+                    {active
+                      ? 'border-blue-500/60 bg-blue-500/15 text-blue-100'
+                      : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-600 hover:text-white'}
+                    {!available || mode === 'edit' ? 'cursor-not-allowed opacity-50' : ''}"
+                  disabled={!available || mode === 'edit'}
+                  aria-pressed={active}
+                  on:click={() => selectType(entry.key)}
                 >
-                  {#each catalog.templates as template}
-                    <option value={templateId(template)}>{template.name} ({template.type})</option>
-                  {/each}
-                </select>
-              </label>
-            {:else}
-              <div class="grid gap-4 md:grid-cols-2">
+                  <svelte:component this={entry.icon} size={22} strokeWidth={1.6} />
+                  <span class="text-[11px] font-medium uppercase tracking-[0.06em]">{entry.label}</span>
+                </button>
+              {/each}
+            </div>
+
+            <div class="grid gap-4 md:grid-cols-3">
+              {#if mode === 'create'}
                 <label class="block">
                   <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Template</div>
-                  <input
-                    value={selectedTemplate ? `${selectedTemplate.name} (${selectedTemplate.type})` : `${node?.template ?? ''}`}
-                    disabled
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-400"
-                  />
-                </label>
-                <label class="block">
-                  <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Name</div>
-                  <input
-                    bind:value={name}
-                    on:input={() => markDirty('name')}
+                  <select
+                    bind:value={selectedTemplateId}
                     class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
-                  />
+                    on:change={onTemplateChange}
+                  >
+                    {#each visibleTemplates as template}
+                      <option value={templateId(template)}>{template.name}</option>
+                    {/each}
+                  </select>
                 </label>
-              </div>
-            {/if}
-
-            <div class="grid gap-4 md:grid-cols-2">
-              {#if mode === 'create'}
                 <label class="block">
                   <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Name prefix</div>
                   <input
@@ -389,8 +426,27 @@
                     class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
                   />
                 </label>
+              {:else}
+                <label class="block">
+                  <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Template</div>
+                  <input
+                    value={selectedTemplate ? `${selectedTemplate.name} (${selectedTemplate.type})` : `${node?.template ?? ''}`}
+                    disabled
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-400"
+                  />
+                </label>
+                <label class="block md:col-span-2">
+                  <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Name</div>
+                  <input
+                    bind:value={name}
+                    on:input={() => markDirty('name')}
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                  />
+                </label>
               {/if}
+            </div>
 
+            <div class="grid gap-4 md:grid-cols-3">
               <label class="block">
                 <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Image</div>
                 <select
@@ -417,9 +473,23 @@
                   {/each}
                 </select>
               </label>
+
+              <label class="block">
+                <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Console</div>
+                <select
+                  bind:value={consoleMode}
+                  on:change={() => markDirty('consoleMode')}
+                  disabled={isStoppedOnly('console')}
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
+                >
+                  <option value="telnet">telnet</option>
+                  <option value="vnc">vnc</option>
+                  <option value="rdp">rdp</option>
+                </select>
+              </label>
             </div>
 
-            <div class="grid gap-4 md:grid-cols-2">
+            <div class="grid gap-4 md:grid-cols-3">
               <label class="block">
                 <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">CPU</div>
                 <input
@@ -454,6 +524,9 @@
                   class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
               </label>
+            </div>
+
+            <div class="grid gap-4 md:grid-cols-3">
               <label class="block">
                 <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Delay (s)</div>
                 <input
@@ -465,44 +538,29 @@
                   class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
               </label>
+              {#if mode === 'create'}
+                <label class="block">
+                  <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Placement</div>
+                  <select
+                    bind:value={placement}
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
+                  >
+                    <option value="grid">grid</option>
+                    <option value="row">row</option>
+                  </select>
+                </label>
+              {/if}
             </div>
-
-            <label class="block">
-              <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Console</div>
-              <select
-                bind:value={consoleMode}
-                on:change={() => markDirty('consoleMode')}
-                disabled={isStoppedOnly('console')}
-                class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100 disabled:text-slate-500"
-              >
-                <option value="telnet">telnet</option>
-                <option value="vnc">vnc</option>
-                <option value="rdp">rdp</option>
-              </select>
-            </label>
-
-            {#if mode === 'create'}
-              <label class="block">
-                <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Placement</div>
-                <select
-                  bind:value={placement}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2.5 text-sm text-slate-100"
-                >
-                  <option value="grid">grid</option>
-                  <option value="row">row</option>
-                </select>
-              </label>
-            {/if}
 
             {#if extrasSchemaFor(selectedTemplate).length > 0}
               <div class="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
                 <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">
                   {selectedTemplate?.type ?? ''} options
                 </div>
-                <div class="grid gap-4 md:grid-cols-2">
+                <div class="grid gap-4 md:grid-cols-3">
                   {#each extrasSchemaFor(selectedTemplate) as field}
                     {#if field.type === 'textarea' || field.type === 'env'}
-                      <div class="md:col-span-2">
+                      <div class="md:col-span-3">
                         <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">{field.label}</div>
                         {#if field.type === 'textarea'}
                           <textarea
