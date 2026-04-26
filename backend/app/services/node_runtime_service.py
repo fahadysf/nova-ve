@@ -248,6 +248,7 @@ class NodeRuntimeService:
         work_dir = self._work_dir(lab_id, node["id"])
         work_dir.mkdir(parents=True, exist_ok=True)
         overlay_path = self._ensure_qemu_overlay(work_dir, node)
+        iso_path = self._resolve_qemu_iso(node)
         stdout_log = work_dir / "stdout.log"
         stderr_log = work_dir / "stderr.log"
         console_mode = node.get("console", "telnet")
@@ -290,6 +291,9 @@ class NodeRuntimeService:
                 f"e1000,netdev=net{index},mac={self._mac_for_index(node.get('firstmac'), index)}",
             ]
 
+        if iso_path:
+            cmd += ["-cdrom", str(iso_path), "-boot", "order=dc"]
+
         with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
             process = subprocess.Popen(
                 cmd,
@@ -316,6 +320,7 @@ class NodeRuntimeService:
             "pid": process.pid,
             "pid_create_time": process_info.create_time(),
             "overlay_path": str(overlay_path),
+            "cdrom_path": str(iso_path) if iso_path else None,
             "work_dir": str(work_dir),
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log),
@@ -473,32 +478,46 @@ class NodeRuntimeService:
             return overlay_path
 
         base_image = self._resolve_qemu_image(node)
-        if not base_image:
-            raise NodeRuntimeError(f"QEMU base image not found for node image: {node.get('image')}")
-
         qemu_img_binary = self._resolve_binary(self.settings.QEMU_IMG_BINARY)
-        if qemu_img_binary:
+
+        if base_image:
+            if qemu_img_binary:
+                result = subprocess.run(
+                    [
+                        qemu_img_binary,
+                        "create",
+                        "-f",
+                        "qcow2",
+                        "-b",
+                        str(base_image),
+                        "-F",
+                        "qcow2",
+                        str(overlay_path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if result.returncode != 0:
+                    raise NodeRuntimeError(result.stderr.strip() or "Failed to create QCOW2 overlay")
+            else:
+                shutil.copy2(base_image, overlay_path)
+            return overlay_path
+
+        if self._resolve_qemu_iso(node):
+            if not qemu_img_binary:
+                raise NodeRuntimeError(
+                    f"qemu-img binary required to create blank install disk: {self.settings.QEMU_IMG_BINARY}"
+                )
             result = subprocess.run(
-                [
-                    qemu_img_binary,
-                    "create",
-                    "-f",
-                    "qcow2",
-                    "-b",
-                    str(base_image),
-                    "-F",
-                    "qcow2",
-                    str(overlay_path),
-                ],
+                [qemu_img_binary, "create", "-f", "qcow2", str(overlay_path), "10G"],
                 capture_output=True,
                 text=True,
             )
             if result.returncode != 0:
-                raise NodeRuntimeError(result.stderr.strip() or "Failed to create QCOW2 overlay")
-        else:
-            shutil.copy2(base_image, overlay_path)
+                raise NodeRuntimeError(result.stderr.strip() or "Failed to create blank QCOW2 install disk")
+            return overlay_path
 
-        return overlay_path
+        raise NodeRuntimeError(f"QEMU base image not found for node image: {node.get('image')}")
 
     def _resolve_qemu_image(self, node: dict[str, Any]) -> Path | None:
         image_name = str(node.get("image", "")).strip()
@@ -518,6 +537,27 @@ class NodeRuntimeService:
                 qcow_images = sorted(directory.glob("*.qcow2"))
                 if qcow_images:
                     return qcow_images[0]
+
+        return None
+
+    def _resolve_qemu_iso(self, node: dict[str, Any]) -> Path | None:
+        image_name = str(node.get("image", "")).strip()
+        if not image_name:
+            return None
+
+        candidates = [
+            self.settings.IMAGES_DIR / "qemu" / image_name / "cdrom.iso",
+            self.settings.IMAGES_DIR / image_name / "cdrom.iso",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+
+        for directory in [self.settings.IMAGES_DIR / "qemu" / image_name, self.settings.IMAGES_DIR / image_name]:
+            if directory.exists():
+                iso_images = sorted(directory.glob("*.iso"))
+                if iso_images:
+                    return iso_images[0]
 
         return None
 
