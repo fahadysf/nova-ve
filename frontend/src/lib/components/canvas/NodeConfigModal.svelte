@@ -337,13 +337,13 @@
 </script>
 
 {#if open}
-  <div class="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+  <div class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
     <div
       role="dialog"
       tabindex="-1"
       aria-modal="true"
       aria-label={mode === 'edit' ? 'Edit node' : 'Add node'}
-      class="flex max-h-[calc(100vh-2rem)] w-full max-w-3xl flex-col overflow-hidden rounded-[1.4rem] border border-slate-700 bg-slate-950/95 shadow-2xl shadow-black/40"
+      class="flex max-h-[calc(100dvh-2rem)] w-full max-w-3xl flex-col overflow-hidden rounded-[1.4rem] border border-slate-700 bg-slate-950/95 shadow-2xl shadow-black/40"
     >
       <div class="flex items-center justify-between border-b border-slate-800 px-5 py-4">
         <div>
