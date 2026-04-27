@@ -40,6 +40,8 @@
   import LinkConfirmModal from '$lib/components/canvas/LinkConfirmModal.svelte';
   import { toastStore } from '$lib/stores/toasts';
   import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
+  import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
+  import { createLabWsStores, type LabWsStores } from '$lib/stores/labWs';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -1154,12 +1156,36 @@
   }
 
   // ── lifecycle: WS hub flush hook & cleanup ───────────────────────────────
+  let wsClient: WsClient | null = null;
+  let labWsStores: LabWsStores | null = null;
+
   onMount(() => {
     if (typeof window !== 'undefined') {
       window.addEventListener('mousemove', handleWindowMouseMove);
       window.addEventListener('mouseup', handleWindowMouseUp);
       window.addEventListener('keydown', handleWindowKeyDown);
     }
+
+    // US-073: live WebSocket wiring. The client tracks lastSeq + reconnect on
+    // its own; we just register the lab_topology listener so the layout
+    // debouncer flushes before the snapshot lands (US-070 invariant).
+    if (typeof window !== 'undefined') {
+      const client = createWsClient({ labId });
+      wsClient = client;
+      labWsStores = createLabWsStores(client);
+      client.on('lab_topology', (_msg: WsMessage) => {
+        // Flush pending layout PUTs before applying the server snapshot so
+        // we don't lose in-flight drag positions to a race.
+        void layoutDebouncer.flush();
+      });
+      // Dev hook for the e2e spec; gate behind import.meta.env.DEV so it's
+      // tree-shaken from production builds.
+      if (import.meta.env.DEV) {
+        (window as unknown as { __novaWsClient?: WsClient }).__novaWsClient = client;
+      }
+      client.connect();
+    }
+
     return () => {
       if (typeof window !== 'undefined') {
         window.removeEventListener('mousemove', handleWindowMouseMove);
@@ -1167,6 +1193,14 @@
         window.removeEventListener('keydown', handleWindowKeyDown);
       }
       void layoutDebouncer.flush();
+      if (wsClient) {
+        wsClient.close();
+        if (typeof window !== 'undefined' && import.meta.env.DEV) {
+          delete (window as unknown as { __novaWsClient?: WsClient }).__novaWsClient;
+        }
+        wsClient = null;
+        labWsStores = null;
+      }
     };
   });
 

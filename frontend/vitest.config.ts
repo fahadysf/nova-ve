@@ -8,6 +8,9 @@ export default defineConfig({
 		alias: {
 			$lib: path.resolve('./src/lib'),
 		},
+		// Resolve the browser entry of Svelte/SvelteKit so component mount() is available
+		// inside the JSDOM environment (Svelte 5 + @testing-library/svelte component tests).
+		conditions: ['browser'],
 	},
 	test: {
 		environment: 'jsdom',

@@ -3,8 +3,8 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { fade } from 'svelte/transition';
-  import type { NodeInterface, PortPosition } from '$lib/types';
+  import type { LiveMacState, NodeInterface, PortPosition } from '$lib/types';
+  import PortTooltip from './PortTooltip.svelte';
 
   export let interfaceData: NodeInterface;
   export let position: PortPosition;
@@ -12,6 +12,7 @@
   export let interfaceIndex = interfaceData.index ?? 0;
   export let isSource = false;
   export let highlighted = false;
+  export let liveMac: LiveMacState | undefined = undefined;
 
   const dispatch = createEventDispatcher<{
     'port:mousedown': { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition };
@@ -23,6 +24,8 @@
 
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let showTooltip = false;
+  let portHandle: HTMLSpanElement | null = null;
+  let anchorRect: DOMRect | null = null;
 
   // SvelteFlow positions ports on the perimeter of a (relatively positioned)
   // wrapper. We use percentage offsets that map directly to the side.
@@ -41,19 +44,22 @@
     }
   })();
 
+  // Map the docked side of the port to the placement of its tooltip.
   $: tooltipPlacement = (() => {
     switch (position.side) {
       case 'top':
-        return 'bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);';
+        return 'top' as const;
       case 'bottom':
-        return 'top: calc(100% + 6px); left: 50%; transform: translateX(-50%);';
+        return 'bottom' as const;
       case 'right':
-        return 'left: calc(100% + 6px); top: 50%; transform: translateY(-50%);';
+        return 'right' as const;
       case 'left':
       default:
-        return 'right: calc(100% + 6px); top: 50%; transform: translateY(-50%);';
+        return 'left' as const;
     }
   })();
+
+  $: hasMismatch = liveMac?.state === 'mismatch';
 
   function clearHoverTimer() {
     if (hoverTimer !== null) {
@@ -62,11 +68,16 @@
     }
   }
 
+  function captureAnchorRect() {
+    anchorRect = portHandle ? portHandle.getBoundingClientRect() : null;
+  }
+
   function handleMouseEnter(event: MouseEvent) {
     clearHoverTimer();
     hoverTimer = setTimeout(() => {
+      captureAnchorRect();
       showTooltip = true;
-    }, 100);
+    }, 250);
     dispatch('port:mouseenter', { event, nodeId, interfaceIndex, port: position });
   }
 
@@ -95,6 +106,7 @@
   data-port-interface-index={interfaceIndex}
   data-port-side={position.side}
   data-port-offset={position.offset.toFixed(4)}
+  data-port-live-state={liveMac?.state ?? ''}
   role="button"
   tabindex="-1"
   aria-label={`Port ${interfaceData.name}`}
@@ -104,6 +116,7 @@
   on:mouseleave={handleMouseLeave}
 >
   <span
+    bind:this={portHandle}
     class={`block h-2.5 w-2.5 rounded-full border border-gray-950 transition ${
       highlighted
         ? 'bg-emerald-300 ring-2 ring-emerald-300/60 shadow-[0_0_8px_rgba(110,231,183,0.55)]'
@@ -112,16 +125,20 @@
           : 'bg-gray-400 hover:bg-blue-300'
     }`}
   ></span>
+  {#if hasMismatch}
+    <span
+      class="pointer-events-none absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-300 ring-1 ring-amber-100/80 shadow-[0_0_4px_rgba(252,211,77,0.7)]"
+      data-testid="port-mismatch-dot"
+      aria-hidden="true"
+    ></span>
+  {/if}
   {#if showTooltip}
-    <div
-      class="pointer-events-none absolute z-20 whitespace-nowrap rounded-md border border-gray-700 bg-gray-900/95 px-2 py-1 text-[10px] font-mono text-gray-100 shadow-lg shadow-black/30 backdrop-blur"
-      style={tooltipPlacement}
-      transition:fade={{ duration: 80 }}
-    >
-      <div>{interfaceData.name}</div>
-      {#if interfaceData.planned_mac}
-        <div class="text-gray-400">{interfaceData.planned_mac}</div>
-      {/if}
-    </div>
+    <PortTooltip
+      interfaceName={interfaceData.name}
+      plannedMac={interfaceData.planned_mac ?? undefined}
+      liveMac={liveMac}
+      placement={tooltipPlacement}
+      anchorRect={anchorRect}
+    />
   {/if}
 </div>

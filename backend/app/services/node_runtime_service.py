@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -13,7 +14,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import psutil
 
@@ -37,6 +38,64 @@ class NodeRuntimeError(Exception):
     pass
 
 
+def _default_qmp_client(socket_path: str, command: str) -> dict:
+    """Connect to a QEMU QMP socket, send `command`, and return the parsed response.
+
+    Performs a minimal QMP handshake (read greeting, send qmp_capabilities, send command).
+    Raises FileNotFoundError or OSError when the socket is missing/unreachable.
+    """
+    if not Path(socket_path).exists():
+        raise FileNotFoundError(f"qmp socket not found: {socket_path}")
+
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(2.0)
+    try:
+        sock.connect(socket_path)
+        buffer = b""
+
+        def _read_line() -> dict:
+            nonlocal buffer
+            while b"\n" not in buffer:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise OSError("qmp socket closed during read")
+                buffer += chunk
+            line, _, buffer = buffer.partition(b"\n")
+            return json.loads(line.decode("utf-8"))
+
+        # Greeting (QMP banner)
+        _read_line()
+        sock.sendall(json.dumps({"execute": "qmp_capabilities"}).encode("utf-8") + b"\n")
+        _read_line()
+        sock.sendall(json.dumps({"execute": command}).encode("utf-8") + b"\n")
+        response = _read_line()
+        return response if isinstance(response, dict) else {}
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+def _default_docker_inspect(docker_binary: str, docker_host: str, container_name: str) -> dict:
+    result = subprocess.run(
+        [
+            docker_binary,
+            "--host",
+            docker_host,
+            "inspect",
+            container_name,
+            "--format",
+            "{{json .NetworkSettings}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise NodeRuntimeError(result.stderr.strip() or "docker inspect failed")
+    return json.loads(result.stdout.strip() or "{}")
+
+
 class NodeRuntimeService:
     _registry: dict[str, dict[str, Any]] = {}
     _loaded = False
@@ -46,6 +105,9 @@ class NodeRuntimeService:
         self.settings = get_settings()
         self.runtime_dir = self.settings.TMP_DIR / "node-runtime"
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
+        # Dependency-injectable hooks so tests can monkey-patch QMP/docker IO.
+        self._qmp_client: Callable[[str, str], dict] = _default_qmp_client
+        self._docker_inspect: Callable[[str, str, str], dict] = _default_docker_inspect
         self._load_registry()
 
     @classmethod
@@ -72,7 +134,330 @@ class NodeRuntimeService:
         with self._lock:
             self._registry[key] = runtime
         self._persist_runtime(runtime)
+
+        # Cadence: schedule live-MAC reads at t=1s/3s/8s after start. No steady-state poll.
+        interfaces = node.get("interfaces") or []
+        if interfaces:
+            self._schedule_live_mac_cadence(lab_data, lab_id, node_id, interfaces)
+
         return runtime
+
+    def _schedule_live_mac_cadence(
+        self,
+        lab_data: dict[str, Any],
+        lab_id: str,
+        node_id: int,
+        interfaces: list[dict[str, Any]],
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _run_cadence() -> None:
+            for delay in (1.0, 3.0, 8.0):
+                await asyncio.sleep(delay)
+                for index, iface in enumerate(interfaces):
+                    if not isinstance(iface, dict):
+                        continue
+                    interface_index = int(iface.get("index", index))
+                    result = self.read_live_mac(lab_id, node_id, interface_index, lab_data=lab_data)
+                    await self._publish_live_mac(lab_id, node_id, interface_index, result)
+
+        loop.create_task(_run_cadence())
+
+    async def _publish_live_mac(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        result: dict[str, Any],
+    ) -> None:
+        try:
+            from app.services.ws_hub import ws_hub  # local import to avoid cycles
+        except ImportError:
+            return
+        payload = {
+            "node_id": node_id,
+            "interface_index": interface_index,
+            "state": result.get("state"),
+            "planned_mac": result.get("planned_mac"),
+            "live_mac": result.get("live_mac"),
+            "reason": result.get("reason"),
+        }
+        try:
+            await ws_hub.publish(lab_id, "interface_live_mac", payload, rev=str(lab_id))
+        except Exception:
+            return
+
+    def read_live_mac(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        lab_data: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return the live MAC state for a single interface. Never raises."""
+        try:
+            return self._read_live_mac_inner(lab_id, node_id, interface_index, lab_data)
+        except Exception as exc:  # never raise — degrade to "unavailable"
+            runtime_type = "unknown"
+            if lab_data is not None:
+                try:
+                    node = self._node_data(lab_data, node_id)
+                    runtime_type = str(node.get("type", "unknown"))
+                except NodeRuntimeError:
+                    pass
+            if runtime_type == "unknown":
+                runtime = self._registry.get(self._key(lab_id, node_id))
+                if runtime:
+                    runtime_type = str(runtime.get("kind", "unknown"))
+            return {
+                "state": "unavailable",
+                "planned_mac": "",
+                "live_mac": None,
+                "runtime_type": runtime_type,
+                "reason": f"live-mac read failed: {exc}",
+            }
+
+    def _read_live_mac_inner(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        lab_data: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        node: dict[str, Any] = {}
+        if lab_data is not None:
+            try:
+                node = self._node_data(lab_data, node_id)
+            except NodeRuntimeError:
+                node = {}
+
+        runtime = self._runtime_record(lab_id, node_id, include_stopped=True) or {}
+        runtime_type = (
+            str(node.get("type", ""))
+            or str(runtime.get("kind", ""))
+            or "qemu"
+        )
+
+        interface = self._lookup_interface(node, interface_index)
+        planned_mac = ""
+        if interface and interface.get("planned_mac"):
+            planned_mac = str(interface["planned_mac"])
+
+        if runtime_type in ("iol", "dynamips"):
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": runtime_type,
+                "reason": "runtime adapter not implemented",
+            }
+
+        if runtime_type == "qemu":
+            return self._read_qemu_live_mac(runtime, planned_mac, interface_index)
+
+        if runtime_type == "docker":
+            return self._read_docker_live_mac(
+                runtime,
+                planned_mac,
+                lab_id,
+                lab_data,
+                interface,
+            )
+
+        return {
+            "state": "unavailable",
+            "planned_mac": planned_mac,
+            "live_mac": None,
+            "runtime_type": runtime_type,
+            "reason": f"unsupported runtime type: {runtime_type}",
+        }
+
+    def _read_qemu_live_mac(
+        self,
+        runtime: dict[str, Any],
+        planned_mac: str,
+        interface_index: int,
+    ) -> dict[str, Any]:
+        socket_path = runtime.get("qmp_socket") or ""
+        if not socket_path:
+            work_dir = runtime.get("work_dir")
+            socket_path = str(Path(work_dir) / "qmp.sock") if work_dir else ""
+        if not socket_path:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "qemu",
+                "reason": "qmp unreachable: no socket path",
+            }
+        try:
+            response = self._qmp_client(socket_path, "query-rx-filter")
+        except Exception as exc:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "qemu",
+                "reason": f"qmp unreachable: {exc}",
+            }
+
+        entries = response.get("return") if isinstance(response, dict) else None
+        if not isinstance(entries, list):
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "qemu",
+                "reason": "qmp returned no rx-filter data",
+            }
+
+        target_id = f"net{interface_index}"
+        match = next(
+            (entry for entry in entries if isinstance(entry, dict) and entry.get("name") == target_id),
+            None,
+        )
+        if match is None and entries:
+            match = entries[interface_index] if 0 <= interface_index < len(entries) else None
+
+        if not isinstance(match, dict) or not match.get("main-mac"):
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "qemu",
+                "reason": "qmp returned no main-mac for interface",
+            }
+
+        live_mac = str(match["main-mac"])
+        state = "confirmed" if planned_mac.lower() == live_mac.lower() else "mismatch"
+        return {
+            "state": state,
+            "planned_mac": planned_mac,
+            "live_mac": live_mac,
+            "runtime_type": "qemu",
+            "reason": None if state == "confirmed" else "live mac differs from planned",
+        }
+
+    def _read_docker_live_mac(
+        self,
+        runtime: dict[str, Any],
+        planned_mac: str,
+        lab_id: str,
+        lab_data: dict[str, Any] | None,
+        interface: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        container_name = runtime.get("container_name")
+        if not container_name:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "docker",
+                "reason": "docker runtime not started",
+            }
+
+        docker_binary = self._resolve_binary("docker") or "docker"
+        try:
+            inspected = self._docker_inspect(docker_binary, self.settings.DOCKER_HOST, container_name)
+        except Exception as exc:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "docker",
+                "reason": f"docker inspect failed: {exc}",
+            }
+
+        target_network_name: str | None = None
+        if interface and lab_data is not None:
+            network_id = 0
+            try:
+                network_id = int(interface.get("network_id") or 0)
+            except (TypeError, ValueError):
+                network_id = 0
+            if not network_id:
+                try:
+                    interface_index = int(interface.get("index", 0))
+                except (TypeError, ValueError):
+                    interface_index = 0
+                node_id_value = 0
+                try:
+                    node_id_value = int(runtime.get("node_id", 0))
+                except (TypeError, ValueError):
+                    node_id_value = 0
+                for link in lab_data.get("links") or []:
+                    endpoints = (link.get("from") or {}, link.get("to") or {})
+                    node_endpoint = next(
+                        (
+                            endpoint for endpoint in endpoints
+                            if isinstance(endpoint, dict)
+                            and "node_id" in endpoint
+                            and int(endpoint.get("node_id", -1)) == node_id_value
+                            and int(endpoint.get("interface_index", -1)) == interface_index
+                        ),
+                        None,
+                    )
+                    network_endpoint = next(
+                        (
+                            endpoint for endpoint in endpoints
+                            if isinstance(endpoint, dict) and "network_id" in endpoint
+                        ),
+                        None,
+                    )
+                    if node_endpoint and network_endpoint:
+                        try:
+                            network_id = int(network_endpoint.get("network_id", 0))
+                        except (TypeError, ValueError):
+                            network_id = 0
+                        break
+            if network_id:
+                target_network_name = self._docker_network_name(lab_id, network_id)
+
+        live_mac: str | None = None
+        if target_network_name:
+            networks = inspected.get("Networks") or {}
+            entry = networks.get(target_network_name)
+            if isinstance(entry, dict) and entry.get("MacAddress"):
+                live_mac = str(entry["MacAddress"])
+        if live_mac is None:
+            top_mac = inspected.get("MacAddress")
+            if top_mac:
+                live_mac = str(top_mac)
+
+        if not live_mac:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "docker",
+                "reason": "docker inspect returned no MacAddress",
+            }
+
+        state = "confirmed" if planned_mac.lower() == live_mac.lower() else "mismatch"
+        return {
+            "state": state,
+            "planned_mac": planned_mac,
+            "live_mac": live_mac,
+            "runtime_type": "docker",
+            "reason": None if state == "confirmed" else "live mac differs from planned",
+        }
+
+    @staticmethod
+    def _lookup_interface(node: dict[str, Any], interface_index: int) -> dict[str, Any] | None:
+        interfaces = node.get("interfaces") if isinstance(node, dict) else None
+        if not isinstance(interfaces, list):
+            return None
+        if 0 <= interface_index < len(interfaces):
+            iface = interfaces[interface_index]
+            if isinstance(iface, dict):
+                return iface
+        for iface in interfaces:
+            if isinstance(iface, dict) and int(iface.get("index", -1)) == interface_index:
+                return iface
+        return None
 
     def stop_node(self, lab_data: dict[str, Any], node_id: int) -> None:
         lab_id = self._lab_id(lab_data)
@@ -301,6 +686,9 @@ class NodeRuntimeService:
         else:
             cmd += ["-serial", f"telnet::{console_port},server,nowait"]
 
+        qmp_socket_path = work_dir / "qmp.sock"
+        cmd += ["-qmp", f"unix:{qmp_socket_path},server,nowait"]
+
         nic_model = _extra_str(extras, "qemu_nic") or "e1000"
         first_mac = node.get("firstmac") or extras.get("firstmac")
         for index in range(int(node.get("ethernet", 0))):
@@ -351,6 +739,7 @@ class NodeRuntimeService:
             "work_dir": str(work_dir),
             "stdout_log": str(stdout_log),
             "stderr_log": str(stderr_log),
+            "qmp_socket": str(qmp_socket_path),
             "command": cmd,
             "started_at": time.time(),
         }

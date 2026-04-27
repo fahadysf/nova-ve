@@ -662,7 +662,6 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
 
 
 def test_linux_bridge_identifier_resolves_to_docker_bridge_driver(patched_settings):
-    """A docker node attached to a linux_bridge network resolves to the docker bridge driver."""
     lab_data = {
         "schema": 2,
         "id": "lab-linuxbridge",
@@ -719,10 +718,8 @@ def test_linux_bridge_identifier_resolves_to_docker_bridge_driver(patched_settin
 
 
 def test_no_legacy_bridge_type_string_in_v2_lab(patched_settings):
-    """Walks every supported node class in a v2 lab and asserts no network.type == 'bridge'."""
     service = NodeRuntimeService()
 
-    # Create one lab per node type and verify no raw 'bridge' network type exists
     node_types = ["qemu", "docker", "iol", "dynamips"]
     networks = {
         "1": {
@@ -801,10 +798,8 @@ def test_no_legacy_bridge_type_string_in_v2_lab(patched_settings):
             "defaults": {"link_style": "orthogonal"},
         }
 
-        # Verify the lab data itself has no legacy 'bridge' type
         _walk_for_bridge_type(lab_data)
 
-        # For docker nodes, also verify the resolved network specs carry no 'bridge' type
         if node_type == "docker":
             specs = service._docker_network_specs(lab_data, lab_data["nodes"]["1"])
             _walk_for_bridge_type(specs)
@@ -891,3 +886,363 @@ async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypa
     service.start_node(lab_data, 1)
     enriched = service.enrich_node("lab-123", 1, lab_data["nodes"]["1"])
     assert enriched["status"] == 2
+
+
+# ---------------------------------------------------------------------------
+# US-072: read_live_mac coverage
+# ---------------------------------------------------------------------------
+
+_QEMU_LAB_DATA = {
+    "schema": 2,
+    "id": "lab-live-qemu",
+    "meta": {"name": "qemu-live"},
+    "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+    "nodes": {
+        "1": {
+            "id": 1,
+            "name": "router-1",
+            "type": "qemu",
+            "image": "router-image",
+            "console": "telnet",
+            "cpu": 1,
+            "ram": 1024,
+            "ethernet": 1,
+            "interfaces": [
+                {
+                    "index": 0,
+                    "name": "Gi1",
+                    "planned_mac": "aa:bb:cc:dd:ee:01",
+                    "port_position": None,
+                    "network_id": 0,
+                }
+            ],
+        }
+    },
+    "networks": {},
+    "links": [],
+    "defaults": {"link_style": "orthogonal"},
+}
+
+
+def _seed_qemu_runtime(service, qmp_socket: str | None = "/tmp/fake-qmp.sock") -> None:
+    runtime = {
+        "lab_id": "lab-live-qemu",
+        "node_id": 1,
+        "kind": "qemu",
+        "name": "router-1",
+        "console": "telnet",
+        "console_port": 12345,
+        "pid": 9999,
+        "pid_create_time": 1.0,
+        "work_dir": "/tmp/live-mac-qemu",
+        "stdout_log": "/tmp/live-mac-qemu/stdout.log",
+        "stderr_log": "/tmp/live-mac-qemu/stderr.log",
+        "qmp_socket": qmp_socket,
+        "command": [],
+        "started_at": 1.0,
+    }
+    service._registry[service._key("lab-live-qemu", 1)] = runtime
+
+
+def test_qemu_live_mac_read_confirmed(patched_settings):
+    service = NodeRuntimeService()
+    _seed_qemu_runtime(service)
+    service._qmp_client = lambda socket_path, command: {
+        "return": [{"name": "net0", "main-mac": "AA:BB:CC:DD:EE:01"}]
+    }
+
+    result = service.read_live_mac("lab-live-qemu", 1, 0, lab_data=_QEMU_LAB_DATA)
+
+    assert result["state"] == "confirmed"
+    assert result["runtime_type"] == "qemu"
+    assert result["planned_mac"] == "aa:bb:cc:dd:ee:01"
+    assert result["live_mac"].lower() == "aa:bb:cc:dd:ee:01"
+
+
+def test_qemu_live_mac_read_mismatch(patched_settings):
+    service = NodeRuntimeService()
+    _seed_qemu_runtime(service)
+    service._qmp_client = lambda socket_path, command: {
+        "return": [{"name": "net0", "main-mac": "11:22:33:44:55:66"}]
+    }
+
+    result = service.read_live_mac("lab-live-qemu", 1, 0, lab_data=_QEMU_LAB_DATA)
+
+    assert result["state"] == "mismatch"
+    assert result["live_mac"].lower() == "11:22:33:44:55:66"
+    assert result["reason"]
+
+
+def test_qemu_live_mac_read_unavailable_when_qmp_socket_missing(patched_settings):
+    service = NodeRuntimeService()
+    _seed_qemu_runtime(service, qmp_socket=None)
+
+    def _raises(socket_path, command):
+        raise FileNotFoundError("qmp socket not found")
+
+    service._qmp_client = _raises
+
+    result = service.read_live_mac("lab-live-qemu", 1, 0, lab_data=_QEMU_LAB_DATA)
+
+    assert result["state"] == "unavailable"
+    assert "qmp" in (result["reason"] or "").lower()
+
+
+_DOCKER_LAB_DATA = {
+    "schema": 2,
+    "id": "lab-live-docker",
+    "meta": {"name": "docker-live"},
+    "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+    "nodes": {
+        "5": {
+            "id": 5,
+            "name": "alpine-c",
+            "type": "docker",
+            "image": "nova-ve-alpine-telnet:latest",
+            "console": "telnet",
+            "cpu": 1,
+            "ram": 256,
+            "ethernet": 2,
+            "interfaces": [
+                {
+                    "index": 0,
+                    "name": "eth0",
+                    "planned_mac": "02:42:ac:11:00:05",
+                    "port_position": None,
+                    "network_id": 1,
+                },
+                {
+                    "index": 1,
+                    "name": "eth1",
+                    "planned_mac": "02:42:ac:22:00:05",
+                    "port_position": None,
+                    "network_id": 2,
+                },
+            ],
+        }
+    },
+    "networks": {
+        "1": {"id": 1, "name": "lab-link", "type": "linux_bridge", "visibility": True, "implicit": False, "config": {}},
+        "2": {"id": 2, "name": "lab-mgmt", "type": "linux_bridge", "visibility": True, "implicit": False, "config": {}},
+    },
+    "links": [
+        {
+            "id": "lnk-d-1",
+            "from": {"node_id": 5, "interface_index": 0},
+            "to": {"network_id": 1},
+            "style_override": None,
+            "label": "",
+            "color": "",
+            "width": "1",
+            "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+        },
+        {
+            "id": "lnk-d-2",
+            "from": {"node_id": 5, "interface_index": 1},
+            "to": {"network_id": 2},
+            "style_override": None,
+            "label": "",
+            "color": "",
+            "width": "1",
+            "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+        },
+    ],
+    "defaults": {"link_style": "orthogonal"},
+}
+
+
+def _seed_docker_runtime(service) -> None:
+    runtime = {
+        "lab_id": "lab-live-docker",
+        "node_id": 5,
+        "kind": "docker",
+        "name": "alpine-c",
+        "console": "telnet",
+        "console_port": 22000,
+        "container_name": "nova-ve-lablivedocke-5",
+        "container_id": "deadbeef",
+        "pid": 8888,
+        "pid_create_time": 1.0,
+        "work_dir": "/tmp/live-mac-docker",
+        "stdout_log": "/tmp/live-mac-docker/stdout.log",
+        "stderr_log": "/tmp/live-mac-docker/stderr.log",
+        "command": [],
+        "network_names": ["nova-ve-lablivedocke-net1", "nova-ve-lablivedocke-net2"],
+        "started_at": 1.0,
+    }
+    service._registry[service._key("lab-live-docker", 5)] = runtime
+
+
+def test_docker_live_mac_read_confirmed(monkeypatch, patched_settings):
+    _mock_runtime_binaries(monkeypatch)
+    service = NodeRuntimeService()
+    _seed_docker_runtime(service)
+
+    def _inspect(docker_binary, docker_host, container_name):
+        return {
+            "MacAddress": "",
+            "Networks": {
+                "nova-ve-lablivedocke-net1": {"MacAddress": "02:42:ac:11:00:05"},
+            },
+        }
+
+    service._docker_inspect = _inspect
+
+    result = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
+
+    assert result["state"] == "confirmed"
+    assert result["runtime_type"] == "docker"
+    assert result["live_mac"].lower() == "02:42:ac:11:00:05"
+
+
+def test_docker_live_mac_read_mismatch_multi_network(monkeypatch, patched_settings):
+    _mock_runtime_binaries(monkeypatch)
+    service = NodeRuntimeService()
+    _seed_docker_runtime(service)
+
+    def _inspect(docker_binary, docker_host, container_name):
+        return {
+            "MacAddress": "02:42:ac:11:00:05",
+            "Networks": {
+                "nova-ve-lablivedocke-net1": {"MacAddress": "02:42:ac:11:00:05"},
+                "nova-ve-lablivedocke-net2": {"MacAddress": "ff:ff:ff:ff:ff:ff"},
+            },
+        }
+
+    service._docker_inspect = _inspect
+
+    result = service.read_live_mac("lab-live-docker", 5, 1, lab_data=_DOCKER_LAB_DATA)
+
+    assert result["state"] == "mismatch"
+    assert result["live_mac"].lower() == "ff:ff:ff:ff:ff:ff"
+    assert result["planned_mac"] == "02:42:ac:22:00:05"
+
+
+def test_docker_live_mac_read_unavailable_when_inspect_fails(monkeypatch, patched_settings):
+    _mock_runtime_binaries(monkeypatch)
+    service = NodeRuntimeService()
+    _seed_docker_runtime(service)
+
+    def _inspect(docker_binary, docker_host, container_name):
+        raise RuntimeError("docker daemon offline")
+
+    service._docker_inspect = _inspect
+
+    result = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
+
+    assert result["state"] == "unavailable"
+    assert "docker" in (result["reason"] or "").lower()
+
+
+def test_iol_and_dynamips_return_unavailable(patched_settings):
+    service = NodeRuntimeService()
+
+    for runtime_type in ("iol", "dynamips"):
+        lab_data = {
+            "schema": 2,
+            "id": f"lab-{runtime_type}",
+            "meta": {"name": runtime_type},
+            "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+            "nodes": {
+                "9": {
+                    "id": 9,
+                    "name": f"{runtime_type}-node",
+                    "type": runtime_type,
+                    "image": "ignored",
+                    "console": "telnet",
+                    "cpu": 1,
+                    "ram": 256,
+                    "ethernet": 1,
+                    "interfaces": [
+                        {
+                            "index": 0,
+                            "name": "e0/0",
+                            "planned_mac": "aa:bb:cc:dd:ee:09",
+                            "port_position": None,
+                            "network_id": 0,
+                        }
+                    ],
+                }
+            },
+            "networks": {},
+            "links": [],
+            "defaults": {"link_style": "orthogonal"},
+        }
+
+        result = service.read_live_mac(f"lab-{runtime_type}", 9, 0, lab_data=lab_data)
+        assert result["state"] == "unavailable"
+        assert result["runtime_type"] == runtime_type
+        assert "not implemented" in (result["reason"] or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_settings):
+    lab_path = patched_settings.LABS_DIR / "live-mac.json"
+    lab_data = {
+        "schema": 2,
+        "id": "lab-live-qemu",
+        "meta": {"name": "qemu-live"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "router-1",
+                "type": "qemu",
+                "image": "router-image",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 1024,
+                "ethernet": 1,
+                "interfaces": [
+                    {
+                        "index": 0,
+                        "name": "Gi1",
+                        "planned_mac": "aa:bb:cc:dd:ee:01",
+                        "port_position": None,
+                        "network_id": 0,
+                    }
+                ],
+            }
+        },
+        "networks": {},
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }
+    lab_path.write_text(json.dumps(lab_data))
+
+    captured: list[dict] = []
+
+    async def _capture_publish(lab_id, event_type, payload, rev=""):
+        captured.append({"lab_id": lab_id, "type": event_type, "payload": payload, "rev": rev})
+        return SimpleNamespace(seq=1, type=event_type, rev=rev, payload=payload)
+
+    monkeypatch.setattr("app.routers.labs.ws_hub.publish", _capture_publish)
+
+    fixed_result = {
+        "state": "confirmed",
+        "planned_mac": "aa:bb:cc:dd:ee:01",
+        "live_mac": "aa:bb:cc:dd:ee:01",
+        "runtime_type": "qemu",
+        "reason": None,
+    }
+    monkeypatch.setattr(
+        "app.routers.labs.NodeRuntimeService",
+        lambda: SimpleNamespace(read_live_mac=lambda *_args, **_kwargs: fixed_result),
+    )
+
+    response = await labs.get_interface_live_mac(
+        "live-mac.json",
+        1,
+        0,
+        current_user=SimpleNamespace(username="admin"),
+    )
+
+    assert response == fixed_result
+    assert len(captured) == 1
+    event = captured[0]
+    assert event["type"] == "interface_live_mac"
+    assert event["payload"]["node_id"] == 1
+    assert event["payload"]["interface_index"] == 0
+    assert event["payload"]["state"] == "confirmed"
+    assert event["payload"]["planned_mac"] == "aa:bb:cc:dd:ee:01"
+    assert event["payload"]["live_mac"] == "aa:bb:cc:dd:ee:01"

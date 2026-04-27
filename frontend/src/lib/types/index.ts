@@ -73,6 +73,18 @@ export interface NodeInterface {
   network_id: number;
 }
 
+/**
+ * Live-MAC tooltip state (US-072). Mirrors the backend ``read_live_mac`` payload.
+ * Keys: ``${nodeId}:${interfaceIndex}`` in the WS-driven liveMacs store.
+ */
+export type LiveMacState = {
+  state: 'confirmed' | 'mismatch' | 'unavailable';
+  planned_mac: string;
+  live_mac?: string;
+  reason?: string;
+  runtime_type?: 'qemu' | 'docker' | 'iol' | 'dynamips';
+};
+
 export type NetworkType =
   | 'linux_bridge'
   | 'ovs_bridge'

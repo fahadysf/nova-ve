@@ -1066,8 +1066,8 @@ async def node_rdp(
     body = "\n".join(
         [
             f"full address:s:{console['host']}:{console['port']}",
-            f"prompt for credentials:i:1",
-            f"administrative session:i:0",
+            "prompt for credentials:i:1",
+            "administrative session:i:0",
         ]
     )
     response = PlainTextResponse(body, media_type="application/x-rdp")
@@ -1326,8 +1326,6 @@ async def delete_network(
     }
 
 
-
-
 # ---------------------------------------------------------------------------
 # US-063 / US-064: per-resource node-interface PATCH/GET + bulk-PUT layout
 # ---------------------------------------------------------------------------
@@ -1488,6 +1486,52 @@ async def list_node_interfaces_v2(
         "message": "Successfully listed interfaces.",
         "data": interfaces,
     }
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/interfaces/{idx}/live_mac")
+async def get_interface_live_mac(
+    lab_path: str,
+    node_id: int,
+    idx: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
+    except FileNotFoundError:
+        return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+    except PermissionError as e:
+        return {"code": 403, "status": "fail", "message": str(e)}
+
+    node = (data.get("nodes") or {}).get(str(node_id))
+    if not isinstance(node, dict):
+        return {"code": 404, "status": "fail", "message": "Node does not exist."}
+
+    interfaces = node.get("interfaces") or []
+    if not (0 <= idx < len(interfaces)):
+        return {"code": 404, "status": "fail", "message": "Interface does not exist."}
+
+    lab_id = str(data.get("id", "")).strip()
+    runtime_service = NodeRuntimeService()
+    result = runtime_service.read_live_mac(lab_id, node_id, idx, lab_data=data)
+
+    await ws_hub.publish(
+        lab_id,
+        "interface_live_mac",
+        {
+            "node_id": int(node_id),
+            "interface_index": int(idx),
+            "state": result.get("state"),
+            "planned_mac": result.get("planned_mac"),
+            "live_mac": result.get("live_mac"),
+            "reason": result.get("reason"),
+        },
+        rev=str(lab_id),
+    )
+
+    return result
 
 
 def _layout_validate_and_collect_forbidden(body: dict) -> list[str]:
