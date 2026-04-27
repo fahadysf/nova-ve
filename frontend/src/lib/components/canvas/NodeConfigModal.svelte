@@ -199,7 +199,7 @@
     cpu = setIfClean('cpu', cpu, template.defaults.cpu);
     ram = setIfClean('ram', ram, template.defaults.ram);
     ethernet = setIfClean('ethernet', ethernet, template.defaults.ethernet);
-    consoleMode = setIfClean('consoleMode', consoleMode, template.defaults.console);
+    consoleMode = setIfClean('consoleMode', consoleMode, template.defaults.console_type);
     delay = setIfClean('delay', delay, template.defaults.delay);
     namePrefix = setIfClean('namePrefix', namePrefix, template.name);
 

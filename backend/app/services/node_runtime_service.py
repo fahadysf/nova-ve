@@ -256,11 +256,11 @@ class NodeRuntimeService:
 
     def _start_qemu_node(self, lab_id: str, node: dict[str, Any]) -> dict[str, Any]:
         extras = _node_extras(node)
-        qemu_arch = _extra_str(extras, "qemu_arch") or "x86_64"
-        qemu_binary = self._resolve_qemu_binary(qemu_arch)
+        architecture = _extra_str(extras, "architecture") or "x86_64"
+        qemu_binary = self._resolve_qemu_binary(architecture)
         if not qemu_binary:
             raise NodeRuntimeError(
-                f"QEMU binary not found for arch {qemu_arch}: {self.settings.QEMU_BINARY}"
+                f"QEMU binary not found for arch {architecture}: {self.settings.QEMU_BINARY}"
             )
 
         work_dir = self._work_dir(lab_id, node["id"])

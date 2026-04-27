@@ -91,11 +91,12 @@ export interface NodeCatalogDefaults {
   type: 'qemu' | 'docker' | 'iol' | 'dynamips';
   template: string;
   image: string;
+  icon_type: string;
   icon: string;
   cpu: number;
   ram: number;
   ethernet: number;
-  console: 'telnet' | 'vnc' | 'rdp';
+  console_type: 'telnet' | 'vnc' | 'rdp';
   delay: number;
   cpulimit: number;
   extras?: Record<string, unknown>;

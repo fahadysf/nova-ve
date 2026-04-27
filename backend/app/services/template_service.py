@@ -13,6 +13,19 @@ from app.config import get_settings
 SUPPORTED_TEMPLATE_TYPES = {"qemu", "docker", "iol", "dynamips"}
 
 
+ICON_TYPE_TO_FILENAME = {
+    "router": "Router.png",
+    "server": "Server.png",
+    "switch": "Switch.png",
+    "firewall": "Firewall.png",
+    "host": "Server.png",
+}
+
+
+def _icon_filename_for(icon_type: str) -> str:
+    return ICON_TYPE_TO_FILENAME.get(icon_type.strip().lower(), "Router.png")
+
+
 QEMU_NIC_OPTIONS = [
     {"value": "virtio-net-pci", "label": "virtio-net-pci"},
     {"value": "e1000", "label": "e1000"},
@@ -78,8 +91,8 @@ DYNAMIPS_C7200_SLOT_OPTIONS = [
 def _qemu_extras_schema() -> list[dict[str, Any]]:
     return [
         {
-            "key": "qemu_arch",
-            "label": "QEMU arch",
+            "key": "architecture",
+            "label": "Architecture",
             "type": "select",
             "options": QEMU_ARCH_OPTIONS,
             "default": "x86_64",
@@ -290,11 +303,11 @@ class TemplateDefinition:
     type: str
     name: str
     description: str
-    icon: str
+    icon_type: str
     cpu: int
     ram: int
     ethernet: int
-    console: str
+    console_type: str
     cpulimit: int
     extras: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
@@ -306,11 +319,12 @@ class TemplateDefinition:
             "type": self.type,
             "name": self.name,
             "description": self.description,
-            "icon": self.icon,
+            "icon_type": self.icon_type,
+            "icon": _icon_filename_for(self.icon_type),
             "cpu": self.cpu,
             "ram": self.ram,
             "ethernet": self.ethernet,
-            "console": self.console,
+            "console_type": self.console_type,
             "cpulimit": self.cpulimit,
             "extras": dict(self.extras),
         }
@@ -338,7 +352,7 @@ class TemplateService:
         raise TemplateError(f"Template {key} does not exist for type {template_type}.")
 
     def list_images(self, template_type: str, template_key: str) -> dict[str, dict[str, Any]]:
-        self.get_template(template_type, template_key)
+        template = self.get_template(template_type, template_key)
         images: dict[str, dict[str, Any]] = {}
 
         if template_type == "docker":
@@ -346,10 +360,21 @@ class TemplateService:
 
         image_root = self.images_dir / template_type
         if image_root.exists():
+            apply_name_filter = template_type != "docker"
+            template_match = template.name.strip().lower()
             for child in sorted(image_root.iterdir()):
                 image_info = self._image_info(child)
-                if image_info:
-                    images[image_info["image"]] = image_info
+                if not image_info:
+                    continue
+                if apply_name_filter and template_match:
+                    folder_match = str(image_info["image"]).strip().lower()
+                    if (
+                        folder_match
+                        and template_match not in folder_match
+                        and folder_match not in template_match
+                    ):
+                        continue
+                images[image_info["image"]] = image_info
 
         return images
 
@@ -368,7 +393,7 @@ class TemplateService:
             "Server.png",
         }
         for template in self._load_templates():
-            icon = str(template.icon).strip()
+            icon = _icon_filename_for(template.icon_type)
             if icon:
                 icons.add(icon)
         return sorted(icons)
@@ -391,11 +416,12 @@ class TemplateService:
                         "type": template.type,
                         "template": template.key,
                         "image": default_image,
-                        "icon": template.icon,
+                        "icon_type": template.icon_type,
+                        "icon": _icon_filename_for(template.icon_type),
                         "cpu": template.cpu,
                         "ram": template.ram,
                         "ethernet": template.ethernet,
-                        "console": template.console,
+                        "console_type": template.console_type,
                         "delay": 0,
                         "cpulimit": template.cpulimit,
                         "extras": defaults_extras,
@@ -466,19 +492,24 @@ class TemplateService:
             yaml_extras = payload.get("extras") or {}
             if not isinstance(yaml_extras, dict):
                 yaml_extras = {}
+            yaml_extras = dict(yaml_extras)
+            for schema_field in _extras_schema_for(template_type):
+                schema_key = schema_field["key"]
+                if schema_key in payload and schema_key not in yaml_extras:
+                    yaml_extras[schema_key] = payload[schema_key]
             templates.append(
                 TemplateDefinition(
                     key=key,
                     type=template_type,
                     name=str(payload.get("name") or key),
                     description=str(payload.get("description") or ""),
-                    icon=str(payload.get("icon") or self._default_icon(template_type)),
+                    icon_type=str(payload.get("icon_type") or self._default_icon_type(template_type)),
                     cpu=int(payload.get("cpu", 1)),
                     ram=int(payload.get("ram", 1024)),
                     ethernet=int(payload.get("ethernet", 1)),
-                    console=str(payload.get("console") or self._default_console(template_type)),
+                    console_type=str(payload.get("console_type") or self._default_console_type(template_type)),
                     cpulimit=int(payload.get("cpulimit", 1)),
-                    extras=dict(yaml_extras),
+                    extras=yaml_extras,
                     raw=payload,
                 )
             )
@@ -543,13 +574,13 @@ class TemplateService:
         return images
 
     @staticmethod
-    def _default_icon(template_type: str) -> str:
+    def _default_icon_type(template_type: str) -> str:
         if template_type == "docker":
-            return "Server.png"
-        return "Router.png"
+            return "server"
+        return "router"
 
     @staticmethod
-    def _default_console(template_type: str) -> str:
+    def _default_console_type(template_type: str) -> str:
         if template_type == "docker":
             return "rdp"
         return "telnet"

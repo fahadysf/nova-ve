@@ -113,12 +113,12 @@ async def test_lab_router_supports_node_network_and_topology_mutations(patched_s
     _write_lab(
         patched_settings.TEMPLATES_DIR / "qemu" / "csr.yml",
         """type: qemu
-name: Cisco CSR1000v
+name: CSR1000v
 cpu: 2
 ram: 4096
 ethernet: 4
-console: telnet
-icon: Router.png
+console_type: telnet
+icon_type: router
 cpulimit: 1
 """,
     )
@@ -211,12 +211,12 @@ async def test_node_update_enforces_running_state_editability(patched_settings, 
     _write_lab(
         patched_settings.TEMPLATES_DIR / "qemu" / "csr.yml",
         """type: qemu
-name: Cisco CSR1000v
+name: CSR1000v
 cpu: 2
 ram: 4096
 ethernet: 4
-console: telnet
-icon: Router.png
+console_type: telnet
+icon_type: router
 cpulimit: 1
 """,
     )

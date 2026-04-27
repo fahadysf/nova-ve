@@ -1,10 +1,10 @@
 type: qemu
-name: VyOS (nightly rolling)
-description: VyOS rolling/nightly router. Boots from cdrom.iso; run `install image` once on first launch.
+name: vyos
+description: VyOS router. Boots from cdrom.iso; run `install image` once on first launch.
 cpulimit: 1
-icon: Router.png
+icon_type: router
 cpu: 1
 ram: 1024
 ethernet: 4
-console: telnet
-qemu_arch: x86_64
+console_type: telnet
+architecture: x86_64
