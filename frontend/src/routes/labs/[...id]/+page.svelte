@@ -11,7 +11,16 @@
   import { toastStore } from '$lib/stores/toasts';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
-  import type { FolderListing, LabListItem, LabMeta, NetworkData, NodeData, TopologyLink } from '$lib/types';
+  import type {
+    FolderListing,
+    LabDefaults,
+    LabListItem,
+    LabMeta,
+    Link,
+    NetworkData,
+    NodeData,
+    TopologyLink
+  } from '$lib/types';
 
   let labId = '';
   let labMeta: LabMeta | null = null;
@@ -19,6 +28,11 @@
   let nodes: Record<string, NodeData> = {};
   let networks: Record<string, NetworkData> = {};
   let topology: TopologyLink[] = [];
+  // US-082: v2 links[] is the canvas source of truth for edges. The /links
+  // endpoint returns the v2 records; the canvas falls back gracefully when
+  // empty.
+  let links: Link[] = [];
+  let labDefaults: LabDefaults = { link_style: 'orthogonal' };
   let loading = true;
   let error = '';
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
@@ -222,6 +236,8 @@
       nodes = {};
       networks = {};
       topology = [];
+      links = [];
+      labDefaults = { link_style: 'orthogonal' };
       consoleWorkspace = null;
     } catch (e) {
       error = e instanceof ApiError ? e.message : 'Unable to load labs.';
@@ -240,17 +256,21 @@
     }
 
     try {
-      const [meta, nodeData, networkData, topologyData] = await Promise.all([
+      const [meta, nodeData, networkData, topologyData, linksData] = await Promise.all([
         apiGetData<LabMeta>(`/labs/${labId}`),
         apiGetData<Record<string, NodeData>>(`/labs/${labId}/nodes`),
         apiGetData<Record<string, NetworkData>>(`/labs/${labId}/networks`),
-        apiGetData<TopologyLink[]>(`/labs/${labId}/topology`)
+        apiGetData<TopologyLink[]>(`/labs/${labId}/topology`),
+        // US-082: v2 links[] feeds the canvas edge derivation. Catch errors so
+        // an isolated /links failure doesn't block the rest of the lab load.
+        apiGetData<Link[]>(`/labs/${labId}/links`).catch(() => [] as Link[])
       ]);
 
       labMeta = meta;
       nodes = nodeData;
       networks = networkData;
       topology = topologyData ?? [];
+      links = linksData ?? [];
       if (consoleWorkspace) {
         const priorActiveTabId = consoleWorkspace.activeTabId;
         const tabs = consoleWorkspace.tabs
@@ -1265,6 +1285,8 @@
             {nodes}
             {networks}
             {topology}
+            {links}
+            defaults={labDefaults}
             {consoleSelectorWindows}
             {consoleMinimizedWindows}
             on:console={(event) => openConsole(event.detail.node)}

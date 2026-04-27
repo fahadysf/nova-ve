@@ -99,33 +99,34 @@ export type NetworkType =
 
 export type LinkStyle = 'orthogonal' | 'bezier' | 'straight';
 
-export interface NodeLinkEndpoint {
-  node_id: number;
-  interface_index: number;
+/**
+ * v2 link endpoint. Either ``node_id`` + ``interface_index`` (node-side) or
+ * ``network_id`` (network-side). The fields are optional individually so the
+ * same shape covers both endpoint kinds; consumers must check which keys are
+ * present at runtime (US-082).
+ */
+export interface LinkEndpoint {
+  node_id?: number;
+  interface_index?: number;
+  network_id?: number;
 }
-
-export interface NetworkLinkEndpoint {
-  network_id: number;
-}
-
-export type LinkEndpoint = NodeLinkEndpoint | NetworkLinkEndpoint;
 
 export interface LinkMetrics {
-  delay_ms: number;
-  loss_pct: number;
-  bandwidth_kbps: number;
-  jitter_ms: number;
+  delay_ms?: number;
+  loss_pct?: number;
+  bandwidth_kbps?: number;
+  jitter_ms?: number;
 }
 
 export interface Link {
   id: string;
   from: LinkEndpoint;
   to: LinkEndpoint;
-  style_override: LinkStyle | null;
-  label: string;
-  color: string;
-  width: string;
-  metrics: LinkMetrics;
+  style_override?: LinkStyle | null;
+  label?: string;
+  color?: string;
+  width?: string;
+  metrics?: LinkMetrics;
 }
 
 export interface Network {

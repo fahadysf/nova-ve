@@ -78,7 +78,25 @@ const V2_LAB_FIXTURE = JSON.stringify({
       interfaces: [{ index: 0, name: 'eth0' }],
     },
   },
-  networks: {},
+  networks: {
+    '5': {
+      id: 5,
+      name: 'bridge0',
+      type: 'linux_bridge',
+      left: 300,
+      top: 350,
+      icon: 'lan.png',
+      width: 0,
+      style: 'Solid',
+      linkstyle: 'Straight',
+      color: '',
+      label: '',
+      visibility: true,
+      implicit: false,
+      smart: 0,
+      config: {},
+    },
+  },
   links: [],
 });
 
@@ -209,6 +227,86 @@ test.describe('US-069 — drag-to-connect', () => {
       await page.waitForTimeout(300);
 
       expect(posts).toHaveLength(0);
+    } finally {
+      try {
+        fs.unlinkSync(setup.fixturePath);
+      } catch {
+        /* best-effort */
+      }
+    }
+  });
+
+  // US-081: reverse drag — drag from a network port to a node port and confirm
+  // the POST body uses node-side ``from`` + network-side ``to`` regardless of
+  // the drag direction.
+  test('reverse flow: network → interface POSTs {from:{node_id,...}, to:{network_id}}', async ({ page, request }) => {
+    const setup = await setupOrSkip(page, request);
+    if (!setup) {
+      test.skip();
+      return;
+    }
+
+    const captured: { headers: Record<string, string>; body: string }[] = [];
+    try {
+      await page.route(/\/api\/labs\/.*\/links$/, async (route) => {
+        if (route.request().method() === 'POST') {
+          captured.push({
+            headers: route.request().headers(),
+            body: route.request().postData() ?? '',
+          });
+        }
+        await route.continue();
+      });
+
+      await page.goto(`${FRONTEND_URL}/labs/e2e-drag-connect.json`);
+      await page.waitForSelector('[data-network-port-id="5"]', { timeout: 10000 });
+
+      // Pick the bottom side of the network bridge as the drag origin so the
+      // pointer travels up toward the node ports placed at top of the canvas.
+      const networkPort = page
+        .locator('[data-network-port-id="5"][data-network-port-side="bottom"]')
+        .first();
+      const interfacePort = page
+        .locator('[data-port-node-id="1"][data-port-interface-index="0"]')
+        .first();
+
+      const networkBox = await networkPort.boundingBox();
+      const ifaceBox = await interfacePort.boundingBox();
+      expect(networkBox).not.toBeNull();
+      expect(ifaceBox).not.toBeNull();
+
+      await page.mouse.move(
+        networkBox!.x + networkBox!.width / 2,
+        networkBox!.y + networkBox!.height / 2
+      );
+      await page.mouse.down();
+      await page.mouse.move(
+        (networkBox!.x + ifaceBox!.x) / 2,
+        (networkBox!.y + ifaceBox!.y) / 2,
+        { steps: 5 }
+      );
+      await interfacePort.hover();
+      await page.mouse.up();
+
+      const modal = page.locator('[data-testid="link-confirm-modal"]');
+      await modal.waitFor({ state: 'visible', timeout: 5000 });
+
+      await page.locator('[data-testid="link-confirm-button"]').click();
+      await page.waitForTimeout(500);
+
+      expect(captured.length).toBeGreaterThanOrEqual(1);
+      const post = captured[0];
+      expect(post.headers['idempotency-key']).toBeTruthy();
+      const body = JSON.parse(post.body) as {
+        from?: { node_id?: number; interface_index?: number; network_id?: number };
+        to?: { node_id?: number; interface_index?: number; network_id?: number };
+      };
+      // The wire contract requires the node-side endpoint as ``from`` so the
+      // server can resolve the interface index regardless of which way the
+      // user dragged.
+      expect(body.from?.node_id).toBe(1);
+      expect(body.from?.interface_index).toBe(0);
+      expect(body.to?.network_id).toBe(5);
     } finally {
       try {
         fs.unlinkSync(setup.fixturePath);

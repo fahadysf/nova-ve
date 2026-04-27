@@ -93,12 +93,6 @@ def _empty_lab_json(lab_id: str, meta: dict) -> dict:
 
 
 def _derive_legacy_topology(data: dict) -> list:
-    """Synthesise legacy ``topology[]`` entries from v2 ``links[]``.
-
-    Wave 1 will retire this shim; for now it lets the existing routers and
-    tests keep operating on the legacy keys without modification.
-    """
-
     topology: list[dict] = []
     nodes = data.get("nodes", {}) or {}
     for link in data.get("links", []) or []:
@@ -215,14 +209,6 @@ def _derive_network_counts(data: dict) -> None:
 
 
 def _legacy_topology_to_links(data: dict) -> list[dict]:
-    """Translate legacy ``topology[]`` entries back into v2 ``links[]``.
-
-    This is the inverse of :func:`_derive_legacy_topology`. Used by
-    ``write_lab_json_static`` so router code that mutates ``topology`` is
-    transparently persisted to v2 link records. ``id`` is generated from the
-    link index when the source legacy record doesn't carry one.
-    """
-
     links: list[dict] = []
     for index, entry in enumerate(data.get("topology", []) or []):
         if not isinstance(entry, dict):
@@ -286,12 +272,16 @@ def _legacy_topology_to_links(data: dict) -> list[dict]:
     return links
 
 
+def _has_v2_shape(data: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    if "links" in data:
+        return True
+    networks = data.get("networks")
+    return isinstance(networks, dict)
+
+
 def _strip_legacy_fields(data: dict) -> dict:
-    """Return a deep-ish copy of ``data`` with synthesised legacy keys removed.
-
-    Used before persisting so we never write the v1 compat shim to disk.
-    """
-
     cleaned = dict(data)
     for key in LEGACY_COMPAT_KEYS:
         cleaned.pop(key, None)
@@ -464,5 +454,9 @@ class LabService:
         cleaned.setdefault("links", [])
         cleaned.setdefault("viewport", {"x": 0, "y": 0, "zoom": 1.0})
         cleaned.setdefault("defaults", {"link_style": "orthogonal"})
+
+        if _has_v2_shape(cleaned) and cleaned.get("schema_version") != SCHEMA_VERSION:
+            cleaned["schema_version"] = SCHEMA_VERSION
+
         with open(filepath, "w") as f:
             json.dump(cleaned, f, indent=2)

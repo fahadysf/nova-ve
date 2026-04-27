@@ -4,7 +4,15 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import type { LiveMacState, NodeInterface, PortPosition } from '$lib/types';
+  import { dragLinkStore, getDragLinkSnapshot } from '$lib/stores/dragLink';
+  import { togglePortInfo } from '$lib/stores/portInfo';
   import PortTooltip from './PortTooltip.svelte';
+
+  // US-079: a click is a mousedown+mouseup pair within this time/distance
+  // window. Anything longer or further is a drag and falls through to the
+  // dragLinkStore flow.
+  const CLICK_MAX_MS = 200;
+  const CLICK_MAX_DIST_PX = 4;
 
   export let interfaceData: NodeInterface;
   export let position: PortPosition;
@@ -20,15 +28,21 @@
     'port:mouseenter': { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition };
     'port:mouseleave': { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition };
     'port:dragstart': { event: MouseEvent; nodeId: number; interfaceIndex: number };
+    'port:click': { nodeId: number; interfaceIndex: number; anchorRect: DOMRect | null };
   }>();
 
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let showTooltip = false;
   let portHandle: HTMLSpanElement | null = null;
   let anchorRect: DOMRect | null = null;
+  // US-079: track hover for the 50% scale-up. The transform lives on the inner
+  // <span> so the wrapper's hit-test geometry stays the same.
+  let isHovered = false;
+  // US-079: click-vs-drag detection state. Captured on mousedown, consulted on
+  // mouseup. ``clickStartCoords`` doubles as a "did we receive mousedown" flag.
+  let clickStartTs = 0;
+  let clickStartCoords: { x: number; y: number } | null = null;
 
-  // SvelteFlow positions ports on the perimeter of a (relatively positioned)
-  // wrapper. We use percentage offsets that map directly to the side.
   $: stylePosition = (() => {
     const offsetPct = `${(position.offset * 100).toFixed(2)}%`;
     switch (position.side) {
@@ -44,7 +58,6 @@
     }
   })();
 
-  // Map the docked side of the port to the placement of its tooltip.
   $: tooltipPlacement = (() => {
     switch (position.side) {
       case 'top':
@@ -74,28 +87,130 @@
 
   function handleMouseEnter(event: MouseEvent) {
     clearHoverTimer();
+    isHovered = true;
     hoverTimer = setTimeout(() => {
       captureAnchorRect();
       showTooltip = true;
     }, 250);
     dispatch('port:mouseenter', { event, nodeId, interfaceIndex, port: position });
+
+    const snap = getDragLinkSnapshot();
+    if (snap.state === 'idle' || snap.state === 'confirming') return;
+    if (snap.source && snap.source.kind === 'interface' && snap.source.nodeId === nodeId) return;
+    dragLinkStore.move({
+      pointer: snap.pointer ?? { x: event.clientX, y: event.clientY },
+      target: {
+        kind: 'interface',
+        nodeId,
+        interfaceIndex,
+        port: position,
+        interfaceName: interfaceData.name,
+        plannedMac: interfaceData.planned_mac ?? null,
+      },
+      nearTarget: true,
+    });
   }
 
   function handleMouseLeave(event: MouseEvent) {
     clearHoverTimer();
+    isHovered = false;
     showTooltip = false;
     dispatch('port:mouseleave', { event, nodeId, interfaceIndex, port: position });
+
+    const snap = getDragLinkSnapshot();
+    if (snap.state === 'near_target') {
+      dragLinkStore.leaveTargetZone();
+    }
   }
 
   function handleMouseDown(event: MouseEvent) {
     if (event.button !== 0) return;
+
+    if (!event.shiftKey) {
+      event.stopPropagation();
+      event.preventDefault();
+    }
+
     clearHoverTimer();
     showTooltip = false;
+
+    if (!event.shiftKey) {
+      clickStartTs = Date.now();
+      clickStartCoords = { x: event.clientX, y: event.clientY };
+      dragLinkStore.start({
+        source: {
+          kind: 'interface',
+          nodeId,
+          interfaceIndex,
+          port: position,
+          interfaceName: interfaceData.name,
+          plannedMac: interfaceData.planned_mac ?? null,
+        },
+        pointer: { x: event.clientX, y: event.clientY },
+      });
+    }
+
     dispatch('port:mousedown', { event, nodeId, interfaceIndex, port: position });
   }
 
   function handleMouseUp(event: MouseEvent) {
     dispatch('port:mouseup', { event, nodeId, interfaceIndex, port: position });
+
+    const startCoords = clickStartCoords;
+    const startTs = clickStartTs;
+    clickStartCoords = null;
+    clickStartTs = 0;
+    if (startCoords) {
+      const elapsed = Date.now() - startTs;
+      const dist = Math.hypot(event.clientX - startCoords.x, event.clientY - startCoords.y);
+      if (elapsed <= CLICK_MAX_MS && dist <= CLICK_MAX_DIST_PX) {
+        const snapBeforeCancel = getDragLinkSnapshot();
+        if (snapBeforeCancel.state === 'port_pressed') {
+          dragLinkStore.cancel();
+        }
+        captureAnchorRect();
+        const rect = anchorRect;
+        dispatch('port:click', { nodeId, interfaceIndex, anchorRect: rect });
+        togglePortInfo({
+          kind: 'interface',
+          nodeId,
+          interfaceIndex,
+          anchorRect: rect,
+          interfaceName: interfaceData.name,
+          plannedMac: interfaceData.planned_mac ?? null,
+        });
+        return;
+      }
+    }
+
+    const snap = getDragLinkSnapshot();
+    if (snap.state !== 'dragging' && snap.state !== 'near_target' && snap.state !== 'port_pressed') {
+      return;
+    }
+    if (!snap.source) {
+      dragLinkStore.cancel();
+      return;
+    }
+    if (snap.source.kind === 'interface' && snap.source.nodeId === nodeId) {
+      dragLinkStore.cancel();
+      return;
+    }
+    dragLinkStore.move({
+      pointer: { x: event.clientX, y: event.clientY },
+      target: {
+        kind: 'interface',
+        nodeId,
+        interfaceIndex,
+        port: position,
+        interfaceName: interfaceData.name,
+        plannedMac: interfaceData.planned_mac ?? null,
+      },
+      nearTarget: true,
+    });
+    dragLinkStore.release({
+      pointer: { x: event.clientX, y: event.clientY },
+      targetReachable: true,
+    });
   }
 </script>
 
@@ -117,13 +232,16 @@
 >
   <span
     bind:this={portHandle}
-    class={`block h-2.5 w-2.5 rounded-full border border-gray-950 transition ${
+    class={`port-handle block h-2.5 w-2.5 rounded-full border border-gray-950 ${
+      isHovered ? 'port-handle-hover' : ''
+    } ${
       highlighted
         ? 'bg-emerald-300 ring-2 ring-emerald-300/60 shadow-[0_0_8px_rgba(110,231,183,0.55)]'
         : isSource
           ? 'bg-blue-400'
           : 'bg-gray-400 hover:bg-blue-300'
     }`}
+    data-testid="port-handle"
   ></span>
   {#if hasMismatch}
     <span
@@ -142,3 +260,17 @@
     />
   {/if}
 </div>
+
+<style>
+  .port-handle {
+    transition:
+      transform 90ms ease-out,
+      background-color 150ms ease-out,
+      box-shadow 150ms ease-out;
+    transform-origin: center center;
+    transform: scale(1);
+  }
+  .port-handle.port-handle-hover {
+    transform: scale(1.5);
+  }
+</style>
