@@ -243,6 +243,13 @@ export interface NodeCatalogExtraField {
   runtime?: boolean;
 }
 
+export interface TemplateCapabilities {
+  hotplug: boolean;
+  max_nics: number;
+  /** QEMU machine type (q35 or pc). null for non-QEMU templates. */
+  machine: 'q35' | 'pc' | null;
+}
+
 export interface NodeCatalogTemplate {
   key: string;
   type: 'qemu' | 'docker' | 'iol' | 'dynamips';
@@ -252,6 +259,7 @@ export interface NodeCatalogTemplate {
   images: NodeCatalogImage[];
   icon_options: string[];
   extras_schema?: NodeCatalogExtraField[];
+  capabilities?: TemplateCapabilities;
 }
 
 export interface NodeCatalog {
