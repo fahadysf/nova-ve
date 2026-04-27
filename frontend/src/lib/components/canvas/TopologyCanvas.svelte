@@ -2,9 +2,9 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, setContext } from 'svelte';
   import { onMount } from 'svelte';
-  import { writable } from 'svelte/store';
+  import { writable, get } from 'svelte/store';
   import {
     ChevronLeft,
     Eraser,
@@ -26,7 +26,6 @@
     Panel,
     SvelteFlow,
     useSvelteFlow,
-    type Connection,
     type Edge,
     type Node
   } from '@xyflow/svelte';
@@ -38,23 +37,27 @@
   import LinkEdge from '$lib/components/canvas/LinkEdge.svelte';
   import LinkPreview from '$lib/components/canvas/LinkPreview.svelte';
   import LinkConfirmModal from '$lib/components/canvas/LinkConfirmModal.svelte';
+  import PortInfoPopover from '$lib/components/canvas/PortInfoPopover.svelte';
+  import { selectedPortInfoStore, type SelectedPortInfo } from '$lib/stores/portInfo';
   import { toastStore } from '$lib/stores/toasts';
   import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { createLabWsStores, type LabWsStores } from '$lib/stores/labWs';
+  import { deriveEdges } from '$lib/services/canvasEdges';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
-    type DragLinkEndpoint,
   } from '$lib/stores/dragLink';
   import type {
+    LabDefaults,
     LabViewport,
+    Link,
     LinkStyle,
+    LiveMacState,
     NetworkData,
     NodeBatchCreateResult,
     NodeCatalog,
     NodeData,
-    NodeInterface,
     PortPosition,
     TopologyLink
   } from '$lib/types';
@@ -63,6 +66,10 @@
   export let nodes: Record<string, NodeData> = {};
   export let networks: Record<string, NetworkData> = {};
   export let topology: TopologyLink[] = [];
+  /** v2 links[] — the source of truth for edges (US-082). */
+  export let links: Link[] = [];
+  /** v2 lab defaults (notably ``link_style`` for edge routing). */
+  export let defaults: LabDefaults = { link_style: 'orthogonal' };
   export let consoleSelectorWindows: ConsoleSelectorWindow[] = [];
   export let consoleMinimizedWindows: ConsoleMinimizedBar[] = [];
 
@@ -117,15 +124,92 @@
   });
   let dragLinkSourceAnchor: { x: number; y: number } | null = null;
 
+  $: selectedPortInfo = $selectedPortInfoStore;
+
+  function resolveInterfacePeerLabel(nodeId: number, interfaceIndex: number): string | null {
+    for (const link of localLinks) {
+      const fromMatches =
+        link.from?.node_id === nodeId && link.from?.interface_index === interfaceIndex;
+      const toMatches =
+        link.to?.node_id === nodeId && link.to?.interface_index === interfaceIndex;
+      if (!fromMatches && !toMatches) continue;
+      const other = fromMatches ? link.to : link.from;
+      if (!other) continue;
+      if (typeof other.network_id === 'number') {
+        const network = localNetworks[String(other.network_id)];
+        return network?.name ?? `network ${other.network_id}`;
+      }
+      if (typeof other.node_id === 'number') {
+        const peerNode = localNodes[String(other.node_id)];
+        if (!peerNode) return `node ${other.node_id}`;
+        const peerIface =
+          typeof other.interface_index === 'number'
+            ? peerNode.interfaces[other.interface_index]
+            : undefined;
+        if (peerIface) return `${peerNode.name} · ${peerIface.name}`;
+        return peerNode.name;
+      }
+    }
+    return null;
+  }
+
+  function resolveNetworkPeerLabel(networkId: number): string | null {
+    for (const link of localLinks) {
+      const fromMatches = link.from?.network_id === networkId;
+      const toMatches = link.to?.network_id === networkId;
+      if (!fromMatches && !toMatches) continue;
+      const other = fromMatches ? link.to : link.from;
+      if (!other) continue;
+      if (typeof other.node_id === 'number') {
+        const peerNode = localNodes[String(other.node_id)];
+        if (!peerNode) return `node ${other.node_id}`;
+        const peerIface =
+          typeof other.interface_index === 'number'
+            ? peerNode.interfaces[other.interface_index]
+            : undefined;
+        if (peerIface) return `${peerNode.name} · ${peerIface.name}`;
+        return peerNode.name;
+      }
+      if (typeof other.network_id === 'number') {
+        const network = localNetworks[String(other.network_id)];
+        return network?.name ?? `network ${other.network_id}`;
+      }
+    }
+    return null;
+  }
+
+  function getLiveMacFor(nodeId: number, interfaceIndex: number): LiveMacState | null {
+    if (!labWsStores) return null;
+    const key = `${nodeId}:${interfaceIndex}`;
+    return get(labWsStores.liveMacs)[key] ?? null;
+  }
+
+  function closePortInfo() {
+    selectedPortInfoStore.set(null);
+  }
+
+  $: {
+    const snapshot = $dragLinkStore;
+    if (snapshot.state === 'idle') {
+      dragLinkSourceAnchor = null;
+    } else if (snapshot.state === 'port_pressed' && snapshot.pointer) {
+      dragLinkSourceAnchor = { x: snapshot.pointer.x, y: snapshot.pointer.y };
+    }
+  }
+
   const nodesStore = writable<Node[]>([]);
   const edgesStore = writable<Edge[]>([]);
 
   let localNodes: Record<string, NodeData> = {};
   let localNetworks: Record<string, NetworkData> = {};
   let localTopology: TopologyLink[] = [];
+  let localLinks: Link[] = [];
+  let localDefaults: LabDefaults = { link_style: 'orthogonal' };
   let lastNodesRef = nodes;
   let lastNetworksRef = networks;
   let lastTopologyRef = topology;
+  let lastLinksRef = links;
+  let lastDefaultsRef = defaults;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saveState: 'idle' | 'saving' | 'saved' = 'idle';
   let selectedEdgeId: string | null = null;
@@ -229,6 +313,8 @@
     localNodes = deepClone(nodes);
     localNetworks = deepClone(networks);
     localTopology = deepClone(topology);
+    localLinks = deepClone(links);
+    localDefaults = deepClone(defaults);
   }
 
   function publishFlowState() {
@@ -236,14 +322,27 @@
     edgesStore.set(buildFlowEdges());
   }
 
-  $: if (nodes !== lastNodesRef || networks !== lastNetworksRef || topology !== lastTopologyRef) {
+  $: if (
+    nodes !== lastNodesRef ||
+    networks !== lastNetworksRef ||
+    topology !== lastTopologyRef ||
+    links !== lastLinksRef ||
+    defaults !== lastDefaultsRef
+  ) {
     lastNodesRef = nodes;
     lastNetworksRef = networks;
     lastTopologyRef = topology;
+    lastLinksRef = links;
+    lastDefaultsRef = defaults;
     syncLocalState();
   }
 
-  $: if (!Object.keys(localNodes).length && !Object.keys(localNetworks).length && !localTopology.length) {
+  $: if (
+    !Object.keys(localNodes).length &&
+    !Object.keys(localNetworks).length &&
+    !localTopology.length &&
+    !localLinks.length
+  ) {
     syncLocalState();
   }
 
@@ -294,24 +393,8 @@
     return flowNodes;
   }
 
-  function edgeIdFor(link: TopologyLink, idx: number): string {
-    return `edge:${link.source}:${link.destination}:${link.network_id}:${idx}`;
-  }
-
   function buildFlowEdges(): Edge[] {
-    return localTopology.map((link, idx) => ({
-      id: edgeIdFor(link, idx),
-      source: link.source,
-      target: link.destination,
-      label: link.source_label ? `${link.source_label}` : undefined,
-      type: 'default',
-      animated: false,
-      style: `stroke: ${link.color || '#9ca3af'}; stroke-width: ${parseInt(link.width || '1', 10)}px;`,
-      labelStyle: 'fill: #d1d5db; font-size: 10px; font-family: var(--font-mono);',
-      labelBgStyle: 'fill: rgba(3, 7, 18, 0.92);',
-      labelBgPadding: [4, 2],
-      labelBgBorderRadius: 4
-    }));
+    return deriveEdges(localLinks, localDefaults);
   }
 
   $: {
@@ -450,25 +533,12 @@
     }, 500);
   }
 
-  function nextNetworkId(): number {
-    return Math.max(0, ...Object.keys(localNetworks).map((key) => Number(key))) + 1;
-  }
-
   function decodeId(elementId: string): { type: 'node' | 'network'; id: number } | null {
     if (elementId.startsWith('node')) {
       return { type: 'node', id: Number(elementId.slice(4)) };
     }
     if (elementId.startsWith('network')) {
       return { type: 'network', id: Number(elementId.slice(7)) };
-    }
-    return null;
-  }
-
-  function nextFreeInterface(node: NodeData): { index: number; interface: NodeInterface } | null {
-    for (let index = 0; index < node.interfaces.length; index += 1) {
-      if ((node.interfaces[index]?.network_id ?? 0) === 0) {
-        return { index, interface: node.interfaces[index] };
-      }
     }
     return null;
   }
@@ -494,176 +564,6 @@
     }
 
     localNetworks = nextNetworks;
-  }
-
-  function pushLink(link: TopologyLink) {
-    localTopology = [...localTopology, link];
-    recalculateNetworks();
-    publishFlowState();
-    scheduleSave();
-    dispatchCanvasChange('topology', {
-      nodes: deepClone(localNodes),
-      networks: deepClone(localNetworks),
-      topology: deepClone(localTopology),
-    });
-  }
-
-  function createNodeToNodeLink(sourceId: number, targetId: number) {
-    const sourceNode = localNodes[String(sourceId)];
-    const targetNode = localNodes[String(targetId)];
-    if (!sourceNode || !targetNode) {
-      return;
-    }
-
-    const sourceInterface = nextFreeInterface(sourceNode);
-    const targetInterface = nextFreeInterface(targetNode);
-    if (!sourceInterface || !targetInterface) {
-      toastStore.push('No free ethernet interface is available on one of the selected nodes.');
-      return;
-    }
-
-    const networkId = nextNetworkId();
-    sourceNode.interfaces[sourceInterface.index].network_id = networkId;
-    targetNode.interfaces[targetInterface.index].network_id = networkId;
-    localNetworks = {
-      ...localNetworks,
-      [String(networkId)]: {
-      id: networkId,
-      name: `Net-${sourceNode.name}-${targetNode.name}`,
-      type: 'bridge',
-      left: 0,
-      top: 0,
-      icon: 'lan.png',
-      visibility: 0,
-      width: 0,
-      style: 'Solid',
-      linkstyle: 'Straight',
-      color: '',
-      label: '',
-      smart: 0,
-      count: 2
-      }
-    };
-    localNodes = { ...localNodes };
-
-    pushLink({
-      type: 'ethernet',
-      source: `node${sourceId}`,
-      source_type: 'node',
-      source_node_name: sourceNode.name,
-      source_label: sourceInterface.interface.name,
-      source_interfaceId: sourceInterface.index,
-      source_suspend: 0,
-      destination: `node${targetId}`,
-      destination_type: 'node',
-      destination_node_name: targetNode.name,
-      destination_label: targetInterface.interface.name,
-      destination_interfaceId: targetInterface.index,
-      destination_suspend: 0,
-      network_id: networkId,
-      style: '',
-      linkstyle: '',
-      label: '',
-      labelpos: '0.5',
-      color: '',
-      stub: '0',
-      width: '1',
-      curviness: '10',
-      beziercurviness: '150',
-      round: '0',
-      midpoint: '0.5',
-      srcpos: '0.15',
-      dstpos: '0.85',
-      source_delay: 0,
-      source_loss: 0,
-      source_bandwidth: 0,
-      source_jitter: 0,
-      destination_delay: 0,
-      destination_loss: 0,
-      destination_bandwidth: 0,
-      destination_jitter: 0
-    });
-  }
-
-  function createNodeToNetworkLink(nodeId: number, networkId: number, networkFirst = false) {
-    const node = localNodes[String(nodeId)];
-    const network = localNetworks[String(networkId)];
-    if (!node || !network) {
-      return;
-    }
-
-    const interfaceInfo = nextFreeInterface(node);
-    if (!interfaceInfo) {
-      toastStore.push(`No free ethernet interface is available on ${node.name}.`);
-      return;
-    }
-
-    node.interfaces[interfaceInfo.index].network_id = networkId;
-    localNodes = { ...localNodes };
-
-    pushLink({
-      type: 'ethernet',
-      source: networkFirst ? `network${networkId}` : `node${nodeId}`,
-      source_type: networkFirst ? 'network' : 'node',
-      source_node_name: networkFirst ? 'network' : node.name,
-      source_label: networkFirst ? '' : interfaceInfo.interface.name,
-      source_interfaceId: networkFirst ? 0 : interfaceInfo.index,
-      source_suspend: 0,
-      destination: networkFirst ? `node${nodeId}` : `network${networkId}`,
-      destination_type: networkFirst ? 'node' : 'network',
-      destination_node_name: networkFirst ? node.name : 'network',
-      destination_label: networkFirst ? interfaceInfo.interface.name : '',
-      destination_interfaceId: networkFirst ? interfaceInfo.index : 'network',
-      destination_suspend: 0,
-      network_id: networkId,
-      style: '',
-      linkstyle: '',
-      label: '',
-      labelpos: '0.5',
-      color: '',
-      stub: '0',
-      width: '1',
-      curviness: '10',
-      beziercurviness: '150',
-      round: '0',
-      midpoint: '0.5',
-      srcpos: '0.15',
-      dstpos: '0.85',
-      source_delay: 0,
-      source_loss: 0,
-      source_bandwidth: 0,
-      source_jitter: 0,
-      destination_delay: 0,
-      destination_loss: 0,
-      destination_bandwidth: 0,
-      destination_jitter: 0
-    });
-  }
-
-  function onConnect(connection: Connection) {
-    const source = connection.source ? decodeId(connection.source) : null;
-    const target = connection.target ? decodeId(connection.target) : null;
-
-    if (!source || !target) {
-      return;
-    }
-
-    if (source.type === 'network' && target.type === 'network') {
-      toastStore.push('Direct network-to-network links are not supported.');
-      return;
-    }
-
-    if (source.type === 'node' && target.type === 'node') {
-      createNodeToNodeLink(source.id, target.id);
-      return;
-    }
-
-    if (source.type === 'node' && target.type === 'network') {
-      createNodeToNetworkLink(source.id, target.id, false);
-      return;
-    }
-
-    createNodeToNetworkLink(target.id, source.id, true);
   }
 
   function handleNodeDragStop(event: CustomEvent<{ targetNode: Node | null }>) {
@@ -702,6 +602,11 @@
   }
 
   function getEdgeIndex(edgeId: string): number {
+    const prefix = 'link:';
+    if (edgeId.startsWith(prefix)) {
+      const linkId = edgeId.slice(prefix.length);
+      return localLinks.findIndex((entry) => entry.id === linkId);
+    }
     return buildFlowEdges().findIndex((edge) => edge.id === edgeId);
   }
 
@@ -711,24 +616,31 @@
       return;
     }
 
-    const link = localTopology[index];
-    if (link.source_type === 'node') {
-      const sourceNodeId = decodeId(link.source)?.id;
-      if (sourceNodeId != null && localNodes[String(sourceNodeId)]?.interfaces[link.source_interfaceId]) {
-        localNodes[String(sourceNodeId)].interfaces[link.source_interfaceId].network_id = 0;
+    const v2Link = localLinks[index];
+    if (v2Link) {
+      if (
+        typeof v2Link.from?.node_id === 'number' &&
+        typeof v2Link.from.interface_index === 'number'
+      ) {
+        const node = localNodes[String(v2Link.from.node_id)];
+        const iface = node?.interfaces[v2Link.from.interface_index];
+        if (iface) iface.network_id = 0;
       }
-    }
-
-    if (link.destination_type === 'node') {
-      const destinationNodeId = decodeId(link.destination)?.id;
-      const interfaceId = Number(link.destination_interfaceId);
-      if (destinationNodeId != null && localNodes[String(destinationNodeId)]?.interfaces[interfaceId]) {
-        localNodes[String(destinationNodeId)].interfaces[interfaceId].network_id = 0;
+      if (
+        typeof v2Link.to?.node_id === 'number' &&
+        typeof v2Link.to.interface_index === 'number'
+      ) {
+        const node = localNodes[String(v2Link.to.node_id)];
+        const iface = node?.interfaces[v2Link.to.interface_index];
+        if (iface) iface.network_id = 0;
       }
     }
 
     localNodes = { ...localNodes };
-    localTopology = localTopology.filter((_, currentIndex) => currentIndex !== index);
+    if (index < localTopology.length) {
+      localTopology = localTopology.filter((_, currentIndex) => currentIndex !== index);
+    }
+    localLinks = localLinks.filter((_, currentIndex) => currentIndex !== index);
     recalculateNetworks();
     publishFlowState();
     scheduleSave();
@@ -899,7 +811,14 @@
     closeAddMenu();
   }
 
-  // ── US-068: persist port_position drag via PATCH /interfaces/{idx} ──────
+  setContext('nova-ve:port-position-persist', (
+    nodeId: number,
+    interfaceIndex: number,
+    port: PortPosition
+  ) => {
+    void persistPortPosition(nodeId, interfaceIndex, port);
+  });
+
   async function persistPortPosition(
     nodeId: number,
     interfaceIndex: number,
@@ -930,100 +849,13 @@
     }
   }
 
-  // ── US-069: drag-to-connect handlers ────────────────────────────────────
   function highlightedTargetForNode(candidateNodeId: number): number | null {
     const snap = getDragLinkSnapshot();
-    if (snap.target?.nodeId === candidateNodeId) {
-      return snap.target.interfaceIndex;
+    const target = snap.target;
+    if (target?.kind === 'interface' && target.nodeId === candidateNodeId) {
+      return target.interfaceIndex;
     }
     return null;
-  }
-
-  function endpointFromPort(
-    nodeId: number,
-    interfaceIndex: number,
-    port: PortPosition
-  ): DragLinkEndpoint | null {
-    const node = localNodes[String(nodeId)];
-    if (!node) return null;
-    const iface = node.interfaces[interfaceIndex];
-    if (!iface) return null;
-    return {
-      nodeId,
-      interfaceIndex,
-      port,
-      interfaceName: iface.name,
-      plannedMac: iface.planned_mac ?? null,
-    };
-  }
-
-  function handlePortMouseDown(detail: {
-    nodeId: number;
-    interfaceIndex: number;
-    port: PortPosition;
-    event: MouseEvent;
-  }) {
-    const source = endpointFromPort(detail.nodeId, detail.interfaceIndex, detail.port);
-    if (!source) return;
-    dragLinkSourceAnchor = { x: detail.event.clientX, y: detail.event.clientY };
-    dragLinkStore.start({
-      source,
-      pointer: { x: detail.event.clientX, y: detail.event.clientY },
-    });
-  }
-
-  function handlePortMouseEnter(detail: {
-    nodeId: number;
-    interfaceIndex: number;
-    port: PortPosition;
-  }) {
-    const snap = getDragLinkSnapshot();
-    if (snap.state === 'idle' || snap.state === 'confirming') return;
-    if (snap.source && snap.source.nodeId === detail.nodeId) return;
-    const target = endpointFromPort(detail.nodeId, detail.interfaceIndex, detail.port);
-    if (!target) return;
-    dragLinkStore.move({
-      pointer: snap.pointer ?? { x: 0, y: 0 },
-      target,
-      nearTarget: true,
-    });
-  }
-
-  function handlePortMouseLeave() {
-    const snap = getDragLinkSnapshot();
-    if (snap.state === 'near_target') {
-      dragLinkStore.leaveTargetZone();
-    }
-  }
-
-  function handlePortMouseUp(detail: {
-    nodeId: number;
-    interfaceIndex: number;
-    port: PortPosition;
-    event: MouseEvent;
-  }) {
-    const snap = getDragLinkSnapshot();
-    if (snap.state !== 'dragging' && snap.state !== 'near_target' && snap.state !== 'port_pressed') {
-      return;
-    }
-    if (!snap.source || snap.source.nodeId === detail.nodeId) {
-      dragLinkStore.cancel();
-      return;
-    }
-    const target = endpointFromPort(detail.nodeId, detail.interfaceIndex, detail.port);
-    if (!target) {
-      dragLinkStore.cancel();
-      return;
-    }
-    dragLinkStore.move({
-      pointer: { x: detail.event.clientX, y: detail.event.clientY },
-      target,
-      nearTarget: true,
-    });
-    dragLinkStore.release({
-      pointer: { x: detail.event.clientX, y: detail.event.clientY },
-      targetReachable: true,
-    });
   }
 
   function handleWindowMouseMove(event: MouseEvent) {
@@ -1070,75 +902,68 @@
     const styleOverride = event.detail.styleOverride;
     const tempId = `tmp_${idempotencyKey}`;
 
-    // Optimistic insertion as a TopologyLink (the canvas's local source of
-    // truth still uses the v1 shape for rendering; the v2 link id arrives via
-    // POST response and supersedes the temporary id).
-    const sourceNode = localNodes[String(snap.source.nodeId)];
-    const targetNode = localNodes[String(snap.target.nodeId)];
-    const sourceInterface = sourceNode?.interfaces[snap.source.interfaceIndex];
-    const targetInterface = targetNode?.interfaces[snap.target.interfaceIndex];
-    if (!sourceNode || !targetNode || !sourceInterface || !targetInterface) {
-      dragLinkStore.cancel();
-      return;
+    const fromEndpoint =
+      snap.source.kind === 'interface'
+        ? { node_id: snap.source.nodeId, interface_index: snap.source.interfaceIndex }
+        : { network_id: snap.source.networkId };
+    const toEndpoint =
+      snap.target.kind === 'interface'
+        ? { node_id: snap.target.nodeId, interface_index: snap.target.interfaceIndex }
+        : { network_id: snap.target.networkId };
+
+    // The wire contract requires the node-side endpoint as ``from`` whenever
+    // exactly one side is a node; flip the orientation if the user dragged
+    // from a network onto an interface.
+    let postFrom = fromEndpoint;
+    let postTo = toEndpoint;
+    if (
+      snap.source.kind === 'network' &&
+      snap.target.kind === 'interface'
+    ) {
+      postFrom = { node_id: snap.target.nodeId, interface_index: snap.target.interfaceIndex };
+      postTo = { network_id: snap.source.networkId };
     }
 
-    const optimisticLink: TopologyLink & { __tempId?: string } = {
-      type: 'ethernet',
-      source: `node${snap.source.nodeId}`,
-      source_type: 'node',
-      source_node_name: sourceNode.name,
-      source_label: sourceInterface.name,
-      source_interfaceId: snap.source.interfaceIndex,
-      source_suspend: 0,
-      destination: `node${snap.target.nodeId}`,
-      destination_type: 'node',
-      destination_node_name: targetNode.name,
-      destination_label: targetInterface.name,
-      destination_interfaceId: snap.target.interfaceIndex,
-      destination_suspend: 0,
-      network_id: 0,
-      style: styleOverride,
-      linkstyle: styleOverride,
+    // Optimistic insertion: append to localLinks with a temporary id so the
+    // edge renders immediately. The server response replaces the temp id.
+    const optimisticLink: Link = {
+      id: tempId,
+      from: postFrom,
+      to: postTo,
+      style_override: styleOverride,
       label: '',
-      labelpos: '0.5',
       color: '',
-      stub: '0',
       width: '1',
-      curviness: '10',
-      beziercurviness: '150',
-      round: '0',
-      midpoint: '0.5',
-      srcpos: '0.15',
-      dstpos: '0.85',
-      __tempId: tempId,
     };
 
-    localTopology = [...localTopology, optimisticLink];
+    localLinks = [...localLinks, optimisticLink];
     publishFlowState();
     dragLinkStore.cancel();
     dragLinkSourceAnchor = null;
 
     try {
-      await apiRequest(`/labs/${labId}/links`, {
+      const response = await apiRequest<Link>(`/labs/${labId}/links`, {
         method: 'POST',
         headers: { 'Idempotency-Key': idempotencyKey },
         body: {
-          from: { node_id: snap.source.nodeId, interface_index: snap.source.interfaceIndex },
-          to: { node_id: snap.target.nodeId, interface_index: snap.target.interfaceIndex },
+          from: postFrom,
+          to: postTo,
           style_override: styleOverride,
         },
         suppressToast: true,
       });
+      const serverLink = response.data;
+      if (serverLink && serverLink.id) {
+        localLinks = localLinks.map((entry) => (entry.id === tempId ? serverLink : entry));
+      }
+      publishFlowState();
       dispatchCanvasChange('topology', {
         nodes: deepClone(localNodes),
         networks: deepClone(localNetworks),
         topology: deepClone(localTopology),
       });
     } catch (error) {
-      // Revert optimistic insertion.
-      localTopology = localTopology.filter(
-        (link) => (link as { __tempId?: string }).__tempId !== tempId
-      );
+      localLinks = localLinks.filter((entry) => entry.id !== tempId);
       publishFlowState();
       const message =
         error instanceof ApiError
@@ -1166,20 +991,13 @@
       window.addEventListener('keydown', handleWindowKeyDown);
     }
 
-    // US-073: live WebSocket wiring. The client tracks lastSeq + reconnect on
-    // its own; we just register the lab_topology listener so the layout
-    // debouncer flushes before the snapshot lands (US-070 invariant).
     if (typeof window !== 'undefined') {
       const client = createWsClient({ labId });
       wsClient = client;
       labWsStores = createLabWsStores(client);
       client.on('lab_topology', (_msg: WsMessage) => {
-        // Flush pending layout PUTs before applying the server snapshot so
-        // we don't lose in-flight drag positions to a race.
         void layoutDebouncer.flush();
       });
-      // Dev hook for the e2e spec; gate behind import.meta.env.DEV so it's
-      // tree-shaken from production builds.
       if (import.meta.env.DEV) {
         (window as unknown as { __novaWsClient?: WsClient }).__novaWsClient = client;
       }
@@ -1204,11 +1022,6 @@
     };
   });
 
-  /**
-   * Hook the lab page can invoke when its WebSocket hub fires a
-   * `lab_topology` event — flushes any pending layout PUT before the canvas
-   * re-renders from the server payload.
-   */
   export async function flushPendingLayout(): Promise<void> {
     await layoutDebouncer.flush();
   }
@@ -1305,7 +1118,6 @@
     nodesConnectable={!canvasLocked}
     nodesDraggable={!canvasLocked}
     elementsSelectable={!canvasLocked}
-    onconnect={onConnect}
     colorMode="dark"
     minZoom={0.1}
     maxZoom={2}
@@ -1322,11 +1134,6 @@
     defaultEdgeOptions={{ type: 'default' }}
     on:nodedragstop={handleNodeDragStop}
     on:moveend={(event: CustomEvent<LabViewport>) => handleViewportEnd(event)}
-    on:port:mousedown={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent }>) => handlePortMouseDown(event.detail)}
-    on:port:mouseup={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent }>) => handlePortMouseUp(event.detail)}
-    on:port:mouseenter={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent }>) => handlePortMouseEnter(event.detail)}
-    on:port:mouseleave={() => handlePortMouseLeave()}
-    on:port:dragend={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition }>) => persistPortPosition(event.detail.nodeId, event.detail.interfaceIndex, event.detail.port)}
     on:edgeclick={(event: CustomEvent<{ edge: Edge }>) => {
       selectedEdgeId = event.detail.edge.id;
       closeMenu();
@@ -1657,6 +1464,44 @@
 
   <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
   <LinkConfirmModal on:confirm={handleLinkConfirm} on:cancel={handleLinkConfirmCancel} />
+
+  {#if selectedPortInfo}
+    {#if selectedPortInfo.kind === 'interface'}
+      <PortInfoPopover
+        kind="interface"
+        interfaceName={selectedPortInfo.interfaceName}
+        plannedMac={selectedPortInfo.plannedMac}
+        liveMac={getLiveMacFor(selectedPortInfo.nodeId, selectedPortInfo.interfaceIndex)}
+        peerLabel={resolveInterfacePeerLabel(
+          selectedPortInfo.nodeId,
+          selectedPortInfo.interfaceIndex,
+        )}
+        status="unknown"
+        speed={null}
+        mtu={null}
+        duplex={null}
+        anchorRect={selectedPortInfo.anchorRect}
+        placement={(localNodes[String(selectedPortInfo.nodeId)]?.interfaces?.[selectedPortInfo.interfaceIndex]
+          ?.port_position?.side ?? 'right') as 'top' | 'right' | 'bottom' | 'left'}
+        onClose={closePortInfo}
+      />
+    {:else}
+      <PortInfoPopover
+        kind="network"
+        interfaceName={selectedPortInfo.networkName ?? `network ${selectedPortInfo.networkId}`}
+        plannedMac={null}
+        liveMac={null}
+        peerLabel={resolveNetworkPeerLabel(selectedPortInfo.networkId)}
+        status="unknown"
+        speed={null}
+        mtu={null}
+        duplex={null}
+        anchorRect={selectedPortInfo.anchorRect}
+        placement={selectedPortInfo.side}
+        onClose={closePortInfo}
+      />
+    {/if}
+  {/if}
 
   <NodeConfigModal
     open={nodeModalOpen}

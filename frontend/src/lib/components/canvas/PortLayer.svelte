@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { createEventDispatcher, onDestroy } from 'svelte';
+  import { createEventDispatcher, getContext, onDestroy } from 'svelte';
   import { clampToPerimeter, placeInterfaces } from '$lib/services/portLayout';
   import type { NodeInterface, PortPosition } from '$lib/types';
   import Port from './Port.svelte';
@@ -10,6 +10,15 @@
   export let nodeId: number;
   export let interfaces: NodeInterface[] = [];
   export let highlightedInterfaceIndex: number | null = null;
+
+  type PortPositionPersist = (
+    nodeId: number,
+    interfaceIndex: number,
+    port: PortPosition
+  ) => void;
+  const persistFromContext = getContext<PortPositionPersist | undefined>(
+    'nova-ve:port-position-persist'
+  );
 
   const dispatch = createEventDispatcher<{
     'port:mousedown': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
@@ -42,6 +51,9 @@
     if (existing) clearTimeout(existing);
     const timer = setTimeout(() => {
       pendingPushTimers.delete(interfaceIndex);
+      if (persistFromContext) {
+        persistFromContext(nodeId, interfaceIndex, port);
+      }
       dispatch('port:dragend', { nodeId, interfaceIndex, port });
     }, PUSH_DEBOUNCE_MS);
     pendingPushTimers.set(interfaceIndex, timer);
@@ -55,11 +67,7 @@
   }) {
     dispatch('port:mousedown', detail);
 
-    // Begin perimeter drag-clamp tracking. The host (TopologyCanvas) will
-    // separately receive port:mousedown to feed the drag-link state machine;
-    // we manage the local re-positioning preview & PATCH debounce here.
-    if (detail.event.shiftKey) {
-      // Shift-drag is reserved for future multi-port operations.
+    if (!detail.event.shiftKey) {
       return;
     }
 

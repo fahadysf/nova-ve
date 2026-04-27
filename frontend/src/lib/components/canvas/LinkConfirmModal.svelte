@@ -16,6 +16,18 @@
   let style: LinkStyle = 'orthogonal';
   let modalEl: HTMLDivElement | null = null;
 
+  function endpointTitle(
+    endpoint: typeof snapshot.source | typeof snapshot.target | null | undefined
+  ): string {
+    if (!endpoint) return '?';
+    if (endpoint.kind === 'network') {
+      return `Network: ${endpoint.networkName ?? `#${endpoint.networkId}`}`;
+    }
+    return endpoint.interfaceName ?? `port ${endpoint.interfaceIndex ?? '?'}`;
+  }
+  $: sourceTitle = endpointTitle(snapshot.source);
+  $: targetTitle = endpointTitle(snapshot.target);
+
   function close() {
     dispatch('cancel');
   }
@@ -74,9 +86,9 @@
         <div>
           <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Confirm link</div>
           <div class="mt-1 text-sm font-semibold text-slate-100">
-            {snapshot.source?.interfaceName ?? `port ${snapshot.source?.interfaceIndex ?? '?'}`}
+            {sourceTitle}
             <span class="text-slate-400"> → </span>
-            {snapshot.target?.interfaceName ?? `port ${snapshot.target?.interfaceIndex ?? '?'}`}
+            {targetTitle}
           </div>
         </div>
         <button
@@ -93,20 +105,32 @@
         <div class="grid gap-3 md:grid-cols-2">
           <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3">
             <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Source</div>
-            <div class="mt-1 text-sm font-medium">
-              node #{snapshot.source?.nodeId} · {snapshot.source?.interfaceName ?? `iface ${snapshot.source?.interfaceIndex}`}
-            </div>
-            {#if snapshot.source?.plannedMac}
-              <div class="mt-1 font-mono text-[11px] text-slate-400">{snapshot.source.plannedMac}</div>
+            {#if snapshot.source?.kind === 'network'}
+              <div class="mt-1 text-sm font-medium">
+                Network: {snapshot.source.networkName ?? `#${snapshot.source.networkId}`}
+              </div>
+            {:else if snapshot.source?.kind === 'interface'}
+              <div class="mt-1 text-sm font-medium">
+                node #{snapshot.source.nodeId} · {snapshot.source.interfaceName ?? `iface ${snapshot.source.interfaceIndex}`}
+              </div>
+              {#if snapshot.source.plannedMac}
+                <div class="mt-1 font-mono text-[11px] text-slate-400">{snapshot.source.plannedMac}</div>
+              {/if}
             {/if}
           </div>
           <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3">
             <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Target</div>
-            <div class="mt-1 text-sm font-medium">
-              node #{snapshot.target?.nodeId} · {snapshot.target?.interfaceName ?? `iface ${snapshot.target?.interfaceIndex}`}
-            </div>
-            {#if snapshot.target?.plannedMac}
-              <div class="mt-1 font-mono text-[11px] text-slate-400">{snapshot.target.plannedMac}</div>
+            {#if snapshot.target?.kind === 'network'}
+              <div class="mt-1 text-sm font-medium">
+                Network: {snapshot.target.networkName ?? `#${snapshot.target.networkId}`}
+              </div>
+            {:else if snapshot.target?.kind === 'interface'}
+              <div class="mt-1 text-sm font-medium">
+                node #{snapshot.target.nodeId} · {snapshot.target.interfaceName ?? `iface ${snapshot.target.interfaceIndex}`}
+              </div>
+              {#if snapshot.target.plannedMac}
+                <div class="mt-1 font-mono text-[11px] text-slate-400">{snapshot.target.plannedMac}</div>
+              {/if}
             {/if}
           </div>
         </div>

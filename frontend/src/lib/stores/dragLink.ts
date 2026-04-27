@@ -1,21 +1,6 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-/**
- * dragLink — state machine for drag-to-connect (US-069).
- *
- * States:
- *   idle          — nothing happening
- *   port_pressed  — mousedown on a source port, no movement yet
- *   dragging      — cursor has moved while pressed
- *   near_target   — cursor is within the target node's hot zone
- *   confirming    — cursor released over a snappable target port
- *
- * Cancellation: ESC at any state, an ``outsideClick`` action while dragging,
- * and ``mouseup`` while the cursor is far from any target all return the
- * machine to ``idle`` and discard the pending Idempotency-Key.
- */
-
 import { writable, get } from 'svelte/store';
 import type { Readable } from 'svelte/store';
 import type { LinkStyle, PortPosition } from '$lib/types';
@@ -27,7 +12,12 @@ export type DragLinkState =
   | 'near_target'
   | 'confirming';
 
-export interface DragLinkEndpoint {
+/** Side of the network bridge a perimeter handle docks to. */
+export type Side = 'top' | 'right' | 'bottom' | 'left';
+
+/** Node-interface endpoint (a Port on a CustomNode). */
+export interface InterfaceEndpoint {
+  kind: 'interface';
   nodeId: number;
   interfaceIndex: number;
   port: PortPosition;
@@ -37,6 +27,18 @@ export interface DragLinkEndpoint {
   plannedMac?: string | null;
 }
 
+/** Network-bridge endpoint (one of the four perimeter handles on a NetworkNode). */
+export interface NetworkEndpoint {
+  kind: 'network';
+  networkId: number;
+  side: Side;
+  offset: number;
+  /** Optional human-friendly label rendered in the confirm modal. */
+  networkName?: string;
+}
+
+export type DragEndpoint = InterfaceEndpoint | NetworkEndpoint;
+
 export interface DragLinkPointer {
   x: number;
   y: number;
@@ -44,28 +46,27 @@ export interface DragLinkPointer {
 
 export interface DragLinkSnapshot {
   state: DragLinkState;
-  source: DragLinkEndpoint | null;
-  target: DragLinkEndpoint | null;
+  source: DragEndpoint | null;
+  target: DragEndpoint | null;
   pointer: DragLinkPointer | null;
   idempotencyKey: string | null;
   styleOverride: LinkStyle | null;
 }
 
 export interface DragLinkStore extends Readable<DragLinkSnapshot> {
-  start(args: { source: DragLinkEndpoint; pointer?: DragLinkPointer }): void;
+  start(args: { source: DragEndpoint; pointer?: DragLinkPointer }): void;
   move(args: {
     pointer: DragLinkPointer;
-    target?: DragLinkEndpoint | null;
+    target?: DragEndpoint | null;
     nearTarget?: boolean;
   }): void;
-  hover(target: DragLinkEndpoint | null): void;
+  hover(target: DragEndpoint | null): void;
   enterTargetZone(): void;
   leaveTargetZone(): void;
   release(args: { pointer: DragLinkPointer; targetReachable: boolean }): void;
   confirm(args?: { styleOverride?: LinkStyle | null }): void;
   cancel(): void;
   reset(): void;
-  /** Test/utility seam for swapping uuid generation. */
   setKeyFactory(factory: () => string): void;
 }
 
@@ -80,14 +81,11 @@ function emptySnapshot(): DragLinkSnapshot {
   };
 }
 
-/** Time-ordered UUIDv7 when crypto is available; falls back to v4-style. */
 export function defaultIdempotencyKey(): string {
   const cryptoApi: Crypto | undefined =
     typeof globalThis !== 'undefined' && (globalThis as { crypto?: Crypto }).crypto
       ? (globalThis as { crypto: Crypto }).crypto
       : undefined;
-  // UUIDv7 = 48-bit unix-ms timestamp + random tail. Browsers ship v4 only;
-  // we synthesise v7 manually to keep the keys time-ordered for the server.
   if (cryptoApi && typeof cryptoApi.getRandomValues === 'function') {
     const randomBytes = new Uint8Array(10);
     cryptoApi.getRandomValues(randomBytes);
@@ -108,10 +106,16 @@ export function defaultIdempotencyKey(): string {
       20
     )}-${hex.slice(20)}`;
   }
-  // Math.random fallback (acceptable for development & jsdom).
   const rand = (n: number) =>
     Array.from({ length: n }, () => Math.floor(Math.random() * 16).toString(16)).join('');
   return `${rand(8)}-${rand(4)}-4${rand(3)}-a${rand(3)}-${rand(12)}`;
+}
+
+export function isLegalEndpointPair(source: DragEndpoint, target: DragEndpoint): boolean {
+  if (source.kind === 'network' && target.kind === 'network') {
+    return false;
+  }
+  return true;
 }
 
 export function createDragLinkStore(): DragLinkStore {
@@ -139,16 +143,22 @@ export function createDragLinkStore(): DragLinkStore {
         if (snapshot.state === 'port_pressed') {
           nextState = 'dragging';
         }
-        if (nearTarget === true) {
+        const nextTarget = target === undefined ? snapshot.target : target;
+        const pairLegal =
+          snapshot.source && nextTarget ? isLegalEndpointPair(snapshot.source, nextTarget) : true;
+        if (nearTarget === true && pairLegal) {
           nextState = 'near_target';
-        } else if (nearTarget === false && nextState === 'near_target') {
+        } else if (
+          (nearTarget === false || (nearTarget === true && !pairLegal)) &&
+          nextState === 'near_target'
+        ) {
           nextState = 'dragging';
         }
         return {
           ...snapshot,
           state: nextState,
           pointer: { x: pointer.x, y: pointer.y },
-          target: target === undefined ? snapshot.target : target,
+          target: pairLegal ? nextTarget : null,
         };
       });
     },
@@ -157,15 +167,23 @@ export function createDragLinkStore(): DragLinkStore {
         if (snapshot.state === 'idle' || snapshot.state === 'confirming') {
           return snapshot;
         }
+        if (target && snapshot.source && !isLegalEndpointPair(snapshot.source, target)) {
+          return { ...snapshot, target: null };
+        }
         return { ...snapshot, target };
       });
     },
     enterTargetZone() {
       store.update((snapshot) => {
-        if (snapshot.state === 'dragging') {
-          return { ...snapshot, state: 'near_target' };
+        if (snapshot.state !== 'dragging') return snapshot;
+        if (
+          snapshot.source &&
+          snapshot.target &&
+          !isLegalEndpointPair(snapshot.source, snapshot.target)
+        ) {
+          return snapshot;
         }
-        return snapshot;
+        return { ...snapshot, state: 'near_target' };
       });
     },
     leaveTargetZone() {
@@ -181,14 +199,18 @@ export function createDragLinkStore(): DragLinkStore {
         if (snapshot.state === 'idle' || snapshot.state === 'confirming') {
           return snapshot;
         }
-        if (targetReachable && snapshot.target) {
+        if (
+          targetReachable &&
+          snapshot.target &&
+          snapshot.source &&
+          isLegalEndpointPair(snapshot.source, snapshot.target)
+        ) {
           return {
             ...snapshot,
             state: 'confirming',
             pointer: { x: pointer.x, y: pointer.y },
           };
         }
-        // Far from target → cancel and discard the idempotency key.
         return emptySnapshot();
       });
     },
@@ -215,10 +237,8 @@ export function createDragLinkStore(): DragLinkStore {
   };
 }
 
-/** Module-singleton used by the canvas. Tests should call ``createDragLinkStore`` instead. */
 export const dragLinkStore: DragLinkStore = createDragLinkStore();
 
-/** Convenience accessor for current snapshot — useful in pure-DOM handlers. */
 export function getDragLinkSnapshot(): DragLinkSnapshot {
   return get(dragLinkStore);
 }
