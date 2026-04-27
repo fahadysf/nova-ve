@@ -20,7 +20,7 @@ from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _normalize_relative_lab_path
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
-from app.services.template_service import TemplateError, TemplateService, _icon_filename_for
+from app.services.template_service import TemplateError, TemplateService, _icon_filename_for, render_interface_name
 from app.services.ws_hub import ws_hub
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
@@ -105,10 +105,26 @@ def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: b
     return f"{root}/{normalized}"
 
 
-def _default_interfaces(node_type: str, ethernet_count: int) -> list[dict]:
+def _default_interfaces(
+    node_type: str,
+    ethernet_count: int,
+    interface_naming_scheme: str | None = None,
+    template_interface_naming: dict | None = None,
+) -> list[dict]:
+    """Generate default interface list for a node.
+
+    Priority (highest first):
+    1. ``interface_naming_scheme`` — node-level override (US-105)
+    2. ``template_interface_naming["format"]`` — template-level format string
+    3. Hard-coded fallback: ``Gi{port}`` for qemu, ``eth{n}`` for everything else
+    """
     interfaces = []
     for index in range(ethernet_count):
-        if node_type == "qemu":
+        if interface_naming_scheme is not None:
+            name = render_interface_name(interface_naming_scheme, index)
+        elif template_interface_naming and "format" in template_interface_naming:
+            name = render_interface_name(template_interface_naming["format"], index)
+        elif node_type == "qemu":
             name = f"Gi{index + 1}"
         else:
             name = f"eth{index}"
@@ -232,7 +248,12 @@ def _build_node_payload(
         "config_list": [],
         "sat": 0,
         "computed_sat": 0,
-        "interfaces": _default_interfaces(request.type, ethernet),
+        "interfaces": _default_interfaces(
+            request.type,
+            ethernet,
+            interface_naming_scheme=getattr(request, "interface_naming_scheme", None),
+            template_interface_naming=dict(template.interface_naming or {}),
+        ),
         "extras": merged_extras,
     }
 
