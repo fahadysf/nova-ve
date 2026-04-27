@@ -19,7 +19,7 @@ from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleD
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
-from app.services.template_service import TemplateError, TemplateService
+from app.services.template_service import TemplateError, TemplateService, _icon_filename_for
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
 
@@ -180,7 +180,7 @@ def _build_node_payload(
         "type": request.type,
         "template": request.template,
         "image": request.image,
-        "console": request.console if "console" in provided_fields else template.console,
+        "console": request.console if "console" in provided_fields else template.console_type,
         "status": 0,
         "delay": request.delay if "delay" in provided_fields else 0,
         "cpu": request.cpu if "cpu" in provided_fields else template.cpu,
@@ -191,7 +191,7 @@ def _build_node_payload(
         "firstmac": merged_extras.get("firstmac") if request.type == "qemu" else None,
         "left": left,
         "top": top,
-        "icon": request.icon if "icon" in provided_fields and request.icon else template.icon,
+        "icon": request.icon if "icon" in provided_fields and request.icon else _icon_filename_for(template.icon_type),
         "width": "0",
         "config": False,
         "config_list": [],

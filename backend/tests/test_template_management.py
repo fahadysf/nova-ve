@@ -54,8 +54,8 @@ name: Cisco CSR1000v
 cpu: 2
 ram: 4096
 ethernet: 4
-console: telnet
-icon: Router.png
+console_type: telnet
+icon_type: router
 cpulimit: 1
 """,
     )
@@ -177,8 +177,8 @@ name: Docker Host
 cpu: 1
 ram: 1024
 ethernet: 1
-console: telnet
-icon: Server.png
+console_type: telnet
+icon_type: server
 cpulimit: 1
 """,
     )

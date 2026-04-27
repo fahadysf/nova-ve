@@ -61,51 +61,51 @@ def populated_templates(patched_extras_settings):
     _write_text(
         settings.TEMPLATES_DIR / "qemu" / "csr.yml",
         """type: qemu
-name: Cisco CSR1000v
+name: CSR1000v
 cpu: 2
 ram: 4096
 ethernet: 2
-console: telnet
-icon: Router.png
+console_type: telnet
+icon_type: router
 cpulimit: 1
 extras:
-  qemu_arch: x86_64
+  architecture: x86_64
   qemu_nic: virtio-net-pci
 """,
     )
     _write_text(
         settings.TEMPLATES_DIR / "docker" / "docker.yml",
         """type: docker
-name: Docker Host
+name: Docker
 cpu: 1
 ram: 256
 ethernet: 1
-console: telnet
-icon: Server.png
+console_type: telnet
+icon_type: server
 cpulimit: 1
 """,
     )
     _write_text(
         settings.TEMPLATES_DIR / "iol" / "iol.yml",
         """type: iol
-name: Cisco IOL
+name: IOL
 cpu: 1
 ram: 1024
 ethernet: 4
-console: telnet
-icon: Router.png
+console_type: telnet
+icon_type: router
 cpulimit: 1
 """,
     )
     _write_text(
         settings.TEMPLATES_DIR / "dynamips" / "c7200.yml",
         """type: dynamips
-name: Cisco 7200
+name: C7200
 cpu: 1
 ram: 512
 ethernet: 2
-console: telnet
-icon: Router.png
+console_type: telnet
+icon_type: router
 cpulimit: 1
 """,
     )
@@ -114,7 +114,7 @@ cpulimit: 1
     image_dir.mkdir(parents=True, exist_ok=True)
     (image_dir / "hda.qcow2").write_text("base")
 
-    iol_image = settings.IMAGES_DIR / "iol" / "i86bi"
+    iol_image = settings.IMAGES_DIR / "iol" / "iol-i86bi"
     iol_image.mkdir(parents=True, exist_ok=True)
     (iol_image / "i86bi.bin").write_text("iol")
 
@@ -146,10 +146,10 @@ def test_catalog_surfaces_extras_schema_per_type(populated_templates):
     by_type = {(template["type"], template["key"]): template for template in catalog["templates"]}
 
     qemu_template = by_type[("qemu", "csr")]
-    assert qemu_template["defaults"]["extras"]["qemu_arch"] == "x86_64"
+    assert qemu_template["defaults"]["extras"]["architecture"] == "x86_64"
     assert qemu_template["defaults"]["extras"]["qemu_nic"] == "virtio-net-pci"
     qemu_keys = {field["key"] for field in qemu_template["extras_schema"]}
-    assert {"qemu_arch", "qemu_nic", "qemu_options", "qemu_version", "uuid", "firstmac", "cpulimit"} <= qemu_keys
+    assert {"architecture", "qemu_nic", "qemu_options", "qemu_version", "uuid", "firstmac", "cpulimit"} <= qemu_keys
 
     docker_template = by_type[("docker", "docker")]
     docker_keys = {field["key"] for field in docker_template["extras_schema"]}
@@ -173,13 +173,13 @@ async def test_create_node_persists_extras_round_trip(populated_templates):
             type="qemu",
             template="csr",
             image="csr1000v",
-            extras={"qemu_options": "-nographic", "qemu_arch": "aarch64"},
+            extras={"qemu_options": "-nographic", "architecture": "aarch64"},
         ),
         current_user=_admin(),
     )
     assert response["code"] == 200
     assert response["data"]["extras"]["qemu_options"] == "-nographic"
-    assert response["data"]["extras"]["qemu_arch"] == "aarch64"
+    assert response["data"]["extras"]["architecture"] == "aarch64"
     assert response["data"]["extras"]["qemu_nic"] == "virtio-net-pci"
 
     lab_data = LabService.read_lab_json_static("demo.json")
@@ -286,7 +286,7 @@ async def test_qemu_runtime_honors_qemu_options_and_nic(monkeypatch, populated_t
 
 @pytest.mark.asyncio
 async def test_qemu_runtime_uses_arch_specific_binary(monkeypatch, populated_templates):
-    _make_qemu_node_lab(populated_templates, {"qemu_arch": "aarch64"})
+    _make_qemu_node_lab(populated_templates, {"architecture": "aarch64"})
     recorded = []
     _stub_qemu_subprocess(monkeypatch, recorded)
 
@@ -435,7 +435,7 @@ async def test_iol_node_round_trips_extras(populated_templates):
             name="iol-1",
             type="iol",
             template="iol",
-            image="i86bi",
+            image="iol-i86bi",
             extras={"serial": 2, "nvram": 2048, "config": "Saved"},
         ),
         current_user=_admin(),

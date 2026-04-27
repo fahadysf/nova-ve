@@ -68,8 +68,8 @@ name: Docker Host
 cpu: 1
 ram: 1024
 ethernet: 1
-console: telnet
-icon: Server.png
+console_type: telnet
+icon_type: server
 cpulimit: 1
 """
     )
@@ -195,8 +195,8 @@ description: Demo docker node
 cpu: 1
 ram: 1024
 ethernet: 1
-console: telnet
-icon: Server.png
+console_type: telnet
+icon_type: server
 cpulimit: 1
 """
     )

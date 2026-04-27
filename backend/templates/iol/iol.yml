@@ -1,8 +1,8 @@
 type: iol
-name: Cisco IOL
+name: IOL
 cpulimit: 1
-icon: Router.png
+icon_type: router
 cpu: 1
 ram: 1024
 ethernet: 4
-console: telnet
+console_type: telnet
