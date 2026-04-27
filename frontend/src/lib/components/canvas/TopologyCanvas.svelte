@@ -31,17 +31,29 @@
     type Node
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
-  import { apiRequest } from '$lib/api';
+  import { apiRequest, ApiError } from '$lib/api';
   import CustomNode from '$lib/components/canvas/CustomNode.svelte';
   import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
   import NetworkNode from '$lib/components/canvas/NetworkNode.svelte';
+  import LinkEdge from '$lib/components/canvas/LinkEdge.svelte';
+  import LinkPreview from '$lib/components/canvas/LinkPreview.svelte';
+  import LinkConfirmModal from '$lib/components/canvas/LinkConfirmModal.svelte';
   import { toastStore } from '$lib/stores/toasts';
+  import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
+  import {
+    dragLinkStore,
+    getDragLinkSnapshot,
+    type DragLinkEndpoint,
+  } from '$lib/stores/dragLink';
   import type {
+    LabViewport,
+    LinkStyle,
     NetworkData,
     NodeBatchCreateResult,
     NodeCatalog,
     NodeData,
     NodeInterface,
+    PortPosition,
     TopologyLink
   } from '$lib/types';
 
@@ -90,7 +102,18 @@
     device: CustomNode,
     network: NetworkNode
   } as unknown as Record<string, never>;
+  const edgeTypes = {
+    link: LinkEdge
+  } as unknown as Record<string, never>;
   const { fitView, screenToFlowPosition, zoomIn, zoomOut } = useSvelteFlow();
+  const layoutDebouncer: LayoutDebouncer = createLayoutDebouncer(labId, {
+    delayMs: 500,
+    onError: (err) => {
+      const message = err instanceof Error ? err.message : 'Layout save failed';
+      toastStore.push(message, 'error');
+    },
+  });
+  let dragLinkSourceAnchor: { x: number; y: number } | null = null;
 
   const nodesStore = writable<Node[]>([]);
   const edgesStore = writable<Edge[]>([]);
@@ -241,7 +264,10 @@
           transientStatus: node.transientStatus,
           type: node.type,
           template: node.template,
-          console: node.console
+          console: node.console,
+          nodeId: node.id,
+          interfaces: node.interfaces ?? [],
+          highlightedInterfaceIndex: highlightedTargetForNode(node.id)
         },
         style: `width: ${node.width ? parseInt(node.width, 10) + 60 : 104}px;`
       });
@@ -649,19 +675,28 @@
       return;
     }
 
+    const left = Math.round(movedNode.position.x);
+    const top = Math.round(movedNode.position.y);
+
     if (decoded.type === 'node' && localNodes[String(decoded.id)]) {
-      localNodes[String(decoded.id)].left = Math.round(movedNode.position.x);
-      localNodes[String(decoded.id)].top = Math.round(movedNode.position.y);
+      localNodes[String(decoded.id)].left = left;
+      localNodes[String(decoded.id)].top = top;
       localNodes = { ...localNodes };
+      layoutDebouncer.pushNodePosition(decoded.id, left, top);
     }
 
     if (decoded.type === 'network' && localNetworks[String(decoded.id)]) {
-      localNetworks[String(decoded.id)].left = Math.round(movedNode.position.x);
-      localNetworks[String(decoded.id)].top = Math.round(movedNode.position.y);
+      localNetworks[String(decoded.id)].left = left;
+      localNetworks[String(decoded.id)].top = top;
       localNetworks = { ...localNetworks };
+      layoutDebouncer.pushNetworkPosition(decoded.id, left, top);
     }
+  }
 
-    scheduleSave();
+  function handleViewportEnd(event: CustomEvent<LabViewport>) {
+    const viewport = event.detail;
+    if (!viewport) return;
+    layoutDebouncer.pushViewport(viewport);
   }
 
   function getEdgeIndex(edgeId: string): number {
@@ -862,6 +897,288 @@
     closeAddMenu();
   }
 
+  // ── US-068: persist port_position drag via PATCH /interfaces/{idx} ──────
+  async function persistPortPosition(
+    nodeId: number,
+    interfaceIndex: number,
+    port: PortPosition
+  ) {
+    const node = localNodes[String(nodeId)];
+    if (!node) return;
+    const iface = node.interfaces[interfaceIndex];
+    if (!iface) return;
+
+    const previous = iface.port_position ?? null;
+    iface.port_position = port;
+    localNodes = { ...localNodes };
+    publishFlowState();
+
+    try {
+      await apiRequest(`/labs/${labId}/nodes/${nodeId}/interfaces/${interfaceIndex}`, {
+        method: 'PATCH',
+        body: { port_position: port },
+        suppressToast: true,
+      });
+    } catch (error) {
+      iface.port_position = previous;
+      localNodes = { ...localNodes };
+      publishFlowState();
+      const message = error instanceof Error ? error.message : 'Failed to persist port position';
+      toastStore.push(message, 'error');
+    }
+  }
+
+  // ── US-069: drag-to-connect handlers ────────────────────────────────────
+  function highlightedTargetForNode(candidateNodeId: number): number | null {
+    const snap = getDragLinkSnapshot();
+    if (snap.target?.nodeId === candidateNodeId) {
+      return snap.target.interfaceIndex;
+    }
+    return null;
+  }
+
+  function endpointFromPort(
+    nodeId: number,
+    interfaceIndex: number,
+    port: PortPosition
+  ): DragLinkEndpoint | null {
+    const node = localNodes[String(nodeId)];
+    if (!node) return null;
+    const iface = node.interfaces[interfaceIndex];
+    if (!iface) return null;
+    return {
+      nodeId,
+      interfaceIndex,
+      port,
+      interfaceName: iface.name,
+      plannedMac: iface.planned_mac ?? null,
+    };
+  }
+
+  function handlePortMouseDown(detail: {
+    nodeId: number;
+    interfaceIndex: number;
+    port: PortPosition;
+    event: MouseEvent;
+  }) {
+    const source = endpointFromPort(detail.nodeId, detail.interfaceIndex, detail.port);
+    if (!source) return;
+    dragLinkSourceAnchor = { x: detail.event.clientX, y: detail.event.clientY };
+    dragLinkStore.start({
+      source,
+      pointer: { x: detail.event.clientX, y: detail.event.clientY },
+    });
+  }
+
+  function handlePortMouseEnter(detail: {
+    nodeId: number;
+    interfaceIndex: number;
+    port: PortPosition;
+  }) {
+    const snap = getDragLinkSnapshot();
+    if (snap.state === 'idle' || snap.state === 'confirming') return;
+    if (snap.source && snap.source.nodeId === detail.nodeId) return;
+    const target = endpointFromPort(detail.nodeId, detail.interfaceIndex, detail.port);
+    if (!target) return;
+    dragLinkStore.move({
+      pointer: snap.pointer ?? { x: 0, y: 0 },
+      target,
+      nearTarget: true,
+    });
+  }
+
+  function handlePortMouseLeave() {
+    const snap = getDragLinkSnapshot();
+    if (snap.state === 'near_target') {
+      dragLinkStore.leaveTargetZone();
+    }
+  }
+
+  function handlePortMouseUp(detail: {
+    nodeId: number;
+    interfaceIndex: number;
+    port: PortPosition;
+    event: MouseEvent;
+  }) {
+    const snap = getDragLinkSnapshot();
+    if (snap.state !== 'dragging' && snap.state !== 'near_target' && snap.state !== 'port_pressed') {
+      return;
+    }
+    if (!snap.source || snap.source.nodeId === detail.nodeId) {
+      dragLinkStore.cancel();
+      return;
+    }
+    const target = endpointFromPort(detail.nodeId, detail.interfaceIndex, detail.port);
+    if (!target) {
+      dragLinkStore.cancel();
+      return;
+    }
+    dragLinkStore.move({
+      pointer: { x: detail.event.clientX, y: detail.event.clientY },
+      target,
+      nearTarget: true,
+    });
+    dragLinkStore.release({
+      pointer: { x: detail.event.clientX, y: detail.event.clientY },
+      targetReachable: true,
+    });
+  }
+
+  function handleWindowMouseMove(event: MouseEvent) {
+    const snap = getDragLinkSnapshot();
+    if (snap.state === 'idle' || snap.state === 'confirming') return;
+    dragLinkStore.move({ pointer: { x: event.clientX, y: event.clientY } });
+  }
+
+  function handleWindowMouseUp(event: MouseEvent) {
+    const snap = getDragLinkSnapshot();
+    if (snap.state === 'idle' || snap.state === 'confirming') return;
+    if (snap.state === 'near_target') {
+      // Mouse-up over target is handled by the port's mouseup; if we got here
+      // without a target, treat as a far-from-target cancel.
+      if (!snap.target) {
+        dragLinkStore.cancel();
+      }
+      return;
+    }
+    // dragging / port_pressed without entering a target hot zone → cancel.
+    dragLinkStore.release({
+      pointer: { x: event.clientX, y: event.clientY },
+      targetReachable: false,
+    });
+  }
+
+  function handleWindowKeyDown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    const snap = getDragLinkSnapshot();
+    if (snap.state !== 'idle') {
+      dragLinkStore.cancel();
+      dragLinkSourceAnchor = null;
+    }
+  }
+
+  async function handleLinkConfirm(event: CustomEvent<{ styleOverride: LinkStyle }>) {
+    const snap = getDragLinkSnapshot();
+    if (!snap.source || !snap.target || !snap.idempotencyKey) {
+      dragLinkStore.cancel();
+      return;
+    }
+
+    const idempotencyKey = snap.idempotencyKey;
+    const styleOverride = event.detail.styleOverride;
+    const tempId = `tmp_${idempotencyKey}`;
+
+    // Optimistic insertion as a TopologyLink (the canvas's local source of
+    // truth still uses the v1 shape for rendering; the v2 link id arrives via
+    // POST response and supersedes the temporary id).
+    const sourceNode = localNodes[String(snap.source.nodeId)];
+    const targetNode = localNodes[String(snap.target.nodeId)];
+    const sourceInterface = sourceNode?.interfaces[snap.source.interfaceIndex];
+    const targetInterface = targetNode?.interfaces[snap.target.interfaceIndex];
+    if (!sourceNode || !targetNode || !sourceInterface || !targetInterface) {
+      dragLinkStore.cancel();
+      return;
+    }
+
+    const optimisticLink: TopologyLink & { __tempId?: string } = {
+      type: 'ethernet',
+      source: `node${snap.source.nodeId}`,
+      source_type: 'node',
+      source_node_name: sourceNode.name,
+      source_label: sourceInterface.name,
+      source_interfaceId: snap.source.interfaceIndex,
+      source_suspend: 0,
+      destination: `node${snap.target.nodeId}`,
+      destination_type: 'node',
+      destination_node_name: targetNode.name,
+      destination_label: targetInterface.name,
+      destination_interfaceId: snap.target.interfaceIndex,
+      destination_suspend: 0,
+      network_id: 0,
+      style: styleOverride,
+      linkstyle: styleOverride,
+      label: '',
+      labelpos: '0.5',
+      color: '',
+      stub: '0',
+      width: '1',
+      curviness: '10',
+      beziercurviness: '150',
+      round: '0',
+      midpoint: '0.5',
+      srcpos: '0.15',
+      dstpos: '0.85',
+      __tempId: tempId,
+    };
+
+    localTopology = [...localTopology, optimisticLink];
+    publishFlowState();
+    dragLinkStore.cancel();
+    dragLinkSourceAnchor = null;
+
+    try {
+      await apiRequest(`/labs/${labId}/links`, {
+        method: 'POST',
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: {
+          from: { node_id: snap.source.nodeId, interface_index: snap.source.interfaceIndex },
+          to: { node_id: snap.target.nodeId, interface_index: snap.target.interfaceIndex },
+          style_override: styleOverride,
+        },
+        suppressToast: true,
+      });
+      dispatchCanvasChange('topology', {
+        nodes: deepClone(localNodes),
+        networks: deepClone(localNetworks),
+        topology: deepClone(localTopology),
+      });
+    } catch (error) {
+      // Revert optimistic insertion.
+      localTopology = localTopology.filter(
+        (link) => (link as { __tempId?: string }).__tempId !== tempId
+      );
+      publishFlowState();
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : 'Failed to create link';
+      toastStore.push(message, 'error');
+    }
+  }
+
+  function handleLinkConfirmCancel() {
+    dragLinkStore.cancel();
+    dragLinkSourceAnchor = null;
+  }
+
+  // ── lifecycle: WS hub flush hook & cleanup ───────────────────────────────
+  onMount(() => {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('mousemove', handleWindowMouseMove);
+      window.addEventListener('mouseup', handleWindowMouseUp);
+      window.addEventListener('keydown', handleWindowKeyDown);
+    }
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('mousemove', handleWindowMouseMove);
+        window.removeEventListener('mouseup', handleWindowMouseUp);
+        window.removeEventListener('keydown', handleWindowKeyDown);
+      }
+      void layoutDebouncer.flush();
+    };
+  });
+
+  /**
+   * Hook the lab page can invoke when its WebSocket hub fires a
+   * `lab_topology` event — flushes any pending layout PUT before the canvas
+   * re-renders from the server payload.
+   */
+  export async function flushPendingLayout(): Promise<void> {
+    await layoutDebouncer.flush();
+  }
+
   async function handleNodeModalSubmit(
     event: CustomEvent<
       | {
@@ -949,6 +1266,7 @@
     nodes={nodesStore}
     edges={edgesStore}
     {nodeTypes}
+    {edgeTypes}
     fitView
     nodesConnectable={!canvasLocked}
     nodesDraggable={!canvasLocked}
@@ -969,6 +1287,12 @@
     autoPanOnNodeDrag={!canvasLocked}
     defaultEdgeOptions={{ type: 'default' }}
     on:nodedragstop={handleNodeDragStop}
+    on:moveend={(event: CustomEvent<LabViewport>) => handleViewportEnd(event)}
+    on:port:mousedown={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent }>) => handlePortMouseDown(event.detail)}
+    on:port:mouseup={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent }>) => handlePortMouseUp(event.detail)}
+    on:port:mouseenter={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent }>) => handlePortMouseEnter(event.detail)}
+    on:port:mouseleave={() => handlePortMouseLeave()}
+    on:port:dragend={(event: CustomEvent<{ nodeId: number; interfaceIndex: number; port: PortPosition }>) => persistPortPosition(event.detail.nodeId, event.detail.interfaceIndex, event.detail.port)}
     on:edgeclick={(event: CustomEvent<{ edge: Edge }>) => {
       selectedEdgeId = event.detail.edge.id;
       closeMenu();
@@ -1296,6 +1620,9 @@
       {/if}
     </div>
   {/if}
+
+  <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
+  <LinkConfirmModal on:confirm={handleLinkConfirm} on:cancel={handleLinkConfirmCancel} />
 
   <NodeConfigModal
     open={nodeModalOpen}
