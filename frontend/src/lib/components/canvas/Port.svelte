@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { Handle, Position, useStore } from '@xyflow/svelte';
   import type { LiveMacState, NodeInterface, PortPosition } from '$lib/types';
   import { dragLinkStore, getDragLinkSnapshot } from '$lib/stores/dragLink';
   import { togglePortInfo } from '$lib/stores/portInfo';
@@ -73,6 +74,27 @@
   })();
 
   $: hasMismatch = liveMac?.state === 'mismatch';
+
+  // Only render the XYFlow Handle when we are actually inside a SvelteFlow
+  // component tree. Outside that context (e.g. unit tests) the Handle calls
+  // useStore() and throws; the guard makes Port test-safe in isolation.
+  let insideFlow = false;
+  try {
+    useStore();
+    insideFlow = true;
+  } catch {
+    insideFlow = false;
+  }
+
+  $: xyPosition = (() => {
+    switch (position.side) {
+      case 'top': return Position.Top;
+      case 'right': return Position.Right;
+      case 'bottom': return Position.Bottom;
+      case 'left':
+      default: return Position.Left;
+    }
+  })();
 
   function clearHoverTimer() {
     if (hoverTimer !== null) {
@@ -230,6 +252,14 @@
   on:mouseenter={handleMouseEnter}
   on:mouseleave={handleMouseLeave}
 >
+  {#if insideFlow}
+    <Handle
+      type="source"
+      position={xyPosition}
+      id={`iface-${interfaceIndex}`}
+      class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+    />
+  {/if}
   <span
     bind:this={portHandle}
     class={`port-handle block h-2.5 w-2.5 rounded-full border border-gray-950 ${
