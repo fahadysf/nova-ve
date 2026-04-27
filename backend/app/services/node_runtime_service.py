@@ -5,6 +5,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -22,6 +23,10 @@ from app.config import get_settings
 
 
 _DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
+_HEARTBEAT_INTERVAL_S: float = 5.0
+_TRANSITION_SUPPRESS_S: float = 30.0
+
+_logger = logging.getLogger("nova-ve.heartbeat")
 
 
 def _node_extras(node: dict[str, Any]) -> dict[str, Any]:
@@ -100,6 +105,9 @@ class NodeRuntimeService:
     _registry: dict[str, dict[str, Any]] = {}
     _loaded = False
     _lock = threading.Lock()
+    # Maps (lab_id, node_id) -> monotonic timestamp of last deliberate start/stop.
+    # Heartbeat skips reconciliation for entries younger than _TRANSITION_SUPPRESS_S.
+    _transition_timestamps: dict[tuple[str, int], float] = {}
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -115,6 +123,20 @@ class NodeRuntimeService:
         with cls._lock:
             cls._registry.clear()
             cls._loaded = False
+        cls._transition_timestamps.clear()
+
+    @classmethod
+    def _record_transition(cls, lab_id: str, node_id: int) -> None:
+        """Mark that a deliberate start/stop just happened; suppresses heartbeat reconcile."""
+        cls._transition_timestamps[(lab_id, node_id)] = time.monotonic()
+
+    @classmethod
+    def _is_suppressed(cls, lab_id: str, node_id: int) -> bool:
+        """Return True if the node is within the post-transition suppression window."""
+        ts = cls._transition_timestamps.get((lab_id, node_id))
+        if ts is None:
+            return False
+        return (time.monotonic() - ts) < _TRANSITION_SUPPRESS_S
 
     def start_node(self, lab_data: dict[str, Any], node_id: int) -> dict[str, Any]:
         lab_id = self._lab_id(lab_data)
@@ -131,6 +153,7 @@ class NodeRuntimeService:
         else:
             raise NodeRuntimeError(f"Unsupported node type: {node.get('type')}")
 
+        self._record_transition(lab_id, node_id)
         with self._lock:
             self._registry[key] = runtime
         self._persist_runtime(runtime)
@@ -465,6 +488,7 @@ class NodeRuntimeService:
         if not runtime:
             return
 
+        self._record_transition(lab_id, node_id)
         kind = runtime.get("kind")
         if kind == "qemu":
             self._stop_qemu_runtime(runtime)
@@ -568,6 +592,179 @@ class NodeRuntimeService:
                 else:
                     idle_rounds += 1
                     time.sleep(0.2)
+
+    @classmethod
+    def start_heartbeat(cls) -> None:
+        """Schedule _heartbeat_loop as a background asyncio task.
+
+        Safe to call from app.startup — creates a task on the running loop.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(cls._heartbeat_loop())
+
+    @classmethod
+    async def _heartbeat_loop(cls) -> None:
+        """Periodic reconciliation: polls live runtime state and updates lab.json."""
+        while True:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
+            try:
+                await cls._run_heartbeat_cycle()
+            except Exception:
+                _logger.exception("heartbeat cycle error")
+
+    @classmethod
+    async def _run_heartbeat_cycle(cls) -> None:
+        """Single heartbeat cycle: reconcile node.status for all known runtimes."""
+        from app.services.lab_service import LabService  # avoid import cycle at module load
+        from app.services.lab_lock import lab_lock
+        from app.services.ws_hub import ws_hub
+
+        settings = get_settings()
+        labs_dir = settings.LABS_DIR
+
+        # Snapshot registry keys under lock; iterate without holding the lock.
+        with cls._lock:
+            registry_snapshot = list(cls._registry.items())
+
+        if not registry_snapshot:
+            return
+
+        # Build lab_id -> relative filename map by scanning LABS_DIR once per cycle.
+        lab_id_to_filename: dict[str, str] = {}
+        if labs_dir.exists():
+            for lab_file in labs_dir.rglob("*.json"):
+                try:
+                    raw = json.loads(lab_file.read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                file_lab_id = str(raw.get("id", "")).strip()
+                if file_lab_id and file_lab_id not in lab_id_to_filename:
+                    try:
+                        relative = lab_file.relative_to(labs_dir).as_posix()
+                    except ValueError:
+                        continue
+                    lab_id_to_filename[file_lab_id] = relative
+
+        for _key, runtime in registry_snapshot:
+            lab_id = str(runtime.get("lab_id", "")).strip()
+            node_id_raw = runtime.get("node_id")
+            if not lab_id or node_id_raw is None:
+                continue
+            try:
+                node_id = int(node_id_raw)
+            except (TypeError, ValueError):
+                continue
+
+            if cls._is_suppressed(lab_id, node_id):
+                continue
+
+            filename = lab_id_to_filename.get(lab_id)
+            if not filename:
+                continue
+
+            kind = runtime.get("kind", "")
+            is_alive = await asyncio.get_running_loop().run_in_executor(
+                None, cls._check_alive_sync, runtime, kind, settings
+            )
+
+            # status: 2 = running, 0 = stopped
+            expected_status = 2 if is_alive else 0
+
+            try:
+                with lab_lock(filename, labs_dir):
+                    data = LabService.read_lab_json_static(filename)
+                    nodes: dict = data.get("nodes") or {}
+                    node = nodes.get(str(node_id))
+                    if not isinstance(node, dict):
+                        continue
+                    current_status = int(node.get("status", -1))
+                    if current_status == expected_status:
+                        continue
+                    node["status"] = expected_status
+                    LabService.write_lab_json_static(filename, data)
+            except Exception:
+                _logger.exception(
+                    "heartbeat: failed to reconcile lab=%s node=%s", lab_id, node_id
+                )
+                continue
+
+            _logger.info(
+                "heartbeat reconciled: lab=%s node=%s status %d -> %d",
+                lab_id, node_id, current_status, expected_status,
+            )
+
+            # If the process is dead according to reality, clean up the registry entry.
+            if not is_alive:
+                cls._delete_runtime_class(lab_id, node_id, settings)
+
+            try:
+                await ws_hub.publish(
+                    lab_id,
+                    "node_status_reconciled",
+                    {"node_id": node_id, "status": expected_status},
+                    rev=str(lab_id),
+                )
+            except Exception:
+                _logger.exception(
+                    "heartbeat: ws publish failed for lab=%s node=%s", lab_id, node_id
+                )
+
+    @staticmethod
+    def _check_alive_sync(runtime: dict[str, Any], kind: str, settings: Any) -> bool:
+        """Synchronous liveness check suitable for run_in_executor."""
+        if kind == "docker":
+            import subprocess as _sp
+            import shutil as _sh
+            docker_binary = _sh.which("docker")
+            if not docker_binary:
+                docker_binary = "docker"
+            container_name = runtime.get("container_name")
+            if not container_name:
+                return False
+            result = _sp.run(
+                [
+                    docker_binary,
+                    "--host",
+                    settings.DOCKER_HOST,
+                    "inspect",
+                    "-f",
+                    "{{.State.Running}}",
+                    container_name,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            return result.returncode == 0 and result.stdout.strip() == "true"
+
+        # QEMU / other — use psutil
+        pid = runtime.get("pid")
+        if not pid:
+            return False
+        try:
+            process = psutil.Process(int(pid))
+        except psutil.Error:
+            return False
+        expected_create_time = runtime.get("pid_create_time")
+        if expected_create_time and abs(process.create_time() - expected_create_time) > 1:
+            return False
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+
+    @classmethod
+    def _delete_runtime_class(cls, lab_id: str, node_id: int, settings: Any) -> None:
+        """Remove registry entry and state file (class-level, no instance needed)."""
+        key = f"{lab_id}:{node_id}"
+        with cls._lock:
+            cls._registry.pop(key, None)
+        runtime_dir = settings.TMP_DIR / "node-runtime"
+        state_path = runtime_dir / f"{lab_id}-{node_id}.json"
+        try:
+            if state_path.exists():
+                state_path.unlink()
+        except OSError:
+            pass
 
     def _load_registry(self) -> None:
         with self._lock:

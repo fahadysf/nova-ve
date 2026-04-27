@@ -62,6 +62,9 @@ async def startup():
                 "Database tables not found. Run: cd backend && alembic upgrade head && python -m scripts.seed"
             )
 
+    from app.services.node_runtime_service import NodeRuntimeService
+    NodeRuntimeService.start_heartbeat()
+
 
 @app.on_event("shutdown")
 async def shutdown():
