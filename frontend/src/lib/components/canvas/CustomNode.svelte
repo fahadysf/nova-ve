@@ -1,5 +1,10 @@
+<!-- Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com> -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+
 <script lang="ts">
-  import { Handle, Position } from '@xyflow/svelte';
+  import { createEventDispatcher } from 'svelte';
+  import PortLayer from './PortLayer.svelte';
+  import type { NodeInterface, PortPosition } from '$lib/types';
 
   export let data: {
     label: string;
@@ -9,12 +14,25 @@
     type?: string;
     template?: string;
     console?: string;
+    nodeId?: number;
+    interfaces?: NodeInterface[];
+    highlightedInterfaceIndex?: number | null;
   };
+
+  const dispatch = createEventDispatcher<{
+    'port:mousedown': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
+    'port:mouseup': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
+    'port:mouseenter': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
+    'port:mouseleave': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
+    'port:dragend': { nodeId: number; interfaceIndex: number; port: PortPosition };
+  }>();
 
   $: running = data.status === 2;
   $: transitioning = data.transientStatus === 'starting' || data.transientStatus === 'stopping';
   $: statusLabel = data.transientStatus ?? (running ? 'running' : 'stopped');
   $: typeLabel = (data.type || 'node').toUpperCase();
+  $: interfaces = data.interfaces ?? [];
+  $: nodeId = data.nodeId ?? 0;
 </script>
 
 <div
@@ -26,14 +44,6 @@
         : 'border-gray-700 bg-gray-800/95'
   }`}
 >
-  <Handle
-    type="target"
-    position={Position.Left}
-    class={`!h-2 !w-2 !border !border-gray-950 ${
-      transitioning ? '!bg-amber-300' : running ? '!bg-emerald-400' : '!bg-gray-500'
-    }`}
-  />
-
   <div class="flex items-start gap-2">
     <span
       class={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${
@@ -60,11 +70,14 @@
     </div>
   </div>
 
-  <Handle
-    type="source"
-    position={Position.Right}
-    class={`!h-2 !w-2 !border !border-gray-950 ${
-      transitioning ? '!bg-amber-300' : running ? '!bg-emerald-400' : '!bg-gray-500'
-    }`}
+  <PortLayer
+    {nodeId}
+    {interfaces}
+    highlightedInterfaceIndex={data.highlightedInterfaceIndex ?? null}
+    on:port:mousedown={(e) => dispatch('port:mousedown', e.detail)}
+    on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
+    on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}
+    on:port:mouseleave={(e) => dispatch('port:mouseleave', e.detail)}
+    on:port:dragend={(e) => dispatch('port:dragend', e.detail)}
   />
 </div>

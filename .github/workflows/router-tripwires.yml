@@ -1,0 +1,58 @@
+# Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# US-071: Router tripwire CI workflow.
+#
+# Gates the orthogonal router on:
+#   - perf bench (router_perf.spec.ts) p95 thresholds
+#   - quality bench (router_quality.spec.ts) crossings-per-edge ≤ 0.5
+#   - LOC guard: orthogonal.ts ≤ 1500 lines
+# On failure, promotes tracker issue #74 by removing the
+# `blocked-on-measurement` label and adding the `active` label.
+#
+# Note: Bench specs are implemented as Vitest tests rather than Playwright
+# specs (the router has no DOM dependency) — see tests/e2e/bench/*.spec.ts
+# for rationale. This is a deliberate deviation from the PRD wording; the
+# semantics (perf + quality bounds) are unchanged.
+
+name: router-tripwires
+on:
+  pull_request:
+    paths:
+      - 'frontend/src/lib/services/router/orthogonal.ts'
+      - 'frontend/tests/e2e/bench/router_*.spec.ts'
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  tripwires:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Install
+        run: cd frontend && npm ci
+      - name: Router perf bench
+        run: cd frontend && npm run test -- tests/e2e/bench/router_perf.spec.ts
+      - name: Router quality bench
+        run: cd frontend && npm run test -- tests/e2e/bench/router_quality.spec.ts
+      - name: LOC guard
+        run: |
+          loc=$(wc -l < frontend/src/lib/services/router/orthogonal.ts)
+          echo "orthogonal.ts LOC: $loc"
+          test "$loc" -le 1500
+
+  promote-on-failure:
+    needs: tripwires
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Promote tracker issue #74
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh issue edit 74 --remove-label blocked-on-measurement --add-label active
