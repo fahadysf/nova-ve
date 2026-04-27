@@ -4,7 +4,7 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import auth, folders, labs, listing, system, users, ws
+from app.routers import auth, folders, labs, links, listing, networks, system, users, ws
 from app.database import engine
 from app.config import get_settings
 from app.services.lab_lock import LabLockTimeout
@@ -34,6 +34,10 @@ app.add_middleware(
 
 app.include_router(auth.router)
 app.include_router(folders.router)
+# v2 per-resource routers must be included BEFORE labs.router so they take
+# precedence on shared verbs (POST /networks, GET /networks, DELETE /networks).
+app.include_router(links.router)
+app.include_router(networks.router)
 app.include_router(labs.router)
 app.include_router(listing.router)
 app.include_router(system.router)
