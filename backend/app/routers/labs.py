@@ -17,9 +17,11 @@ from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionError, Html5SessionService
-from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
+from app.services.lab_lock import lab_lock
+from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _normalize_relative_lab_path
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateError, TemplateService, _icon_filename_for
+from app.services.ws_hub import ws_hub
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
 
@@ -1321,6 +1323,322 @@ async def delete_network(
         "code": 200,
         "status": "success",
         "message": "Network deleted successfully.",
+    }
+
+
+
+
+# ---------------------------------------------------------------------------
+# US-063 / US-064: per-resource node-interface PATCH/GET + bulk-PUT layout
+# ---------------------------------------------------------------------------
+
+_LAYOUT_NODE_ALLOWED = {"id", "left", "top"}
+_LAYOUT_NETWORK_ALLOWED = {"id", "left", "top"}
+_LAYOUT_TOP_ALLOWED = {"nodes", "networks", "viewport", "defaults"}
+_LAYOUT_DEFAULTS_ALLOWED = {"link_style"}
+_LAYOUT_VIEWPORT_ALLOWED = {"x", "y", "zoom"}
+
+
+def _interface_network_id(lab_data: dict, node_id: int, interface_index: int) -> int:
+    node = (lab_data.get("nodes") or {}).get(str(node_id)) or {}
+    interfaces = node.get("interfaces") or []
+    if 0 <= interface_index < len(interfaces):
+        iface = interfaces[interface_index]
+        if isinstance(iface, dict):
+            value = iface.get("network_id", 0)
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+@router.patch("/{lab_path:path}/nodes/{node_id}/interfaces/{interface_index}")
+async def patch_node_interface(
+    lab_path: str,
+    node_id: int,
+    interface_index: int,
+    body: dict = Body(...),
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as e:
+        return {"code": 403, "status": "fail", "message": str(e)}
+
+    normalized = _normalize_relative_lab_path(scoped_path)
+    settings = get_settings()
+
+    with lab_lock(normalized, settings.LABS_DIR):
+        try:
+            data = _read_lab_data(normalized)
+        except LegacyLabSchemaError as exc:
+            return _legacy_schema_response(exc)
+        except FileNotFoundError:
+            return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+
+        node = (data.get("nodes") or {}).get(str(node_id))
+        if not isinstance(node, dict):
+            return {"code": 404, "status": "fail", "message": "Node does not exist."}
+        interfaces = node.get("interfaces") or []
+        if not (0 <= interface_index < len(interfaces)):
+            return {"code": 404, "status": "fail", "message": "Interface does not exist."}
+        iface = interfaces[interface_index]
+        if not isinstance(iface, dict):
+            return {"code": 404, "status": "fail", "message": "Interface does not exist."}
+
+        new_mac = body.get("planned_mac")
+        if "planned_mac" in body and new_mac:
+            mac_lower = str(new_mac).strip().lower()
+            network_id = _interface_network_id(data, node_id, interface_index) or 0
+            try:
+                from app.services.mac_registry import mac_registry  # type: ignore
+            except ImportError:
+                mac_registry = None  # type: ignore
+            if mac_registry is not None and network_id:
+                conflict = mac_registry.check_collision(
+                    network_id,
+                    mac_lower,
+                    owner_key=(normalized, int(node_id), int(interface_index)),
+                )
+                if conflict is not None:
+                    suggested = mac_registry.suggest_mac(network_id, base_mac=mac_lower)
+                    return {
+                        "code": 409,
+                        "status": "fail",
+                        "message": "mac collision",
+                        "suggested_mac": suggested,
+                    }
+            iface["planned_mac"] = mac_lower
+        elif "planned_mac" in body and new_mac is None:
+            iface["planned_mac"] = None
+
+        if "port_position" in body:
+            iface["port_position"] = body["port_position"]
+
+        data.pop("topology", None)
+        LabService.write_lab_json_static(normalized, data)
+
+        from app.services.link_service import _recompute_mac_registry
+        _recompute_mac_registry(normalized, data)
+
+        derived_network_id = _interface_network_id(data, node_id, interface_index)
+        response_iface = {
+            "index": iface.get("index", interface_index),
+            "name": iface.get("name", ""),
+            "planned_mac": iface.get("planned_mac"),
+            "port_position": iface.get("port_position"),
+            "network_id": derived_network_id,
+            "live_mac": None,
+        }
+
+    await ws_hub.publish(
+        normalized,
+        "interface_updated",
+        {
+            "node_id": int(node_id),
+            "interface_index": int(interface_index),
+            "interface": response_iface,
+        },
+    )
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Interface updated successfully.",
+        "interface": response_iface,
+    }
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/interfaces/v2")
+async def list_node_interfaces_v2(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
+    except FileNotFoundError:
+        return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+    except PermissionError as e:
+        return {"code": 403, "status": "fail", "message": str(e)}
+
+    node = (data.get("nodes") or {}).get(str(node_id))
+    if not isinstance(node, dict):
+        return {"code": 404, "status": "fail", "message": "Node does not exist."}
+
+    interfaces = []
+    for index, iface in enumerate(node.get("interfaces", []) or []):
+        if not isinstance(iface, dict):
+            continue
+        interfaces.append({
+            "index": iface.get("index", index),
+            "name": iface.get("name", ""),
+            "planned_mac": iface.get("planned_mac"),
+            "port_position": iface.get("port_position"),
+            "network_id": _interface_network_id(data, node_id, index),
+            "live_mac": None,
+        })
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Successfully listed interfaces.",
+        "data": interfaces,
+    }
+
+
+def _layout_validate_and_collect_forbidden(body: dict) -> list[str]:
+    forbidden: list[str] = []
+    if not isinstance(body, dict):
+        return ["<body>"]
+    for key in body.keys():
+        if key not in _LAYOUT_TOP_ALLOWED:
+            forbidden.append(key)
+
+    nodes = body.get("nodes")
+    if isinstance(nodes, list):
+        for entry in nodes:
+            if not isinstance(entry, dict):
+                forbidden.append("nodes[*]")
+                continue
+            for k in entry.keys():
+                if k not in _LAYOUT_NODE_ALLOWED:
+                    forbidden.append(f"nodes[*].{k}")
+    elif nodes is not None:
+        forbidden.append("nodes")
+
+    networks = body.get("networks")
+    if isinstance(networks, list):
+        for entry in networks:
+            if not isinstance(entry, dict):
+                forbidden.append("networks[*]")
+                continue
+            for k in entry.keys():
+                if k not in _LAYOUT_NETWORK_ALLOWED:
+                    forbidden.append(f"networks[*].{k}")
+    elif networks is not None:
+        forbidden.append("networks")
+
+    viewport = body.get("viewport")
+    if isinstance(viewport, dict):
+        for k in viewport.keys():
+            if k not in _LAYOUT_VIEWPORT_ALLOWED:
+                forbidden.append(f"viewport.{k}")
+    elif viewport is not None:
+        forbidden.append("viewport")
+
+    defaults = body.get("defaults")
+    if isinstance(defaults, dict):
+        for k in defaults.keys():
+            if k not in _LAYOUT_DEFAULTS_ALLOWED:
+                forbidden.append(f"defaults.{k}")
+    elif defaults is not None:
+        forbidden.append("defaults")
+
+    # Deduplicate while preserving order.
+    seen: set[str] = set()
+    unique: list[str] = []
+    for item in forbidden:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique
+
+
+@router.put("/{lab_path:path}/layout")
+async def put_layout(
+    lab_path: str,
+    body: dict = Body(...),
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as e:
+        return {"code": 403, "status": "fail", "message": str(e)}
+
+    forbidden = _layout_validate_and_collect_forbidden(body)
+    if forbidden:
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": 409,
+                "status": "fail",
+                "message": "structural mutation forbidden",
+                "forbidden_fields": forbidden,
+            },
+        )
+
+    normalized = _normalize_relative_lab_path(scoped_path)
+    settings = get_settings()
+
+    affected_nodes: list[int] = []
+    affected_networks: list[int] = []
+
+    with lab_lock(normalized, settings.LABS_DIR):
+        try:
+            data = _read_lab_data(normalized)
+        except LegacyLabSchemaError as exc:
+            return _legacy_schema_response(exc)
+        except FileNotFoundError:
+            return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+
+        for node_entry in body.get("nodes", []) or []:
+            node_id = node_entry.get("id")
+            if node_id is None:
+                continue
+            node = (data.get("nodes") or {}).get(str(node_id))
+            if not isinstance(node, dict):
+                continue
+            if "left" in node_entry:
+                node["left"] = int(node_entry["left"])
+            if "top" in node_entry:
+                node["top"] = int(node_entry["top"])
+            affected_nodes.append(int(node_id))
+
+        for net_entry in body.get("networks", []) or []:
+            net_id = net_entry.get("id")
+            if net_id is None:
+                continue
+            network = (data.get("networks") or {}).get(str(net_id))
+            if not isinstance(network, dict):
+                continue
+            if "left" in net_entry:
+                network["left"] = int(net_entry["left"])
+            if "top" in net_entry:
+                network["top"] = int(net_entry["top"])
+            affected_networks.append(int(net_id))
+
+        if isinstance(body.get("viewport"), dict):
+            data["viewport"] = {**(data.get("viewport") or {}), **body["viewport"]}
+
+        if isinstance(body.get("defaults"), dict):
+            data["defaults"] = {**(data.get("defaults") or {}), **body["defaults"]}
+
+        data.pop("topology", None)
+        LabService.write_lab_json_static(normalized, data)
+
+    await ws_hub.publish(
+        normalized,
+        "layout_updated",
+        {
+            "node_ids": affected_nodes,
+            "network_ids": affected_networks,
+        },
+    )
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Layout updated successfully.",
+        "data": {
+            "node_ids": affected_nodes,
+            "network_ids": affected_networks,
+        },
     }
 
 
