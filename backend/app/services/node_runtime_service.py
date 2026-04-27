@@ -191,7 +191,7 @@ class NodeRuntimeService:
             for state_file in self.runtime_dir.glob("*.json"):
                 try:
                     runtime = json.loads(state_file.read_text())
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, OSError):
                     continue
                 key = self._key(runtime["lab_id"], runtime["node_id"])
                 self._registry[key] = runtime
@@ -768,8 +768,37 @@ class NodeRuntimeService:
         seen: set[int] = set()
         specs: list[dict[str, Any]] = []
 
-        for interface in node.get("interfaces", []):
-            network_id = int(interface.get("network_id") or 0)
+        node_id = int(node.get("id", 0))
+        link_map: dict[int, int] = {}
+        for link in lab_data.get("links", []) or []:
+            endpoints = (link.get("from") or {}, link.get("to") or {})
+            node_endpoint = next(
+                (
+                    endpoint for endpoint in endpoints
+                    if isinstance(endpoint, dict)
+                    and "node_id" in endpoint
+                    and int(endpoint.get("node_id", -1)) == node_id
+                ),
+                None,
+            )
+            network_endpoint = next(
+                (
+                    endpoint for endpoint in endpoints
+                    if isinstance(endpoint, dict) and "network_id" in endpoint
+                ),
+                None,
+            )
+            if node_endpoint and network_endpoint:
+                interface_index = int(node_endpoint.get("interface_index", 0))
+                network_id = int(network_endpoint.get("network_id", 0))
+                if network_id:
+                    link_map[interface_index] = network_id
+
+        for index, interface in enumerate(node.get("interfaces", [])):
+            interface_index = int(interface.get("index", index)) if isinstance(interface, dict) else index
+            network_id = int(interface.get("network_id") or 0) if isinstance(interface, dict) else 0
+            if not network_id:
+                network_id = link_map.get(interface_index, 0)
             if not network_id or network_id in seen:
                 continue
 
@@ -777,7 +806,7 @@ class NodeRuntimeService:
             if not network:
                 continue
 
-            network_type = str(network.get("type", "bridge"))
+            network_type = str(network.get("type", "linux_bridge"))
             if network_type.startswith("pnet"):
                 continue
 

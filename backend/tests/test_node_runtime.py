@@ -60,8 +60,10 @@ def runtime_settings(tmp_path):
 def sample_lab(runtime_settings):
     lab_path = runtime_settings.LABS_DIR / "sample.json"
     lab_data = {
+        "schema": 2,
         "id": "lab-123",
         "meta": {"name": "sample"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
         "nodes": {
             "1": {
                 "id": 1,
@@ -76,7 +78,8 @@ def sample_lab(runtime_settings):
             }
         },
         "networks": {},
-        "topology": [],
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
     }
     lab_path.write_text(json.dumps(lab_data))
 
@@ -481,8 +484,10 @@ async def test_guacamole_auth_token_refreshes_when_cached_token_is_invalid(monke
 @pytest.mark.asyncio
 async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch, patched_settings):
     lab_data = {
+        "schema": 2,
         "id": "lab-123",
         "meta": {"name": "docker-demo"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
         "nodes": {
             "1": {
                 "id": 1,
@@ -493,7 +498,9 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
                 "cpu": 1,
                 "ram": 256,
                 "ethernet": 1,
-                "interfaces": [{"name": "eth0", "network_id": 1}],
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None}
+                ],
             },
             "2": {
                 "id": 2,
@@ -504,17 +511,44 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
                 "cpu": 1,
                 "ram": 256,
                 "ethernet": 1,
-                "interfaces": [{"name": "eth0", "network_id": 1}],
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None}
+                ],
             },
         },
         "networks": {
             "1": {
                 "id": 1,
                 "name": "lab-link",
-                "type": "bridge",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
             }
         },
-        "topology": [],
+        "links": [
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            },
+            {
+                "id": "lnk_002",
+                "from": {"node_id": 2, "interface_index": 0},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            },
+        ],
+        "defaults": {"link_style": "orthogonal"},
     }
 
     recorded_calls: list[list[str]] = []
@@ -627,11 +661,162 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
     assert "nova-ve-lab123-net1" not in existing_networks
 
 
+def test_linux_bridge_identifier_resolves_to_docker_bridge_driver(patched_settings):
+    """A docker node attached to a linux_bridge network resolves to the docker bridge driver."""
+    lab_data = {
+        "schema": 2,
+        "id": "lab-linuxbridge",
+        "meta": {"name": "linux-bridge-test"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "alpine-x",
+                "type": "docker",
+                "image": "nova-ve-alpine-telnet:latest",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 1,
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None}
+                ],
+            }
+        },
+        "networks": {
+            "1": {
+                "id": 1,
+                "name": "lab-link",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+            }
+        },
+        "links": [
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            }
+        ],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+    service = NodeRuntimeService()
+    specs = service._docker_network_specs(lab_data, lab_data["nodes"]["1"])
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec["id"] == 1
+    assert spec["name"] == "nova-ve-lablinuxbrid-net1"
+    assert spec["internal"] is False
+
+
+def test_no_legacy_bridge_type_string_in_v2_lab(patched_settings):
+    """Walks every supported node class in a v2 lab and asserts no network.type == 'bridge'."""
+    service = NodeRuntimeService()
+
+    # Create one lab per node type and verify no raw 'bridge' network type exists
+    node_types = ["qemu", "docker", "iol", "dynamips"]
+    networks = {
+        "1": {
+            "id": 1,
+            "name": "net1",
+            "type": "linux_bridge",
+            "visibility": True,
+            "implicit": False,
+            "config": {},
+        },
+        "2": {
+            "id": 2,
+            "name": "net2",
+            "type": "ovs_bridge",
+            "visibility": True,
+            "implicit": False,
+            "config": {},
+        },
+        "3": {
+            "id": 3,
+            "name": "net3",
+            "type": "internal",
+            "visibility": True,
+            "implicit": False,
+            "config": {},
+        },
+    }
+
+    def _walk_for_bridge_type(obj, path=""):
+        """Recursively walk dict/list; fail if any value is exactly 'bridge' in a 'type' key."""
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == "type" and v == "bridge":
+                    raise AssertionError(
+                        f"Legacy network type 'bridge' found at path '{path}.{k}': {obj}"
+                    )
+                _walk_for_bridge_type(v, path=f"{path}.{k}")
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                _walk_for_bridge_type(item, path=f"{path}[{i}]")
+
+    for node_type in node_types:
+        lab_data = {
+            "schema": 2,
+            "id": f"lab-{node_type}",
+            "meta": {"name": f"{node_type}-lab"},
+            "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+            "nodes": {
+                "1": {
+                    "id": 1,
+                    "name": f"{node_type}-node",
+                    "type": node_type,
+                    "image": "test-image",
+                    "console": "telnet",
+                    "cpu": 1,
+                    "ram": 512,
+                    "ethernet": 1,
+                    "interfaces": [
+                        {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None}
+                    ],
+                }
+            },
+            "networks": networks,
+            "links": [
+                {
+                    "id": "lnk_001",
+                    "from": {"node_id": 1, "interface_index": 0},
+                    "to": {"network_id": 1},
+                    "style_override": None,
+                    "label": "",
+                    "color": "",
+                    "width": "1",
+                    "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+                }
+            ],
+            "defaults": {"link_style": "orthogonal"},
+        }
+
+        # Verify the lab data itself has no legacy 'bridge' type
+        _walk_for_bridge_type(lab_data)
+
+        # For docker nodes, also verify the resolved network specs carry no 'bridge' type
+        if node_type == "docker":
+            specs = service._docker_network_specs(lab_data, lab_data["nodes"]["1"])
+            _walk_for_bridge_type(specs)
+
+
 @pytest.mark.asyncio
 async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypatch, patched_settings):
     lab_data = {
+        "schema": 2,
         "id": "lab-123",
         "meta": {"name": "docker-demo"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
         "nodes": {
             "1": {
                 "id": 1,
@@ -642,13 +827,34 @@ async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypa
                 "cpu": 1,
                 "ram": 256,
                 "ethernet": 1,
-                "interfaces": [{"name": "eth0", "network_id": 1}],
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None}
+                ],
             }
         },
         "networks": {
-            "1": {"id": 1, "name": "lab-link", "type": "bridge"}
+            "1": {
+                "id": 1,
+                "name": "lab-link",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+            }
         },
-        "topology": [],
+        "links": [
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            }
+        ],
+        "defaults": {"link_style": "orthogonal"},
     }
 
     def fake_run(cmd, capture_output=False, text=False, **_kwargs):

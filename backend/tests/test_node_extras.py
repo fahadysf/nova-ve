@@ -126,11 +126,14 @@ cpulimit: 1
         settings.LABS_DIR / "demo.json",
         json.dumps(
             {
+                "schema": 2,
                 "id": "lab-extras",
                 "meta": {"name": "demo"},
+                "viewport": {"x": 0, "y": 0, "zoom": 1.0},
                 "nodes": {},
                 "networks": {},
-                "topology": [],
+                "links": [],
+                "defaults": {"link_style": "orthogonal"},
             }
         ),
     )
@@ -209,8 +212,10 @@ async def test_node_update_accepts_extras_when_stopped(populated_templates):
 
 def _make_qemu_node_lab(populated_templates, extras: dict) -> dict:
     lab_data = {
+        "schema": 2,
         "id": "lab-qemu",
         "meta": {"name": "qemu"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
         "nodes": {
             "1": {
                 "id": 1,
@@ -226,7 +231,8 @@ def _make_qemu_node_lab(populated_templates, extras: dict) -> dict:
             }
         },
         "networks": {},
-        "topology": [],
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
     }
     (populated_templates.LABS_DIR / "qemu.json").write_text(json.dumps(lab_data))
     return lab_data
@@ -349,8 +355,10 @@ def _stub_docker_subprocess(monkeypatch, recorded, containers):
 @pytest.mark.asyncio
 async def test_docker_runtime_honors_env_restart_and_extra_args(monkeypatch, populated_templates):
     lab_data = {
+        "schema": 2,
         "id": "lab-docker",
         "meta": {"name": "docker"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
         "nodes": {
             "1": {
                 "id": 1,
@@ -373,7 +381,8 @@ async def test_docker_runtime_honors_env_restart_and_extra_args(monkeypatch, pop
             }
         },
         "networks": {},
-        "topology": [],
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
     }
     (populated_templates.LABS_DIR / "docker.json").write_text(json.dumps(lab_data))
 
@@ -398,8 +407,10 @@ async def test_docker_runtime_honors_env_restart_and_extra_args(monkeypatch, pop
 @pytest.mark.asyncio
 async def test_docker_runtime_rejects_invalid_restart_policy(monkeypatch, populated_templates):
     lab_data = {
+        "schema": 2,
         "id": "lab-docker",
         "meta": {"name": "docker"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
         "nodes": {
             "1": {
                 "id": 1,
@@ -415,7 +426,8 @@ async def test_docker_runtime_rejects_invalid_restart_policy(monkeypatch, popula
             }
         },
         "networks": {},
-        "topology": [],
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
     }
     (populated_templates.LABS_DIR / "docker.json").write_text(json.dumps(lab_data))
     recorded: list[list[str]] = []

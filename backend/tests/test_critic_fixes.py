@@ -128,11 +128,14 @@ cpulimit: 1
     _write_lab(
         lab_path,
         """{
+  "schema": 2,
   "id": "lab-1",
   "meta": {"name": "nested"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
   "nodes": {},
   "networks": {},
-  "topology": []
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
 }""",
     )
 
@@ -229,8 +232,10 @@ cpulimit: 1
     _write_lab(
         lab_path,
         """{
+  "schema": 2,
   "id": "running-lab",
   "meta": {"name": "running"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
   "nodes": {
     "1": {
       "id": 1,
@@ -255,11 +260,15 @@ cpulimit: 1
       "config_list": [],
       "sat": 0,
       "computed_sat": 0,
-      "interfaces": [{"name": "Gi1", "network_id": 0}, {"name": "Gi2", "network_id": 0}]
+      "interfaces": [
+        {"index": 0, "name": "Gi1", "planned_mac": null, "port_position": null},
+        {"index": 1, "name": "Gi2", "planned_mac": null, "port_position": null}
+      ]
     }
   },
   "networks": {},
-  "topology": []
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
 }""",
     )
 

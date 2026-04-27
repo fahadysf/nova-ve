@@ -48,10 +48,121 @@ export interface FolderListing {
   labs: LabListItem[];
 }
 
+// --- v2 schema (US-058) ---------------------------------------------------
+
+export type PortSide = 'top' | 'right' | 'bottom' | 'left';
+
+export interface PortPosition {
+  side: PortSide;
+  /** 0..1 along the chosen side. */
+  offset: number;
+}
+
 export interface NodeInterface {
+  /** v2 fields. ``index`` and ``name`` are always present on the wire. */
+  index?: number;
   name: string;
+  planned_mac?: string | null;
+  port_position?: PortPosition | null;
+  /**
+   * Synthesised legacy field — populated by the loader from links[]. Mutations
+   * must go through links[]; this is a read-only compat shim retained until
+   * the canvas migrates to v2 links.
+   * @deprecated Use links[] for the source of truth.
+   */
   network_id: number;
 }
+
+export type NetworkType =
+  | 'linux_bridge'
+  | 'ovs_bridge'
+  | 'nat'
+  | 'cloud'
+  | 'management'
+  | 'pnet0' | 'pnet1' | 'pnet2' | 'pnet3' | 'pnet4'
+  | 'pnet5' | 'pnet6' | 'pnet7' | 'pnet8' | 'pnet9'
+  | 'internal' | 'internal2' | 'internal3'
+  | 'private' | 'private2' | 'private3'
+  | 'nat0';
+
+export type LinkStyle = 'orthogonal' | 'bezier' | 'straight';
+
+export interface NodeLinkEndpoint {
+  node_id: number;
+  interface_index: number;
+}
+
+export interface NetworkLinkEndpoint {
+  network_id: number;
+}
+
+export type LinkEndpoint = NodeLinkEndpoint | NetworkLinkEndpoint;
+
+export interface LinkMetrics {
+  delay_ms: number;
+  loss_pct: number;
+  bandwidth_kbps: number;
+  jitter_ms: number;
+}
+
+export interface Link {
+  id: string;
+  from: LinkEndpoint;
+  to: LinkEndpoint;
+  style_override: LinkStyle | null;
+  label: string;
+  color: string;
+  width: string;
+  metrics: LinkMetrics;
+}
+
+export interface Network {
+  id: number;
+  name: string;
+  type: NetworkType;
+  left: number;
+  top: number;
+  icon: string;
+  width: number;
+  style: string;
+  linkstyle: string;
+  color: string;
+  label: string;
+  visibility: boolean;
+  implicit: boolean;
+  smart: number;
+  config: Record<string, unknown>;
+  /** Derived from links[] on read; never persisted. */
+  count?: number;
+}
+
+export interface LabViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+export interface LabDefaults {
+  link_style: LinkStyle;
+}
+
+export interface LabData {
+  schema: 2;
+  id: string;
+  meta: LabMeta;
+  viewport: LabViewport;
+  nodes: Record<string, NodeData>;
+  networks: Record<string, Network>;
+  links: Link[];
+  defaults: LabDefaults;
+  textobjects?: unknown[];
+  lineobjects?: unknown[];
+  pictures?: unknown[];
+  tasks?: unknown[];
+  configsets?: Record<string, unknown>;
+}
+
+// --- end v2 schema --------------------------------------------------------
 
 export interface NodeData {
   id: number;
@@ -146,6 +257,11 @@ export interface NodeBatchCreateResult {
   nodes: NodeData[];
 }
 
+/**
+ * @deprecated v1 alias retained for the existing canvas implementation. Use
+ * {@link Network} for the v2 schema. Will be removed once the canvas migrates
+ * to links[].
+ */
 export interface NetworkData {
   id: number;
   name: string;
@@ -161,8 +277,15 @@ export interface NetworkData {
   label?: string;
   smart?: number;
   width?: number;
+  implicit?: boolean;
+  config?: Record<string, unknown>;
 }
 
+/**
+ * @deprecated v1 ``topology[]`` shape. The v2 source of truth is {@link Link};
+ * this interface is retained only as a read-side compat shim while the canvas
+ * still consumes ``/api/labs/{path}/topology``. Wave 1 will retire it.
+ */
 export interface TopologyLink {
   type: 'ethernet';
   source: string;
