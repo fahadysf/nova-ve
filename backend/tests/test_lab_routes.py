@@ -79,11 +79,14 @@ cpulimit: 1
     lab_path = patched_route_settings.LABS_DIR / "delete-probe.json"
     lab_path.write_text(
         """{
+  "schema": 2,
   "id": "delete-probe",
   "meta": {"name": "delete-probe"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
   "nodes": {},
   "networks": {},
-  "topology": []
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
 }"""
     )
 
@@ -124,8 +127,10 @@ async def test_update_topology_route_is_not_shadowed_by_update_lab(monkeypatch, 
     lab_path = patched_route_settings.LABS_DIR / "topology-probe.json"
     lab_path.write_text(
         """{
+  "schema": 2,
   "id": "topology-probe",
   "meta": {"name": "topology-probe"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
   "nodes": {
     "1": {
       "id": 1,
@@ -141,11 +146,12 @@ async def test_update_topology_route_is_not_shadowed_by_update_lab(monkeypatch, 
       "left": 100,
       "top": 100,
       "icon": "Server.png",
-      "interfaces": [{"name": "eth0", "network_id": 0}]
+      "interfaces": [{"index": 0, "name": "eth0", "planned_mac": null, "port_position": null}]
     }
   },
   "networks": {},
-  "topology": []
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
 }"""
     )
 
@@ -203,11 +209,14 @@ cpulimit: 1
     lab_path = patched_route_settings.LABS_DIR / "catalog-probe.json"
     lab_path.write_text(
         """{
+  "schema": 2,
   "id": "catalog-probe",
   "meta": {"name": "catalog-probe"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
   "nodes": {},
   "networks": {},
-  "topology": []
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
 }"""
     )
 

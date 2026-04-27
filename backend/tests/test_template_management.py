@@ -62,11 +62,14 @@ cpulimit: 1
     _write_text(
         patched_template_settings.LABS_DIR / "demo.json",
         """{
+  "schema": 2,
   "id": "lab-templates",
   "meta": {"name": "demo"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
   "nodes": {},
   "networks": {},
-  "topology": []
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
 }""",
     )
     image_dir = patched_template_settings.IMAGES_DIR / "qemu" / "csr1000v"

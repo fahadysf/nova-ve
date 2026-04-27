@@ -297,6 +297,59 @@ class TemplateError(Exception):
     pass
 
 
+_INTERFACE_NAMING_FORMAT_PLACEHOLDERS = ("{n}", "{slot}", "{port}")
+
+
+def _validate_interface_naming(payload: dict[str, Any], source: str) -> dict[str, Any]:
+    """Validate the optional ``interface_naming`` block on a template YAML.
+
+    Either ``format: <str>`` (a pattern containing one of {n}|{slot}|{port})
+    OR ``explicit: [<str>, ...]`` may be supplied — exactly one. Any other
+    combination raises :class:`TemplateError`.
+    """
+
+    if not isinstance(payload, dict):
+        raise TemplateError(
+            f"interface_naming on {source} must be an object with 'format' or 'explicit'."
+        )
+
+    has_format = "format" in payload
+    has_explicit = "explicit" in payload
+
+    if has_format and has_explicit:
+        raise TemplateError(
+            f"interface_naming on {source} must specify exactly one of 'format' or 'explicit', not both."
+        )
+    if not has_format and not has_explicit:
+        raise TemplateError(
+            f"interface_naming on {source} must specify either 'format' or 'explicit'."
+        )
+
+    if has_format:
+        fmt = payload["format"]
+        if not isinstance(fmt, str) or not fmt.strip():
+            raise TemplateError(
+                f"interface_naming.format on {source} must be a non-empty string."
+            )
+        if not any(token in fmt for token in _INTERFACE_NAMING_FORMAT_PLACEHOLDERS):
+            raise TemplateError(
+                f"interface_naming.format on {source} must contain at least one of "
+                f"{', '.join(_INTERFACE_NAMING_FORMAT_PLACEHOLDERS)}."
+            )
+        return {"format": fmt}
+
+    explicit = payload["explicit"]
+    if not isinstance(explicit, list) or not explicit:
+        raise TemplateError(
+            f"interface_naming.explicit on {source} must be a non-empty list of strings."
+        )
+    if not all(isinstance(item, str) and item.strip() for item in explicit):
+        raise TemplateError(
+            f"interface_naming.explicit on {source} must contain only non-empty strings."
+        )
+    return {"explicit": list(explicit)}
+
+
 @dataclass
 class TemplateDefinition:
     key: str
@@ -311,6 +364,7 @@ class TemplateDefinition:
     cpulimit: int
     extras: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    interface_naming: dict[str, Any] | None = None
 
     def as_response(self) -> dict[str, Any]:
         return {
@@ -441,6 +495,11 @@ class TemplateService:
         template = self.get_template(template_type, template_key)
         return self._compose_extras(_extras_schema_for(template_type), template.extras)
 
+    def interface_naming(self, template_type: str, template_key: str) -> dict[str, Any]:
+        """Return the validated ``interface_naming`` block for a template, or ``{}``."""
+        template = self.get_template(template_type, template_key)
+        return dict(template.interface_naming or {})
+
     @staticmethod
     def _compose_extras(schema: list[dict[str, Any]], yaml_overrides: dict[str, Any]) -> dict[str, Any]:
         result: dict[str, Any] = {}
@@ -497,6 +556,11 @@ class TemplateService:
                 schema_key = schema_field["key"]
                 if schema_key in payload and schema_key not in yaml_extras:
                     yaml_extras[schema_key] = payload[schema_key]
+            interface_naming = payload.get("interface_naming")
+            if interface_naming is not None:
+                interface_naming = _validate_interface_naming(
+                    interface_naming, source=str(template_path)
+                )
             templates.append(
                 TemplateDefinition(
                     key=key,
@@ -511,6 +575,7 @@ class TemplateService:
                     cpulimit=int(payload.get("cpulimit", 1)),
                     extras=yaml_extras,
                     raw=payload,
+                    interface_naming=interface_naming,
                 )
             )
         return templates

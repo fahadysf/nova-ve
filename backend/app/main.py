@@ -1,16 +1,29 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import auth, folders, labs, listing, system, users
+from fastapi.responses import JSONResponse
+from app.routers import auth, folders, labs, listing, system, users, ws
 from app.database import engine
 from app.config import get_settings
+from app.services.lab_lock import LabLockTimeout
+
+
+def lab_lock_timeout_handler(request: Request, exc: LabLockTimeout) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "2"},
+        content={
+            "code": 503,
+            "status": "fail",
+            "message": str(exc) or "Lab is busy; retry in 2s",
+        },
+    )
 
 settings = get_settings()
 app = FastAPI(title="nova-ve", version="0.1.0-alpha")
 
-# CORS for frontend dev
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:5173", "http://localhost:4173"],
@@ -19,19 +32,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include routers
 app.include_router(auth.router)
 app.include_router(folders.router)
 app.include_router(labs.router)
 app.include_router(listing.router)
 app.include_router(system.router)
 app.include_router(users.router)
+app.include_router(ws.router)
+
+app.add_exception_handler(LabLockTimeout, lab_lock_timeout_handler)
 
 
 @app.on_event("startup")
 async def startup():
-    # Tables are managed by Alembic migrations.
-    # Dev convenience: warn if DB looks empty.
     from sqlalchemy import text
     async with engine.connect() as conn:
         result = await conn.execute(

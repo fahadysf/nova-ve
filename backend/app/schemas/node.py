@@ -1,6 +1,23 @@
-from pydantic import BaseModel, Field
 from typing import Any, Dict, Optional, Literal, List
 from uuid import UUID
+
+from pydantic import BaseModel, Field
+
+from app.schemas.port import PortPosition
+
+
+class NodeInterface(BaseModel):
+    """v2 node interface entry.
+
+    The ``network_id`` from v1 is gone — that relationship now lives in the
+    top-level ``links[]`` array. ``planned_mac`` is populated by the MAC
+    registry (Wave 1 work); for now it can be ``None``.
+    """
+
+    index: int = Field(ge=0)
+    name: str
+    planned_mac: Optional[str] = None
+    port_position: Optional[PortPosition] = None
 
 
 class NodeBase(BaseModel):
@@ -26,6 +43,7 @@ class NodeBase(BaseModel):
     config_list: List[str] = Field(default_factory=list)
     sat: int = 0
     computed_sat: int = 0
+    interfaces: List[NodeInterface] = Field(default_factory=list)
     extras: Dict[str, Any] = Field(default_factory=dict)
 
 

@@ -17,11 +17,28 @@ from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionError, Html5SessionService
-from app.services.lab_service import LabService
+from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateError, TemplateService, _icon_filename_for
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
+
+
+class LegacyLabSchemaError(ValueError):
+    """Raised when a v1 lab.json is read; converted to HTTP 422."""
+
+    def __init__(self, lab_path: str):
+        super().__init__(f"{LEGACY_SCHEMA_ERROR} (lab_path={lab_path})")
+        self.lab_path = lab_path
+
+
+def _legacy_schema_response(error: LegacyLabSchemaError) -> dict:
+    return {
+        "code": 422,
+        "status": "fail",
+        "message": LEGACY_SCHEMA_ERROR,
+        "lab_path": error.lab_path,
+    }
 
 NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top"}
 NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "delay", "extras"}
@@ -53,7 +70,13 @@ NODE_EDIT_FIELDS = [
 
 
 def _read_lab_data(lab_path: str) -> dict:
-    return LabService.read_lab_json_static(lab_path)
+    try:
+        return LabService.read_lab_json_static(lab_path)
+    except ValueError as exc:
+        message = str(exc)
+        if message.startswith(LEGACY_SCHEMA_ERROR):
+            raise LegacyLabSchemaError(lab_path) from exc
+        raise
 
 
 def _user_root(current_user: UserRead) -> str:
@@ -87,7 +110,13 @@ def _default_interfaces(node_type: str, ethernet_count: int) -> list[dict]:
             name = f"Gi{index + 1}"
         else:
             name = f"eth{index}"
-        interfaces.append({"name": name, "network_id": 0})
+        interfaces.append({
+            "index": index,
+            "name": name,
+            "planned_mac": None,
+            "port_position": None,
+            "network_id": 0,
+        })
     return interfaces
 
 
@@ -96,6 +125,10 @@ def _resize_interfaces(existing: list[dict], node_type: str, ethernet_count: int
     for index, interface in enumerate(existing[:ethernet_count]):
         resized[index]["name"] = interface.get("name", resized[index]["name"])
         resized[index]["network_id"] = interface.get("network_id", 0)
+        if "planned_mac" in interface:
+            resized[index]["planned_mac"] = interface.get("planned_mac")
+        if "port_position" in interface:
+            resized[index]["port_position"] = interface.get("port_position")
     return resized
 
 
@@ -327,6 +360,8 @@ async def get_topology(
 ):
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -357,6 +392,8 @@ async def update_topology(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -404,6 +441,8 @@ async def list_nodes(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -436,6 +475,8 @@ async def node_catalog(
 ):
     try:
         _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -474,6 +515,8 @@ async def create_node(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -530,6 +573,8 @@ async def create_nodes_batch(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -592,6 +637,8 @@ async def list_interfaces(
 ):
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -635,6 +682,8 @@ async def update_node(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -696,6 +745,8 @@ async def delete_node(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -746,6 +797,8 @@ async def start_node(
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         NodeRuntimeService().start_node(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -781,6 +834,8 @@ async def stop_node(
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         NodeRuntimeService().stop_node(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -816,6 +871,8 @@ async def wipe_node(
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         NodeRuntimeService().wipe_node(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -852,6 +909,8 @@ async def node_logs(
 ):
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -891,6 +950,8 @@ async def node_console(
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
         console = NodeRuntimeService().console_info(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -929,6 +990,8 @@ async def node_telnet(
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -970,6 +1033,8 @@ async def node_rdp(
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -1024,6 +1089,8 @@ async def node_html5(
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
         console = NodeRuntimeService().console_info(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -1079,6 +1146,8 @@ async def list_networks(
 ):
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -1109,6 +1178,8 @@ async def create_network(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -1136,12 +1207,14 @@ async def create_network(
         "linkstyle": "Straight",
         "color": "",
         "label": "",
-        "visibility": 1,
+        "visibility": True,
+        "implicit": False,
         "smart": -1,
-        "count": 0,
+        "config": {},
     }
     networks[str(next_id)] = network
     LabService.write_lab_json_static(scoped_path, data)
+    network["count"] = 0
 
     return {
         "code": 200,
@@ -1161,6 +1234,8 @@ async def update_network(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -1204,6 +1279,8 @@ async def delete_network(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -1291,6 +1368,8 @@ async def get_lab(
 
     try:
         data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
     except FileNotFoundError:
         return {
             "code": 404,
