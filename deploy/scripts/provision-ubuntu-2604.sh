@@ -216,6 +216,24 @@ install_nova_ve_net_helper() {
   install -m 0440 -o root -g root "${sudoers_src}" "${sudoers_dst}"
 }
 
+ensure_instance_id() {
+  local id_dir="/etc/nova-ve"
+  local id_file="${id_dir}/instance_id"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "+ ensure ${id_file} exists (idempotent)"
+    return 0
+  fi
+  install -d -m 0755 -o root -g root "${id_dir}"
+  if [[ ! -f "${id_file}" ]] || [[ ! -s "${id_file}" ]]; then
+    cat /proc/sys/kernel/random/uuid > "${id_file}"
+    chmod 0644 "${id_file}"
+    chown root:root "${id_file}"
+    echo "Generated instance ID: $(cat "${id_file}")"
+  else
+    echo "Instance ID already exists: $(cat "${id_file}")"
+  fi
+}
+
 require_target_host
 
 run apt-get update
@@ -245,6 +263,7 @@ run systemctl enable docker
 run systemctl restart docker
 run usermod -aG docker "${APP_OWNER}"
 ensure_backend_env
+ensure_instance_id
 
 ensure_database
 

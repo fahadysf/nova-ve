@@ -8,6 +8,7 @@ from app.routers import auth, folders, labs, links, listing, networks, system, u
 from app.database import engine
 from app.config import get_settings
 from app.services.lab_lock import LabLockTimeout
+from app.services.host_net import HostNetInstanceIdMissing, get_instance_id
 
 
 def lab_lock_timeout_handler(request: Request, exc: LabLockTimeout) -> JSONResponse:
@@ -49,6 +50,19 @@ app.add_exception_handler(LabLockTimeout, lab_lock_timeout_handler)
 
 @app.on_event("startup")
 async def startup():
+    import logging
+    _logger = logging.getLogger("nova-ve")
+    try:
+        instance_id = get_instance_id()
+        _logger.info("nova-ve instance ID: %s", instance_id)
+    except HostNetInstanceIdMissing as exc:
+        _logger.critical(
+            "FATAL: instance ID not provisioned — deploy/scripts/provision-ubuntu-2604.sh did not run. "
+            "Cannot derive collision-resistant bridge names. %s",
+            exc,
+        )
+        raise SystemExit(1) from exc
+
     from sqlalchemy import text
     async with engine.connect() as conn:
         result = await conn.execute(
