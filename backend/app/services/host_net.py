@@ -11,13 +11,14 @@ lab_hash is a 16-bit value derived from blake2b(instance_id + ":" + lab_id).
 Using blake2b (not Python's built-in hash()) because hash() is salted per-process since Python 3.3.
 
 Instance ID is read from:
+  $NOVA_VE_INSTANCE_ID_FILE
   $NOVA_VE_INSTANCE_DIR/instance_id  (default dir: /etc/nova-ve)
 
-Precedence rules (file-wins with explicit env override):
-  1. If the file exists and is non-empty → use file value (authoritative).
-  2. If NOVA_VE_INSTANCE_ID is set AND NOVA_VE_INSTANCE_ID_OVERRIDE_OK=1 → use env value
-     (WARNING logged on every call).
-  3. Otherwise → raise HostNetInstanceIdMissing.
+Precedence rules:
+  1. If NOVA_VE_INSTANCE_ID_FILE is set → use that file path.
+  2. Else if NOVA_VE_INSTANCE_DIR is set → use $DIR/instance_id.
+  3. Else → use /etc/nova-ve/instance_id.
+  4. Missing or empty file → raise HostNetInstanceIdMissing.
 
 Privileged helper (US-201) is invoked via:
   sudo $NOVA_VE_HELPER_BIN <verb> [args...]
@@ -78,45 +79,45 @@ class HostNetUnknown(HostNetError):
 
 _INSTANCE_DIR_DEFAULT = "/etc/nova-ve"
 _INSTANCE_FILE_NAME = "instance_id"
+_INSTANCE_ID_FILE_ENV = "NOVA_VE_INSTANCE_ID_FILE"
+_INSTANCE_ID_DIR_ENV = "NOVA_VE_INSTANCE_DIR"
 
 
 def _instance_id_file() -> Path:
-    """Return the path to the instance_id file, honouring NOVA_VE_INSTANCE_DIR."""
-    instance_dir = os.environ.get("NOVA_VE_INSTANCE_DIR", _INSTANCE_DIR_DEFAULT)
+    """Return the instance_id path using file override, dir override, then default."""
+    instance_file = os.environ.get(_INSTANCE_ID_FILE_ENV, "").strip()
+    if instance_file:
+        return Path(instance_file)
+
+    instance_dir = os.environ.get(_INSTANCE_ID_DIR_ENV, _INSTANCE_DIR_DEFAULT)
     return Path(instance_dir) / _INSTANCE_FILE_NAME
 
 
 def get_instance_id() -> str:
-    """Return the instance ID string, applying the file-wins precedence rules.
+    """Return the instance ID string from the resolved instance-id file.
 
     Raises HostNetInstanceIdMissing if the ID cannot be resolved.
     """
     id_file = _instance_id_file()
-
-    # --- Try the file first (authoritative when present and non-empty) ----
-    if id_file.exists():
+    try:
         value = id_file.read_text(encoding="ascii").strip()
-        if value:
-            return value
-        # File exists but is empty — treat as missing.
+    except FileNotFoundError as exc:
+        raise HostNetInstanceIdMissing(
+            f"Instance ID file '{id_file}' is missing. Set {_INSTANCE_ID_FILE_ENV} to a "
+            f"readable file, set {_INSTANCE_ID_DIR_ENV} to a directory containing "
+            f"'{_INSTANCE_FILE_NAME}', or provision '{_INSTANCE_DIR_DEFAULT}/{_INSTANCE_FILE_NAME}'."
+        ) from exc
+    except OSError as exc:
+        raise HostNetInstanceIdMissing(
+            f"Instance ID file '{id_file}' could not be read: {exc}"
+        ) from exc
 
-    # --- Env-var override (only with explicit OVERRIDE_OK flag) -----------
-    env_id = os.environ.get("NOVA_VE_INSTANCE_ID", "").strip()
-    override_ok = os.environ.get("NOVA_VE_INSTANCE_ID_OVERRIDE_OK", "").strip() == "1"
+    if value:
+        return value
 
-    if env_id and override_ok:
-        logger.warning(
-            "WARNING: using NOVA_VE_INSTANCE_ID env override (file ignored); "
-            "persist via deploy script for production"
-        )
-        return env_id
-
-    # --- Neither source is usable — fail hard ----------------------------
     raise HostNetInstanceIdMissing(
-        f"Instance ID file '{id_file}' is missing or empty and no valid env override "
-        "is configured (set both NOVA_VE_INSTANCE_ID and NOVA_VE_INSTANCE_ID_OVERRIDE_OK=1 "
-        "for a temporary override, or run deploy/scripts/provision-ubuntu-2604.sh). "
-        "Cannot derive collision-resistant bridge names without a per-host instance ID."
+        f"Instance ID file '{id_file}' is empty. Populate it with a non-empty host ID "
+        f"or point {_INSTANCE_ID_FILE_ENV} at a valid override file."
     )
 
 
@@ -224,7 +225,7 @@ def _run(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
     )
 
 
-def _classify_helper_failure(
+def _classify_helper_error(
     stderr: str, returncode: int
 ) -> HostNetError:
     """Map helper exit code + stderr to a typed exception."""
@@ -235,11 +236,18 @@ def _classify_helper_failure(
         return HostNetUnknown(msg, returncode=returncode, stderr=stderr)
     # exit 1 — underlying ``ip`` invocation failed.
     lower = stderr.lower()
-    if "exists" in lower or "file exists" in lower:
+    if "file exists" in lower:
         return HostNetEEXIST(msg, returncode=returncode, stderr=stderr)
-    if "does not exist" in lower or "cannot find" in lower or "no such" in lower:
+    if (
+        "invalid argument" in lower
+        or "does not exist" in lower
+        or "no such" in lower
+    ):
         return HostNetEINVAL(msg, returncode=returncode, stderr=stderr)
-    return HostNetEINVAL(msg, returncode=returncode, stderr=stderr)
+    return HostNetUnknown(msg, returncode=returncode, stderr=stderr)
+
+
+_classify_helper_failure = _classify_helper_error
 
 
 def _invoke_helper(verb: str, *args: str) -> "subprocess.CompletedProcess[str]":
@@ -247,7 +255,7 @@ def _invoke_helper(verb: str, *args: str) -> "subprocess.CompletedProcess[str]":
     argv = [_sudo_bin(), "-n", _helper_bin(), verb, *args]
     proc = _run(argv)
     if proc.returncode != 0:
-        raise _classify_helper_failure(proc.stderr or "", proc.returncode)
+        raise _classify_helper_error(proc.stderr or "", proc.returncode)
     return proc
 
 
@@ -284,6 +292,16 @@ def bridge_del(name: str) -> None:
     Raises :class:`HostNetEINVAL` if the bridge does not exist.
     """
     _invoke_helper("bridge-del", name)
+
+
+def tap_add(name: str) -> None:
+    """Create a TAP interface via the privileged helper."""
+    _invoke_helper("tap-add", name)
+
+
+def tap_del(name: str) -> None:
+    """Delete a TAP interface via the privileged helper."""
+    _invoke_helper("tap-del", name)
 
 
 # ---------------------------------------------------------------------------
