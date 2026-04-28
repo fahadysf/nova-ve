@@ -23,7 +23,7 @@ from app.services import host_net
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.link_utils import _endpoint_key, _link_pair_key  # noqa: F401 — re-exported
-from app.services.runtime_mutex import runtime_mutex
+from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
 from app.services.ws_hub import ws_hub
 
 
@@ -39,6 +39,17 @@ class DuplicateLinkError(Exception):
     def __init__(self, existing_link: dict) -> None:
         super().__init__("link already exists")
         self.existing_link = existing_link
+
+
+class LinkContentionError(Exception):
+    """US-303 codex iter1 MEDIUM: raised when the per-(lab, node, iface)
+    runtime mutex cannot be acquired within the bounded contention
+    window (default 2.0s). The router translates this to HTTP 409.
+    """
+
+    def __init__(self, contention: RuntimeMutexContention) -> None:
+        self.contention = contention
+        super().__init__(str(contention))
 
 
 def _refcount(lab_data: dict, network_id: int) -> int:
@@ -297,21 +308,25 @@ class LinkService:
             probe = None
         mutex_lab_id = _runtime_mutex_lab_id(probe, normalized)
 
-        async with AsyncExitStack() as stack:
-            for node_id, interface_index in node_keys:
-                await stack.enter_async_context(
-                    runtime_mutex.acquire(mutex_lab_id, node_id, interface_index)
+        try:
+            async with AsyncExitStack() as stack:
+                for node_id, interface_index in node_keys:
+                    await stack.enter_async_context(
+                        runtime_mutex.acquire(mutex_lab_id, node_id, interface_index)
+                    )
+                return await self._create_link_locked(
+                    normalized=normalized,
+                    labs_dir=labs_dir,
+                    endpoint_a=endpoint_a,
+                    endpoint_b=endpoint_b,
+                    style_override=style_override,
+                    idempotency_key=idempotency_key,
+                    ws_events=ws_events,
+                    mutex_lab_id=mutex_lab_id,
                 )
-            return await self._create_link_locked(
-                normalized=normalized,
-                labs_dir=labs_dir,
-                endpoint_a=endpoint_a,
-                endpoint_b=endpoint_b,
-                style_override=style_override,
-                idempotency_key=idempotency_key,
-                ws_events=ws_events,
-                mutex_lab_id=mutex_lab_id,
-            )
+        except RuntimeMutexContention as exc:
+            # US-303 codex iter1 MEDIUM: bounded-wait timeout → 409.
+            raise LinkContentionError(exc) from exc
 
     async def _create_link_locked(
         self,
@@ -561,6 +576,7 @@ class LinkService:
         # link_service back).
         from app.services.node_runtime_service import (  # noqa: WPS433 — local import
             NodeRuntimeError,
+            NodeRuntimeQMPTimeout,
             NodeRuntimeService,
         )
 
@@ -690,7 +706,12 @@ class LinkService:
                     network_id=network_id,
                     attach_generation=attach_generation,
                 )
-        except (NodeRuntimeError, host_net.HostNetError):
+        except (NodeRuntimeError, NodeRuntimeQMPTimeout, host_net.HostNetError):
+            # US-303 codex iter1 HIGH-1: NodeRuntimeQMPTimeout is a
+            # subclass of NodeRuntimeError so the listing is technically
+            # redundant, but we list it explicitly so multi-endpoint
+            # rollback intent is grep-able. A raw transport timeout on
+            # endpoint B MUST roll back endpoint A's successful attach.
             for node_id, interface_index, kind in attached:
                 if kind == "docker":
                     host_end = host_net.veth_host_name(lab_id, node_id, interface_index)
@@ -887,17 +908,21 @@ class LinkService:
         # ``(node, iface)`` always observe the same mutex instance.
         mutex_lab_id = _runtime_mutex_lab_id(probe, normalized)
 
-        async with AsyncExitStack() as stack:
-            for node_id, interface_index in node_keys:
-                await stack.enter_async_context(
-                    runtime_mutex.acquire(mutex_lab_id, node_id, interface_index)
+        try:
+            async with AsyncExitStack() as stack:
+                for node_id, interface_index in node_keys:
+                    await stack.enter_async_context(
+                        runtime_mutex.acquire(mutex_lab_id, node_id, interface_index)
+                    )
+                return await self._delete_link_locked(
+                    normalized=normalized,
+                    labs_dir=labs_dir,
+                    link_id=link_id,
+                    mutex_lab_id=mutex_lab_id,
                 )
-            return await self._delete_link_locked(
-                normalized=normalized,
-                labs_dir=labs_dir,
-                link_id=link_id,
-                mutex_lab_id=mutex_lab_id,
-            )
+        except RuntimeMutexContention as exc:
+            # US-303 codex iter1 MEDIUM: bounded-wait timeout → 409.
+            raise LinkContentionError(exc) from exc
 
     async def _delete_link_locked(
         self,

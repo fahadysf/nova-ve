@@ -51,6 +51,39 @@ from typing import Dict, Tuple
 
 
 _MutexKey = Tuple[str, int, int]
+_NodeKey = Tuple[str, int]
+
+
+# US-303 codex iter1 MEDIUM: bounded contention window.
+DEFAULT_ACQUIRE_TIMEOUT_S = 2.0
+
+
+class RuntimeMutexContention(Exception):
+    """Raised when :meth:`RuntimeMutexRegistry.acquire` /
+    :meth:`acquire_sync` cannot grab the mutex within the bounded
+    timeout (default 2.0s).
+
+    Translated to HTTP 409 by ``link_service.create_link`` /
+    ``delete_link`` per the US-303 spec at
+    ``.omc/plans/network-runtime-wiring.md``.
+    """
+
+    def __init__(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        timeout: float,
+    ) -> None:
+        self.lab_id = str(lab_id)
+        self.node_id = int(node_id)
+        self.interface_index = int(interface_index)
+        self.timeout = float(timeout)
+        super().__init__(
+            f"Hot-attach already in progress on (node={self.node_id}, "
+            f"iface={self.interface_index}); timed out after "
+            f"{self.timeout:.1f}s"
+        )
 
 
 class RuntimeMutexRegistry:
@@ -61,15 +94,26 @@ class RuntimeMutexRegistry:
     set of in-flight ``(lab, node, iface)`` keys is bounded by the lab's
     declared topology (max 999 nodes per lab × 99 interfaces per node)
     and the cost of a stale lock is negligible.
+
+    US-303 codex iter1 HIGH-2: also exposes a per-``(lab_id, node_id)``
+    "node-scoped" lock for serializing PCIe slot allocation
+    (``query-pci`` → ``device_add`` window). Without this, two concurrent
+    attaches to *different* interfaces on the same VM can both see the
+    same free ``rpN`` slot and race. The per-iface mutex is still
+    required for the US-204b delete-vs-attach contract.
     """
 
     def __init__(self) -> None:
-        # Guards ``_locks`` itself.
+        # Guards ``_locks`` / ``_node_locks`` themselves.
         self._registry_lock = threading.Lock()
         self._locks: Dict[_MutexKey, threading.Lock] = {}
+        self._node_locks: Dict[_NodeKey, threading.Lock] = {}
 
     def _key(self, lab_id: str, node_id: int, interface_index: int) -> _MutexKey:
         return (str(lab_id), int(node_id), int(interface_index))
+
+    def _node_key(self, lab_id: str, node_id: int) -> _NodeKey:
+        return (str(lab_id), int(node_id))
 
     def _get_or_create(
         self, lab_id: str, node_id: int, interface_index: int
@@ -82,16 +126,37 @@ class RuntimeMutexRegistry:
                 self._locks[key] = lock
             return lock
 
+    def _get_or_create_node_lock(
+        self, lab_id: str, node_id: int
+    ) -> threading.Lock:
+        key = self._node_key(lab_id, node_id)
+        with self._registry_lock:
+            lock = self._node_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._node_locks[key] = lock
+            return lock
+
     @contextmanager
     def acquire_sync(
-        self, lab_id: str, node_id: int, interface_index: int
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        *,
+        timeout: float = DEFAULT_ACQUIRE_TIMEOUT_S,
     ):
         """Synchronous mutex acquire. Use from sync callers
         (``_start_docker_node``, ``_start_qemu_node``, the public
         ``attach_*_interface`` / ``detach_*_interface`` entrypoints).
+
+        ``timeout`` (seconds) bounds the wait; on expiry raises
+        :class:`RuntimeMutexContention` instead of blocking indefinitely
+        (US-303 spec).
         """
         lock = self._get_or_create(lab_id, node_id, interface_index)
-        lock.acquire()
+        if not lock.acquire(timeout=float(timeout)):
+            raise RuntimeMutexContention(lab_id, node_id, interface_index, timeout)
         try:
             yield
         finally:
@@ -99,7 +164,12 @@ class RuntimeMutexRegistry:
 
     @asynccontextmanager
     async def acquire(
-        self, lab_id: str, node_id: int, interface_index: int
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        *,
+        timeout: float = DEFAULT_ACQUIRE_TIMEOUT_S,
     ):
         """Async mutex acquire. Use from async callers
         (``link_service.create_link`` / ``delete_link``). Internally
@@ -109,6 +179,9 @@ class RuntimeMutexRegistry:
         The ``threading.Lock.acquire(blocking=False)`` poll keeps the
         event loop responsive on contention; on success we return
         immediately without an executor hop.
+
+        ``timeout`` (seconds) bounds the wait; on expiry raises
+        :class:`RuntimeMutexContention`.
         """
         import asyncio
 
@@ -123,8 +196,39 @@ class RuntimeMutexRegistry:
                 lock.release()
 
         # Contended: hop to the default executor so blocking acquire does
-        # not stall the event loop.
-        await asyncio.get_running_loop().run_in_executor(None, lock.acquire)
+        # not stall the event loop. Bounded wait per US-303 spec.
+        acquired = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: lock.acquire(timeout=float(timeout))
+        )
+        if not acquired:
+            raise RuntimeMutexContention(lab_id, node_id, interface_index, timeout)
+        try:
+            yield
+        finally:
+            lock.release()
+
+    @contextmanager
+    def acquire_node_sync(
+        self,
+        lab_id: str,
+        node_id: int,
+        *,
+        timeout: float = DEFAULT_ACQUIRE_TIMEOUT_S,
+    ):
+        """US-303 codex iter1 HIGH-2: per-``(lab, node)`` slot-allocation
+        lock. Acquire AROUND the ``query-pci → device_add`` window so
+        concurrent attaches to different interfaces on the same VM
+        cannot pick the same ``rpN`` slot.
+
+        Bounded wait (raises :class:`RuntimeMutexContention` on expiry)
+        — slot pick is a millisecond-scale operation, anything longer
+        means the QMP socket itself is wedged.
+        """
+        lock = self._get_or_create_node_lock(lab_id, node_id)
+        if not lock.acquire(timeout=float(timeout)):
+            # interface_index=-1 sentinel marks "node-scoped" contention
+            # so the message is still informative.
+            raise RuntimeMutexContention(lab_id, node_id, -1, timeout)
         try:
             yield
         finally:
@@ -153,6 +257,7 @@ class RuntimeMutexRegistry:
         """
         with self._registry_lock:
             self._locks.clear()
+            self._node_locks.clear()
 
 
 # Module-level singleton mirrors the ``link_service`` / ``mac_registry``

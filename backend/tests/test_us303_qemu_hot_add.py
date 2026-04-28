@@ -42,12 +42,13 @@ from typing import Any
 import pytest
 
 from app.services import host_net
-from app.services.link_service import LinkService
+from app.services.link_service import LinkContentionError, LinkService
 from app.services.node_runtime_service import (
     NodeRuntimeError,
+    NodeRuntimeQMPTimeout,
     NodeRuntimeService,
 )
-from app.services.runtime_mutex import runtime_mutex
+from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
 
 
 # ---------------------------------------------------------------------------
@@ -740,13 +741,17 @@ def test_us303_locked_helper_asserts_mutex_held(
         )
 
 
-def test_us303_concurrent_attach_serializes_on_same_iface(
+def test_us303_concurrent_same_iface_second_caller_gets_contention_409(
     lab_settings, monkeypatch, _instance_id
 ):
-    """Two concurrent ``attach_qemu_interface`` calls on the same
-    ``(node, iface)`` MUST serialize via the runtime mutex — they cannot
-    both run their kernel sequence simultaneously (race risk: TAP name
-    collision, slot collision).
+    """US-303 codex iter1 MEDIUM (Step 1 of test backfill): the runtime
+    mutex enforces a BOUNDED wait (default 2.0s). Two concurrent attach
+    calls on the same ``(node, iface)`` — the second one MUST raise
+    :class:`RuntimeMutexContention` once the wait expires, NOT block
+    indefinitely.
+
+    Replaces the previous ``…_serializes_on_same_iface`` test which
+    asserted the wrong (unbounded) contract.
     """
     lab_id = "labconc"
     _seed_lab(
@@ -764,51 +769,69 @@ def test_us303_concurrent_attach_serializes_on_same_iface(
     svc._qmp_client = fake_qmp
     _patch_host_net(monkeypatch)
 
-    # Hold a small barrier inside the section — first thread to enter
-    # publishes "in", second thread must wait until first exits.
     in_section = threading.Event()
     proceed = threading.Event()
-    order: list[str] = []
 
     original = svc._qmp_command
 
     def _slow_qmp(socket_path, command, arguments=None):
         if command == "device_add":
-            order.append("enter")
             in_section.set()
-            proceed.wait(timeout=2.0)
-            order.append("exit")
+            # Hold past the second caller's bounded-wait window.
+            proceed.wait(timeout=5.0)
         return original(socket_path, command, arguments)
 
     monkeypatch.setattr(svc, "_qmp_command", _slow_qmp)
 
     results: list = []
 
-    def _attach():
+    def _attach_first():
         try:
             r = svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
             results.append(("ok", r))
         except Exception as exc:  # noqa: BLE001
             results.append(("err", exc))
 
-    t1 = threading.Thread(target=_attach)
-    t2 = threading.Thread(target=_attach)
+    def _attach_second():
+        try:
+            # Bounded wait: 0.2s — much shorter than the 2.0s default
+            # so the test runs in a few hundred ms.
+            from app.services.runtime_mutex import runtime_mutex as _m
+
+            with _m.acquire_sync(lab_id, 1, 2, timeout=0.2):
+                r = svc._attach_qemu_interface_locked(
+                    lab_id, 1, network_id=5, interface_index=2
+                )
+                results.append(("ok2", r))
+        except RuntimeMutexContention as exc:
+            results.append(("contention", exc))
+        except Exception as exc:  # noqa: BLE001
+            results.append(("err", exc))
+
+    t1 = threading.Thread(target=_attach_first)
     t1.start()
     in_section.wait(timeout=2.0)
+    # First thread is now blocked in the slow device_add, holding the
+    # per-iface mutex. Launch the second attempt with a short timeout.
+    t2 = threading.Thread(target=_attach_second)
     t2.start()
-    # T2 must be blocked waiting for the mutex — it should not have
-    # entered the QMP section yet.
-    time.sleep(0.05)
-    assert order == ["enter"], (
-        f"second thread entered the critical section while the first held the mutex; order={order!r}"
-    )
+    t2.join(timeout=2.0)
+    # Now release the first thread.
     proceed.set()
     t1.join(timeout=2.0)
-    t2.join(timeout=2.0)
-    # First call succeeded; second sees the duplicate-iface guard.
+
+    # The SECOND thread must have gotten contention, NOT serialized
+    # success — we want bounded wait + 409, not unbounded blocking.
     statuses = [s for s, _ in results]
+    assert "contention" in statuses, (
+        f"second thread must hit RuntimeMutexContention within bounded wait; "
+        f"got results={results!r}"
+    )
+    contention = next(v for s, v in results if s == "contention")
+    assert isinstance(contention, RuntimeMutexContention)
+    assert contention.timeout == 0.2
+    # Sanity: first attach succeeded.
     assert "ok" in statuses
-    assert "err" in statuses
 
 
 # ---------------------------------------------------------------------------
@@ -966,3 +989,643 @@ async def test_us303_create_link_rolls_back_lab_json_on_qmp_failure(
     assert saved["links"] == [], (
         f"link must be rolled back from lab.json on QMP failure; got {saved['links']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — Step 3 (tap_add) failure
+# ---------------------------------------------------------------------------
+
+
+def test_us303_rollback_step3_tap_add_failure_runs_nothing_else(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #2: Step 3 (``tap_add``) failure must
+    leave NO kernel object behind and MUST NOT progress to step 4
+    (``link_master``), step 5 (``netdev_add``), or step 6
+    (``device_add``).
+    """
+    lab_id = "labrb3"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([])
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    def _failing_tap_add(_name):
+        raise host_net.HostNetError("tap_add EBUSY", returncode=1, stderr="")
+
+    monkeypatch.setattr(host_net, "tap_add", _failing_tap_add)
+
+    with pytest.raises(host_net.HostNetError):
+        svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
+
+    # Step 4..6 MUST NOT have run.
+    assert calls["link_master"] == []
+    assert calls["link_set_nomaster"] == []
+    assert calls["tap_del"] == []
+    cmds = [c[1] for c in fake_qmp.calls]
+    # query-pci ran (step 2 succeeded), but neither netdev_add nor
+    # device_add did.
+    assert "query-pci" in cmds
+    assert "netdev_add" not in cmds
+    assert "device_add" not in cmds
+    # Slot reservation was released so a retry can pick it up.
+    runtime = svc._runtime_record(lab_id, 1, include_stopped=True)
+    # ``boot_slots=4`` default → only the boot reservations remain.
+    assert sorted(runtime.get("allocated_slots") or []) == [0, 1, 2, 3]
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — Step 5 transport-timeout (HIGH-1 case)
+# ---------------------------------------------------------------------------
+
+
+def test_us303_rollback_step5_netdev_add_transport_timeout_runs_full_chain(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #3 / HIGH-1: a transport-level timeout
+    on ``netdev_add`` (vs an in-band command error) MUST cause rollback
+    to issue both ``device_del`` (no-op since device wasn't created) AND
+    ``netdev_del`` — we cannot tell whether QEMU applied the command
+    over the lost connection.
+
+    Without the fix, ``netdev_added`` stayed False on raw transport
+    failure and rollback skipped ``netdev_del`` entirely → leaked
+    netdev.
+    """
+    lab_id = "labrbtimeout5"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    # Inject a transport-level OSError on netdev_add — _qmp_command
+    # MUST wrap it in NodeRuntimeQMPTimeout.
+    fake_qmp.raise_on["netdev_add"] = OSError(
+        "qmp socket closed during read"
+    )
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    with pytest.raises(NodeRuntimeQMPTimeout, match="netdev_add transport"):
+        svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
+
+    expected_tap = host_net.tap_name(lab_id, 1, 2)
+    # Steps 3 + 4 ran.
+    assert calls["tap_add"] == [expected_tap]
+    assert calls["link_master"]
+    # Rollback: link_set_nomaster + tap_del.
+    assert calls["link_set_nomaster"] == [expected_tap]
+    assert calls["tap_del"] == [expected_tap]
+    # CRITICAL: rollback issued netdev_del (idempotent) because we
+    # don't know whether QEMU applied the command.
+    netdev_del = [c for c in fake_qmp.calls if c[1] == "netdev_del"]
+    assert len(netdev_del) == 1, (
+        f"transport-timeout on netdev_add MUST issue idempotent "
+        f"netdev_del; calls={fake_qmp.calls!r}"
+    )
+    assert netdev_del[0][2] == {"id": "net2"}
+    # device_add must NOT have been issued (we didn't get past step 5).
+    assert not any(c[1] == "device_add" for c in fake_qmp.calls)
+
+    # Slot reservation released.
+    runtime = svc._runtime_record(lab_id, 1, include_stopped=True)
+    assert int(7) not in (runtime.get("allocated_slots") or [])
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — Step 6 transport-timeout (HIGH-1 case)
+# ---------------------------------------------------------------------------
+
+
+def test_us303_rollback_step6_device_add_transport_timeout_runs_full_chain(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #4 / HIGH-1: a transport-level timeout
+    on ``device_add`` MUST cause rollback to issue both ``device_del``
+    AND ``netdev_del``.
+
+    Without the fix, the catch clause only ran ``netdev_del`` (assumed
+    netdev_added=True, device_added=False) and silently leaked any
+    device QEMU may have created before the connection died.
+    """
+    lab_id = "labrbtimeout6"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    fake_qmp.responses["netdev_add"] = {"return": {}}
+    fake_qmp.raise_on["device_add"] = OSError("qmp socket reset")
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    with pytest.raises(NodeRuntimeQMPTimeout, match="device_add transport"):
+        svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
+
+    # Both device_del AND netdev_del must have been issued (full chain).
+    cmds = [c[1] for c in fake_qmp.calls]
+    assert "device_del" in cmds, (
+        "transport-timeout on device_add MUST issue idempotent device_del"
+    )
+    assert "netdev_del" in cmds, (
+        "transport-timeout on device_add MUST issue netdev_del"
+    )
+    # Order: device_del before netdev_del (reverse of attach order).
+    device_del_idx = cmds.index("device_del")
+    netdev_del_idx = cmds.index("netdev_del")
+    assert device_del_idx < netdev_del_idx
+    expected_tap = host_net.tap_name(lab_id, 1, 2)
+    assert calls["link_set_nomaster"] == [expected_tap]
+    assert calls["tap_del"] == [expected_tap]
+
+
+def test_us303_rollback_step6_timeout_idempotent_when_device_del_returns_no_such_device(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #4 (idempotency): when the timeout
+    occurred BEFORE QEMU applied device_add, the follow-up rollback
+    ``device_del`` returns "no such device". Rollback must swallow this
+    and still issue ``netdev_del``.
+    """
+    lab_id = "labrbidem"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    fake_qmp.responses["netdev_add"] = {"return": {}}
+    fake_qmp.raise_on["device_add"] = OSError("qmp socket reset")
+    # device_del returns "no such device" — QEMU never applied device_add.
+    fake_qmp.responses["device_del"] = {
+        "error": {"class": "DeviceNotFound", "desc": "no device with id dev2"}
+    }
+    fake_qmp.responses["netdev_del"] = {"return": {}}
+    svc._qmp_client = fake_qmp
+    _patch_host_net(monkeypatch)
+
+    with pytest.raises(NodeRuntimeQMPTimeout):
+        svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
+
+    cmds = [c[1] for c in fake_qmp.calls]
+    # The "no such device" reply on device_del must NOT prevent
+    # netdev_del.
+    assert "device_del" in cmds
+    assert "netdev_del" in cmds
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — Multi-endpoint rollback on second-endpoint failure
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_us303_multi_endpoint_create_rolls_back_first_on_second_timeout(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #5 / HIGH-1: implicit-bridge node↔node
+    create must roll back endpoint A's successful attach when endpoint
+    B raises a transport timeout.
+
+    The pre-fix outer rollback only caught
+    ``(NodeRuntimeError, host_net.HostNetError)`` — a raw transport
+    timeout on the second endpoint bypassed rollback entirely and
+    leaked endpoint A's TAP/netdev/device.
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    lab_id = "labmulti"
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1), "2": _qemu_node(2)},
+    )
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    fake_qmp.responses["netdev_add"] = {"return": {}}
+    # device_add succeeds for the FIRST endpoint but raises a transport
+    # OSError on the SECOND endpoint. Wrap fake_qmp via a callable
+    # closure (monkeypatching __call__ on an instance does NOT work in
+    # Python — the type's __call__ is what bound calls dispatch to).
+    device_add_count = {"n": 0}
+
+    def _selective_qmp(socket_path, command, arguments=None):
+        if command == "device_add":
+            device_add_count["n"] += 1
+            if device_add_count["n"] == 2:
+                raise OSError("qmp socket closed mid-device_add")
+        return fake_qmp(socket_path, command, arguments)
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service._default_qmp_client",
+        _selective_qmp,
+    )
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=2, boot_slots=1, monkeypatch=monkeypatch)
+    # Use the selective wrapper as the per-instance client too so the
+    # test passes through the OSError → NodeRuntimeQMPTimeout wrapping
+    # in ``_qmp_command``.
+    svc._qmp_client = _selective_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    link_service = LinkService()
+    with pytest.raises(NodeRuntimeQMPTimeout):
+        await link_service.create_link(
+            lab_name,
+            {"node_id": 1, "interface_index": 2},
+            {"node_id": 2, "interface_index": 2},
+        )
+
+    # CRITICAL: endpoint A's QMP objects must have been torn down by
+    # the outer rollback in link_service. We expect a device_del +
+    # netdev_del with id derived from interface_index=2.
+    cmds = [c[1] for c in fake_qmp.calls]
+    assert "device_del" in cmds, (
+        "outer rollback MUST issue device_del for the first (succeeded) "
+        f"endpoint; calls={cmds!r}"
+    )
+    assert "netdev_del" in cmds, (
+        "outer rollback MUST issue netdev_del for the first (succeeded) "
+        f"endpoint; calls={cmds!r}"
+    )
+    # The host-side TAP for endpoint A must have been torn down too.
+    expected_tap_a = host_net.tap_name(lab_id, 1, 2)
+    assert expected_tap_a in calls["try_link_del"] or expected_tap_a in calls["link_set_nomaster"]
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — PCIe slot race regression (HIGH-2)
+# ---------------------------------------------------------------------------
+
+
+def test_us303_concurrent_attach_different_ifaces_get_different_slots(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #6 / HIGH-2: two concurrent attaches
+    to DIFFERENT interfaces on the same VM must NOT race on slot
+    allocation. Without the node-scoped lock both calls would see the
+    same free ``rpN`` from query-pci and try to attach to the same bus.
+
+    Pre-fix expected failure mode: both calls pick the same slot,
+    second device_add fails with "bus already in use" or both succeed
+    with corrupted topology.
+
+    Post-fix: the per-(lab, node) slot lock serializes the slot-pick →
+    device_add window so the two calls receive distinct slots.
+    """
+    lab_id = "labslotrace"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1, ethernet=8)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    # boot_slots=2 → rp0+rp1 occupied, rp2..rp7 free.
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, max_nics=8, boot_slots=2, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0, 1])
+    svc._qmp_client = fake_qmp
+    _patch_host_net(monkeypatch)
+
+    # Coordination: thread 1 enters the slot-pick window and holds
+    # there. Thread 2 races in concurrently — without the node-scoped
+    # lock it would call query-pci immediately and pick the SAME free
+    # slot (rp7). With the lock thread 2 blocks until thread 1 finishes
+    # and reserves its slot, then sees rp7 as taken and picks rp6.
+    thread1_in_slot_pick = threading.Event()
+    thread1_proceed = threading.Event()
+    pick_call_count = {"n": 0}
+    pick_call_lock = threading.Lock()
+
+    original_find = svc._find_free_pcie_slot
+
+    def _coordinated_find(socket_path, max_nics, *, reserved_slots=None):
+        with pick_call_lock:
+            pick_call_count["n"] += 1
+            n = pick_call_count["n"]
+        if n == 1:
+            # Thread 1 enters and signals; then waits for green light so
+            # we know thread 2 is parked at the node-lock.
+            thread1_in_slot_pick.set()
+            thread1_proceed.wait(timeout=5.0)
+        return original_find(socket_path, max_nics, reserved_slots=reserved_slots)
+
+    monkeypatch.setattr(svc, "_find_free_pcie_slot", _coordinated_find)
+
+    results: list = []
+    lock = threading.Lock()
+
+    def _attach(iface_index):
+        try:
+            r = svc.attach_qemu_interface(
+                lab_id, 1, network_id=5, interface_index=iface_index
+            )
+            with lock:
+                results.append(("ok", iface_index, r))
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                results.append(("err", iface_index, exc))
+
+    t1 = threading.Thread(target=_attach, args=(2,))
+    t1.start()
+    # Wait for thread 1 to enter the slot-pick window (already holding
+    # the node-scoped lock).
+    assert thread1_in_slot_pick.wait(timeout=2.0)
+    # Now launch thread 2 — it MUST block on the node-scoped lock.
+    t2 = threading.Thread(target=_attach, args=(3,))
+    t2.start()
+    # Give thread 2 a moment to attempt its slot-pick (it should be
+    # blocked, not progressed).
+    time.sleep(0.05)
+    with pick_call_lock:
+        # If the node lock is doing its job, only thread 1 has called
+        # _find_free_pcie_slot so far. If the lock is missing, thread 2
+        # would already have entered and picked the same rp7 → race.
+        observed_calls_before_release = pick_call_count["n"]
+    # Release thread 1.
+    thread1_proceed.set()
+    t1.join(timeout=10.0)
+    t2.join(timeout=10.0)
+
+    # CRITICAL: serialization — thread 2 MUST NOT have entered slot-pick
+    # while thread 1 was inside it. Pre-fix it would have entered
+    # immediately and the count would have been 2.
+    assert observed_calls_before_release == 1, (
+        f"node-scoped slot lock did not serialize slot-pick: thread 2 "
+        f"entered while thread 1 still held the window "
+        f"(observed_calls_before_release={observed_calls_before_release})"
+    )
+
+    statuses = [s for s, _, _ in results]
+    assert statuses.count("ok") == 2, f"both attaches must succeed; got {results!r}"
+
+    # CRITICAL: the two attaches must have received DIFFERENT slots.
+    # Pre-fix this would have been the same slot (the race).
+    slots = sorted(r["slot"] for s, _, r in results if s == "ok")
+    assert len(set(slots)) == 2, (
+        f"concurrent attaches to different ifaces on the same VM picked "
+        f"the SAME slot — slot allocation race! slots={slots!r}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — link_up failure branch
+# ---------------------------------------------------------------------------
+
+
+def test_us303_rollback_link_up_failure_cleans_master_and_tap(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #7: ``host_net.link_up`` runs between
+    step 4 (link_master) and step 5 (netdev_add) and was previously
+    untested. A failure here must roll back identically to a step-4
+    failure: undo link_master + tap_add, no QMP cleanup needed.
+    """
+    lab_id = "labrblinkup"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    def _failing_link_up(_iface):
+        raise host_net.HostNetError("link_up EBUSY", returncode=1, stderr="")
+
+    monkeypatch.setattr(host_net, "link_up", _failing_link_up)
+
+    with pytest.raises(host_net.HostNetError):
+        svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
+
+    expected_tap = host_net.tap_name(lab_id, 1, 2)
+    # Steps 3 + 4 ran (tap + master).
+    assert calls["tap_add"] == [expected_tap]
+    assert calls["link_master"]
+    # Rollback ran: link_set_nomaster + tap_del.
+    assert calls["link_set_nomaster"] == [expected_tap]
+    assert calls["tap_del"] == [expected_tap]
+    # No QMP traffic past query-pci (step 5/6 never ran).
+    cmds = [c[1] for c in fake_qmp.calls]
+    assert "netdev_add" not in cmds
+    assert "device_add" not in cmds
+    assert "netdev_del" not in cmds
+    assert "device_del" not in cmds
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — planned-MAC observability after hot-add
+# ---------------------------------------------------------------------------
+
+
+def test_us303_planned_mac_persisted_after_hot_add_for_firstmac_default(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #8: when ``interface.planned_mac`` is
+    None (default ``firstmac+offset`` case), the value computed at
+    hot-add time MUST be persisted onto ``node.interfaces[i].planned_mac``
+    so the live-MAC mismatch detector (``_read_qemu_live_mac``) has a
+    real value to compare against.
+
+    Pre-fix the default case left ``planned_mac=None`` in lab.json and
+    the mismatch detector silently compared the live MAC against an
+    empty string → always reported "confirmed" regardless of the actual
+    guest MAC.
+    """
+    lab_id = "labpm"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    svc._qmp_client = fake_qmp
+    _patch_host_net(monkeypatch)
+
+    # Hot-add interface_index=2.
+    attachment = svc.attach_qemu_interface(
+        lab_id, 1, network_id=5, interface_index=2
+    )
+    # The attachment record carries the computed planned_mac too.
+    assert attachment["planned_mac"], (
+        f"attachment must carry the planned_mac that was passed to "
+        f"device_add; got {attachment!r}"
+    )
+
+    # device_add was issued with mac=<planned_mac>.
+    device_add = next(c for c in fake_qmp.calls if c[1] == "device_add")
+    assert device_add[2].get("mac") == attachment["planned_mac"]
+
+    # CRITICAL: lab.json now has the planned_mac persisted on
+    # node.interfaces[2].planned_mac so the mismatch detector can read
+    # it back.
+    saved = json.loads((lab_settings.LABS_DIR / f"{lab_id}.json").read_text())
+    iface = saved["nodes"]["1"]["interfaces"][2]
+    assert iface["planned_mac"] == attachment["planned_mac"], (
+        f"planned_mac must be persisted on node.interfaces[2]; "
+        f"got iface={iface!r}"
+    )
+
+
+def test_us303_planned_mac_does_not_overwrite_explicit_operator_value(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #8 (idempotency): if the operator
+    explicitly set ``interface.planned_mac`` in lab.json, hot-add MUST
+    use that value AND must not overwrite it with a recomputed default.
+    """
+    lab_id = "labpmexp"
+    explicit_mac = "52:54:00:de:ad:42"
+    node = _qemu_node(1)
+    node["interfaces"][2]["planned_mac"] = explicit_mac
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": node},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    svc._qmp_client = fake_qmp
+    _patch_host_net(monkeypatch)
+
+    attachment = svc.attach_qemu_interface(
+        lab_id, 1, network_id=5, interface_index=2
+    )
+    assert attachment["planned_mac"].lower() == explicit_mac.lower()
+
+    # device_add used the explicit MAC.
+    device_add = next(c for c in fake_qmp.calls if c[1] == "device_add")
+    assert device_add[2]["mac"].lower() == explicit_mac.lower()
+
+    # lab.json still carries the operator's value (idempotent — not
+    # overwritten with a recomputed default).
+    saved = json.loads((lab_settings.LABS_DIR / f"{lab_id}.json").read_text())
+    assert saved["nodes"]["1"]["interfaces"][2]["planned_mac"] == explicit_mac
+
+
+# ---------------------------------------------------------------------------
+# Codex iter1 backfill — link_service 409 mapping for contention
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_us303_link_service_create_link_409_on_mutex_contention(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex iter1 test backfill #1 (Step 1): when the per-(lab, node,
+    iface) mutex is already held by another in-flight call,
+    ``link_service.create_link`` must raise :class:`LinkContentionError`
+    so the router can return HTTP 409.
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    lab_id = "lab409"
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    monkeypatch.setattr(
+        "app.services.node_runtime_service._default_qmp_client", fake_qmp
+    )
+    svc._qmp_client = fake_qmp
+    _patch_host_net(monkeypatch)
+
+    # Pre-acquire the mutex on another thread — release after the test
+    # has exercised the contention path.
+    proceed = threading.Event()
+    holder_started = threading.Event()
+
+    def _hold():
+        with runtime_mutex.acquire_sync(lab_id, 1, 2, timeout=5.0):
+            holder_started.set()
+            proceed.wait(timeout=5.0)
+
+    holder = threading.Thread(target=_hold)
+    holder.start()
+    assert holder_started.wait(timeout=2.0)
+
+    link_service = LinkService()
+    # Patch the mutex's acquire timeout via direct call: we cannot pass
+    # a custom timeout through link_service.create_link, so we monkey-
+    # patch the registry's default timeout for this test.
+    monkeypatch.setattr(
+        "app.services.runtime_mutex.DEFAULT_ACQUIRE_TIMEOUT_S", 0.2
+    )
+
+    try:
+        with pytest.raises(LinkContentionError):
+            await link_service.create_link(
+                lab_name,
+                {"node_id": 1, "interface_index": 2},
+                {"network_id": 5},
+            )
+    finally:
+        proceed.set()
+        holder.join(timeout=2.0)

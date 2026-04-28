@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Optional
 
 import psutil
 
@@ -62,6 +62,23 @@ def _extra_str(extras: dict[str, Any], key: str, default: str = "") -> str:
 
 
 class NodeRuntimeError(Exception):
+    pass
+
+
+class NodeRuntimeQMPTimeout(NodeRuntimeError):
+    """US-303 codex iter1 HIGH-1: raised when a QMP transport-level
+    error or socket timeout is observed while sending a command.
+
+    Subclass of :class:`NodeRuntimeError` so existing
+    ``except NodeRuntimeError`` clauses still catch it. The distinct
+    subclass lets the rollback dispatcher in
+    ``_attach_qemu_interface_locked`` recognise the "may have succeeded
+    in QEMU" case and run the FULL rollback chain (both ``device_del``
+    AND ``netdev_del``) regardless of which step the timeout fired on,
+    because after a transport-level failure we cannot tell whether QEMU
+    applied the command.
+    """
+
     pass
 
 
@@ -2027,111 +2044,179 @@ class NodeRuntimeService:
         max_nics = int(runtime.get("max_nics", 8) or 8)
 
         # ----- Step 2: query-pci → find free pcie-root-port slot --------
-        try:
-            slot = self._find_free_pcie_slot(socket_path, max_nics)
-        except NodeRuntimeError:
-            raise
-        except Exception as exc:  # noqa: BLE001 — typed below
-            raise NodeRuntimeError(
-                f"QMP query-pci failed during hot-add: {exc}"
-            ) from exc
+        # US-303 codex iter1 HIGH-2: PCIe slots are NODE-wide, not
+        # iface-local. Two concurrent attaches to different ifaces on the
+        # same VM can both call query-pci, both see the same free rpN,
+        # and both attempt device_add → race. Wrap the slot-pick →
+        # device_add window in a per-(lab, node) "node-scoped" lock so
+        # only one attach picks a slot at a time. The per-(lab, node,
+        # iface) mutex (US-204b contract) is still held by the caller
+        # for delete-vs-attach serialization on the same iface.
+        from app.services.runtime_mutex import runtime_mutex as _mutex
 
-        if slot is None:
-            raise NodeRuntimeError(
-                f"All {max_nics} hot-plug slots in use on this VM. To grow the "
-                "pool, edit the template's `capabilities.max_nics` in "
-                "backend/templates/qemu/{type}/{template}.yml and restart "
-                "this node."
-            )
-
-        tap = host_net.tap_name(lab_id, int(node_id), int(interface_index))
-        netdev_id = f"net{int(interface_index)}"
-        device_id = f"dev{int(interface_index)}"
-
-        tap_provisioned = False
-        bridge_attached = False
-        netdev_added = False
-        try:
-            # ----- Step 3: tap_add ------------------------------------
-            host_net.tap_add(tap)
-            tap_provisioned = True
-
-            # ----- Step 4: link_master (TAP -> bridge) ----------------
-            host_net.link_master(tap, bridge)
-            bridge_attached = True
-            # Bring the host side of the TAP up so traffic can flow.
+        with _mutex.acquire_node_sync(lab_id, int(node_id)):
             try:
-                host_net.link_up(tap)
-            except host_net.HostNetError:
-                # link_up failure does not leak kernel objects (TAP+master
-                # are already in place); roll back identically to step 4.
+                slot = self._find_free_pcie_slot(
+                    socket_path,
+                    max_nics,
+                    reserved_slots=runtime.get("allocated_slots") or [],
+                )
+            except NodeRuntimeError:
                 raise
-
-            # ----- Step 5: QMP netdev_add -----------------------------
-            netdev_response = self._qmp_command(
-                socket_path,
-                "netdev_add",
-                {
-                    "type": "tap",
-                    "id": netdev_id,
-                    "ifname": tap,
-                    "script": "no",
-                    "downscript": "no",
-                },
-            )
-            if isinstance(netdev_response, dict) and "error" in netdev_response:
+            except Exception as exc:  # noqa: BLE001 — typed below
                 raise NodeRuntimeError(
-                    f"QMP netdev_add failed: {netdev_response['error']}"
-                )
-            netdev_added = True
+                    f"QMP query-pci failed during hot-add: {exc}"
+                ) from exc
 
-            # ----- Step 6: QMP device_add -----------------------------
-            device_args: dict[str, Any] = {
-                "driver": nic_model,
-                "id": device_id,
-                "netdev": netdev_id,
-                "bus": f"rp{slot}",
-            }
-            if planned_mac:
-                device_args["mac"] = planned_mac
-            device_response = self._qmp_command(
-                socket_path, "device_add", device_args
-            )
-            if isinstance(device_response, dict) and "error" in device_response:
+            if slot is None:
                 raise NodeRuntimeError(
-                    f"QMP device_add failed: {device_response['error']}"
+                    f"All {max_nics} hot-plug slots in use on this VM. To grow the "
+                    "pool, edit the template's `capabilities.max_nics` in "
+                    "backend/templates/qemu/{type}/{template}.yml and restart "
+                    "this node."
                 )
-        except Exception:
-            # 6-step rollback per plan §US-303. Each cleanup is wrapped in
-            # try/except so a rollback failure logs but does not mask the
-            # original error.
-            if netdev_added:
+
+            # Reserve the slot in-runtime BEFORE issuing device_add so a
+            # concurrent attach that grabs the node-lock immediately
+            # after we release it sees the slot as taken even though
+            # query-pci has not yet observed it. We move pending →
+            # final on success or strip on rollback.
+            with self._lock:
+                allocated_slots = list(runtime.get("allocated_slots") or [])
+                if int(slot) not in allocated_slots:
+                    allocated_slots.append(int(slot))
+                runtime["allocated_slots"] = allocated_slots
+
+            tap = host_net.tap_name(lab_id, int(node_id), int(interface_index))
+            netdev_id = f"net{int(interface_index)}"
+            device_id = f"dev{int(interface_index)}"
+
+            tap_provisioned = False
+            bridge_attached = False
+            netdev_added = False
+            device_added = False
+            slot_reserved_in_runtime = True
+            timeout_seen = False
+            try:
+                # ----- Step 3: tap_add ------------------------------------
+                host_net.tap_add(tap)
+                tap_provisioned = True
+
+                # ----- Step 4: link_master (TAP -> bridge) ----------------
+                host_net.link_master(tap, bridge)
+                bridge_attached = True
+                # Bring the host side of the TAP up so traffic can flow.
+                host_net.link_up(tap)
+
+                # ----- Step 5: QMP netdev_add -----------------------------
                 try:
-                    self._qmp_command(
-                        socket_path, "netdev_del", {"id": netdev_id}
+                    netdev_response = self._qmp_command(
+                        socket_path,
+                        "netdev_add",
+                        {
+                            "type": "tap",
+                            "id": netdev_id,
+                            "ifname": tap,
+                            "script": "no",
+                            "downscript": "no",
+                        },
                     )
-                except Exception:  # noqa: BLE001
-                    _logger.exception(
-                        "rollback: QMP netdev_del(%s) failed", netdev_id
+                except NodeRuntimeQMPTimeout:
+                    # Transport timeout: QEMU may already have created
+                    # the netdev — assume YES so rollback issues
+                    # netdev_del idempotently.
+                    netdev_added = True
+                    timeout_seen = True
+                    raise
+                if isinstance(netdev_response, dict) and "error" in netdev_response:
+                    raise NodeRuntimeError(
+                        f"QMP netdev_add failed: {netdev_response['error']}"
                     )
-            if bridge_attached:
+                netdev_added = True
+
+                # ----- Step 6: QMP device_add -----------------------------
+                device_args: dict[str, Any] = {
+                    "driver": nic_model,
+                    "id": device_id,
+                    "netdev": netdev_id,
+                    "bus": f"rp{slot}",
+                }
+                if planned_mac:
+                    device_args["mac"] = planned_mac
                 try:
-                    host_net.link_set_nomaster(tap)
-                except Exception:  # noqa: BLE001
-                    _logger.exception(
-                        "rollback: link_set_nomaster(%s) failed", tap
+                    device_response = self._qmp_command(
+                        socket_path, "device_add", device_args
                     )
-            if tap_provisioned:
-                try:
-                    host_net.tap_del(tap)
-                except Exception:  # noqa: BLE001
+                except NodeRuntimeQMPTimeout:
+                    # Transport timeout: QEMU may already have created
+                    # the device — assume YES so rollback issues
+                    # device_del idempotently.
+                    device_added = True
+                    timeout_seen = True
+                    raise
+                if isinstance(device_response, dict) and "error" in device_response:
+                    raise NodeRuntimeError(
+                        f"QMP device_add failed: {device_response['error']}"
+                    )
+                device_added = True
+            except Exception:
+                # 6-step rollback per plan §US-303. Each cleanup is wrapped in
+                # try/except so a rollback failure logs but does not mask the
+                # original error.
+                #
+                # US-303 codex iter1 HIGH-1: on a transport-level
+                # timeout, we cannot tell whether QEMU applied the
+                # command. We must run BOTH device_del and netdev_del
+                # idempotently — if QEMU never applied the command, the
+                # *_del will return "no such device" / "no such netdev"
+                # and we swallow it (the inner try/except).
+                if device_added:
                     try:
-                        host_net.try_link_del(tap)
+                        self._qmp_command(
+                            socket_path, "device_del", {"id": device_id}
+                        )
                     except Exception:  # noqa: BLE001
                         _logger.exception(
-                            "rollback: tap_del(%s) failed", tap
+                            "rollback: QMP device_del(%s) failed", device_id
                         )
-            raise
+                if netdev_added:
+                    try:
+                        self._qmp_command(
+                            socket_path, "netdev_del", {"id": netdev_id}
+                        )
+                    except Exception:  # noqa: BLE001
+                        _logger.exception(
+                            "rollback: QMP netdev_del(%s) failed", netdev_id
+                        )
+                if bridge_attached:
+                    try:
+                        host_net.link_set_nomaster(tap)
+                    except Exception:  # noqa: BLE001
+                        _logger.exception(
+                            "rollback: link_set_nomaster(%s) failed", tap
+                        )
+                if tap_provisioned:
+                    try:
+                        host_net.tap_del(tap)
+                    except Exception:  # noqa: BLE001
+                        try:
+                            host_net.try_link_del(tap)
+                        except Exception:  # noqa: BLE001
+                            _logger.exception(
+                                "rollback: tap_del(%s) failed", tap
+                            )
+                # Release the pending slot reservation so a retry can
+                # pick it up.
+                if slot_reserved_in_runtime:
+                    with self._lock:
+                        allocated = list(runtime.get("allocated_slots") or [])
+                        runtime["allocated_slots"] = [
+                            s for s in allocated if int(s) != int(slot)
+                        ]
+                # Suppress the unused-flag lint warning while keeping
+                # the timeout context for future debugging.
+                _ = timeout_seen
+                raise
 
         # ----- US-204b: bump current_attach_generation ----------------
         new_generation = self._bump_interface_attach_generation(
@@ -2146,11 +2231,14 @@ class NodeRuntimeService:
             "slot": int(slot),
             "nic_model": nic_model,
             "attach_generation": new_generation,
+            "planned_mac": planned_mac or "",
         }
 
         # Persist the new attachment + tap onto the runtime record so
         # stop-time cleanup sweeps the TAP (matches initial-attach
-        # contract at ``_stop_qemu_runtime``).
+        # contract at ``_stop_qemu_runtime``). The slot was already
+        # reserved during the slot-pick window above; we just add the
+        # attachment record + TAP name here.
         with self._lock:
             attachments_list = list(runtime.get("interface_attachments") or [])
             attachments_list.append(new_attachment)
@@ -2159,11 +2247,29 @@ class NodeRuntimeService:
             if tap not in tap_names:
                 tap_names.append(tap)
             runtime["tap_names"] = tap_names
-            allocated_slots = list(runtime.get("allocated_slots") or [])
-            if int(slot) not in allocated_slots:
-                allocated_slots.append(int(slot))
-            runtime["allocated_slots"] = allocated_slots
         self._persist_runtime(runtime)
+
+        # US-303 codex iter1: persist the computed planned_mac onto
+        # ``interface.planned_mac`` in lab.json so the live-MAC mismatch
+        # detection path (``_read_qemu_live_mac``) can compare against
+        # the value we actually passed to device_add. Without this, the
+        # ``firstmac`` default case would leave ``interface.planned_mac``
+        # empty and the mismatch detector would have nothing to compare
+        # against.
+        if planned_mac:
+            try:
+                self._persist_planned_mac_to_lab_json(
+                    lab_id, int(node_id), int(interface_index), planned_mac
+                )
+            except Exception:  # noqa: BLE001 — best-effort, observability only
+                _logger.exception(
+                    "failed to persist planned_mac=%s for "
+                    "lab=%s node=%s iface=%s",
+                    planned_mac,
+                    lab_id,
+                    node_id,
+                    interface_index,
+                )
 
         return new_attachment
 
@@ -2173,6 +2279,14 @@ class NodeRuntimeService:
         """Send a QMP command with optional arguments and return the parsed
         response dict. Wraps :func:`_default_qmp_client` so tests can
         monkey-patch the underlying transport via ``self._qmp_client``.
+
+        US-303 codex iter1 HIGH-1: socket-level errors / timeouts
+        (``OSError``, :class:`socket.timeout`) are wrapped in
+        :class:`NodeRuntimeQMPTimeout` so the hot-add rollback dispatcher
+        can recognise the ambiguous "may have applied in QEMU" case and
+        run the FULL idempotent rollback chain. In-band command errors
+        (``response["error"]``) are still returned verbatim — they are
+        unambiguous failures.
         """
         # The default_qmp_client signature ``(socket_path, command)`` does
         # not accept arguments; for commands needing arguments we go
@@ -2182,15 +2296,28 @@ class NodeRuntimeService:
         # ``(socket_path, command, arguments)`` to capture both pieces.
         client = self._qmp_client
         try:
-            # Test-injected client may accept a 3rd positional arg.
-            return client(socket_path, command, arguments) if arguments else client(socket_path, command)  # type: ignore[call-arg]
-        except TypeError:
-            # Fall back to default 2-arg signature: encode arguments inline
-            # via the bare socket protocol.
-            return _qmp_send_with_args(socket_path, command, arguments)
+            try:
+                # Test-injected client may accept a 3rd positional arg.
+                return client(socket_path, command, arguments) if arguments else client(socket_path, command)  # type: ignore[call-arg]
+            except TypeError:
+                # Fall back to default 2-arg signature: encode arguments inline
+                # via the bare socket protocol.
+                return _qmp_send_with_args(socket_path, command, arguments)
+        except (OSError, socket.timeout) as exc:
+            # Transport-level failure: socket closed mid-flight, host
+            # network blip, command exceeded ``sock.settimeout``. We do
+            # NOT know whether QEMU applied the command, so the caller
+            # MUST run the full rollback chain.
+            raise NodeRuntimeQMPTimeout(
+                f"QMP {command} transport error on {socket_path}: {exc}"
+            ) from exc
 
     def _find_free_pcie_slot(
-        self, socket_path: str, max_nics: int
+        self,
+        socket_path: str,
+        max_nics: int,
+        *,
+        reserved_slots: list[int] | None = None,
     ) -> int | None:
         """Scan ``query-pci`` for the highest free pcie-root-port (US-301
         policy: hot-add scans descending so additions never collide with
@@ -2198,6 +2325,14 @@ class NodeRuntimeService:
 
         Returns the slot index (0-based, matching ``rp{i}`` ids) or
         ``None`` if every pre-allocated slot is occupied.
+
+        ``reserved_slots`` (US-303 codex iter1 HIGH-2) lists slots
+        already reserved in-runtime by an earlier (still-pending) hot-add
+        on this same VM. We treat them as occupied even if ``query-pci``
+        has not yet observed the device — covers the window between
+        slot-pick and ``device_add`` where two concurrent attaches on
+        the same VM (different ifaces) would otherwise pick the same
+        slot.
 
         QMP ``query-pci`` returns a list of bus dicts; each bus has
         ``devices`` with the actual NIC devices, plus ``pci_bridge`` for
@@ -2234,6 +2369,15 @@ class NodeRuntimeService:
                                 occupied.add(int(qdev_id[2:]))
                             except ValueError:
                                 continue
+
+        # Treat in-runtime reservations as occupied so a concurrent
+        # attach that has already picked a slot but not yet flushed
+        # device_add to QEMU does not collide.
+        for reserved in reserved_slots or []:
+            try:
+                occupied.add(int(reserved))
+            except (TypeError, ValueError):
+                continue
 
         # Descending scan: pick the highest free slot.
         for slot_index in range(int(max_nics) - 1, -1, -1):
@@ -2331,6 +2475,67 @@ class NodeRuntimeService:
             first_mac = node.get("firstmac") or extras.get("firstmac")
             return self._mac_for_index(first_mac, interface_index)
         return ""
+
+    def _persist_planned_mac_to_lab_json(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        planned_mac: str,
+    ) -> None:
+        """US-303 codex iter1: persist the computed ``planned_mac`` onto
+        ``node.interfaces[i].planned_mac`` in lab.json so live-MAC
+        mismatch detection (``_read_qemu_live_mac``) can compare against
+        the value we actually passed to ``device_add``.
+
+        Without this, the ``firstmac`` default case leaves
+        ``interface.planned_mac = None`` and the mismatch detector
+        returns ``state="confirmed"`` against an empty string regardless
+        of what the guest reports.
+
+        Idempotent: a non-empty existing value is left untouched (the
+        operator may have set an explicit MAC; we never overwrite it).
+        """
+        from app.services.lab_lock import lab_lock  # local import: cycle-free
+        from app.services.lab_service import LabService  # noqa: WPS433
+
+        try:
+            settings = get_settings()
+        except Exception:  # noqa: BLE001
+            return
+        labs_dir = Path(settings.LABS_DIR)
+        if not labs_dir.exists():
+            return
+
+        # Find the lab.json file whose ``id`` matches lab_id.
+        target: Optional[Path] = None
+        for path in labs_dir.glob("*.json"):
+            try:
+                data = LabService.read_lab_json_static(path.name)
+            except Exception:  # noqa: BLE001
+                continue
+            if str(data.get("id") or "") == lab_id:
+                target = path
+                break
+        if target is None:
+            return
+
+        with lab_lock(target.name, labs_dir):
+            data = LabService.read_lab_json_static(target.name)
+            node = data.get("nodes", {}).get(str(int(node_id)))
+            if not isinstance(node, dict):
+                return
+            iface = self._lookup_interface(node, int(interface_index))
+            if not isinstance(iface, dict):
+                return
+            existing = iface.get("planned_mac")
+            if existing:  # non-empty: respect operator-supplied MAC.
+                return
+            iface["planned_mac"] = str(planned_mac)
+            # Strip the read-time topology shim so the writer does not
+            # regenerate links[] from a stale snapshot.
+            data.pop("topology", None)
+            LabService.write_lab_json_static(target.name, data)
 
     def _docker_force_remove(self, docker_binary: str, container_name: str) -> None:
         """Force-remove a container, swallowing any error (best-effort cleanup)."""
