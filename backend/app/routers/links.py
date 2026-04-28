@@ -13,7 +13,11 @@ from fastapi.responses import JSONResponse
 from app.dependencies import get_current_user
 from app.schemas.user import UserRead
 from app.services.lab_service import LEGACY_SCHEMA_ERROR
-from app.services.link_service import DuplicateLinkError, link_service
+from app.services.link_service import (
+    DuplicateLinkError,
+    LinkContentionError,
+    link_service,
+)
 
 
 router = APIRouter(prefix="/api/labs", tags=["links"])
@@ -108,6 +112,17 @@ async def create_link(
                 "existing_link": exc.existing_link,
             },
         )
+    except LinkContentionError as exc:
+        # US-303 codex iter1 MEDIUM: bounded mutex wait expired (default
+        # 2.0s); surface as 409 so the client can retry deliberately.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": 409,
+                "status": "fail",
+                "message": str(exc),
+            },
+        )
     except KeyError as exc:
         return JSONResponse(
             status_code=404,
@@ -153,7 +168,18 @@ async def delete_link(
     pre_links = data.get("links", []) or []
     existed = any(str(l.get("id")) == str(link_id) for l in pre_links)
 
-    await link_service.delete_link(lab_path, link_id)
+    try:
+        await link_service.delete_link(lab_path, link_id)
+    except LinkContentionError as exc:
+        # US-303 codex iter1 MEDIUM: bounded mutex wait expired.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": 409,
+                "status": "fail",
+                "message": str(exc),
+            },
+        )
 
     if not existed:
         return {
