@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from app.dependencies import get_current_user
 from app.schemas.user import UserRead
 from app.services.lab_service import LEGACY_SCHEMA_ERROR
-from app.services.link_service import link_service
+from app.services.link_service import DuplicateLinkError, link_service
 
 
 router = APIRouter(prefix="/api/labs", tags=["links"])
@@ -97,6 +97,16 @@ async def create_link(
             to_endpoint,
             style_override=style_override,
             idempotency_key=idempotency_key,
+        )
+    except DuplicateLinkError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": 409,
+                "status": "fail",
+                "message": "link already exists",
+                "existing_link": exc.existing_link,
+            },
         )
     except KeyError as exc:
         return JSONResponse(

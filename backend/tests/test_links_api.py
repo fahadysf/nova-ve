@@ -482,3 +482,112 @@ async def test_create_link_acquires_lock_and_publishes_ws_event(
     assert publish_mock.await_count >= 1
     # Lock file should exist.
     assert (patched_route_settings.LABS_DIR / f"{lab_name}.lock").exists()
+
+
+# ---------------------------------------------------------------------------
+# US-102 — duplicate {from,to} pair detection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_duplicate_link_returns_409(
+    patched_route_settings, auth_override, reset_idempotency, ws_recorder,
+):
+    """Second POST with identical endpoints must return 409 + existing_link."""
+    lab_name = _seed_lab(
+        patched_route_settings.LABS_DIR,
+        nodes={"1": _node(1)},
+        networks={"5": _explicit_network(5, "lan")},
+    )
+    body = {"from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 5}}
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp1 = await c.post(f"/api/labs/{lab_name}/links", json=body)
+        assert resp1.status_code == 201
+        created_id = resp1.json()["link"]["id"]
+
+        resp2 = await c.post(f"/api/labs/{lab_name}/links", json=body)
+
+    assert resp2.status_code == 409
+    body2 = resp2.json()
+    assert body2["code"] == 409
+    assert body2["status"] == "fail"
+    assert body2["message"] == "link already exists"
+    assert body2["existing_link"]["id"] == created_id
+
+    # Lab must still contain only one link.
+    saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
+    assert len(saved["links"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_link_symmetric_pair_returns_409(
+    patched_route_settings, auth_override, reset_idempotency, ws_recorder,
+):
+    """B→A after A→B is detected as a duplicate (bidirectional dedup)."""
+    lab_name = _seed_lab(
+        patched_route_settings.LABS_DIR,
+        nodes={"1": _node(1)},
+        networks={"5": _explicit_network(5, "lan")},
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp1 = await c.post(
+            f"/api/labs/{lab_name}/links",
+            json={"from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 5}},
+        )
+        assert resp1.status_code == 201
+        created_id = resp1.json()["link"]["id"]
+
+        # Swap from/to — logically the same port pair.
+        resp2 = await c.post(
+            f"/api/labs/{lab_name}/links",
+            json={"from": {"network_id": 5}, "to": {"node_id": 1, "interface_index": 0}},
+        )
+
+    assert resp2.status_code == 409
+    body2 = resp2.json()
+    assert body2["existing_link"]["id"] == created_id
+
+    saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
+    assert len(saved["links"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_duplicate_node_to_node_link_returns_409(
+    patched_route_settings, auth_override, reset_idempotency, ws_recorder,
+):
+    """Duplicate node↔network pair pre-seeded in links[] is rejected with 409."""
+    # Pre-seed a lab with an existing node→network link so the dedup check fires
+    # against links already stored in the file.
+    lab_name = _seed_lab(
+        patched_route_settings.LABS_DIR,
+        nodes={"1": _node(1)},
+        networks={"3": _explicit_network(3, "core")},
+        links=[
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 3},
+                "style_override": None, "label": "", "color": "", "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            }
+        ],
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Duplicate of the pre-existing link.
+        resp = await c.post(
+            f"/api/labs/{lab_name}/links",
+            json={"from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 3}},
+        )
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["code"] == 409
+    assert body["message"] == "link already exists"
+    assert body["existing_link"]["id"] == "lnk_001"
+
+    # Link count must stay at 1.
+    saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
+    assert len(saved["links"]) == 1

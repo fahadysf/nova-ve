@@ -23,6 +23,28 @@ from app.services.ws_hub import ws_hub
 _IDEMPOTENCY_CACHE_MAX = 1024
 
 
+class DuplicateLinkError(Exception):
+    """Raised when a link with the same canonical port pair already exists."""
+
+    def __init__(self, existing_link: dict) -> None:
+        super().__init__("link already exists")
+        self.existing_link = existing_link
+
+
+def _endpoint_key(ep: dict) -> tuple:
+    """Return a hashable key for a normalised endpoint dict."""
+    if "network_id" in ep:
+        return ("network", int(ep["network_id"]))
+    return ("node", int(ep["node_id"]), int(ep.get("interface_index", 0)))
+
+
+def _link_pair_key(ep_a: dict, ep_b: dict) -> tuple:
+    """Return a canonical (order-independent) key for a {from, to} pair."""
+    ka = _endpoint_key(ep_a)
+    kb = _endpoint_key(ep_b)
+    return (min(ka, kb), max(ka, kb))
+
+
 def _refcount(lab_data: dict, network_id: int) -> int:
     """Count link endpoints referencing ``network_id``."""
     return sum(
@@ -227,6 +249,22 @@ class LinkService:
             data = LabService.read_lab_json_static(normalized)
             networks = data.setdefault("networks", {})
             links = data.setdefault("links", [])
+
+            # Duplicate detection (US-102): treat {a,b} and {b,a} as equivalent.
+            target_key = _link_pair_key(endpoint_a, endpoint_b)
+            for existing in links:
+                ex_from = existing.get("from")
+                ex_to = existing.get("to")
+                if isinstance(ex_from, dict) and isinstance(ex_to, dict):
+                    try:
+                        ex_key = _link_pair_key(
+                            _normalize_endpoint(ex_from),
+                            _normalize_endpoint(ex_to),
+                        )
+                    except (ValueError, TypeError):
+                        continue
+                    if ex_key == target_key:
+                        raise DuplicateLinkError(_link_with_state(existing))
 
             link_payload: dict
             network_payload: Optional[dict] = None
