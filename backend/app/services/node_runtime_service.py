@@ -2273,6 +2273,487 @@ class NodeRuntimeService:
 
         return new_attachment
 
+    # ------------------------------------------------------------------
+    # US-304 — QMP-driven hot-remove NIC for running QEMU nodes
+    # ------------------------------------------------------------------
+
+    def detach_qemu_interface(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        *,
+        lab_path: str | None = None,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """US-304 PUBLIC hot-remove NIC for a running QEMU node.
+
+        Acquires the per-``(lab_id, node_id, interface_index)`` mutex
+        internally (mirrors :meth:`attach_qemu_interface`) and delegates
+        to :meth:`_detach_qemu_interface_locked`. Used by callers that do
+        NOT already hold the mutex on entry (e.g. direct API entrypoints).
+        ``link_service.delete_link`` instead acquires the mutex itself
+        and calls the locked helper directly to avoid double-acquisition.
+
+        ``lab_path`` is accepted as a forward-compat hook for log
+        contextualisation; the detach itself is fully driven by the
+        in-process runtime registry (no lab.json read required).
+
+        ``expected_generation`` mirrors the US-204b freshness contract on
+        the docker detach path: when supplied, it is compared against the
+        runtime's per-interface ``current_attach_generation`` before any
+        QMP traffic. A stale rollback (older generation than the live
+        attachment) returns ``state='stale_noop'`` without issuing
+        ``device_del`` — preventing a stale delete/rollback from tearing
+        down a NEWER QEMU NIC that reuses the same ``dev{iface}`` /
+        ``net{iface}`` QMP IDs.
+
+        Returns a result dict whose ``state`` field is one of:
+          * ``"detached"`` — device gone from QMP within the bounded
+            poll window; ``netdev_del`` + ``tap_del`` were issued.
+          * ``"forced"`` — guest never ejected the device; the TAP was
+            detached from the bridge (kernel-side stop) but ``netdev_del``
+            and ``tap_del`` were intentionally skipped because the QMP
+            side still holds the device.
+          * ``"absent"`` — no runtime record / no matching attachment
+            (idempotent double-delete).
+          * ``"stale_noop"`` — ``expected_generation`` did not match the
+            current runtime generation; nothing was changed.
+        """
+        from app.services.runtime_mutex import runtime_mutex
+
+        with runtime_mutex.acquire_sync(lab_id, node_id, interface_index):
+            return self._detach_qemu_interface_locked(
+                lab_id,
+                node_id,
+                interface_index,
+                lab_path=lab_path,
+                expected_generation=expected_generation,
+            )
+
+    def _detach_qemu_interface_locked(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        *,
+        lab_path: str | None = None,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """US-304 PRIVATE hot-remove NIC. Mutex MUST be held.
+
+        Sequence (per plan §US-304 acceptance criteria):
+
+          1. QMP ``device_del id=dev{interface_index}``. If QEMU returns
+             ``DeviceNotFound`` (race A — delete arrived before add
+             completed), sleep 0.5s and retry once; if still
+             ``DeviceNotFound``, treat as already-detached success
+             (idempotent double-delete).
+          2. Bounded poll: ``query-pci`` every 500ms for up to 8s
+             (16 iterations). Device is "gone" when no
+             ``qdev_id == f"dev{interface_index}"`` appears anywhere in
+             the bus->devices arrays.
+          3a. Happy path (gone within timeout): QMP ``netdev_del`` ->
+              ``host_net.tap_del(tap_name)``.
+          3b. Forced fallback (still present at 8s):
+              ``host_net.link_set_nomaster(tap_name)`` so packets stop
+              flowing kernel-side; do NOT call ``tap_del`` or
+              ``netdev_del`` because the QEMU side still references the
+              device until guest reboot. Publish a ``node_warning`` WS
+              event so the UI can surface "restart node to fully clean".
+
+        Transport-level errors (``NodeRuntimeQMPTimeout``) on
+        ``device_del``, ``netdev_del``, or ``query-pci`` propagate — they
+        are NOT swallowed as forced-fallback (transport timeout != guest
+        didn't eject).
+
+        Generation tokens: bump ``current_attach_generation`` for this
+        interface AFTER the kernel objects are removed (happy path) so a
+        stale concurrent attach doesn't race a freshly torn-down NIC.
+        Forced fallback also bumps the generation because lab.json's
+        ``links[]`` will be the source of truth and the kernel-side
+        object is no longer reachable.
+        """
+        from app.services.runtime_mutex import runtime_mutex
+
+        # Defensive contract: catches accidental bypass of the public API.
+        assert runtime_mutex.is_held(lab_id, node_id, interface_index), (
+            f"_detach_qemu_interface_locked called without the per-"
+            f"(lab, node, iface) mutex held for "
+            f"({lab_id!r}, {node_id}, {interface_index}); use the public "
+            f"detach_qemu_interface(...) entrypoint or acquire "
+            f"runtime_mutex.acquire(...) yourself."
+        )
+
+        runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
+        if runtime is None:
+            # No runtime record means the node already stopped or never
+            # started — nothing to detach. Treat as idempotent absent.
+            return {"state": "absent", "reason": "no runtime record"}
+        if runtime.get("kind") != "qemu":
+            # Wrong runtime kind — caller (link_service) routes by kind so
+            # this should never happen, but keep it defensive.
+            return {
+                "state": "absent",
+                "reason": f"runtime kind={runtime.get('kind')!r}, expected 'qemu'",
+            }
+
+        # Locate the matching attachment record. Missing means the iface
+        # is already detached — idempotent no-op.
+        attachments = runtime.get("interface_attachments") or []
+        target = None
+        target_index = None
+        for index, entry in enumerate(attachments):
+            if int(entry.get("interface_index", -1)) == int(interface_index):
+                target = entry
+                target_index = index
+                break
+        if target is None:
+            return {"state": "absent", "reason": "no attachment record"}
+
+        # US-204b generation-token check (mirrors
+        # :meth:`_detach_docker_interface_locked`). Use the interface's
+        # ``current_attach_generation`` (the freshness oracle) — NOT the
+        # attachment's own ``attach_generation`` — so a fresh re-attach
+        # (which bumped ``current_attach_generation`` past the caller's
+        # ``expected_generation``) correctly invalidates a stale rollback.
+        # Without this guard, a stale delete/rollback could tear down a
+        # NEWER QEMU NIC because QMP IDs reuse ``dev{iface}`` /
+        # ``net{iface}`` deterministically.
+        current_gen = self._interface_attach_generation(
+            runtime, int(interface_index)
+        )
+        if expected_generation is not None and int(expected_generation) != int(current_gen):
+            _logger.info(
+                "stale qemu detach for gen %s (current %s), ignoring "
+                "(lab=%s node=%s iface=%s)",
+                expected_generation,
+                current_gen,
+                lab_id,
+                node_id,
+                interface_index,
+            )
+            return {
+                "state": "stale_noop",
+                "expected_generation": int(expected_generation),
+                "current_attach_generation": int(current_gen),
+            }
+
+        socket_path = runtime.get("qmp_socket") or ""
+        if not socket_path:
+            work_dir = runtime.get("work_dir")
+            socket_path = str(Path(work_dir) / "qmp.sock") if work_dir else ""
+        if not socket_path:
+            raise NodeRuntimeError(
+                f"Cannot hot-detach interface on node {node_id}: QMP socket "
+                "path is not set on the runtime record."
+            )
+
+        device_id = f"dev{int(interface_index)}"
+        netdev_id = f"net{int(interface_index)}"
+        tap = target.get("tap_name") or host_net.tap_name(
+            lab_id, int(node_id), int(interface_index)
+        )
+        slot = target.get("slot")
+
+        # ----- Step 1: device_del with race-A retry --------------------
+        device_already_gone = False
+        device_del_response = self._qmp_command(
+            socket_path, "device_del", {"id": device_id}
+        )
+        if (
+            isinstance(device_del_response, dict)
+            and isinstance(device_del_response.get("error"), dict)
+        ):
+            err = device_del_response["error"]
+            err_class = str(err.get("class", "")) if isinstance(err, dict) else ""
+            if err_class == "DeviceNotFound":
+                # Race A: ``device_del`` arrived before the create-side
+                # flushed ``device_add`` to ``query-pci`` visibility.
+                # Plan §US-304 acceptance criteria: "wait up to 2s for
+                # the create-side lock to finish, then retry once."
+                #
+                # Codex hotfix MEDIUM-1: the previous implementation was
+                # a fixed ``sleep(0.5)`` + one retry. If ``device_add``
+                # visibility lagged past 500ms, that classified the NIC
+                # as "already gone" and tore down ``netdev`` / TAP while
+                # the device was about to appear.
+                #
+                # Real bounded wait: poll ``query-pci`` every 100ms for
+                # the device to APPEAR, up to 2.0s total. As soon as it
+                # is visible (or the budget expires), retry ``device_del``
+                # exactly once. Treat second-call ``DeviceNotFound`` as
+                # idempotent success (the device was never created).
+                _RACE_A_BUDGET_S = 2.0
+                _RACE_A_CADENCE_S = 0.1
+                _race_a_iters = max(1, int(_RACE_A_BUDGET_S / _RACE_A_CADENCE_S))
+                for _race_a_i in range(_race_a_iters):
+                    if not self._qemu_device_gone(socket_path, device_id):
+                        # Device became visible — break and retry.
+                        break
+                    time.sleep(_RACE_A_CADENCE_S)
+                retry_response = self._qmp_command(
+                    socket_path, "device_del", {"id": device_id}
+                )
+                if (
+                    isinstance(retry_response, dict)
+                    and isinstance(retry_response.get("error"), dict)
+                    and str(retry_response["error"].get("class", ""))
+                    == "DeviceNotFound"
+                ):
+                    device_already_gone = True
+                elif (
+                    isinstance(retry_response, dict)
+                    and isinstance(retry_response.get("error"), dict)
+                ):
+                    raise NodeRuntimeError(
+                        f"QMP device_del retry failed: {retry_response['error']}"
+                    )
+                # else: retry succeeded — fall through to bounded poll.
+            else:
+                raise NodeRuntimeError(
+                    f"QMP device_del failed: {err}"
+                )
+
+        # ----- Step 2: bounded poll for device removal -----------------
+        # 16 iterations * 500ms = 8s ceiling per plan §US-304.
+        device_gone = device_already_gone
+        if not device_gone:
+            for _iteration in range(16):
+                if self._qemu_device_gone(socket_path, device_id):
+                    device_gone = True
+                    break
+                time.sleep(0.5)
+
+        forced_fallback = False
+        if device_gone:
+            # ----- Step 3a: happy path — netdev_del + tap_del ----------
+            # Order: issue netdev_del first; on transport timeout we
+            # STILL run tap_del so the kernel TAP doesn't leak (the
+            # host-side cleanup is not impacted by a QMP transport
+            # blip). The exception is re-raised AFTER the host-side
+            # cleanup. In-band ``netdev_del`` errors that look like
+            # "no such netdev" are absorbed (the netdev was already
+            # removed); other in-band errors are deferred until after
+            # tap_del runs so the host-side still gets cleaned up.
+            netdev_del_error: dict[str, Any] | None = None
+            netdev_transport_error: NodeRuntimeQMPTimeout | None = None
+            try:
+                netdev_del_response = self._qmp_command(
+                    socket_path, "netdev_del", {"id": netdev_id}
+                )
+            except NodeRuntimeQMPTimeout as exc:
+                # Transport timeout: cleanup host side first, raise after.
+                netdev_transport_error = exc
+                netdev_del_response = None
+            if isinstance(netdev_del_response, dict) and isinstance(
+                netdev_del_response.get("error"), dict
+            ):
+                err = netdev_del_response["error"]
+                err_class = str(err.get("class", ""))
+                err_desc = str(err.get("desc", "")).lower()
+                # An idempotent "no such netdev" reply is fine — netdev
+                # was already removed by an earlier rollback. Match by
+                # err_class plus a description heuristic (QEMU's reply
+                # is a GenericError with "not found" in the desc).
+                idempotent = (
+                    err_class == "DeviceNotFound"
+                    or "no" in err_desc
+                    or "not found" in err_desc
+                )
+                if not idempotent:
+                    netdev_del_error = err
+
+            # tap_del is best-effort with a typed propagation: if the
+            # TAP is already gone (HostNetEINVAL), swallow it; any
+            # other helper error propagates so the caller can roll back.
+            try:
+                host_net.tap_del(tap)
+            except host_net.HostNetEINVAL:
+                pass
+
+            if netdev_transport_error is not None:
+                raise netdev_transport_error
+            if netdev_del_error is not None:
+                raise NodeRuntimeError(
+                    f"QMP netdev_del failed: {netdev_del_error}"
+                )
+        else:
+            # ----- Step 3b: forced fallback ---------------------------
+            # Codex hotfix HIGH-2: ``link_set_nomaster`` failure is a
+            # HARD detach failure. Previously we swallowed it, then
+            # still tore down runtime state, released the slot, bumped
+            # the generation, and let ``link_service.delete_link``
+            # remove the link from ``lab.json`` — leaving live bridge
+            # connectivity behind while reporting success and making
+            # retry impossible because the attachment row was gone.
+            #
+            # Re-raise as ``host_net.HostNetError`` so ``delete_link``
+            # surfaces the failure to the caller, leaves
+            # ``interface_attachments`` / ``allocated_slots`` /
+            # ``current_attach_generation`` UNCHANGED, and keeps
+            # ``lab.json`` + IPAM intact for retry.
+            forced_fallback = True
+            host_net.link_set_nomaster(tap)
+            # Publish a ws_hub warning so the UI can surface that the
+            # guest did not eject the NIC.
+            try:
+                self._publish_node_warning(
+                    lab_id=lab_id,
+                    node_id=int(node_id),
+                    interface_index=int(interface_index),
+                    message="guest did not eject NIC; restart node to fully clean",
+                )
+            except Exception:  # noqa: BLE001
+                _logger.exception(
+                    "us-304 forced-fallback: ws warning publish failed "
+                    "(lab=%s node=%s iface=%s)",
+                    lab_id,
+                    node_id,
+                    interface_index,
+                )
+
+        # ----- Drop attachment + slot reservation from runtime ---------
+        with self._lock:
+            attachments_list = list(runtime.get("interface_attachments") or [])
+            if target_index is not None and target_index < len(attachments_list):
+                # Re-locate by interface_index to be robust against any
+                # concurrent mutation between probe and now.
+                for idx, entry in enumerate(attachments_list):
+                    if int(entry.get("interface_index", -1)) == int(interface_index):
+                        attachments_list.pop(idx)
+                        break
+            runtime["interface_attachments"] = attachments_list
+
+            # Happy path: drop the TAP from the runtime's tap_names so
+            # stop-time sweep doesn't double-process. Forced fallback:
+            # leave the TAP entry in place so stop-time cleanup still
+            # removes the kernel object on node restart.
+            if not forced_fallback:
+                tap_names = [
+                    t for t in (runtime.get("tap_names") or []) if t != tap
+                ]
+                runtime["tap_names"] = tap_names
+
+            # Release the slot reservation so a future hot-add can pick
+            # it up. Forced fallback also releases — the QEMU side still
+            # holds the device, but our in-process tracking should
+            # reflect "intent to remove" so a re-attach with a different
+            # iface_index can use the slot pool. The QEMU device_add
+            # would still collide with the stale guest device but that
+            # is exactly the "restart node" message we surfaced.
+            if slot is not None:
+                allocated = list(runtime.get("allocated_slots") or [])
+                runtime["allocated_slots"] = [
+                    s for s in allocated if int(s) != int(slot)
+                ]
+
+        # Bump the generation so concurrent / future attach operations
+        # observe a fresh ``current_attach_generation`` and a stale
+        # rollback re-attach is invalidated.
+        new_generation = self._bump_interface_attach_generation(
+            runtime, int(interface_index)
+        )
+        self._persist_runtime(runtime)
+
+        result: dict[str, Any] = {
+            "state": "forced" if forced_fallback else "detached",
+            "interface_index": int(interface_index),
+            "tap_name": tap,
+            "current_attach_generation": int(new_generation),
+        }
+        if device_already_gone:
+            result["device_already_gone"] = True
+        return result
+
+    def _qemu_device_gone(self, socket_path: str, device_id: str) -> bool:
+        """Return True iff ``query-pci`` shows no device with
+        ``qdev_id == device_id`` anywhere in the bus->devices arrays.
+
+        Used by US-304 hot-remove to bound-poll guest ejection.
+
+        Codex hotfix MEDIUM-2: walks the FULL nested ``pci_bridge``
+        subtree exhaustively. The previous implementation only walked
+        the top-level ``bus.devices`` array and ONE ``pci_bridge.devices``
+        level — for deeper PCIe topologies (bridge under bridge under
+        bridge), it returned ``True`` (gone) too early, causing the
+        detach path to run ``netdev_del`` / ``tap_del`` while the device
+        was still present in QEMU. We now recurse into every nested
+        ``pci_bridge.devices`` subtree until exhaustion.
+        """
+        response = self._qmp_command(socket_path, "query-pci")
+        if not isinstance(response, dict):
+            raise NodeRuntimeError(
+                "QMP query-pci returned non-dict response during detach poll"
+            )
+        if "error" in response:
+            raise NodeRuntimeError(
+                f"QMP query-pci returned error during detach poll: "
+                f"{response['error']}"
+            )
+        buses = response.get("return")
+        if not isinstance(buses, list):
+            return True  # malformed but device certainly not present
+
+        def _device_present_in_subtree(devices: Any) -> bool:
+            """Recurse through ``devices`` and any nested
+            ``pci_bridge.devices`` subtrees until exhaustion.
+            """
+            if not isinstance(devices, list):
+                return False
+            for device in devices:
+                if not isinstance(device, dict):
+                    continue
+                if str(device.get("qdev_id") or "") == device_id:
+                    return True
+                bridge = device.get("pci_bridge")
+                if isinstance(bridge, dict):
+                    if _device_present_in_subtree(bridge.get("devices")):
+                        return True
+            return False
+
+        for bus in buses:
+            if not isinstance(bus, dict):
+                continue
+            if _device_present_in_subtree(bus.get("devices")):
+                return False
+        return True
+
+    def _publish_node_warning(
+        self,
+        *,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        message: str,
+    ) -> None:
+        """US-304 forced-fallback: publish a ``node_warning`` WS event so
+        the UI can surface the "guest did not eject" condition.
+
+        Goes through :class:`app.services.ws_hub.ws_hub` (the existing
+        per-lab event hub) — there is no separate ``ws_manager`` service.
+        Fire-and-forget: we schedule the coroutine on the running event
+        loop if one is available, otherwise we fall back to
+        ``asyncio.run`` so sync callers still get the broadcast.
+        """
+        from app.services.ws_hub import ws_hub  # local import — cycle-free
+
+        payload = {
+            "node_id": int(node_id),
+            "interface_index": int(interface_index),
+            "message": message,
+        }
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and loop.is_running():
+            loop.create_task(ws_hub.publish(lab_id, "node_warning", payload))
+            return
+        # No running loop — synchronous caller. Run the publish in a
+        # short-lived loop so the event still goes out.
+        asyncio.run(ws_hub.publish(lab_id, "node_warning", payload))
+
     def _qmp_command(
         self, socket_path: str, command: str, arguments: dict[str, Any] | None = None
     ) -> dict[str, Any]:
