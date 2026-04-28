@@ -8,3 +8,7 @@ ram: 1024
 ethernet: 4
 console_type: telnet
 architecture: x86_64
+capabilities:
+  hotplug: true
+  max_nics: 8
+  machine: q35
