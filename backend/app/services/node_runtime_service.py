@@ -2670,10 +2670,16 @@ class NodeRuntimeService:
         """Return True iff ``query-pci`` shows no device with
         ``qdev_id == device_id`` anywhere in the bus->devices arrays.
 
-        Used by US-304 hot-remove to bound-poll guest ejection. Walks the
-        same tree shape as :meth:`_find_free_pcie_slot`: each bus has
-        ``devices`` (root-port carriers) and each carrier has
-        ``pci_bridge.devices`` (the actual NICs).
+        Used by US-304 hot-remove to bound-poll guest ejection.
+
+        Codex hotfix MEDIUM-2: walks the FULL nested ``pci_bridge``
+        subtree exhaustively. The previous implementation only walked
+        the top-level ``bus.devices`` array and ONE ``pci_bridge.devices``
+        level — for deeper PCIe topologies (bridge under bridge under
+        bridge), it returned ``True`` (gone) too early, causing the
+        detach path to run ``netdev_del`` / ``tap_del`` while the device
+        was still present in QEMU. We now recurse into every nested
+        ``pci_bridge.devices`` subtree until exhaustion.
         """
         response = self._qmp_command(socket_path, "query-pci")
         if not isinstance(response, dict):
@@ -2688,22 +2694,29 @@ class NodeRuntimeService:
         buses = response.get("return")
         if not isinstance(buses, list):
             return True  # malformed but device certainly not present
-        for bus in buses:
-            if not isinstance(bus, dict):
-                continue
-            for device in bus.get("devices") or []:
+
+        def _device_present_in_subtree(devices: Any) -> bool:
+            """Recurse through ``devices`` and any nested
+            ``pci_bridge.devices`` subtrees until exhaustion.
+            """
+            if not isinstance(devices, list):
+                return False
+            for device in devices:
                 if not isinstance(device, dict):
                     continue
                 if str(device.get("qdev_id") or "") == device_id:
-                    return False
-                # Walk into the root-port's pci_bridge children too.
+                    return True
                 bridge = device.get("pci_bridge")
                 if isinstance(bridge, dict):
-                    for child in bridge.get("devices") or []:
-                        if not isinstance(child, dict):
-                            continue
-                        if str(child.get("qdev_id") or "") == device_id:
-                            return False
+                    if _device_present_in_subtree(bridge.get("devices")):
+                        return True
+            return False
+
+        for bus in buses:
+            if not isinstance(bus, dict):
+                continue
+            if _device_present_in_subtree(bus.get("devices")):
+                return False
         return True
 
     def _publish_node_warning(

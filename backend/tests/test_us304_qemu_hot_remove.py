@@ -1616,3 +1616,155 @@ def test_us304_race_a_bounded_wait_capped_at_2s(
         f"race-A bounded wait MUST cap at 20 iterations (2.0s / 100ms); "
         f"got {pre_retry_qpci}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Codex hotfix MEDIUM-2 — _qemu_device_gone recurses through nested bridges
+# ---------------------------------------------------------------------------
+
+
+def _query_pci_response_with_nested_device(
+    device_id: str, *, depth: int = 2
+) -> dict:
+    """Mock a ``query-pci`` response where ``device_id`` is nested
+    ``depth`` levels of ``pci_bridge`` deep.
+
+    ``depth=1`` matches the existing flat fixture (``bus -> rp7 ->
+    pci_bridge.devices -> device``). ``depth=2`` puts the device
+    BELOW a second ``pci_bridge`` (``bus -> rp7 -> pci_bridge.devices
+    -> rp_inner -> pci_bridge.devices -> device``). Higher depths
+    chain more bridges.
+
+    Used by codex hotfix MEDIUM-2 regression: the OLD ``_qemu_device_gone``
+    only walked one ``pci_bridge.devices`` level and therefore returned
+    ``True`` (gone) too early for ``depth >= 2``, even though the device
+    was still very much present in QEMU.
+    """
+    inner = {"qdev_id": device_id}
+    for level in range(depth):
+        inner = {
+            "qdev_id": f"rp_nested_{level}",
+            "pci_bridge": {"devices": [inner]},
+        }
+    return {
+        "return": [
+            {
+                "devices": [inner],
+            }
+        ]
+    }
+
+
+def test_us304_qemu_device_gone_recurses_through_nested_pci_bridges(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Regression for codex hotfix MEDIUM-2: ``_qemu_device_gone`` MUST
+    recurse through every nested ``pci_bridge.devices`` subtree when
+    deciding whether a device has been ejected.
+
+    Fixture: ``query-pci`` returns a topology where the target
+    ``qdev_id`` is nested 3 levels of ``pci_bridge`` deep (bus -> bridge
+    -> bridge -> bridge -> device). The OLD code returned ``True`` (gone)
+    because it only walked one bridge level; the FIX returns ``False``
+    (still present) so the detach poll keeps waiting for real ejection.
+    """
+    lab_id = "lab304nested"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+
+    fake_qmp = _FakeQmp()
+    # Device is nested 3 bridges deep — must NOT be reported as gone.
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_nested_device(
+        "dev2", depth=3
+    )
+    svc._qmp_client = fake_qmp
+
+    # Direct unit-test of the helper.
+    assert svc._qemu_device_gone("/tmp/qmp.sock", "dev2") is False, (
+        "device nested 3 bridges deep must NOT be reported as gone; "
+        "old code only walked one bridge level"
+    )
+
+    # Sanity: the helper still works for top-level + 1-level + missing.
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_device("dev2")
+    assert svc._qemu_device_gone("/tmp/qmp.sock", "dev2") is False
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_device(None)
+    assert svc._qemu_device_gone("/tmp/qmp.sock", "dev2") is True
+
+
+def test_us304_forced_fallback_when_device_persists_at_deep_nest(
+    lab_settings, monkeypatch, _instance_id
+):
+    """End-to-end regression for codex hotfix MEDIUM-2: a NIC that
+    remains present nested deep in the PCIe topology must NOT be
+    classified as gone — the detach must take the forced-fallback
+    path (``link_set_nomaster``, no ``netdev_del`` / ``tap_del``)
+    instead of running the happy-path teardown over a still-live device.
+    """
+    lab_id = "lab304deepforced"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["device_del"] = {"return": {}}
+    # Device is nested 2 bridges deep — old shallow walk would say
+    # "gone" and run the happy path.
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_nested_device(
+        "dev2", depth=2
+    )
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    async def _capture_publish(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr(
+        "app.services.ws_hub.ws_hub.publish", _capture_publish
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda _s: None
+    )
+
+    expected_tap = host_net.tap_name(lab_id, 1, 2)
+    result = svc.detach_qemu_interface(lab_id, 1, 2)
+
+    # Forced fallback (device never disappeared from the deep nest).
+    assert result["state"] == "forced", (
+        f"deep-nested device must take forced-fallback path; result={result!r}"
+    )
+    assert calls["link_set_nomaster"] == [expected_tap]
+    # Crucially: tap_del / netdev_del MUST NOT have run — those would
+    # tear down host objects while the QEMU device is still live.
+    assert calls["tap_del"] == []
+    cmds = [c[1] for c in fake_qmp.calls]
+    assert "netdev_del" not in cmds, (
+        f"deep-nested device must NOT trigger netdev_del; cmds={cmds!r}"
+    )
