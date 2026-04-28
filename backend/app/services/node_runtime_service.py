@@ -2468,11 +2468,30 @@ class NodeRuntimeService:
             err = device_del_response["error"]
             err_class = str(err.get("class", "")) if isinstance(err, dict) else ""
             if err_class == "DeviceNotFound":
-                # Race A: delete arrived before the create-side flushed
-                # device_add. Sleep briefly, then retry once. If the
-                # device still does not exist, treat as already-detached
-                # idempotent success.
-                time.sleep(0.5)
+                # Race A: ``device_del`` arrived before the create-side
+                # flushed ``device_add`` to ``query-pci`` visibility.
+                # Plan §US-304 acceptance criteria: "wait up to 2s for
+                # the create-side lock to finish, then retry once."
+                #
+                # Codex hotfix MEDIUM-1: the previous implementation was
+                # a fixed ``sleep(0.5)`` + one retry. If ``device_add``
+                # visibility lagged past 500ms, that classified the NIC
+                # as "already gone" and tore down ``netdev`` / TAP while
+                # the device was about to appear.
+                #
+                # Real bounded wait: poll ``query-pci`` every 100ms for
+                # the device to APPEAR, up to 2.0s total. As soon as it
+                # is visible (or the budget expires), retry ``device_del``
+                # exactly once. Treat second-call ``DeviceNotFound`` as
+                # idempotent success (the device was never created).
+                _RACE_A_BUDGET_S = 2.0
+                _RACE_A_CADENCE_S = 0.1
+                _race_a_iters = max(1, int(_RACE_A_BUDGET_S / _RACE_A_CADENCE_S))
+                for _race_a_i in range(_race_a_iters):
+                    if not self._qemu_device_gone(socket_path, device_id):
+                        # Device became visible — break and retry.
+                        break
+                    time.sleep(_RACE_A_CADENCE_S)
                 retry_response = self._qmp_command(
                     socket_path, "device_del", {"id": device_id}
                 )

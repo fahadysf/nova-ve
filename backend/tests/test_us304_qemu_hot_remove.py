@@ -1439,3 +1439,180 @@ def test_us304_locked_helper_propagates_link_set_nomaster_error(
 
     # tap_del was NOT called.
     assert calls["tap_del"] == []
+
+
+# ---------------------------------------------------------------------------
+# Codex hotfix MEDIUM-1 — Race-A bounded 2s wait before retry
+# ---------------------------------------------------------------------------
+
+
+def test_us304_race_a_bounded_wait_polls_until_device_appears_then_retries(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Plan §US-304: Race-A handling is "wait up to 2s for the create-side
+    lock to finish, then retry once" — NOT a fixed ``sleep(0.5)``.
+
+    Regression for codex hotfix MEDIUM-1: when ``device_add`` visibility
+    lags past 500ms, the previous implementation tore down ``netdev`` /
+    TAP while the device was about to appear. The fix polls ``query-pci``
+    on a 100ms cadence up to 2.0s before retrying ``device_del`` exactly
+    once, so a NIC that becomes visible after >500ms is correctly torn
+    down on the retry.
+
+    Setup:
+      * First ``device_del``: returns ``DeviceNotFound`` (device not yet
+        visible to QEMU's command parser).
+      * ``query-pci`` poll: returns "device absent" for the first 7
+        iterations (~700ms simulated), then returns "device visible" on
+        iteration 8 — i.e. >500ms but <2s.
+      * Second ``device_del``: returns success (device now exists and
+        is being ejected).
+      * Subsequent ``query-pci`` (the bounded 16-iter poll): immediately
+        shows the device gone.
+
+    With the OLD code (fixed 0.5s sleep), the second ``device_del`` was
+    issued too early (the test fixture would only have driven 5
+    iterations of query-pci visibility — but the OLD code did not poll
+    query-pci between attempts at all, so it always saw DeviceNotFound
+    on retry and treated the NIC as already gone). The fix waits long
+    enough for query-pci to see the device.
+    """
+    lab_id = "lab304racewait"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+
+    fake_qmp = _FakeQmp()
+    # First device_del: DeviceNotFound (race A — device not yet visible).
+    # Second device_del: success — device is now there and being removed.
+    fake_qmp.response_seqs["device_del"] = [
+        {"error": {"class": "DeviceNotFound", "desc": "no device with id dev2"}},
+        {"return": {}},
+    ]
+    # query-pci sequence: 7 "device absent" responses (race-A polling
+    # window — should NOT be treated as "already gone" by the retry
+    # logic), then "device visible" so the retry actually issues
+    # device_del against the real device. After the retry succeeds, the
+    # bounded post-retry poll should see the device gone.
+    absent = _query_pci_response_with_device(None)
+    visible = _query_pci_response_with_device("dev2")
+    fake_qmp.response_seqs["query-pci"] = [
+        absent, absent, absent, absent, absent, absent, absent,  # 7 iterations
+        visible,  # 8th: device finally appears
+        # Post-retry bounded poll: device confirmed gone after device_del.
+        absent,
+    ]
+    fake_qmp.responses["netdev_del"] = {"return": {}}
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda _s: None
+    )
+
+    expected_tap = host_net.tap_name(lab_id, 1, 2)
+    result = svc.detach_qemu_interface(lab_id, 1, 2)
+
+    # The device was real and was successfully torn down on retry — NOT
+    # classified as "already gone".
+    assert result["state"] == "detached", result
+    assert result.get("device_already_gone") is not True, (
+        f"race-A bounded wait must NOT classify a late-visible device as "
+        f"already gone; result={result!r}"
+    )
+
+    # Two device_del calls (the retry exists).
+    device_del_calls = [c for c in fake_qmp.calls if c[1] == "device_del"]
+    assert len(device_del_calls) == 2, (
+        f"race-A must issue exactly one retry; got {len(device_del_calls)} "
+        f"device_del calls"
+    )
+
+    # Race-A bounded wait actually polled query-pci before the retry.
+    # The second device_del MUST land AFTER multiple query-pci calls
+    # (the bounded wait), not immediately after the first device_del.
+    cmds = [c[1] for c in fake_qmp.calls]
+    first_dd = cmds.index("device_del")
+    second_dd = cmds.index("device_del", first_dd + 1)
+    qpci_between = sum(
+        1 for c in cmds[first_dd + 1:second_dd] if c == "query-pci"
+    )
+    assert qpci_between >= 1, (
+        f"race-A retry must poll query-pci between device_del attempts; "
+        f"cmds={cmds!r}"
+    )
+
+    # Host-side cleanup ran (device was real and detached → happy path).
+    assert calls["tap_del"] == [expected_tap]
+    assert calls["link_set_nomaster"] == []
+
+
+def test_us304_race_a_bounded_wait_capped_at_2s(
+    lab_settings, monkeypatch, _instance_id
+):
+    """The Race-A bounded wait MUST be capped at 2.0s (≤20 iterations
+    at 100ms cadence). If ``query-pci`` never sees the device, the
+    retry still runs after the budget expires — we don't poll forever.
+    """
+    lab_id = "lab304racecap"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+
+    fake_qmp = _FakeQmp()
+    # First device_del: DeviceNotFound. Second: also DeviceNotFound
+    # (idempotent absent).
+    fake_qmp.response_seqs["device_del"] = [
+        {"error": {"class": "DeviceNotFound", "desc": "no device with id dev2"}},
+        {"error": {"class": "DeviceNotFound", "desc": "no device with id dev2"}},
+    ]
+    # query-pci always shows "device absent" — simulates the budget
+    # expiring without the create-side ever completing.
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_device(None)
+    fake_qmp.responses["netdev_del"] = {"return": {}}
+    svc._qmp_client = fake_qmp
+    _patch_host_net(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda _s: None
+    )
+
+    svc.detach_qemu_interface(lab_id, 1, 2)
+
+    # Race-A poll budget: 2.0s / 100ms = 20 iterations max.
+    # The pre-retry query-pci count (between the two device_del calls)
+    # MUST NOT exceed 20.
+    cmds = [c[1] for c in fake_qmp.calls]
+    first_dd = cmds.index("device_del")
+    second_dd = cmds.index("device_del", first_dd + 1)
+    pre_retry_qpci = sum(
+        1 for c in cmds[first_dd + 1:second_dd] if c == "query-pci"
+    )
+    assert pre_retry_qpci <= 20, (
+        f"race-A bounded wait MUST cap at 20 iterations (2.0s / 100ms); "
+        f"got {pre_retry_qpci}"
+    )
