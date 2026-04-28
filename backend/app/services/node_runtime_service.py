@@ -36,7 +36,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Optional
 
 import psutil
 
@@ -65,11 +65,42 @@ class NodeRuntimeError(Exception):
     pass
 
 
+class NodeRuntimeQMPTimeout(NodeRuntimeError):
+    """US-303 codex iter1 HIGH-1: raised when a QMP transport-level
+    error or socket timeout is observed while sending a command.
+
+    Subclass of :class:`NodeRuntimeError` so existing
+    ``except NodeRuntimeError`` clauses still catch it. The distinct
+    subclass lets the rollback dispatcher in
+    ``_attach_qemu_interface_locked`` recognise the "may have succeeded
+    in QEMU" case and run the FULL rollback chain (both ``device_del``
+    AND ``netdev_del``) regardless of which step the timeout fired on,
+    because after a transport-level failure we cannot tell whether QEMU
+    applied the command.
+    """
+
+    pass
+
+
 def _default_qmp_client(socket_path: str, command: str) -> dict:
     """Connect to a QEMU QMP socket, send `command`, and return the parsed response.
 
     Performs a minimal QMP handshake (read greeting, send qmp_capabilities, send command).
     Raises FileNotFoundError or OSError when the socket is missing/unreachable.
+    """
+    return _qmp_send_with_args(socket_path, command, None)
+
+
+def _qmp_send_with_args(
+    socket_path: str, command: str, arguments: dict[str, Any] | None
+) -> dict:
+    """Connect to a QEMU QMP socket, send `command` with optional `arguments`,
+    return the parsed response.
+
+    Used by US-303 hot-add (which needs ``netdev_add`` / ``device_add``
+    arguments) and as the implementation backing the bare-2-arg
+    :func:`_default_qmp_client` for the simple ``query-rx-filter`` /
+    ``query-pci`` path.
     """
     if not Path(socket_path).exists():
         raise FileNotFoundError(f"qmp socket not found: {socket_path}")
@@ -94,7 +125,10 @@ def _default_qmp_client(socket_path: str, command: str) -> dict:
         _read_line()
         sock.sendall(json.dumps({"execute": "qmp_capabilities"}).encode("utf-8") + b"\n")
         _read_line()
-        sock.sendall(json.dumps({"execute": command}).encode("utf-8") + b"\n")
+        payload: dict[str, Any] = {"execute": command}
+        if arguments:
+            payload["arguments"] = arguments
+        sock.sendall(json.dumps(payload).encode("utf-8") + b"\n")
         response = _read_line()
         return response if isinstance(response, dict) else {}
     finally:
@@ -1840,6 +1874,668 @@ class NodeRuntimeService:
         iface_runtime = runtime.get("interface_runtime") or {}
         record = iface_runtime.get(str(int(interface_index))) or {}
         return int(record.get("current_attach_generation", 0))
+
+    # ------------------------------------------------------------------
+    # US-303 — QMP-driven hot-add NIC for running QEMU nodes
+    # ------------------------------------------------------------------
+
+    def attach_qemu_interface(
+        self,
+        lab_id: str,
+        node_id: int,
+        network_id: int,
+        interface_index: int,
+        *,
+        bridge_name: str | None = None,
+        nic_model: str | None = None,
+        planned_mac: str | None = None,
+    ) -> dict[str, Any]:
+        """US-303 PUBLIC hot-add NIC for a running QEMU node.
+
+        Acquires the per-``(lab_id, node_id, interface_index)`` mutex
+        internally (mirrors :meth:`attach_docker_interface`) and delegates
+        to :meth:`_attach_qemu_interface_locked`. Used by callers that do
+        NOT already hold the mutex on entry (e.g. start-path callers,
+        direct API entry points). ``link_service.create_link`` instead
+        acquires the mutex itself and calls the locked helper directly to
+        avoid double-acquisition.
+
+        Returns the attachment record (which includes ``attach_generation``
+        per US-204b) describing the newly-created TAP + QMP-side objects.
+        """
+        from app.services.runtime_mutex import runtime_mutex
+
+        with runtime_mutex.acquire_sync(lab_id, node_id, interface_index):
+            return self._attach_qemu_interface_locked(
+                lab_id,
+                node_id,
+                network_id,
+                interface_index,
+                bridge_name=bridge_name,
+                nic_model=nic_model,
+                planned_mac=planned_mac,
+            )
+
+    def _attach_qemu_interface_locked(
+        self,
+        lab_id: str,
+        node_id: int,
+        network_id: int,
+        interface_index: int,
+        *,
+        bridge_name: str | None = None,
+        nic_model: str | None = None,
+        planned_mac: str | None = None,
+    ) -> dict[str, Any]:
+        """US-303 PRIVATE hot-add NIC. Mutex MUST be held.
+
+        Sequence (rollback per the plan §US-303):
+
+          1. Acquire lock — done by caller; assert mutex is held here.
+          2. ``query-pci`` → find the highest free ``pcie-root-port`` slot
+             (descending scan per US-301 policy: hot-add never collides
+             with the boot-time positional layout).
+          3. ``host_net.tap_add(tap_name)``.
+          4. ``host_net.link_master(tap_name, bridge_name)``.
+          5. QMP ``netdev_add type=tap id=net{interface_index}
+             ifname={tap_name} script=no downscript=no``.
+          6. QMP ``device_add driver={qemu_nic_model} id=dev{interface_index}
+             netdev=net{interface_index} bus=rp{slot} mac={planned_mac}``.
+
+        Rollback (Codex critic enumerated, no hand-waving):
+
+          * Step 2 (query-pci) fails → release lock, raise NodeRuntimeError.
+          * Step 3 (``host_net.tap_add``) fails → raise NodeRuntimeError.
+          * Step 4 (``host_net.link_master``) fails → ``host_net.tap_del``.
+          * Step 5 (QMP ``netdev_add``) fails → ``host_net.link_set_nomaster``,
+            ``host_net.tap_del``.
+          * Step 6 (QMP ``device_add``) fails → QMP ``netdev_del``,
+            ``host_net.link_set_nomaster``, ``host_net.tap_del``.
+
+        All rollback steps are wrapped in ``try/except`` so a rollback
+        failure logs but does NOT mask the original error.
+
+        QMP ``id=`` MUST use ``interface_index``, NOT slot number — this
+        preserves the ``_read_qemu_live_mac`` invariant (see line ~367
+        of this module: ``query-rx-filter`` lookups use
+        ``f"net{interface_index}"``). Slot is just topology placement.
+
+        ``nic_model`` MUST come from the same ``extras.qemu_nic`` /
+        ``node.template.qemu_nic`` used at boot — Codex critic finding #4.
+        Hardcoding ``virtio-net-pci`` would mix boot/hotplug device types
+        in the same VM.
+
+        Returns the attachment record (with ``attach_generation``) for the
+        link router / link_service to stamp on ``Link.runtime``.
+        """
+        from app.services.runtime_mutex import runtime_mutex
+
+        # Defensive contract: catches accidental bypass of the public API.
+        assert runtime_mutex.is_held(lab_id, node_id, interface_index), (
+            f"_attach_qemu_interface_locked called without the per-"
+            f"(lab, node, iface) mutex held for "
+            f"({lab_id!r}, {node_id}, {interface_index}); use the public "
+            f"attach_qemu_interface(...) entrypoint or acquire "
+            f"runtime_mutex.acquire(...) yourself."
+        )
+
+        runtime = self._runtime_record(lab_id, node_id)
+        if runtime is None:
+            raise NodeRuntimeError(
+                f"Cannot hot-attach interface: node {node_id} in lab {lab_id} "
+                "is not running (no runtime record)."
+            )
+        if runtime.get("kind") != "qemu":
+            raise NodeRuntimeError(
+                f"Cannot hot-attach qemu interface: node {node_id} runtime kind "
+                f"is {runtime.get('kind')!r}, expected 'qemu'."
+            )
+
+        if not runtime.get("hotplug_capable", False):
+            raise NodeRuntimeError(
+                f"Cannot hot-attach interface on node {node_id}: template "
+                f"capabilities.hotplug is false or machine is not q35. "
+                "Restart the node with a hot-plug-capable template."
+            )
+
+        socket_path = runtime.get("qmp_socket") or ""
+        if not socket_path:
+            work_dir = runtime.get("work_dir")
+            socket_path = str(Path(work_dir) / "qmp.sock") if work_dir else ""
+        if not socket_path:
+            raise NodeRuntimeError(
+                f"Cannot hot-attach interface on node {node_id}: QMP socket "
+                "path is not set on the runtime record."
+            )
+
+        # Reject duplicate interface indices on the same node — the QMP
+        # ``id=net{interface_index}`` would collide with an existing one.
+        existing_attachments = runtime.get("interface_attachments") or []
+        for existing in existing_attachments:
+            if int(existing.get("interface_index", -1)) == int(interface_index):
+                raise NodeRuntimeError(
+                    f"interface_index={interface_index} already attached on "
+                    f"node {node_id}; detach before re-attaching."
+                )
+
+        bridge = bridge_name or host_net.bridge_name(lab_id, int(network_id))
+        if not host_net.bridge_exists(bridge):
+            raise NodeRuntimeError(
+                f"Bridge {bridge} for network_id={network_id} is not present on "
+                "the host; provision it via create_network (US-202) before "
+                "hot-attaching interfaces."
+            )
+
+        # Resolve the NIC model from the same source the boot path uses
+        # (Codex critic finding #4). Caller may override (link_service can
+        # plumb extras through), otherwise read from the runtime record's
+        # cached extras snapshot or default to ``e1000`` (matches boot
+        # default at ``_start_qemu_node`` line ~954).
+        if not nic_model:
+            nic_model = self._resolve_qemu_nic_model(lab_id, node_id, runtime)
+
+        # Resolve the planned MAC the same way the boot path does:
+        # ``firstmac`` + ``interface_index`` offset.
+        if not planned_mac:
+            planned_mac = self._resolve_qemu_planned_mac(
+                lab_id, node_id, runtime, int(interface_index)
+            )
+
+        max_nics = int(runtime.get("max_nics", 8) or 8)
+
+        # ----- Step 2: query-pci → find free pcie-root-port slot --------
+        # US-303 codex iter1 HIGH-2: PCIe slots are NODE-wide, not
+        # iface-local. Two concurrent attaches to different ifaces on the
+        # same VM can both call query-pci, both see the same free rpN,
+        # and both attempt device_add → race. Wrap the slot-pick →
+        # device_add window in a per-(lab, node) "node-scoped" lock so
+        # only one attach picks a slot at a time. The per-(lab, node,
+        # iface) mutex (US-204b contract) is still held by the caller
+        # for delete-vs-attach serialization on the same iface.
+        from app.services.runtime_mutex import runtime_mutex as _mutex
+
+        with _mutex.acquire_node_sync(lab_id, int(node_id)):
+            try:
+                slot = self._find_free_pcie_slot(
+                    socket_path,
+                    max_nics,
+                    reserved_slots=runtime.get("allocated_slots") or [],
+                )
+            except NodeRuntimeError:
+                raise
+            except Exception as exc:  # noqa: BLE001 — typed below
+                raise NodeRuntimeError(
+                    f"QMP query-pci failed during hot-add: {exc}"
+                ) from exc
+
+            if slot is None:
+                raise NodeRuntimeError(
+                    f"All {max_nics} hot-plug slots in use on this VM. To grow the "
+                    "pool, edit the template's `capabilities.max_nics` in "
+                    "backend/templates/qemu/{type}/{template}.yml and restart "
+                    "this node."
+                )
+
+            # Reserve the slot in-runtime BEFORE issuing device_add so a
+            # concurrent attach that grabs the node-lock immediately
+            # after we release it sees the slot as taken even though
+            # query-pci has not yet observed it. We move pending →
+            # final on success or strip on rollback.
+            with self._lock:
+                allocated_slots = list(runtime.get("allocated_slots") or [])
+                if int(slot) not in allocated_slots:
+                    allocated_slots.append(int(slot))
+                runtime["allocated_slots"] = allocated_slots
+
+            tap = host_net.tap_name(lab_id, int(node_id), int(interface_index))
+            netdev_id = f"net{int(interface_index)}"
+            device_id = f"dev{int(interface_index)}"
+
+            tap_provisioned = False
+            bridge_attached = False
+            netdev_added = False
+            device_added = False
+            slot_reserved_in_runtime = True
+            timeout_seen = False
+            try:
+                # ----- Step 3: tap_add ------------------------------------
+                host_net.tap_add(tap)
+                tap_provisioned = True
+
+                # ----- Step 4: link_master (TAP -> bridge) ----------------
+                host_net.link_master(tap, bridge)
+                bridge_attached = True
+                # Bring the host side of the TAP up so traffic can flow.
+                host_net.link_up(tap)
+
+                # ----- Step 5: QMP netdev_add -----------------------------
+                try:
+                    netdev_response = self._qmp_command(
+                        socket_path,
+                        "netdev_add",
+                        {
+                            "type": "tap",
+                            "id": netdev_id,
+                            "ifname": tap,
+                            "script": "no",
+                            "downscript": "no",
+                        },
+                    )
+                except NodeRuntimeQMPTimeout:
+                    # Transport timeout: QEMU may already have created
+                    # the netdev — assume YES so rollback issues
+                    # netdev_del idempotently.
+                    netdev_added = True
+                    timeout_seen = True
+                    raise
+                if isinstance(netdev_response, dict) and "error" in netdev_response:
+                    raise NodeRuntimeError(
+                        f"QMP netdev_add failed: {netdev_response['error']}"
+                    )
+                netdev_added = True
+
+                # ----- Step 6: QMP device_add -----------------------------
+                device_args: dict[str, Any] = {
+                    "driver": nic_model,
+                    "id": device_id,
+                    "netdev": netdev_id,
+                    "bus": f"rp{slot}",
+                }
+                if planned_mac:
+                    device_args["mac"] = planned_mac
+                try:
+                    device_response = self._qmp_command(
+                        socket_path, "device_add", device_args
+                    )
+                except NodeRuntimeQMPTimeout:
+                    # Transport timeout: QEMU may already have created
+                    # the device — assume YES so rollback issues
+                    # device_del idempotently.
+                    device_added = True
+                    timeout_seen = True
+                    raise
+                if isinstance(device_response, dict) and "error" in device_response:
+                    raise NodeRuntimeError(
+                        f"QMP device_add failed: {device_response['error']}"
+                    )
+                device_added = True
+            except Exception:
+                # 6-step rollback per plan §US-303. Each cleanup is wrapped in
+                # try/except so a rollback failure logs but does not mask the
+                # original error.
+                #
+                # US-303 codex iter1 HIGH-1: on a transport-level
+                # timeout, we cannot tell whether QEMU applied the
+                # command. We must run BOTH device_del and netdev_del
+                # idempotently — if QEMU never applied the command, the
+                # *_del will return "no such device" / "no such netdev"
+                # and we swallow it (the inner try/except).
+                if device_added:
+                    try:
+                        self._qmp_command(
+                            socket_path, "device_del", {"id": device_id}
+                        )
+                    except Exception:  # noqa: BLE001
+                        _logger.exception(
+                            "rollback: QMP device_del(%s) failed", device_id
+                        )
+                if netdev_added:
+                    try:
+                        self._qmp_command(
+                            socket_path, "netdev_del", {"id": netdev_id}
+                        )
+                    except Exception:  # noqa: BLE001
+                        _logger.exception(
+                            "rollback: QMP netdev_del(%s) failed", netdev_id
+                        )
+                if bridge_attached:
+                    try:
+                        host_net.link_set_nomaster(tap)
+                    except Exception:  # noqa: BLE001
+                        _logger.exception(
+                            "rollback: link_set_nomaster(%s) failed", tap
+                        )
+                if tap_provisioned:
+                    try:
+                        host_net.tap_del(tap)
+                    except Exception:  # noqa: BLE001
+                        try:
+                            host_net.try_link_del(tap)
+                        except Exception:  # noqa: BLE001
+                            _logger.exception(
+                                "rollback: tap_del(%s) failed", tap
+                            )
+                # Release the pending slot reservation so a retry can
+                # pick it up.
+                if slot_reserved_in_runtime:
+                    with self._lock:
+                        allocated = list(runtime.get("allocated_slots") or [])
+                        runtime["allocated_slots"] = [
+                            s for s in allocated if int(s) != int(slot)
+                        ]
+                # Suppress the unused-flag lint warning while keeping
+                # the timeout context for future debugging.
+                _ = timeout_seen
+                raise
+
+        # ----- US-204b: bump current_attach_generation ----------------
+        new_generation = self._bump_interface_attach_generation(
+            runtime, int(interface_index)
+        )
+
+        new_attachment = {
+            "interface_index": int(interface_index),
+            "network_id": int(network_id),
+            "bridge_name": bridge,
+            "tap_name": tap,
+            "slot": int(slot),
+            "nic_model": nic_model,
+            "attach_generation": new_generation,
+            "planned_mac": planned_mac or "",
+        }
+
+        # Persist the new attachment + tap onto the runtime record so
+        # stop-time cleanup sweeps the TAP (matches initial-attach
+        # contract at ``_stop_qemu_runtime``). The slot was already
+        # reserved during the slot-pick window above; we just add the
+        # attachment record + TAP name here.
+        with self._lock:
+            attachments_list = list(runtime.get("interface_attachments") or [])
+            attachments_list.append(new_attachment)
+            runtime["interface_attachments"] = attachments_list
+            tap_names = list(runtime.get("tap_names") or [])
+            if tap not in tap_names:
+                tap_names.append(tap)
+            runtime["tap_names"] = tap_names
+        self._persist_runtime(runtime)
+
+        # US-303 codex iter1: persist the computed planned_mac onto
+        # ``interface.planned_mac`` in lab.json so the live-MAC mismatch
+        # detection path (``_read_qemu_live_mac``) can compare against
+        # the value we actually passed to device_add. Without this, the
+        # ``firstmac`` default case would leave ``interface.planned_mac``
+        # empty and the mismatch detector would have nothing to compare
+        # against.
+        if planned_mac:
+            try:
+                self._persist_planned_mac_to_lab_json(
+                    lab_id, int(node_id), int(interface_index), planned_mac
+                )
+            except Exception:  # noqa: BLE001 — best-effort, observability only
+                _logger.exception(
+                    "failed to persist planned_mac=%s for "
+                    "lab=%s node=%s iface=%s",
+                    planned_mac,
+                    lab_id,
+                    node_id,
+                    interface_index,
+                )
+
+        return new_attachment
+
+    def _qmp_command(
+        self, socket_path: str, command: str, arguments: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """Send a QMP command with optional arguments and return the parsed
+        response dict. Wraps :func:`_default_qmp_client` so tests can
+        monkey-patch the underlying transport via ``self._qmp_client``.
+
+        US-303 codex iter1 HIGH-1: socket-level errors / timeouts
+        (``OSError``, :class:`socket.timeout`) are wrapped in
+        :class:`NodeRuntimeQMPTimeout` so the hot-add rollback dispatcher
+        can recognise the ambiguous "may have applied in QEMU" case and
+        run the FULL idempotent rollback chain. In-band command errors
+        (``response["error"]``) are still returned verbatim — they are
+        unambiguous failures.
+        """
+        # The default_qmp_client signature ``(socket_path, command)`` does
+        # not accept arguments; for commands needing arguments we go
+        # through a lightweight inline path (``netdev_add``, ``device_add``,
+        # ``netdev_del``, ``device_del``). Tests can monkey-patch
+        # ``self._qmp_client`` to a callable accepting
+        # ``(socket_path, command, arguments)`` to capture both pieces.
+        client = self._qmp_client
+        try:
+            try:
+                # Test-injected client may accept a 3rd positional arg.
+                return client(socket_path, command, arguments) if arguments else client(socket_path, command)  # type: ignore[call-arg]
+            except TypeError:
+                # Fall back to default 2-arg signature: encode arguments inline
+                # via the bare socket protocol.
+                return _qmp_send_with_args(socket_path, command, arguments)
+        except (OSError, socket.timeout) as exc:
+            # Transport-level failure: socket closed mid-flight, host
+            # network blip, command exceeded ``sock.settimeout``. We do
+            # NOT know whether QEMU applied the command, so the caller
+            # MUST run the full rollback chain.
+            raise NodeRuntimeQMPTimeout(
+                f"QMP {command} transport error on {socket_path}: {exc}"
+            ) from exc
+
+    def _find_free_pcie_slot(
+        self,
+        socket_path: str,
+        max_nics: int,
+        *,
+        reserved_slots: list[int] | None = None,
+    ) -> int | None:
+        """Scan ``query-pci`` for the highest free pcie-root-port (US-301
+        policy: hot-add scans descending so additions never collide with
+        the boot-time positional layout ``rp0..rp{N-1}``).
+
+        Returns the slot index (0-based, matching ``rp{i}`` ids) or
+        ``None`` if every pre-allocated slot is occupied.
+
+        ``reserved_slots`` (US-303 codex iter1 HIGH-2) lists slots
+        already reserved in-runtime by an earlier (still-pending) hot-add
+        on this same VM. We treat them as occupied even if ``query-pci``
+        has not yet observed the device — covers the window between
+        slot-pick and ``device_add`` where two concurrent attaches on
+        the same VM (different ifaces) would otherwise pick the same
+        slot.
+
+        QMP ``query-pci`` returns a list of bus dicts; each bus has
+        ``devices`` with the actual NIC devices, plus ``pci_bridge`` for
+        root ports. We walk the tree looking for ``rp{i}`` ids whose
+        ``pci_bridge.devices`` is empty.
+        """
+        response = self._qmp_client(socket_path, "query-pci")
+        if not isinstance(response, dict):
+            raise NodeRuntimeError("QMP query-pci returned non-dict response")
+        if "error" in response:
+            raise NodeRuntimeError(
+                f"QMP query-pci returned error: {response['error']}"
+            )
+        buses = response.get("return")
+        if not isinstance(buses, list):
+            raise NodeRuntimeError(
+                "QMP query-pci returned no bus data (return field missing)"
+            )
+
+        occupied: set[int] = set()
+        for bus in buses:
+            if not isinstance(bus, dict):
+                continue
+            for device in bus.get("devices") or []:
+                if not isinstance(device, dict):
+                    continue
+                qdev_id = device.get("qdev_id")
+                if isinstance(qdev_id, str) and qdev_id.startswith("rp"):
+                    bridge = device.get("pci_bridge")
+                    if isinstance(bridge, dict):
+                        children = bridge.get("devices") or []
+                        if children:
+                            try:
+                                occupied.add(int(qdev_id[2:]))
+                            except ValueError:
+                                continue
+
+        # Treat in-runtime reservations as occupied so a concurrent
+        # attach that has already picked a slot but not yet flushed
+        # device_add to QEMU does not collide.
+        for reserved in reserved_slots or []:
+            try:
+                occupied.add(int(reserved))
+            except (TypeError, ValueError):
+                continue
+
+        # Descending scan: pick the highest free slot.
+        for slot_index in range(int(max_nics) - 1, -1, -1):
+            if slot_index not in occupied:
+                return slot_index
+        return None
+
+    def _resolve_qemu_nic_model(
+        self, lab_id: str, node_id: int, runtime: dict[str, Any]
+    ) -> str:
+        """Resolve the QEMU NIC model from the lab.json node extras.
+
+        Mirrors the boot-path resolution at ``_start_qemu_node`` line ~954:
+        ``_extra_str(extras, "qemu_nic") or "e1000"``. Boot and hot-add
+        MUST use the same model — Codex critic finding #4 (mixing types
+        confuses guest interface ordering).
+
+        Reads lab.json on demand via :class:`LabService` to avoid stamping
+        the model into the runtime record at start-time (which would
+        require a migration for already-running VMs).
+        """
+        try:
+            from app.services.lab_service import LabService  # noqa: WPS433
+        except ImportError:
+            return "e1000"
+
+        # Locate the lab.json by lab_id. Walk LABS_DIR for a matching id.
+        try:
+            settings = get_settings()
+        except Exception:  # noqa: BLE001
+            return "e1000"
+
+        labs_dir = Path(settings.LABS_DIR)
+        if not labs_dir.exists():
+            return "e1000"
+
+        for path in labs_dir.glob("*.json"):
+            try:
+                data = LabService.read_lab_json_static(path.name)
+            except Exception:  # noqa: BLE001
+                continue
+            if str(data.get("id") or "") != lab_id:
+                continue
+            node = data.get("nodes", {}).get(str(node_id))
+            if not isinstance(node, dict):
+                return "e1000"
+            extras = _node_extras(node)
+            return _extra_str(extras, "qemu_nic") or "e1000"
+        return "e1000"
+
+    def _resolve_qemu_planned_mac(
+        self,
+        lab_id: str,
+        node_id: int,
+        runtime: dict[str, Any],
+        interface_index: int,
+    ) -> str:
+        """Resolve the planned MAC for a QEMU interface.
+
+        Resolution chain (mirrors the boot path):
+          1. ``node.interfaces[i].planned_mac`` if explicitly set.
+          2. ``_mac_for_index(node.firstmac, interface_index)``.
+        Returns "" if neither source is available — caller may pass an
+        empty string to QMP, in which case QEMU assigns a random MAC
+        (acceptable for tests; real callers should always have firstmac).
+        """
+        try:
+            from app.services.lab_service import LabService  # noqa: WPS433
+        except ImportError:
+            return ""
+
+        try:
+            settings = get_settings()
+        except Exception:  # noqa: BLE001
+            return ""
+
+        labs_dir = Path(settings.LABS_DIR)
+        if not labs_dir.exists():
+            return ""
+
+        for path in labs_dir.glob("*.json"):
+            try:
+                data = LabService.read_lab_json_static(path.name)
+            except Exception:  # noqa: BLE001
+                continue
+            if str(data.get("id") or "") != lab_id:
+                continue
+            node = data.get("nodes", {}).get(str(node_id))
+            if not isinstance(node, dict):
+                return ""
+            iface = self._lookup_interface(node, interface_index)
+            if iface and iface.get("planned_mac"):
+                return str(iface["planned_mac"])
+            extras = _node_extras(node)
+            first_mac = node.get("firstmac") or extras.get("firstmac")
+            return self._mac_for_index(first_mac, interface_index)
+        return ""
+
+    def _persist_planned_mac_to_lab_json(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        planned_mac: str,
+    ) -> None:
+        """US-303 codex iter1: persist the computed ``planned_mac`` onto
+        ``node.interfaces[i].planned_mac`` in lab.json so live-MAC
+        mismatch detection (``_read_qemu_live_mac``) can compare against
+        the value we actually passed to ``device_add``.
+
+        Without this, the ``firstmac`` default case leaves
+        ``interface.planned_mac = None`` and the mismatch detector
+        returns ``state="confirmed"`` against an empty string regardless
+        of what the guest reports.
+
+        Idempotent: a non-empty existing value is left untouched (the
+        operator may have set an explicit MAC; we never overwrite it).
+        """
+        from app.services.lab_lock import lab_lock  # local import: cycle-free
+        from app.services.lab_service import LabService  # noqa: WPS433
+
+        try:
+            settings = get_settings()
+        except Exception:  # noqa: BLE001
+            return
+        labs_dir = Path(settings.LABS_DIR)
+        if not labs_dir.exists():
+            return
+
+        # Find the lab.json file whose ``id`` matches lab_id.
+        target: Optional[Path] = None
+        for path in labs_dir.glob("*.json"):
+            try:
+                data = LabService.read_lab_json_static(path.name)
+            except Exception:  # noqa: BLE001
+                continue
+            if str(data.get("id") or "") == lab_id:
+                target = path
+                break
+        if target is None:
+            return
+
+        with lab_lock(target.name, labs_dir):
+            data = LabService.read_lab_json_static(target.name)
+            node = data.get("nodes", {}).get(str(int(node_id)))
+            if not isinstance(node, dict):
+                return
+            iface = self._lookup_interface(node, int(interface_index))
+            if not isinstance(iface, dict):
+                return
+            existing = iface.get("planned_mac")
+            if existing:  # non-empty: respect operator-supplied MAC.
+                return
+            iface["planned_mac"] = str(planned_mac)
+            # Strip the read-time topology shim so the writer does not
+            # regenerate links[] from a stale snapshot.
+            data.pop("topology", None)
+            LabService.write_lab_json_static(target.name, data)
 
     def _docker_force_remove(self, docker_binary: str, container_name: str) -> None:
         """Force-remove a container, swallowing any error (best-effort cleanup)."""
