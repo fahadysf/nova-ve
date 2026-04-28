@@ -26,11 +26,14 @@ where NOVA_VE_HELPER_BIN defaults to /opt/nova-ve/bin/nova-ve-net.py.
 """
 
 import hashlib
+import json
 import logging
 import os
 import subprocess
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Literal, Sequence
 
 logger = logging.getLogger("nova-ve")
 
@@ -71,6 +74,10 @@ class HostNetEINVAL(HostNetError):
 
 class HostNetUnknown(HostNetError):
     """Unknown verb or unparseable failure."""
+
+
+class HostNetBridgeOwnershipError(HostNetError):
+    """A bridge name collision failed ownership verification."""
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +204,8 @@ def veth_peer_name(lab_id: str, node_id: int, iface: int) -> str:
 _HELPER_BIN_DEFAULT = "/opt/nova-ve/bin/nova-ve-net.py"
 _SUDO_BIN_DEFAULT = "/usr/bin/sudo"
 _IP_BIN_DEFAULT = "/sbin/ip"
+_RUNTIME_ROOT_DEFAULT = Path("/var/lib/nova-ve")
+_BRIDGE_FINGERPRINT_DIRNAME = "bridges"
 
 
 def _helper_bin() -> str:
@@ -209,6 +218,20 @@ def _sudo_bin() -> str:
 
 def _ip_bin() -> str:
     return os.environ.get("NOVA_VE_IP_BIN", _IP_BIN_DEFAULT)
+
+
+def _runtime_root() -> Path:
+    override = os.environ.get("NOVA_VE_RUNTIME_ROOT")
+    if override:
+        return Path(override)
+    return _RUNTIME_ROOT_DEFAULT
+
+
+def _bridge_fingerprint_root() -> Path:
+    override = os.environ.get("NOVA_VE_BRIDGE_FINGERPRINT_ROOT")
+    if override:
+        return Path(override)
+    return _runtime_root() / _BRIDGE_FINGERPRINT_DIRNAME
 
 
 def _run(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
@@ -275,6 +298,78 @@ def bridge_exists(name: str) -> bool:
     return proc.returncode == 0
 
 
+def bridge_fingerprint_path(name: str) -> Path:
+    """Return the ownership fingerprint path for ``name``."""
+    return _bridge_fingerprint_root() / f"{name}.json"
+
+
+def bridge_fingerprint_read(name: str) -> dict[str, Any] | None:
+    """Return the decoded ownership fingerprint or ``None`` if absent.
+
+    Malformed or unreadable files are surfaced as synthetic dict payloads so
+    callers can fail closed and include the on-disk state in diagnostics.
+    """
+    path = bridge_fingerprint_path(name)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return {"_error": f"could not read fingerprint: {exc}"}
+
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return {"_error": f"invalid JSON: {exc}", "_raw": raw}
+
+    if not isinstance(payload, dict):
+        return {
+            "_error": f"expected JSON object, found {type(payload).__name__}",
+            "_raw": payload,
+        }
+    return payload
+
+
+def bridge_fingerprint_write(name: str, lab_id: str, network_id: int) -> None:
+    """Atomically persist bridge ownership metadata for ``name``."""
+    path = bridge_fingerprint_path(name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.tmp.{uuid.uuid4().hex}")
+    payload = {
+        "lab_id": str(lab_id),
+        "network_id": int(network_id),
+        "created_at": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fd:
+            fd.write(json.dumps(payload, indent=2, sort_keys=True))
+            fd.flush()
+            os.fsync(fd.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def bridge_fingerprint_check(
+    name: str, lab_id: str, network_id: int
+) -> Literal["match", "mismatch", "absent"]:
+    """Compare the stored ownership fingerprint for ``name`` with expectations."""
+    payload = bridge_fingerprint_read(name)
+    if payload is None:
+        return "absent"
+    if payload.get("lab_id") == str(lab_id) and payload.get("network_id") == int(
+        network_id
+    ):
+        return "match"
+    return "mismatch"
+
+
+def bridge_fingerprint_remove(name: str) -> None:
+    """Remove the ownership fingerprint for ``name`` if present."""
+    bridge_fingerprint_path(name).unlink(missing_ok=True)
+
+
 def bridge_add(name: str) -> None:
     """Create a Linux bridge with ``name`` via the privileged helper.
 
@@ -292,6 +387,7 @@ def bridge_del(name: str) -> None:
     Raises :class:`HostNetEINVAL` if the bridge does not exist.
     """
     _invoke_helper("bridge-del", name)
+    bridge_fingerprint_remove(name)
 
 
 def tap_add(name: str) -> None:

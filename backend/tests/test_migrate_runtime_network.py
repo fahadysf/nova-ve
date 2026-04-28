@@ -9,7 +9,7 @@ Covers:
   - idempotency (second run is a no-op)
   - dry-run does not write any files or touch host state
   - running-node precondition: exits 1 and lists offending labs
-  - per-lab rollback on simulated bridge_add failure
+  - per-lab rollback on bridge ownership verification failure
   - abort on docker network inspect failure (no docker network rm called)
   - rollback restores old Docker network from captured inspect JSON
   - stamps node.machine_override='pc' on pre-Wave-7 QEMU nodes
@@ -147,11 +147,6 @@ def test_fills_missing_bridge_name(instance_id, tmp_path, monkeypatch):
         "_docker_network_inspect",
         lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
     )
-    bridge_add_calls: list[str] = []
-    monkeypatch.setattr(
-        "app.services.host_net.bridge_add",
-        lambda name: bridge_add_calls.append(name),
-    )
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
 
     checked, backfilled, nodes_stamped = mig.process_lab(
@@ -167,10 +162,8 @@ def test_fills_missing_bridge_name(instance_id, tmp_path, monkeypatch):
     expected_2 = host_net.bridge_name("lab-fill", 2)
     assert saved["networks"]["1"]["runtime"]["bridge_name"] == expected_1
     assert saved["networks"]["2"]["runtime"]["bridge_name"] == expected_2
-
-    # bridge_add called for each network (since bridge_exists returns False).
-    assert expected_1 in bridge_add_calls
-    assert expected_2 in bridge_add_calls
+    assert host_net.bridge_fingerprint_check(expected_1, "lab-fill", 1) == "absent"
+    assert host_net.bridge_fingerprint_check(expected_2, "lab-fill", 2) == "absent"
 
 
 # ---------------------------------------------------------------------------
@@ -326,17 +319,13 @@ def test_precondition_stopped_node_passes(instance_id, tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Per-lab rollback on bridge_add failure
+# Per-lab abort on bridge ownership collision
 # ---------------------------------------------------------------------------
 
 
-def test_rollback_on_bridge_add_failure(instance_id, tmp_path, monkeypatch):
-    """If bridge_add raises, lab.json is restored from backup.
-
-    Also asserts that test_migrate_runtime_network_rollback_on_host_failure
-    acceptance test: old Docker network is restored from captured inspect JSON.
-    """
-    from app.services import host_net as hn
+def test_migrate_aborts_on_unfingerprinted_bridge(instance_id, tmp_path, monkeypatch):
+    """An existing unfingerprinted bridge aborts the lab migration fail-closed."""
+    from app.services import host_net
 
     labs_dir = tmp_path / "labs"
     labs_dir.mkdir()
@@ -355,24 +344,19 @@ def test_rollback_on_bridge_add_failure(instance_id, tmp_path, monkeypatch):
         "_docker_network_inspect",
         lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
     )
-
-    def boom(name: str) -> None:
-        raise hn.HostNetEEXIST("RTNETLINK: File exists", returncode=1, stderr="exists")
-
-    monkeypatch.setattr("app.services.host_net.bridge_add", boom)
-    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
+    bridge = host_net.bridge_name("lab-fail", 1)
+    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: name == bridge)
     monkeypatch.setattr("app.services.host_net.bridge_del", lambda name: None)
 
-    with pytest.raises(RuntimeError, match="migration failed"):
+    with pytest.raises(RuntimeError, match="ownership check failed"):
         mig.process_lab(lab_path, labs_dir, backup_dir, dry_run=False)
 
-    # lab.json must be restored.
     assert lab_path.read_text() == original_text
 
 
-def test_rollback_restores_docker_network(instance_id, tmp_path, monkeypatch):
-    """On bridge_add failure after docker network rm, docker network create is called."""
-    from app.services import host_net as hn
+def test_migrate_aborts_on_mismatched_fingerprint(instance_id, tmp_path, monkeypatch):
+    """A mismatched fingerprint aborts and restores the removed Docker network."""
+    from app.services import host_net
 
     labs_dir = tmp_path / "labs"
     labs_dir.mkdir()
@@ -421,15 +405,12 @@ def test_rollback_restores_docker_network(instance_id, tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(mig, "_docker_network_create_from_inspect", fake_create)
-
-    def boom(name: str) -> None:
-        raise hn.HostNetEEXIST("RTNETLINK: File exists", returncode=1, stderr="exists")
-
-    monkeypatch.setattr("app.services.host_net.bridge_add", boom)
-    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
+    bridge = host_net.bridge_name("lab-fail2", 1)
+    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: name == bridge)
     monkeypatch.setattr("app.services.host_net.bridge_del", lambda name: None)
+    host_net.bridge_fingerprint_write(bridge, "other-lab", 1)
 
-    with pytest.raises(RuntimeError, match="migration failed"):
+    with pytest.raises(RuntimeError, match="ownership check failed"):
         mig.process_lab(lab_path, labs_dir, backup_dir, dry_run=False)
 
     # Docker network was removed.
@@ -491,6 +472,8 @@ def test_migrate_runtime_network_aborts_on_inspect_failure(
 
 def test_main_returns_2_on_error(instance_id, tmp_path, monkeypatch):
     """main() returns 2 when any lab fails migration."""
+    from app.services import host_net
+
     labs_dir = tmp_path / "labs"
     labs_dir.mkdir()
 
@@ -505,13 +488,8 @@ def test_main_returns_2_on_error(instance_id, tmp_path, monkeypatch):
         "_docker_network_inspect",
         lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
     )
-    from app.services import host_net as hn
-
-    def boom(name: str) -> None:
-        raise hn.HostNetEEXIST("exists", returncode=1, stderr="exists")
-
-    monkeypatch.setattr("app.services.host_net.bridge_add", boom)
-    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
+    bridge = host_net.bridge_name("lab-err", 1)
+    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: name == bridge)
     monkeypatch.setattr("app.services.host_net.bridge_del", lambda name: None)
 
     rc = mig.main(["--labs-dir", str(labs_dir)])

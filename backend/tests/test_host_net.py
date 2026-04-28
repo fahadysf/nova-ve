@@ -1,19 +1,17 @@
-"""Regression coverage for host_net wrapper drift fixes."""
+# Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+
+"""Regression coverage for host_net wrapper drift fixes (HF7) and bridge
+ownership fingerprint helpers (HF3)."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 import app.services.host_net as host_net
-
-HF3_FINGERPRINT_HELPERS = (
-    "bridge_fingerprint_write",
-    "bridge_fingerprint_check",
-    "bridge_fingerprint_remove",
-)
-HF3_AVAILABLE = all(hasattr(host_net, name) for name in HF3_FINGERPRINT_HELPERS)
 
 
 @pytest.mark.parametrize(
@@ -140,16 +138,88 @@ def test_get_instance_id_missing_file_raises_clear_error(monkeypatch, tmp_path: 
         host_net.get_instance_id()
 
 
-@pytest.mark.skipif(
-    not HF3_AVAILABLE,
-    reason="HF3 bridge fingerprint helpers are not present on this branch/main",
-)
-def test_bridge_fingerprint_write_check_remove(tmp_path: Path) -> None:
-    fingerprint_path = tmp_path / "bridge.fp"
+# ---------------------------------------------------------------------------
+# Bridge ownership fingerprint helpers (HF3 — #126)
+# ---------------------------------------------------------------------------
 
-    host_net.bridge_fingerprint_write(fingerprint_path, "fp-123")
-    assert host_net.bridge_fingerprint_check(fingerprint_path, "fp-123") is True
-    assert host_net.bridge_fingerprint_check(fingerprint_path, "fp-456") is False
 
-    host_net.bridge_fingerprint_remove(fingerprint_path)
-    assert host_net.bridge_fingerprint_check(fingerprint_path, "fp-123") is False
+def test_bridge_fingerprint_write_check_remove(monkeypatch, tmp_path: Path):
+    fingerprint_root = tmp_path / "fingerprints"
+    monkeypatch.setenv("NOVA_VE_BRIDGE_FINGERPRINT_ROOT", str(fingerprint_root))
+
+    host_net.bridge_fingerprint_write("nove1234n1", "lab-a", 1)
+
+    path = host_net.bridge_fingerprint_path("nove1234n1")
+    assert path == fingerprint_root / "nove1234n1.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    assert payload["lab_id"] == "lab-a"
+    assert payload["network_id"] == 1
+    assert payload["created_at"]
+    assert host_net.bridge_fingerprint_check("nove1234n1", "lab-a", 1) == "match"
+
+    host_net.bridge_fingerprint_remove("nove1234n1")
+    assert host_net.bridge_fingerprint_check("nove1234n1", "lab-a", 1) == "absent"
+
+
+def test_bridge_fingerprint_path_uses_runtime_root_override(
+    monkeypatch, tmp_path: Path
+):
+    runtime_root = tmp_path / "runtime-root"
+    monkeypatch.delenv("NOVA_VE_BRIDGE_FINGERPRINT_ROOT", raising=False)
+    monkeypatch.setenv("NOVA_VE_RUNTIME_ROOT", str(runtime_root))
+
+    assert host_net.bridge_fingerprint_path("nove1234n2") == (
+        runtime_root / "bridges" / "nove1234n2.json"
+    )
+
+
+def test_bridge_fingerprint_check_detects_mismatch(monkeypatch, tmp_path: Path):
+    fingerprint_root = tmp_path / "fingerprints"
+    monkeypatch.setenv("NOVA_VE_BRIDGE_FINGERPRINT_ROOT", str(fingerprint_root))
+
+    host_net.bridge_fingerprint_write("nove1234n3", "lab-a", 3)
+
+    assert host_net.bridge_fingerprint_check("nove1234n3", "lab-b", 3) == "mismatch"
+    assert host_net.bridge_fingerprint_check("nove1234n3", "lab-a", 4) == "mismatch"
+
+
+def test_bridge_fingerprint_write_is_atomic(monkeypatch, tmp_path: Path):
+    fingerprint_root = tmp_path / "fingerprints"
+    monkeypatch.setenv("NOVA_VE_BRIDGE_FINGERPRINT_ROOT", str(fingerprint_root))
+
+    replace_calls: list[tuple[Path, Path]] = []
+    original_replace = host_net.os.replace
+
+    def fake_replace(src: str | Path, dst: str | Path) -> None:
+        replace_calls.append((Path(src), Path(dst)))
+        original_replace(src, dst)
+
+    monkeypatch.setattr(host_net.os, "replace", fake_replace)
+
+    host_net.bridge_fingerprint_write("nove1234n4", "lab-a", 4)
+
+    assert len(replace_calls) == 1
+    src, dst = replace_calls[0]
+    assert src.parent == fingerprint_root
+    assert ".tmp." in src.name
+    assert dst == fingerprint_root / "nove1234n4.json"
+    assert not src.exists()
+    assert dst.exists()
+
+
+def test_bridge_del_removes_fingerprint(monkeypatch, tmp_path: Path):
+    fingerprint_root = tmp_path / "fingerprints"
+    monkeypatch.setenv("NOVA_VE_BRIDGE_FINGERPRINT_ROOT", str(fingerprint_root))
+    calls: list[tuple[str, str]] = []
+
+    def fake_invoke_helper(verb: str, *args: str):
+        calls.append((verb, *args))
+        return object()
+
+    monkeypatch.setattr(host_net, "_invoke_helper", fake_invoke_helper)
+    host_net.bridge_fingerprint_write("nove1234n5", "lab-a", 5)
+
+    host_net.bridge_del("nove1234n5")
+
+    assert calls == [("bridge-del", "nove1234n5")]
+    assert host_net.bridge_fingerprint_check("nove1234n5", "lab-a", 5) == "absent"

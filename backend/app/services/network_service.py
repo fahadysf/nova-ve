@@ -11,6 +11,7 @@ the matching Linux bridge via the privileged helper, persisting
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -38,6 +39,15 @@ def _serialize_network(network: dict, count: int) -> dict:
     out = dict(network)
     out["count"] = count
     return out
+
+
+def _bridge_ownership_message(bridge: str, lab_id: str, network_id: int) -> str:
+    actual = host_net.bridge_fingerprint_read(bridge)
+    actual_desc = "absent" if actual is None else json.dumps(actual, sort_keys=True)
+    return (
+        f"Bridge {bridge} ownership check failed: expected lab_id={lab_id!r}, "
+        f"network_id={int(network_id)}; actual fingerprint={actual_desc}"
+    )
 
 
 class NetworkService:
@@ -100,21 +110,41 @@ class NetworkService:
             networks[str(next_id)] = network
             data.pop("topology", None)
             # Persist BEFORE provisioning so on-disk state never leads the
-            # kernel state. If bridge_add then fails we roll the file back.
+            # kernel state. Any provisioning or ownership failure rolls it back.
             LabService.write_lab_json_static(normalized, data)
             try:
-                # Idempotent: pre-existing bridge with the right name is a
-                # no-op (e.g. backend restarted mid-create, or US-202b
-                # backfill already provisioned it).
-                if not host_net.bridge_exists(bridge):
+                if host_net.bridge_exists(bridge):
+                    status = host_net.bridge_fingerprint_check(bridge, lab_id, next_id)
+                    if status != "match":
+                        raise host_net.HostNetBridgeOwnershipError(
+                            _bridge_ownership_message(bridge, lab_id, next_id)
+                        )
+                else:
                     host_net.bridge_add(bridge)
-            except host_net.HostNetError as exc:
+                    try:
+                        host_net.bridge_fingerprint_write(bridge, lab_id, next_id)
+                    except Exception:
+                        try:
+                            host_net.bridge_del(bridge)
+                        except host_net.HostNetError as rollback_exc:
+                            logger.error(
+                                "create_network: bridge fingerprint rollback failed for %s (%s)",
+                                bridge,
+                                rollback_exc,
+                            )
+                        raise
+            except host_net.HostNetBridgeOwnershipError:
+                networks.pop(str(next_id), None)
+                data["networks"] = networks
+                LabService.write_lab_json_static(normalized, data)
+                raise
+            except (host_net.HostNetError, OSError) as exc:
                 # Roll back the JSON write — never leave inconsistent state.
                 networks.pop(str(next_id), None)
                 data["networks"] = networks
                 LabService.write_lab_json_static(normalized, data)
                 logger.error(
-                    "create_network: bridge_add(%s) failed (%s); rolled back lab.json",
+                    "create_network: bridge provisioning failed for %s (%s); rolled back lab.json",
                     bridge,
                     exc,
                 )
