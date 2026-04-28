@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -41,8 +40,10 @@ for _p in (_BACKEND_DIR, _REPO_ROOT):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-# Import only the pure helpers — no database/ORM imports triggered.
+# Import the canonical dedup helper, lock, and lab JSON write surface.
+from app.config import get_settings  # noqa: E402
 from app.services.link_utils import _link_pair_key  # noqa: E402
+from app.services.lab_service import LabService  # noqa: E402
 from app.services.lab_lock import lab_lock  # noqa: E402
 
 
@@ -120,15 +121,13 @@ def process_lab(
         data["links"] = deduped
         # Remove synthesized legacy shim so write does not regenerate links[].
         data.pop("topology", None)
-
-        # Atomic write: write to .tmp then rename.
-        tmp_path = lab_path.with_suffix(".json.tmp")
+        settings = get_settings()
+        original_labs_dir = settings.LABS_DIR
+        settings.LABS_DIR = labs_dir
         try:
-            tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            os.replace(tmp_path, lab_path)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+            LabService.write_lab_json_static(lab_id, data)
+        finally:
+            settings.LABS_DIR = original_labs_dir
 
     return before, removed
 
