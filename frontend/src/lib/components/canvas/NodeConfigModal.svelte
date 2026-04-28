@@ -661,6 +661,32 @@
               </div>
             {/if}
 
+            {#if selectedTemplate?.capabilities}
+              {@const caps = selectedTemplate.capabilities}
+              <div class="rounded-2xl border border-slate-700 bg-slate-900/60 p-4" data-testid="capabilities-banner">
+                <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Capabilities</div>
+                <div class="mt-2 flex flex-wrap gap-2 text-[11px]">
+                  {#if caps.hotplug}
+                    <span class="rounded-full border border-emerald-700/50 bg-emerald-900/30 px-2 py-1 text-emerald-300">
+                      Hot-plug supported
+                    </span>
+                  {:else}
+                    <span class="rounded-full border border-amber-700/50 bg-amber-900/30 px-2 py-1 text-amber-300">
+                      Restart required to change topology
+                    </span>
+                  {/if}
+                  <span class="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">
+                    max NICs: {caps.max_nics}
+                  </span>
+                  {#if caps.machine}
+                    <span class="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">
+                      machine: {caps.machine}
+                    </span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
             <div class="rounded-2xl border border-slate-800 bg-slate-950/80 p-4">
               <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Template summary</div>
               <div class="mt-2 text-sm text-slate-100">{selectedTemplate?.name ?? 'No template selected'}</div>

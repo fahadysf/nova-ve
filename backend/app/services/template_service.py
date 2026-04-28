@@ -12,6 +12,89 @@ from app.config import get_settings
 
 SUPPORTED_TEMPLATE_TYPES = {"qemu", "docker", "iol", "dynamips"}
 
+QEMU_MACHINE_OPTIONS = {"q35", "pc"}
+_QEMU_MAX_NICS_HARD_CAP = 8
+_DOCKER_MAX_NICS_DEFAULT = 99
+
+
+def _default_capabilities(template_type: str) -> dict[str, Any]:
+    """Return capability defaults inferred from node type (backward-compat for templates without capabilities block)."""
+    if template_type == "docker":
+        return {"hotplug": True, "max_nics": _DOCKER_MAX_NICS_DEFAULT, "machine": None}
+    # qemu, iol, dynamips default to conservative values
+    return {"hotplug": False, "max_nics": _QEMU_MAX_NICS_HARD_CAP, "machine": "pc"}
+
+
+def _validate_capabilities(payload: Any, template_type: str, source: str) -> dict[str, Any]:
+    """Validate and normalise the ``capabilities`` block from a template YAML.
+
+    Returns a fully-populated capabilities dict with all three fields resolved.
+    Raises :class:`TemplateError` on invalid input.
+    """
+    defaults = _default_capabilities(template_type)
+
+    if payload is None:
+        # No capabilities block: infer from node type (backward compat)
+        return defaults
+
+    if not isinstance(payload, dict):
+        raise TemplateError(
+            f"capabilities on {source} must be an object with optional fields "
+            f"hotplug (bool), max_nics (int), machine (str)."
+        )
+
+    result: dict[str, Any] = dict(defaults)
+
+    # hotplug
+    if "hotplug" in payload:
+        val = payload["hotplug"]
+        if not isinstance(val, bool):
+            raise TemplateError(
+                f"capabilities.hotplug on {source} must be a boolean."
+            )
+        result["hotplug"] = val
+
+    # max_nics
+    if "max_nics" in payload:
+        val = payload["max_nics"]
+        if not isinstance(val, int) or isinstance(val, bool):
+            raise TemplateError(
+                f"capabilities.max_nics on {source} must be an integer."
+            )
+        if template_type != "docker" and val > _QEMU_MAX_NICS_HARD_CAP:
+            raise TemplateError(
+                f"capabilities.max_nics on {source} exceeds the hard cap of "
+                f"{_QEMU_MAX_NICS_HARD_CAP} for {template_type} templates (Principle 5)."
+            )
+        if val < 1:
+            raise TemplateError(
+                f"capabilities.max_nics on {source} must be at least 1."
+            )
+        result["max_nics"] = val
+
+    # machine
+    if "machine" in payload:
+        val = payload["machine"]
+        if template_type != "qemu":
+            raise TemplateError(
+                f"capabilities.machine on {source} is only valid for qemu templates."
+            )
+        if not isinstance(val, str) or val not in QEMU_MACHINE_OPTIONS:
+            raise TemplateError(
+                f"capabilities.machine on {source} must be one of "
+                f"{sorted(QEMU_MACHINE_OPTIONS)}, got {val!r}."
+            )
+        result["machine"] = val
+
+    # Consistency check: pc + hotplug=True is not allowed for QEMU
+    if template_type == "qemu" and result.get("hotplug") and result.get("machine") == "pc":
+        raise TemplateError(
+            f"capabilities on {source}: hotplug=true requires machine='q35'; "
+            f"'pc' does not support PCIe hot-plug."
+        )
+
+    return result
+
 
 ICON_TYPE_TO_FILENAME = {
     "router": "Router.png",
@@ -376,6 +459,7 @@ class TemplateDefinition:
     extras: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
     interface_naming: dict[str, Any] | None = None
+    capabilities: dict[str, Any] = field(default_factory=dict)
 
     def as_response(self) -> dict[str, Any]:
         return {
@@ -392,6 +476,7 @@ class TemplateDefinition:
             "console_type": self.console_type,
             "cpulimit": self.cpulimit,
             "extras": dict(self.extras),
+            "capabilities": dict(self.capabilities),
         }
 
 
@@ -494,6 +579,7 @@ class TemplateService:
                     "images": images,
                     "icon_options": icon_options,
                     "extras_schema": extras_schema,
+                    "capabilities": dict(template.capabilities),
                 }
             )
         return {
@@ -572,6 +658,9 @@ class TemplateService:
                 interface_naming = _validate_interface_naming(
                     interface_naming, source=str(template_path)
                 )
+            capabilities = _validate_capabilities(
+                payload.get("capabilities"), template_type, source=str(template_path)
+            )
             templates.append(
                 TemplateDefinition(
                     key=key,
@@ -587,6 +676,7 @@ class TemplateService:
                     extras=yaml_extras,
                     raw=payload,
                     interface_naming=interface_naming,
+                    capabilities=capabilities,
                 )
             )
         return templates
