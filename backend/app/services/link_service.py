@@ -11,14 +11,20 @@ and publish WebSocket events.
 
 from __future__ import annotations
 
+import copy
+import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import get_settings
+from app.services import host_net
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.link_utils import _endpoint_key, _link_pair_key  # noqa: F401 — re-exported
 from app.services.ws_hub import ws_hub
+
+
+_logger = logging.getLogger("nova-ve.link_service")
 
 
 _IDEMPOTENCY_CACHE_MAX = 1024
@@ -253,6 +259,21 @@ class LinkService:
                     if ex_key == target_key:
                         raise DuplicateLinkError(_link_with_state(existing))
 
+            # Snapshot pre-write state so we can roll back lab.json if
+            # post-write hot-attach (US-204) fails. ``read_lab_json_static``
+            # synthesises ``topology`` from links[]; we strip that derived
+            # field before deep-copying so the rollback write does not
+            # regenerate links[] from a stale shim.
+            original_snapshot = copy.deepcopy(data)
+            original_snapshot.pop("topology", None)
+            # ``implicit_bridge_to_provision`` is the (network_id, bridge_name|None)
+            # for an implicit network synthesised by this call. ``bridge_name``
+            # is None at this stage; the helper resolves it lazily so labs
+            # without a per-host instance_id (typical for unit tests that
+            # never start a node) do not pre-emptively blow up here.
+            implicit_bridge_to_provision: Optional[Tuple[int, Optional[str]]] = None
+            concrete_links_to_attach: List[dict] = []
+
             link_payload: dict
             network_payload: Optional[dict] = None
             promoted_network: Optional[dict] = None
@@ -295,6 +316,18 @@ class LinkService:
                 ws_events.append(("network_created", {"network": dict(implicit_net)}))
                 ws_events.append(("link_created", {"link": _link_with_state(first_link)}))
                 ws_events.append(("link_created", {"link": _link_with_state(second_link)}))
+
+                # US-204: each concrete node↔network link is processed
+                # independently for hot-attach. The implicit network's
+                # bridge must be provisioned exactly once before either
+                # attach call (Codex critic v4 new defect #3). The bridge
+                # name is resolved lazily in ``_hot_attach_running_endpoints``
+                # so labs without a per-host ``instance_id`` (e.g. unit
+                # tests that never start a node) do not blow up on the
+                # ``host_net.bridge_name`` call.
+                implicit_bridge_to_provision = (int(net_id), None)
+                concrete_links_to_attach.append(first_link)
+                concrete_links_to_attach.append(second_link)
 
             else:
                 # Mixed node/network or network/network attach.
@@ -342,6 +375,34 @@ class LinkService:
                     ws_events.append(("network_promoted", {"network": promoted_network}))
                 ws_events.append(("link_created", {"link": _link_with_state(new_link)}))
 
+                # US-204: hot-attach single concrete link (only when the
+                # node-ish endpoint is running). bridge_name resolution
+                # uses the existing network's runtime.bridge_name when
+                # present (US-202 / US-202b), falling back to the canonical
+                # derived name.
+                concrete_links_to_attach.append(new_link)
+
+            # ----------------------------------------------------------
+            # US-204 hot-attach pass — runs INSIDE the lab_lock so we can
+            # roll back lab.json atomically on host-side failure.
+            # ----------------------------------------------------------
+            try:
+                self._hot_attach_running_endpoints(
+                    lab_path=normalized,
+                    lab_data=data,
+                    implicit_bridge=implicit_bridge_to_provision,
+                    concrete_links=concrete_links_to_attach,
+                )
+            except Exception as exc:
+                # Roll back lab.json — JSON file leads kernel state contract.
+                LabService.write_lab_json_static(normalized, original_snapshot)
+                _recompute_mac_registry(normalized, original_snapshot)
+                _logger.error(
+                    "create_link: hot-attach failed (%s); rolled back lab.json",
+                    exc,
+                )
+                raise
+
         for event_type, payload in ws_events:
             await ws_hub.publish(normalized, event_type, payload)
 
@@ -354,6 +415,185 @@ class LinkService:
             ws_events,
         )
         return link_payload, network_payload, False
+
+    def _hot_attach_running_endpoints(
+        self,
+        *,
+        lab_path: str,
+        lab_data: dict,
+        implicit_bridge: Optional[Tuple[int, Optional[str]]],
+        concrete_links: List[dict],
+    ) -> None:
+        """US-204: hot-attach Docker for every concrete node↔network link
+        whose node endpoint is currently running.
+
+        Symmetric with US-203's initial-attach path: both invoke the same
+        per-iface attach helper (``_attach_docker_interface_initial``) so
+        host-side iface naming is identical between first-NIC and Nth-NIC
+        attachments — no special-case for the first NIC.
+
+        ``implicit_bridge`` is set when ``create_link`` synthesises an
+        implicit network from a node↔node request. The bridge for that
+        network is provisioned exactly once before any hot-attach call (the
+        plan's "implicit network's bridge is created via ``host_net.bridge_add``
+        exactly once, before either attach call" requirement).
+
+        On any failure, raises and the caller rolls back lab.json.
+        """
+        # Local import to avoid a module-load cycle (node_runtime_service →
+        # link_service is fine, but link_service → node_runtime_service at
+        # import time would create one if node_runtime_service ever imports
+        # link_service back).
+        from app.services.node_runtime_service import (  # noqa: WPS433 — local import
+            NodeRuntimeError,
+            NodeRuntimeService,
+        )
+
+        # Filter to links that need a hot-attach: node↔network endpoint pairs
+        # where the node is currently running on this host. Network↔network
+        # links and stopped nodes are no-ops at the runtime layer.
+        runtime_service = NodeRuntimeService()
+        lab_id = str(lab_data.get("id") or lab_path)
+        nodes = lab_data.get("nodes") or {}
+
+        # Pre-pass: identify candidate (node_id, interface_index, network_id)
+        # tuples whose node is currently running. We defer bridge_name
+        # resolution (which requires a per-host instance_id) until we know
+        # there is at least one candidate — labs that never start nodes
+        # never trigger the instance_id read.
+        pending: List[Tuple[int, int, int]] = []
+        for link in concrete_links:
+            node_endpoint = None
+            network_endpoint = None
+            for endpoint in (link.get("from"), link.get("to")):
+                if not isinstance(endpoint, dict):
+                    continue
+                if "network_id" in endpoint:
+                    network_endpoint = endpoint
+                elif "node_id" in endpoint:
+                    node_endpoint = endpoint
+            if node_endpoint is None or network_endpoint is None:
+                continue
+
+            try:
+                node_id = int(node_endpoint["node_id"])
+                interface_index = int(node_endpoint.get("interface_index", 0))
+                network_id = int(network_endpoint["network_id"])
+            except (TypeError, ValueError):
+                continue
+
+            # Hot-attach is opt-in by liveness: skip nodes that are not
+            # running (their initial attach will run when the user starts
+            # the node). The runtime registry is the single source of truth.
+            runtime = runtime_service._runtime_record(lab_id, node_id)
+            if runtime is None:
+                continue
+            if runtime.get("kind") != "docker":
+                # QEMU hot-attach is US-303, not US-204.
+                continue
+
+            pending.append((node_id, interface_index, network_id))
+
+        if not pending:
+            return
+
+        # Resolve the implicit network's bridge name lazily — only now do we
+        # know there is at least one running endpoint that needs the kernel
+        # object.
+        resolved_implicit_bridge: Optional[Tuple[int, str]] = None
+        if implicit_bridge is not None:
+            implicit_net_id, implicit_name = implicit_bridge
+            if implicit_name is None:
+                implicit_name = host_net.bridge_name(lab_id, int(implicit_net_id))
+            resolved_implicit_bridge = (int(implicit_net_id), implicit_name)
+
+        # Now resolve a bridge name for every pending target.
+        attach_targets: List[Tuple[int, int, int, str]] = []
+        for node_id, interface_index, network_id in pending:
+            bridge = self._resolve_bridge_name(
+                lab_id=lab_id,
+                network_id=network_id,
+                networks=lab_data.get("networks") or {},
+                implicit_bridge=resolved_implicit_bridge,
+            )
+            attach_targets.append((node_id, interface_index, network_id, bridge))
+
+        # Provision the implicit network's bridge exactly once before any
+        # attach call (Codex critic v4 new defect #3). Idempotent: pre-existing
+        # bridge is treated as a no-op.
+        provisioned_implicit_bridge: Optional[str] = None
+        if resolved_implicit_bridge is not None:
+            net_id, bridge_name = resolved_implicit_bridge
+            if any(target[2] == net_id for target in attach_targets):
+                if not host_net.bridge_exists(bridge_name):
+                    host_net.bridge_add(bridge_name)
+                    provisioned_implicit_bridge = bridge_name
+
+        # Attach each target. On the FIRST failure, sweep the bridges + every
+        # already-attached interface so we leave no host-side leftover.
+        attached: List[Tuple[int, int]] = []
+        try:
+            for node_id, interface_index, network_id, bridge in attach_targets:
+                runtime_service.attach_docker_interface(
+                    lab_id,
+                    node_id,
+                    network_id,
+                    interface_index,
+                    bridge_name=bridge,
+                )
+                attached.append((node_id, interface_index))
+        except (NodeRuntimeError, host_net.HostNetError):
+            for node_id, interface_index in attached:
+                host_end = host_net.veth_host_name(lab_id, node_id, interface_index)
+                host_net.try_link_del(host_end)
+                # Best-effort: drop the rolled-back attachment from the
+                # runtime record so subsequent reads stay consistent.
+                runtime = runtime_service._runtime_record(lab_id, node_id)
+                if runtime is not None:
+                    attachments = [
+                        a for a in (runtime.get("interface_attachments") or [])
+                        if int(a.get("interface_index", -1)) != interface_index
+                    ]
+                    runtime["interface_attachments"] = attachments
+                    host_ends = [
+                        h for h in (runtime.get("veth_host_ends") or [])
+                        if h != host_end
+                    ]
+                    runtime["veth_host_ends"] = host_ends
+                    runtime_service._persist_runtime(runtime)
+            if provisioned_implicit_bridge is not None:
+                try:
+                    host_net.bridge_del(provisioned_implicit_bridge)
+                except host_net.HostNetError:
+                    pass
+            raise
+
+    @staticmethod
+    def _resolve_bridge_name(
+        *,
+        lab_id: str,
+        network_id: int,
+        networks: dict,
+        implicit_bridge: Optional[Tuple[int, str]],
+    ) -> str:
+        """Return the host bridge name for a network referenced by a link.
+
+        Resolution order:
+          1. Implicit bridge tuple if it matches this network_id (newly
+             synthesised network from a node↔node create_link call).
+          2. ``networks[str(network_id)].runtime.bridge_name`` if present
+             (US-202 / US-202b populated this on create / migrate).
+          3. Canonical derived name via ``host_net.bridge_name``.
+        """
+        if implicit_bridge is not None and implicit_bridge[0] == network_id:
+            return implicit_bridge[1]
+        record = networks.get(str(network_id))
+        if isinstance(record, dict):
+            runtime_record = record.get("runtime") or {}
+            bridge = runtime_record.get("bridge_name")
+            if isinstance(bridge, str) and bridge:
+                return bridge
+        return host_net.bridge_name(lab_id, network_id)
 
     async def delete_link(self, lab_path: str, link_id: str) -> Tuple[bool, Optional[dict]]:
         """Delete a link. Idempotent: missing link returns ``(True, None)``.
