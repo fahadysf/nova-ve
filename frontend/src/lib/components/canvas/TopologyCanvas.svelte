@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { createEventDispatcher, setContext } from 'svelte';
+  import { createEventDispatcher, onDestroy, setContext } from 'svelte';
   import { onMount } from 'svelte';
   import { writable, get } from 'svelte/store';
   import {
@@ -47,6 +47,8 @@
   import {
     dragLinkStore,
     getDragLinkSnapshot,
+    type DragEndpoint,
+    type DragLinkSnapshot,
   } from '$lib/stores/dragLink';
   import type {
     LabDefaults,
@@ -59,6 +61,7 @@
     NodeCatalog,
     NodeData,
     PortPosition,
+    TemplateCapabilities,
     TopologyLink
   } from '$lib/types';
 
@@ -123,6 +126,18 @@
     },
   });
   let dragLinkSourceAnchor: { x: number; y: number } | null = null;
+  const defaultTemplateCapabilities: TemplateCapabilities = {
+    hotplug: true,
+    max_nics: 8,
+    machine: 'q35',
+  };
+  let topologyChangeBanner:
+    | {
+        message: string;
+        nodeNames: string[];
+      }
+    | null = null;
+  let topologyChangeBannerTimer: ReturnType<typeof setTimeout> | null = null;
 
   $: selectedPortInfo = $selectedPortInfoStore;
 
@@ -197,6 +212,13 @@
     }
   }
 
+  $: {
+    const snapshot = $dragLinkStore;
+    if (snapshot.state === 'confirming') {
+      gateLinkConfirmIfNeeded(snapshot);
+    }
+  }
+
   const nodesStore = writable<Node[]>([]);
   const edgesStore = writable<Edge[]>([]);
 
@@ -245,6 +267,75 @@
 
   function deepClone<T>(value: T): T {
     return JSON.parse(JSON.stringify(value)) as T;
+  }
+
+  function clearTopologyChangeBanner() {
+    if (topologyChangeBannerTimer) {
+      clearTimeout(topologyChangeBannerTimer);
+      topologyChangeBannerTimer = null;
+    }
+    topologyChangeBanner = null;
+  }
+
+  function showTopologyChangeBanner(nodeNames: string[]) {
+    const uniqueNodeNames = [...new Set(nodeNames)].filter((name) => name.length > 0);
+    const suffix = uniqueNodeNames.length ? `: ${uniqueNodeNames.join(', ')}` : '';
+    topologyChangeBanner = {
+      message: `Restart required to change topology${suffix}`,
+      nodeNames: uniqueNodeNames,
+    };
+
+    if (topologyChangeBannerTimer) {
+      clearTimeout(topologyChangeBannerTimer);
+    }
+    topologyChangeBannerTimer = setTimeout(() => {
+      topologyChangeBanner = null;
+      topologyChangeBannerTimer = null;
+    }, 5000);
+  }
+
+  function resolveNodeCapabilities(node: NodeData): TemplateCapabilities {
+    if (node.capabilities) {
+      return node.capabilities;
+    }
+
+    const templateCapabilities = nodeCatalog?.templates.find(
+      (template) => template.key === node.template && template.type === node.type
+    )?.capabilities;
+    return templateCapabilities ?? defaultTemplateCapabilities;
+  }
+
+  function resolveEndpointNode(endpoint: DragEndpoint | null): NodeData | null {
+    if (endpoint?.kind !== 'interface') {
+      return null;
+    }
+    return localNodes[String(endpoint.nodeId)] ?? null;
+  }
+
+  function blockedTopologyChangeNodes(snapshot: DragLinkSnapshot): NodeData[] {
+    const seenNodeIds = new Set<number>();
+    const candidateNodes = [resolveEndpointNode(snapshot.source), resolveEndpointNode(snapshot.target)];
+
+    return candidateNodes.filter((node): node is NodeData => {
+      if (!node || seenNodeIds.has(node.id)) {
+        return false;
+      }
+      seenNodeIds.add(node.id);
+      const capabilities = resolveNodeCapabilities(node);
+      return node.status === 2 && capabilities.hotplug === false;
+    });
+  }
+
+  function gateLinkConfirmIfNeeded(snapshot: DragLinkSnapshot): boolean {
+    const blockedNodes = blockedTopologyChangeNodes(snapshot);
+    if (blockedNodes.length === 0) {
+      return false;
+    }
+
+    dragLinkStore.cancel();
+    dragLinkSourceAnchor = null;
+    showTopologyChangeBanner(blockedNodes.map((node) => node.name));
+    return true;
   }
 
   function dispatchCanvasChange(reason: string, detail: Record<string, unknown> = {}) {
@@ -1022,6 +1113,10 @@
     };
   });
 
+  onDestroy(() => {
+    clearTopologyChangeBanner();
+  });
+
   export async function flushPendingLayout(): Promise<void> {
     await layoutDebouncer.flush();
   }
@@ -1459,6 +1554,26 @@
           <span>Delete Link</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
       {/if}
+    </div>
+  {/if}
+
+  {#if topologyChangeBanner}
+    <div class="pointer-events-none absolute inset-x-4 top-4 z-40 flex justify-center" data-testid="topology-hotplug-banner">
+      <div class="pointer-events-auto flex w-full max-w-xl items-start gap-3 rounded-2xl border border-amber-700/60 bg-amber-950/90 px-4 py-3 text-sm text-amber-100 shadow-2xl shadow-black/30 backdrop-blur">
+        <div class="min-w-0 flex-1">
+          <div class="text-[10px] uppercase tracking-[0.05em] text-amber-300/80">Topology change blocked</div>
+          <div class="mt-1 font-medium">{topologyChangeBanner.message}</div>
+        </div>
+        <button
+          type="button"
+          class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-amber-600/40 bg-amber-950/80 text-amber-100 transition hover:border-amber-400/70 hover:text-white"
+          aria-label="Dismiss topology change banner"
+          data-testid="topology-hotplug-banner-close"
+          on:click={clearTopologyChangeBanner}
+        >
+          ×
+        </button>
+      </div>
     </div>
   {/if}
 
