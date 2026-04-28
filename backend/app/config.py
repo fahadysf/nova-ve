@@ -3,6 +3,7 @@ from functools import lru_cache
 from pathlib import Path
 from sys import platform
 
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -61,9 +62,34 @@ class Settings(BaseSettings):
     GUACAMOLE_TERMINAL_FONT_NAME: str = "Roboto Mono"
     GUACAMOLE_TERMINAL_FONT_SIZE: int = 10
 
+    # Reconciliation / discovery (US-402)
+    # The discovery loop polls kernel-side bridge state every N seconds and
+    # cross-references against ``links[]`` in lab.json.  Operators tune this
+    # via ``NOVA_VE_DISCOVERY_CADENCE_SECONDS``.  Live edits land within one
+    # cycle because ``_discovery_loop`` reads ``get_settings()`` per
+    # iteration; reload via ``get_settings.cache_clear()``.
+    DISCOVERY_CADENCE_SECONDS: int = Field(
+        default=30,
+        validation_alias=AliasChoices(
+            "DISCOVERY_CADENCE_SECONDS",
+            "NOVA_VE_DISCOVERY_CADENCE_SECONDS",
+        ),
+    )
+
+    @field_validator("DISCOVERY_CADENCE_SECONDS")
+    @classmethod
+    def _validate_discovery_cadence(cls, value: int) -> int:
+        if not 5 <= value <= 300:
+            raise ValueError(
+                "DISCOVERY_CADENCE_SECONDS must be between 5 and 300 seconds "
+                f"(got {value})"
+            )
+        return value
+
     class Config:
         env_file = ".env"
         case_sensitive = True
+        populate_by_name = True
 
 
 @lru_cache()
