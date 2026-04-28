@@ -1319,3 +1319,374 @@ async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_setting
     assert event["payload"]["state"] == "confirmed"
     assert event["payload"]["planned_mac"] == "aa:bb:cc:dd:ee:01"
     assert event["payload"]["live_mac"] == "aa:bb:cc:dd:ee:01"
+
+
+# ---------------------------------------------------------------------------
+# US-302 — per-NIC TAP + bridge attach at QEMU start (replaces SLIRP)
+# ---------------------------------------------------------------------------
+
+
+def _us302_helper_mock(
+    monkeypatch,
+    *,
+    present_bridges: set[str] | None = None,
+    fail_on: tuple[str, str] | None = None,
+):
+    """Capture every privileged-helper call relevant to US-302.
+
+    ``fail_on`` is ``(verb, name)`` — when the verb is invoked with the
+    matching iface name, the fake raises ``HostNetEINVAL`` so the start
+    path can exercise its rollback.
+    """
+    from app.services import host_net
+
+    if present_bridges is None:
+        present_bridges = set()
+
+    calls: dict[str, list] = {
+        "bridge_exists": [],
+        "tap_add": [],
+        "tap_del": [],
+        "link_master": [],
+        "link_up": [],
+        "try_link_del": [],
+    }
+
+    def _maybe_fail(verb: str, name: str) -> None:
+        if fail_on and fail_on == (verb, name):
+            raise host_net.HostNetEINVAL(
+                f"injected failure: {verb} {name}",
+                returncode=1,
+                stderr="injected",
+            )
+
+    def fake_bridge_exists(name: str) -> bool:
+        calls["bridge_exists"].append(name)
+        return name in present_bridges
+
+    def fake_tap_add(name: str) -> None:
+        calls["tap_add"].append(name)
+        _maybe_fail("tap_add", name)
+
+    def fake_tap_del(name: str) -> None:
+        calls["tap_del"].append(name)
+
+    def fake_link_master(iface: str, bridge: str) -> None:
+        calls["link_master"].append((iface, bridge))
+        _maybe_fail("link_master", iface)
+
+    def fake_link_up(iface: str) -> None:
+        calls["link_up"].append(iface)
+        _maybe_fail("link_up", iface)
+
+    def fake_try_link_del(name: str) -> None:
+        calls["try_link_del"].append(name)
+
+    monkeypatch.setattr(host_net, "bridge_exists", fake_bridge_exists)
+    monkeypatch.setattr(host_net, "tap_add", fake_tap_add)
+    monkeypatch.setattr(host_net, "tap_del", fake_tap_del)
+    monkeypatch.setattr(host_net, "link_master", fake_link_master)
+    monkeypatch.setattr(host_net, "link_up", fake_link_up)
+    monkeypatch.setattr(host_net, "try_link_del", fake_try_link_del)
+    return calls
+
+
+def _us302_names() -> dict:
+    """Compute the canonical bridge/tap names for the US-302 fixture."""
+    from app.services import host_net
+
+    lab_id = "lab-302"
+    return {
+        "lab_id": lab_id,
+        "bridge1": host_net.bridge_name(lab_id, 1),
+        "bridge2": host_net.bridge_name(lab_id, 2),
+        "tap0": host_net.tap_name(lab_id, 1, 0),
+        "tap1": host_net.tap_name(lab_id, 1, 1),
+    }
+
+
+def _us302_lab_data() -> dict:
+    """Two-NIC QEMU node attached to a single linux_bridge network."""
+    names = _us302_names()
+    return {
+        "schema": 2,
+        "id": names["lab_id"],
+        "meta": {"name": "us302"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "vyos-1",
+                "type": "qemu",
+                "image": "router-image",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 1024,
+                "ethernet": 2,
+                "firstmac": "50:00:00:01:00:00",
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None},
+                    {"index": 1, "name": "eth1", "planned_mac": None, "port_position": None},
+                ],
+            }
+        },
+        "networks": {
+            "1": {
+                "id": 1,
+                "name": "lab-link",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+                "runtime": {"bridge_name": names["bridge1"]},
+            },
+            "2": {
+                "id": 2,
+                "name": "mgmt",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+                "runtime": {"bridge_name": names["bridge2"]},
+            },
+        },
+        "links": [
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            },
+            {
+                "id": "lnk_002",
+                "from": {"node_id": 1, "interface_index": 1},
+                "to": {"network_id": 2},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            },
+        ],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+
+def _setup_us302_qemu_runtime(monkeypatch, runtime_settings):
+    """Stage shared mocks for the QEMU start path: image dir, popen, psutil."""
+    image_dir = runtime_settings.IMAGES_DIR / "qemu" / "router-image"
+    image_dir.mkdir(parents=True, exist_ok=True)
+    (image_dir / "hda.qcow2").write_text("base-image")
+
+    _mock_runtime_binaries(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _fake_subprocess_run_factory([]),
+    )
+    recorded_popen: list[dict] = []
+
+    def fake_popen(cmd, cwd=None, stdin=None, stdout=None, stderr=None, start_new_session=None):
+        recorded_popen.append({"cmd": list(cmd), "cwd": str(cwd)})
+        return _FakeProcess(7777)
+
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda *_a, **_kw: None
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.psutil.Process",
+        lambda pid: SimpleNamespace(
+            create_time=lambda: 222.0,
+            cpu_percent=lambda interval=0.0: 1.0,
+            memory_info=lambda: SimpleNamespace(rss=1024),
+            wait=lambda timeout=5: None,
+            is_running=lambda: True,
+            status=lambda: "sleeping",
+        ),
+    )
+    return recorded_popen
+
+
+def test_us302_qemu_start_creates_per_nic_tap_and_no_slirp(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Each declared interface gets its own TAP, attached to the right
+    bridge. No `-netdev user` (SLIRP) is in the QEMU argv when every NIC
+    has a network attachment.
+    """
+    names = _us302_names()
+    bridges = {names["bridge1"], names["bridge2"]}
+    helper = _us302_helper_mock(monkeypatch, present_bridges=bridges)
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+
+    service = NodeRuntimeService()
+    runtime = service.start_node(_us302_lab_data(), 1)
+
+    cmd = recorded_popen[0]["cmd"]
+    netdev_args = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "-netdev"]
+
+    # Two NICs => two -netdev tap entries, no -netdev user.
+    tap_args = [a for a in netdev_args if a.startswith("tap,")]
+    user_args = [a for a in netdev_args if a.startswith("user,")]
+    assert len(tap_args) == 2, f"expected 2 -netdev tap entries, got {netdev_args}"
+    assert user_args == [], f"SLIRP must not be used when bridges exist: {user_args}"
+
+    # Each tap arg references the canonical TAP name and the no-script flags.
+    for arg in tap_args:
+        assert "ifname=" in arg
+        assert ",script=no" in arg
+        assert ",downscript=no" in arg
+
+    # Helper sequence: bridge_exists pre-flight, tap_add → link_master → link_up.
+    assert set(helper["bridge_exists"]) == bridges
+    assert len(helper["tap_add"]) == 2
+    assert len(helper["link_master"]) == 2
+    assert len(helper["link_up"]) == 2
+    # link_master pairs each TAP with its declared bridge.
+    masters = dict(helper["link_master"])
+    assert set(masters.values()) == bridges
+
+    # Runtime record carries the TAP names so stop-path can sweep them.
+    assert len(runtime["tap_names"]) == 2
+    assert all(name.startswith("nve") for name in runtime["tap_names"])
+    assert len(runtime["interface_attachments"]) == 2
+
+
+def test_us302_qemu_start_aborts_when_bridge_missing(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Pre-flight bridge presence check raises before QEMU spawns."""
+    helper = _us302_helper_mock(monkeypatch, present_bridges=set())
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+
+    service = NodeRuntimeService()
+    with pytest.raises(Exception) as excinfo:
+        service.start_node(_us302_lab_data(), 1)
+
+    assert "bridge" in str(excinfo.value).lower()
+    # QEMU never started.
+    assert recorded_popen == []
+    # No TAP work happened.
+    assert helper["tap_add"] == []
+    assert helper["link_master"] == []
+
+
+def test_us302_qemu_start_rolls_back_taps_on_helper_failure(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """A mid-loop helper failure sweeps already-created TAPs.
+
+    With ``link_master`` failing on the second NIC, the first TAP must
+    be deleted (try_link_del), the second TAP appended via tap_add must
+    also be deleted, QEMU must NOT have spawned, and the runtime PID
+    registry must stay empty (no register call survives rollback).
+    """
+    from app.services import runtime_pids
+
+    names = _us302_names()
+    bridges = {names["bridge1"], names["bridge2"]}
+    helper = _us302_helper_mock(
+        monkeypatch,
+        present_bridges=bridges,
+        fail_on=("link_master", names["tap1"]),
+    )
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+
+    service = NodeRuntimeService()
+    with pytest.raises(Exception):
+        service.start_node(_us302_lab_data(), 1)
+
+    # Both TAPs got an add attempt — first succeeded, second failed at link_master.
+    assert helper["tap_add"] == [names["tap0"], names["tap1"]]
+    # Both TAPs are swept on rollback.
+    assert set(helper["try_link_del"]) == {names["tap0"], names["tap1"]}
+    # QEMU never spawned and no PID was registered.
+    assert recorded_popen == []
+    assert runtime_pids.list_entries() == []
+
+
+def test_us302_qemu_argv_contains_netdev_tap_not_user(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Sanity assertion isolated from helper choreography: the assembled
+    QEMU argv uses ``-netdev tap,ifname=...`` and never ``-netdev user``
+    when networks resolve."""
+    names = _us302_names()
+    _us302_helper_mock(
+        monkeypatch, present_bridges={names["bridge1"], names["bridge2"]}
+    )
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+
+    service = NodeRuntimeService()
+    service.start_node(_us302_lab_data(), 1)
+
+    flat = " ".join(recorded_popen[0]["cmd"])
+    assert "-netdev tap," in flat
+    assert ",ifname=nve" in flat
+    assert "-netdev user," not in flat
+
+
+def test_us302_rollback_symmetry_with_docker_start(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """When the registry write fails AFTER QEMU spawned, we kill the
+    process and sweep TAPs (mirrors docker step-4 rollback)."""
+    from app.services import runtime_pids
+
+    names = _us302_names()
+    _us302_helper_mock(
+        monkeypatch, present_bridges={names["bridge1"], names["bridge2"]}
+    )
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+
+    killed: list = []
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.os.killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+    )
+
+    def boom(*_a, **_kw):
+        raise RuntimeError("registry write blocked")
+
+    monkeypatch.setattr(runtime_pids, "register", boom)
+
+    service = NodeRuntimeService()
+    with pytest.raises(Exception) as excinfo:
+        service.start_node(_us302_lab_data(), 1)
+
+    assert "registry" in str(excinfo.value).lower()
+    # QEMU spawned exactly once and was killed during rollback.
+    assert len(recorded_popen) == 1
+    assert killed and killed[0][0] == 7777
+    # No leaked entry in the registry (register raised, unregister noop).
+    assert runtime_pids.list_entries() == []
+
+
+def test_us302_qemu_stop_sweeps_tap_names(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Stop path must call ``host_net.try_link_del`` for every TAP the
+    start path created (parity with US-203 veth sweep)."""
+    names = _us302_names()
+    helper = _us302_helper_mock(
+        monkeypatch, present_bridges={names["bridge1"], names["bridge2"]}
+    )
+    _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.os.killpg",
+        lambda pid, sig: None,
+    )
+
+    service = NodeRuntimeService()
+    lab_data = _us302_lab_data()
+    runtime = service.start_node(lab_data, 1)
+    expected_taps = set(runtime["tap_names"])
+    assert expected_taps  # sanity
+
+    helper["try_link_del"].clear()
+    service.stop_node(lab_data, 1)
+    assert set(helper["try_link_del"]) == expected_taps
