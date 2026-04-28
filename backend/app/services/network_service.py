@@ -7,10 +7,17 @@ US-063 + US-064 — JSON-side mutations under the per-lab flock.
 US-202 — ``create_network`` / ``delete_network`` provision and tear down
 the matching Linux bridge via the privileged helper, persisting
 ``runtime.bridge_name`` on the network record.
+US-204c — Container interface IP bringup. ``create_network`` validates
+the optional ``config.cidr`` (IPv4 only) and seeds
+``runtime.used_ips: list[str]`` and ``runtime.first_offset: int``.
+``_allocate_ip``/``_release_ip`` mutate the free-list under ``lab_lock``;
+nsenter-based IP application happens OUTSIDE the lock by callers per the
+plan §US-204c "Lock-hold-time discipline".
 """
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -25,6 +32,12 @@ from app.services.ws_hub import ws_hub
 logger = logging.getLogger("nova-ve")
 
 
+# US-204c: free-list IPAM defaults. ``first_offset=2`` skips .0 (network)
+# and .1 (conventional gateway reservation). The broadcast address is
+# excluded explicitly inside ``_allocate_ip``.
+DEFAULT_FIRST_OFFSET = 2
+
+
 class NetworkServiceError(Exception):
     """Generic exception for network-service contract violations."""
 
@@ -33,6 +46,37 @@ class NetworkServiceError(Exception):
         self.code = code
         self.message = message
         self.extra = extra or {}
+
+
+def _is_ipv4(value: str) -> bool:
+    try:
+        ipaddress.IPv4Address(value)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
+def _validate_cidr(cidr: Any) -> ipaddress.IPv4Network:
+    """Validate a user-supplied CIDR string.
+
+    IPv4 only — IPv6 raises 422 with explicit pointer to plan §5
+    "deferred-IPv6". Empty/None inputs raise; callers must gate on the
+    presence of ``config.cidr`` before calling.
+    """
+    if not isinstance(cidr, str) or not cidr.strip():
+        raise NetworkServiceError(422, "config.cidr must be a non-empty string")
+    try:
+        net = ipaddress.ip_network(cidr.strip(), strict=True)
+    except (ValueError, TypeError) as exc:
+        raise NetworkServiceError(
+            422, f"config.cidr is not a valid CIDR: {exc}"
+        ) from exc
+    if isinstance(net, ipaddress.IPv6Network):
+        raise NetworkServiceError(
+            422,
+            "IPv6 CIDR not yet supported (see plan §5 deferred-IPv6)",
+        )
+    return net
 
 
 def _serialize_network(network: dict, count: int) -> dict:
@@ -80,6 +124,16 @@ class NetworkService:
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
+        # US-204c: validate CIDR (if any) before touching the lab lock so
+        # invalid input cannot create partial state. ``config`` is the
+        # user-supplied shape from ``NetworkCreate``/``NetworkConfig``.
+        raw_config = request.get("config") or {}
+        if not isinstance(raw_config, dict):
+            raw_config = {}
+        cidr_value = raw_config.get("cidr")
+        if cidr_value:
+            _validate_cidr(cidr_value)
+
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
             lab_id = str(data.get("id") or normalized)
@@ -104,8 +158,15 @@ class NetworkService:
                 "visibility": True,
                 "implicit": False,
                 "smart": -1,
-                "config": {},
-                "runtime": {"bridge_name": bridge},
+                "config": dict(raw_config),
+                "runtime": {
+                    "bridge_name": bridge,
+                    # US-204c: seed an empty free-list. Counter-based
+                    # allocation would exhaust a /24 in 250 cycles even
+                    # with one container; the free-list does not.
+                    "used_ips": [],
+                    "first_offset": DEFAULT_FIRST_OFFSET,
+                },
             }
             networks[str(next_id)] = network
             data.pop("topology", None)
@@ -215,6 +276,130 @@ class NetworkService:
 
         await ws_hub.publish(normalized, "network_deleted", {"network": removed})
         return removed
+
+    # ------------------------------------------------------------------
+    # US-204c — IPAM free-list allocator
+    # ------------------------------------------------------------------
+
+    def _allocate_ip(self, lab_path: str, network_id: int) -> str:
+        """Reserve and return the lowest free IP from ``network.config.cidr``.
+
+        Walks the CIDR's host range starting at ``runtime.first_offset``,
+        skipping the network/broadcast addresses and any IP already in
+        ``runtime.used_ips``. The chosen address is appended to
+        ``used_ips`` (kept sorted by integer value) and persisted under
+        the per-lab flock. Callers MUST execute ``nsenter ip addr add``
+        OUTSIDE the lock and call ``_release_ip`` on failure (plan
+        §US-204c "Lock-hold-time discipline" / "Rollback semantics").
+
+        Raises:
+            NetworkServiceError(404): the network does not exist.
+            NetworkServiceError(422): the network has no ``config.cidr``,
+                or the CIDR cannot be parsed.
+            NetworkServiceError(409): the subnet has no free addresses.
+        """
+        normalized = _normalize_relative_lab_path(lab_path)
+        labs_dir = get_settings().LABS_DIR
+
+        with lab_lock(normalized, labs_dir):
+            data = LabService.read_lab_json_static(normalized)
+            networks = data.get("networks", {}) or {}
+            network = networks.get(str(network_id))
+            if not isinstance(network, dict):
+                raise NetworkServiceError(404, "Network does not exist.")
+            config = network.get("config") or {}
+            cidr_value = config.get("cidr") if isinstance(config, dict) else None
+            if not cidr_value:
+                raise NetworkServiceError(
+                    422,
+                    "Network has no config.cidr; allocate_ip not applicable.",
+                    extra={"network_id": int(network_id)},
+                )
+            net = _validate_cidr(cidr_value)
+
+            runtime = network.setdefault("runtime", {})
+            used_raw = runtime.get("used_ips") or []
+            # Defensive: tolerate persisted garbage (None, non-string)
+            # and keep only addresses that parse and live in the CIDR.
+            used: set = set()
+            for entry in used_raw:
+                if not isinstance(entry, str):
+                    continue
+                try:
+                    addr = ipaddress.IPv4Address(entry)
+                except ValueError:
+                    continue
+                if addr in net:
+                    used.add(addr)
+
+            first_offset = int(runtime.get("first_offset") or DEFAULT_FIRST_OFFSET)
+            if first_offset < 1:
+                first_offset = 1
+            network_addr = net.network_address
+            broadcast_addr = net.broadcast_address
+            start_int = int(network_addr) + first_offset
+            end_int = int(broadcast_addr) - 1  # exclusive of broadcast
+
+            chosen: Optional[ipaddress.IPv4Address] = None
+            for candidate_int in range(start_int, end_int + 1):
+                candidate = ipaddress.IPv4Address(candidate_int)
+                if candidate in used:
+                    continue
+                chosen = candidate
+                break
+
+            if chosen is None:
+                raise NetworkServiceError(
+                    409,
+                    "subnet exhausted, please widen CIDR",
+                    extra={"network_id": int(network_id), "cidr": str(net)},
+                )
+
+            used.add(chosen)
+            runtime["used_ips"] = sorted(
+                (str(addr) for addr in used),
+                key=lambda s: int(ipaddress.IPv4Address(s)),
+            )
+            runtime.setdefault("first_offset", first_offset)
+            networks[str(network_id)] = network
+            data["networks"] = networks
+            data.pop("topology", None)
+            LabService.write_lab_json_static(normalized, data)
+
+        return str(chosen)
+
+    def _release_ip(self, lab_path: str, network_id: int, ip: str) -> bool:
+        """Remove ``ip`` from ``runtime.used_ips``; return True if removed.
+
+        No-op (returns False) when the network or IP is absent —
+        idempotent so detach paths can call this without a pre-check.
+        """
+        normalized = _normalize_relative_lab_path(lab_path)
+        labs_dir = get_settings().LABS_DIR
+
+        with lab_lock(normalized, labs_dir):
+            data = LabService.read_lab_json_static(normalized)
+            networks = data.get("networks", {}) or {}
+            network = networks.get(str(network_id))
+            if not isinstance(network, dict):
+                return False
+            runtime = network.get("runtime") or {}
+            used = list(runtime.get("used_ips") or [])
+            if ip not in used:
+                return False
+            used.remove(ip)
+            runtime["used_ips"] = sorted(
+                used,
+                key=lambda s: int(ipaddress.IPv4Address(s))
+                if _is_ipv4(s)
+                else 0,
+            )
+            network["runtime"] = runtime
+            networks[str(network_id)] = network
+            data["networks"] = networks
+            data.pop("topology", None)
+            LabService.write_lab_json_static(normalized, data)
+            return True
 
     async def patch_network(
         self,

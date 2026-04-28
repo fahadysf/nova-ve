@@ -339,3 +339,222 @@ async def test_delete_network_tolerates_already_absent_bridge(
     # No exception — the network record is gone either way.
     removed = await NetworkService().delete_network(lab_name, 1)
     assert removed["id"] == 1
+
+
+# ---------------------------------------------------------------------------
+# US-204c — IPAM free-list (used_ips, NOT a counter)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_network_seeds_empty_used_ips_freelist(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """``runtime.used_ips`` and ``runtime.first_offset`` are persisted on
+    create_network. Empty list (NOT a counter) is the seed value per
+    plan §US-204c "IPAM data model (free-list, NOT a counter)"."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-seed-lab")
+
+    payload = await NetworkService().create_network(
+        lab_name, {"name": "lan", "config": {"cidr": "10.99.1.0/24"}}
+    )
+
+    assert payload["runtime"]["used_ips"] == []
+    assert payload["runtime"]["first_offset"] == 2
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["used_ips"] == []
+    assert saved["networks"]["1"]["runtime"]["first_offset"] == 2
+    assert saved["networks"]["1"]["config"]["cidr"] == "10.99.1.0/24"
+
+
+@pytest.mark.asyncio
+async def test_create_network_rejects_invalid_cidr(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """Invalid CIDR strings raise 422 BEFORE any kernel work happens."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-bad-cidr")
+
+    with pytest.raises(NetworkServiceError) as excinfo:
+        await NetworkService().create_network(
+            lab_name, {"name": "lan", "config": {"cidr": "not-a-cidr"}}
+        )
+    assert excinfo.value.code == 422
+    # No bridge work happened — validation gates BEFORE the lab lock.
+    assert helper_mocks["bridge_add"] == []
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"] == {}
+
+
+@pytest.mark.asyncio
+async def test_create_network_rejects_ipv6_cidr(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """IPv6 CIDRs raise 422 with the deferred-IPv6 §5 pointer."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-ipv6")
+
+    with pytest.raises(NetworkServiceError) as excinfo:
+        await NetworkService().create_network(
+            lab_name, {"name": "lan", "config": {"cidr": "fd00::/64"}}
+        )
+    assert excinfo.value.code == 422
+    assert "IPv6" in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_allocate_ip_returns_lowest_free_address(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """Allocator picks the lowest-numbered free host IP (skipping .0
+    network and .1 reserved per ``first_offset=2``)."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-low")
+    await NetworkService().create_network(
+        lab_name, {"name": "lan", "config": {"cidr": "10.99.1.0/24"}}
+    )
+    svc = NetworkService()
+
+    first = svc._allocate_ip(lab_name, 1)
+    second = svc._allocate_ip(lab_name, 1)
+    third = svc._allocate_ip(lab_name, 1)
+
+    # first_offset=2 → first allocation is .2, then .3, then .4.
+    assert first == "10.99.1.2"
+    assert second == "10.99.1.3"
+    assert third == "10.99.1.4"
+
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["used_ips"] == [
+        "10.99.1.2",
+        "10.99.1.3",
+        "10.99.1.4",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_release_ip_makes_address_reusable(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """After release, the SAME address is the next allocation result —
+    proves the free-list does not leak (the bug a counter would have)."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-release")
+    await NetworkService().create_network(
+        lab_name, {"name": "lan", "config": {"cidr": "10.99.1.0/24"}}
+    )
+    svc = NetworkService()
+
+    a = svc._allocate_ip(lab_name, 1)  # .2
+    b = svc._allocate_ip(lab_name, 1)  # .3
+    assert a == "10.99.1.2" and b == "10.99.1.3"
+
+    # Release the lower one; next allocation must reuse it.
+    assert svc._release_ip(lab_name, 1, a) is True
+    next_alloc = svc._allocate_ip(lab_name, 1)
+    assert next_alloc == "10.99.1.2"
+
+    # Releasing an absent IP is a no-op (idempotent for detach paths).
+    assert svc._release_ip(lab_name, 1, "10.99.1.99") is False
+
+
+@pytest.mark.asyncio
+async def test_allocate_ip_thrashes_freelist_returns_to_baseline(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """50 attach/detach cycles leave ``used_ips`` empty — the very leak
+    a monotonic counter would create over /24 (250 cycles → exhausted)."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-thrash")
+    await NetworkService().create_network(
+        lab_name, {"name": "lan", "config": {"cidr": "10.99.1.0/24"}}
+    )
+    svc = NetworkService()
+
+    for _ in range(50):
+        ip = svc._allocate_ip(lab_name, 1)
+        assert svc._release_ip(lab_name, 1, ip) is True
+
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["used_ips"] == []
+
+
+@pytest.mark.asyncio
+async def test_allocate_ip_exhausts_small_cidr_with_typed_error(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """A /30 has hosts {.1, .2}; with first_offset=2 only .2 is usable —
+    second allocation raises 409 ``subnet exhausted``."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-exhaust")
+    await NetworkService().create_network(
+        lab_name, {"name": "lan", "config": {"cidr": "10.99.2.0/30"}}
+    )
+    svc = NetworkService()
+
+    only_addr = svc._allocate_ip(lab_name, 1)
+    assert only_addr == "10.99.2.2"
+
+    with pytest.raises(NetworkServiceError) as excinfo:
+        svc._allocate_ip(lab_name, 1)
+    assert excinfo.value.code == 409
+    assert "exhausted" in excinfo.value.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_allocate_ip_rejects_network_without_cidr(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """Networks without ``config.cidr`` are L2-only — calling
+    _allocate_ip raises 422 (caller should gate on cidr presence)."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-no-cidr")
+    # No config -> L2-only.
+    await NetworkService().create_network(lab_name, {"name": "lan"})
+    svc = NetworkService()
+
+    with pytest.raises(NetworkServiceError) as excinfo:
+        svc._allocate_ip(lab_name, 1)
+    assert excinfo.value.code == 422
+    assert "config.cidr" in excinfo.value.message
+
+
+@pytest.mark.asyncio
+async def test_allocate_ip_persists_used_ips_into_lab_json(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """Each allocation writes ``used_ips`` to lab.json under the lab
+    flock — survives backend restart per plan §US-204c reconciliation."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-persist")
+    await NetworkService().create_network(
+        lab_name, {"name": "lan", "config": {"cidr": "10.99.3.0/29"}}
+    )
+    svc = NetworkService()
+
+    svc._allocate_ip(lab_name, 1)
+    svc._allocate_ip(lab_name, 1)
+
+    # Re-read directly from disk — no in-memory caching is allowed to
+    # mask a missing write.
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["used_ips"] == [
+        "10.99.3.2",
+        "10.99.3.3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_allocate_ip_skips_externally_reserved_addresses(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """Pre-existing entries in ``used_ips`` are honoured — allocator
+    walks past them to the next free address, supporting reservations
+    written by reconciliation or import."""
+    lab_name = _seed_lab(labs_dir, lab_id="ipam-reserved")
+    await NetworkService().create_network(
+        lab_name, {"name": "lan", "config": {"cidr": "10.99.4.0/24"}}
+    )
+    # Manually pre-populate the free-list (e.g. backend-startup
+    # reconciliation re-baselining live container IPs).
+    raw = json.loads((labs_dir / lab_name).read_text())
+    raw["networks"]["1"]["runtime"]["used_ips"] = ["10.99.4.2", "10.99.4.3"]
+    (labs_dir / lab_name).write_text(json.dumps(raw))
+
+    svc = NetworkService()
+    chosen = svc._allocate_ip(lab_name, 1)
+
+    # First free is .4 — .2 and .3 were both reserved.
+    assert chosen == "10.99.4.4"
