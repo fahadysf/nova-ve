@@ -756,13 +756,82 @@ class LinkService:
         Returns ``(already_deleted_or_succeeded, deleted_implicit_network)``.
         ``deleted_implicit_network`` is None unless an implicit network's
         refcount dropped to 0 and it was GC'd in the same step.
+
+        US-205 / US-204b: mirror of ``create_link`` for hot-detach. We
+        acquire the per-``(lab, node, iface)`` runtime mutex BEFORE entering
+        ``lab_lock`` for every node-side endpoint of the link being deleted,
+        then call :meth:`NodeRuntimeService._detach_docker_interface_locked`
+        with the link's ``runtime.attach_generation`` as
+        ``expected_generation`` so a stale rollback never tears down a fresh
+        re-attach. The kernel-side veth removal runs OUTSIDE the lab_lock.
         """
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
+        # US-205 / US-204b: probe for the link's node-side endpoints before
+        # we take any lock so we know which mutex keys to acquire.  Reading
+        # outside lab_lock is safe — the actual mutation happens under
+        # lab_lock below.  Worst case: we acquire one extra mutex if the
+        # link disappears between probe and lock.
+        probe = LabService.read_lab_json_static(normalized)
+        target_link_probe: Optional[dict] = None
+        for lnk in (probe.get("links", []) or []):
+            if str(lnk.get("id")) == str(link_id):
+                target_link_probe = lnk
+                break
+        if target_link_probe is None:
+            return True, None
+
+        node_keys: List[Tuple[int, int]] = []
+        for ep in (target_link_probe.get("from"), target_link_probe.get("to")):
+            if isinstance(ep, dict) and "node_id" in ep:
+                try:
+                    node_keys.append(
+                        (int(ep["node_id"]), int(ep.get("interface_index", 0)))
+                    )
+                except (TypeError, ValueError):
+                    continue
+        # Deterministic acquisition order prevents deadlocks (symmetric
+        # with create_link).
+        node_keys.sort()
+
+        # Use the same lab_id resolution as create_link / _hot_attach_running_endpoints:
+        # prefer the JSON ``id`` field so the mutex key matches what the runtime
+        # service uses (it keys records by lab_id = str(lab_data["id"] or path)).
+        mutex_lab_id = str(probe.get("id") or normalized)
+
+        async with AsyncExitStack() as stack:
+            for node_id, interface_index in node_keys:
+                await stack.enter_async_context(
+                    runtime_mutex.acquire(mutex_lab_id, node_id, interface_index)
+                )
+            return await self._delete_link_locked(
+                normalized=normalized,
+                labs_dir=labs_dir,
+                link_id=link_id,
+                mutex_lab_id=mutex_lab_id,
+            )
+
+    async def _delete_link_locked(
+        self,
+        *,
+        normalized: str,
+        labs_dir,
+        link_id: str,
+        mutex_lab_id: str,
+    ) -> Tuple[bool, Optional[dict]]:
+        """Per-iface mutex(es) ARE held by the caller (US-205 / US-204b).
+
+        Runs the lab_lock-bounded mutation then hot-detaches any running
+        Docker container whose interface was removed.
+        """
         ws_events: List[Tuple[str, dict]] = []
         deleted_implicit: Optional[dict] = None
-        already_deleted = False
+
+        # Captured under lab_lock for the post-lock hot-detach pass:
+        # list of (node_id, interface_index, attach_generation).
+        detach_targets: List[Tuple[int, int, int]] = []
+        lab_id_for_detach: Optional[str] = None
 
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
@@ -796,17 +865,88 @@ class LinkService:
                     deleted_implicit = dict(network_record)
                     ws_events.append(("network_deleted", {"network": dict(network_record)}))
 
+            # US-205: capture generation token + release IPAM under lab_lock
+            # so the IP removal lands atomically with the link deletion.
+            removed_runtime = removed_link.get("runtime") or {}
+            attach_generation = int(removed_runtime.get("attach_generation", 0))
+            removed_ip: Optional[str] = removed_runtime.get("ip")  # type: ignore[assignment]
+
+            node_eps: List[Tuple[int, int]] = []
+            network_ep_ids: List[int] = []
+            for ep in (removed_link.get("from"), removed_link.get("to")):
+                if not isinstance(ep, dict):
+                    continue
+                if "node_id" in ep:
+                    try:
+                        node_eps.append(
+                            (int(ep["node_id"]), int(ep.get("interface_index", 0)))
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                elif "network_id" in ep:
+                    try:
+                        network_ep_ids.append(int(ep["network_id"]))
+                    except (TypeError, ValueError):
+                        continue
+
+            if node_eps and network_ep_ids:
+                paired_net_id = network_ep_ids[0]
+                # US-205 IPAM release (Codex critic v4 defect #6):
+                # remove the IP from used_ips when US-204c has populated it.
+                # Until US-204c ships, removed_ip is None and this is a no-op.
+                if isinstance(removed_ip, str) and removed_ip:
+                    net_rec = networks.get(str(paired_net_id))
+                    if isinstance(net_rec, dict):
+                        net_rt = net_rec.setdefault("runtime", {})
+                        used = list(net_rt.get("used_ips") or [])
+                        if removed_ip in used:
+                            used.remove(removed_ip)
+                            net_rt["used_ips"] = used
+
+                for node_id, iface_idx in node_eps:
+                    detach_targets.append((int(node_id), int(iface_idx), attach_generation))
+
             data["networks"] = networks
             data.pop("topology", None)
             LabService.write_lab_json_static(normalized, data)
             _recompute_mac_registry(normalized, data)
+            lab_id_for_detach = str(data.get("id") or normalized)
 
             ws_events.append(("link_deleted", {"link_id": str(link_id)}))
+
+        # ------------------------------------------------------------------
+        # US-205 hot-detach pass — outside lab_lock, inside per-iface mutex.
+        # The generation-token check inside _detach_docker_interface_locked
+        # ensures a stale delete_link never tears down a fresh re-attach.
+        # ------------------------------------------------------------------
+        if detach_targets and lab_id_for_detach is not None:
+            from app.services.node_runtime_service import NodeRuntimeService  # noqa: WPS433
+
+            runtime_service = NodeRuntimeService()
+            for node_id, iface_idx, expected_gen in detach_targets:
+                # Both the runtime-record lookup and the locked helper call
+                # use mutex_lab_id — the same key passed to runtime_mutex.acquire()
+                # above so the is_held() defensive assert in the locked helper
+                # matches the outer acquire.
+                runtime = runtime_service._runtime_record(
+                    mutex_lab_id, node_id, include_stopped=True
+                )
+                if runtime is None:
+                    continue
+                if runtime.get("kind") != "docker":
+                    # QEMU hot-detach is US-303.
+                    continue
+                runtime_service._detach_docker_interface_locked(
+                    mutex_lab_id,
+                    int(node_id),
+                    int(iface_idx),
+                    expected_generation=int(expected_gen) if expected_gen else None,
+                )
 
         for event_type, payload in ws_events:
             await ws_hub.publish(normalized, event_type, payload)
 
-        return already_deleted, deleted_implicit
+        return False, deleted_implicit
 
     async def patch_link(self, lab_path: str, link_id: str, patch: Dict[str, Any]) -> Optional[dict]:
         normalized = _normalize_relative_lab_path(lab_path)
