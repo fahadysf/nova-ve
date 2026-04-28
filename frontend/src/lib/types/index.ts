@@ -202,6 +202,8 @@ export interface NodeData {
   cpu_usage?: number;
   ram_usage?: number;
   extras?: Record<string, unknown>;
+  /** Optional runtime/template capabilities echoed by newer backend responses. */
+  capabilities?: TemplateCapabilities;
 }
 
 export interface NodeCatalogImage {
