@@ -1391,6 +1391,13 @@ class NodeRuntimeService:
         # so a recycled pid cannot inherit this entry's authorization.
         self._unregister_pid(pid)
 
+        # US-206: sweep per-node TAP/veth host-ends left behind by this QEMU node.
+        # Best-effort — failures are logged inside sweep_node_host_ifaces.
+        lab_id = runtime.get("lab_id", "")
+        node_id = runtime.get("node_id")
+        if lab_id and node_id is not None:
+            host_net.sweep_node_host_ifaces(lab_id, int(node_id))
+
     @staticmethod
     def _unregister_pid(pid: int | None) -> None:
         if not pid:
@@ -1430,6 +1437,14 @@ class NodeRuntimeService:
         # synchronously here (not deferred to the heartbeat) so a recycled
         # PID cannot reuse this entry's authorization.
         self._unregister_pid(runtime.get("pid"))
+
+        # US-206: sweep any remaining veth host-ends for this node not already
+        # caught by the explicit ``veth_host_ends`` loop above (e.g. interfaces
+        # created by hot-attach after start-time).  Best-effort.
+        lab_id = runtime.get("lab_id", "")
+        node_id = runtime.get("node_id")
+        if lab_id and node_id is not None:
+            host_net.sweep_node_host_ifaces(lab_id, int(node_id))
 
         # US-203: no Docker network record exists for nova-ve labs any
         # more. ``network_names`` is retained on the runtime record only

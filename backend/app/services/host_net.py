@@ -479,3 +479,200 @@ def try_link_del(name: str) -> None:
     except HostNetError:
         # Any other helper failure is still best-effort: log and continue.
         logger.warning("try_link_del(%s): non-fatal cleanup failure", name)
+
+
+def try_bridge_del(name: str) -> None:
+    """Best-effort bridge deletion — swallows :class:`HostNetEINVAL` (already gone).
+
+    Used in orphan-sweep paths.
+    """
+    try:
+        bridge_del(name)
+    except HostNetEINVAL:
+        return
+    except HostNetError:
+        logger.warning("try_bridge_del(%s): non-fatal cleanup failure", name)
+
+
+# ---------------------------------------------------------------------------
+# Orphan sweep (US-206)
+# ---------------------------------------------------------------------------
+
+import re as _re
+
+# Patterns that match nova-ve-owned kernel objects.
+# Bridges: nove<4-hex>n<network_id>
+_RE_BRIDGE = _re.compile(r"^nove[0-9a-f]{4}n\d{1,5}$")
+# TAPs / veth host-ends: nve<4-hex>d<node_id>i<iface>[h|p]?
+_RE_NVE_IFACE = _re.compile(r"^nve[0-9a-f]{4}d\d{1,3}i\d{1,2}[hp]?$")
+
+
+def _list_host_ifaces_prefixed(prefix: str) -> list[str]:
+    """Return names of host interfaces whose name starts with ``prefix``.
+
+    Uses ``ip -o link show`` (unprivileged read) and parses the output.
+    Returns an empty list on any failure so callers degrade gracefully.
+    """
+    try:
+        proc = _run([_ip_bin(), "-o", "link", "show"])
+    except FileNotFoundError:
+        return []
+    if proc.returncode != 0:
+        return []
+    names: list[str] = []
+    for line in proc.stdout.splitlines():
+        # Format: "<index>: <name>[@<peer>]: <flags> ..."
+        parts = line.split(":", 2)
+        if len(parts) < 2:
+            continue
+        raw_name = parts[1].strip().split("@")[0]
+        if raw_name.startswith(prefix):
+            names.append(raw_name)
+    return names
+
+
+def sweep_node_host_ifaces(lab_id: str, node_id: int) -> list[str]:
+    """Remove all host-side veth/TAP interfaces belonging to ``(lab_id, node_id)``.
+
+    Sweeps interfaces matching ``nve<hash>d<node_id>i*[h|p]?`` for the given
+    lab/node.  Best-effort: failures on individual interfaces are logged and
+    skipped so a single stuck interface does not block the rest.
+
+    Returns the list of interface names that were successfully deleted.
+    """
+    try:
+        instance_id = get_instance_id()
+    except HostNetInstanceIdMissing:
+        return []
+
+    h = _lab_hash(lab_id, instance_id)
+    prefix = f"nve{h:04x}d{node_id}i"
+    candidates = _list_host_ifaces_prefixed(prefix)
+    removed: list[str] = []
+    for name in candidates:
+        if not _RE_NVE_IFACE.match(name):
+            continue
+        try:
+            try_link_del(name)
+            removed.append(name)
+            logger.info("orphan-sweep: removed iface %s (lab=%s node=%s)", name, lab_id, node_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "orphan-sweep: failed to remove iface %s (lab=%s node=%s)",
+                name, lab_id, node_id, exc_info=True,
+            )
+    return removed
+
+
+def sweep_lab_host_ifaces(lab_id: str) -> list[str]:
+    """Remove all host-side veth/TAP interfaces belonging to ``lab_id``.
+
+    Sweeps all ``nve<hash>*`` interfaces for the lab.  Called on lab stop.
+    Best-effort: individual failures are logged and skipped.
+
+    Returns the list of interface names that were successfully deleted.
+    """
+    try:
+        instance_id = get_instance_id()
+    except HostNetInstanceIdMissing:
+        return []
+
+    h = _lab_hash(lab_id, instance_id)
+    prefix = f"nve{h:04x}"
+    candidates = _list_host_ifaces_prefixed(prefix)
+    removed: list[str] = []
+    for name in candidates:
+        if not _RE_NVE_IFACE.match(name):
+            continue
+        try:
+            try_link_del(name)
+            removed.append(name)
+            logger.info("orphan-sweep: removed lab iface %s (lab=%s)", name, lab_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "orphan-sweep: failed to remove lab iface %s (lab=%s)",
+                name, lab_id, exc_info=True,
+            )
+    return removed
+
+
+def sweep_orphan_bridges(known_lab_ids: "set[str]") -> list[str]:
+    """Scan host bridges and delete any ``nove*`` bridge not owned by a known lab.
+
+    ``known_lab_ids`` is the set of lab IDs currently on disk.  Any ``nove*``
+    bridge whose hash prefix does not match any of those labs is an orphan
+    (left behind by a crashed backend or a deleted lab) and is removed.
+
+    Best-effort: individual failures are logged and skipped.
+
+    Returns the list of bridge names that were successfully deleted.
+    """
+    try:
+        instance_id = get_instance_id()
+    except HostNetInstanceIdMissing:
+        return []
+
+    # Build a set of known 4-hex hash prefixes from known labs.
+    known_hashes: set[str] = set()
+    for lab_id in known_lab_ids:
+        h = _lab_hash(lab_id, instance_id)
+        known_hashes.add(f"{h:04x}")
+
+    candidates = _list_host_ifaces_prefixed("nove")
+    removed: list[str] = []
+    for name in candidates:
+        if not _RE_BRIDGE.match(name):
+            continue
+        # Extract the 4-hex portion after "nove"
+        bridge_hash = name[4:8]
+        if bridge_hash in known_hashes:
+            continue
+        # Orphan — no live lab owns this bridge.
+        logger.warning("orphan-sweep: found orphan bridge %s (no matching lab)", name)
+        try:
+            try_bridge_del(name)
+            removed.append(name)
+            logger.info("orphan-sweep: deleted orphan bridge %s", name)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "orphan-sweep: failed to delete orphan bridge %s", name, exc_info=True,
+            )
+    return removed
+
+
+def sweep_orphan_ifaces(known_lab_ids: "set[str]") -> list[str]:
+    """Scan host interfaces and delete any ``nve*`` iface not owned by a known lab.
+
+    Mirrors :func:`sweep_orphan_bridges` for TAP/veth host-ends.
+    Best-effort: individual failures are logged and skipped.
+
+    Returns the list of interface names that were successfully deleted.
+    """
+    try:
+        instance_id = get_instance_id()
+    except HostNetInstanceIdMissing:
+        return []
+
+    known_hashes: set[str] = set()
+    for lab_id in known_lab_ids:
+        h = _lab_hash(lab_id, instance_id)
+        known_hashes.add(f"{h:04x}")
+
+    candidates = _list_host_ifaces_prefixed("nve")
+    removed: list[str] = []
+    for name in candidates:
+        if not _RE_NVE_IFACE.match(name):
+            continue
+        iface_hash = name[3:7]
+        if iface_hash in known_hashes:
+            continue
+        logger.warning("orphan-sweep: found orphan iface %s (no matching lab)", name)
+        try:
+            try_link_del(name)
+            removed.append(name)
+            logger.info("orphan-sweep: deleted orphan iface %s", name)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "orphan-sweep: failed to delete orphan iface %s", name, exc_info=True,
+            )
+    return removed
