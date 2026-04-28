@@ -20,6 +20,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import get_settings
@@ -161,6 +162,12 @@ class NetworkService:
                 "config": dict(raw_config),
                 "runtime": {
                     "bridge_name": bridge,
+                    # US-401: provisioning-backend metadata for the
+                    # reconciliation loop (US-402). ``driver`` mirrors
+                    # the network's ``type`` vocabulary; ``created_at``
+                    # is an ISO-8601 UTC timestamp.
+                    "driver": "linux_bridge",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
                     # US-204c: seed an empty free-list. Counter-based
                     # allocation would exhaust a /24 in 250 cycles even
                     # with one container; the free-list does not.
