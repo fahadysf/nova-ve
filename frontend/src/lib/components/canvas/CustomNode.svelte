@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { Handle, Position } from '@xyflow/svelte';
   import PortLayer from './PortLayer.svelte';
   import type { NodeInterface, PortPosition } from '$lib/types';
 
@@ -44,6 +45,18 @@
         : 'border-gray-700 bg-gray-800/95'
   }`}
 >
+  <Handle
+    type="source"
+    position={Position.Right}
+    id="default"
+    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+  />
+  <Handle
+    type="target"
+    position={Position.Left}
+    id="default"
+    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+  />
   <div class="flex items-start gap-2">
     <span
       class={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${
