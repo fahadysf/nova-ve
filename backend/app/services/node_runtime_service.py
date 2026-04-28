@@ -169,7 +169,7 @@ class NodeRuntimeService:
             return runtime
 
         if node.get("type") == "qemu":
-            runtime = self._start_qemu_node(lab_id, node)
+            runtime = self._start_qemu_node(lab_data, node)
         elif node.get("type") == "docker":
             runtime = self._start_docker_node(lab_data, node)
         else:
@@ -858,7 +858,9 @@ class NodeRuntimeService:
             return False
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
 
-    def _start_qemu_node(self, lab_id: str, node: dict[str, Any]) -> dict[str, Any]:
+    def _start_qemu_node(
+        self, lab_data: dict[str, Any], node: dict[str, Any]
+    ) -> dict[str, Any]:
         extras = _node_extras(node)
         architecture = _extra_str(extras, "architecture") or "x86_64"
         qemu_binary = self._resolve_qemu_binary(architecture)
@@ -867,9 +869,25 @@ class NodeRuntimeService:
                 f"QEMU binary not found for arch {architecture}: {self.settings.QEMU_BINARY}"
             )
 
+        lab_id = self._lab_id(lab_data)
+        node_id = int(node["id"])
         machine, max_nics, hotplug_capable = self._resolve_qemu_machine(node)
 
-        work_dir = self._work_dir(lab_id, node["id"])
+        # US-302: per-NIC TAP attachments. Pre-flight every declared
+        # interface's bridge BEFORE we spawn QEMU so a missing bridge
+        # surfaces a typed NodeRuntimeError instead of leaking a half-
+        # started VM. SLIRP is opt-in via per-interface ``extras.uplink``.
+        attachments = self._qemu_attachments(lab_data, node)
+        for attachment in attachments:
+            bridge = attachment["bridge_name"]
+            if not host_net.bridge_exists(bridge):
+                raise NodeRuntimeError(
+                    f"Bridge {bridge} for network_id={attachment['network_id']} "
+                    f"is not present on the host; provision it via create_network "
+                    f"(US-202) before starting the node."
+                )
+
+        work_dir = self._work_dir(lab_id, node_id)
         work_dir.mkdir(parents=True, exist_ok=True)
         overlay_path = self._ensure_qemu_overlay(work_dir, node)
         iso_path = self._resolve_qemu_iso(node)
@@ -890,9 +908,9 @@ class NodeRuntimeService:
             "-m",
             str(node.get("ram", 1024)),
             "-name",
-            str(node.get("name", f"node-{node['id']}")),
+            str(node.get("name", f"node-{node_id}")),
             "-uuid",
-            str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node['id']}"),
+            str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node_id}"),
             "-drive",
             f"file={overlay_path},if=virtio,cache=writeback,format=qcow2",
         ]
@@ -924,18 +942,67 @@ class NodeRuntimeService:
 
         nic_model = _extra_str(extras, "qemu_nic") or "e1000"
         first_mac = node.get("firstmac") or extras.get("firstmac")
-        for index in range(int(node.get("ethernet", 0))):
+        attachment_by_index: dict[int, dict[str, Any]] = {
+            int(a["interface_index"]): a for a in attachments
+        }
+        node_interfaces = node.get("interfaces") or []
+        ethernet_count = int(node.get("ethernet", 0))
+
+        # US-302: provision TAPs BEFORE spawning QEMU. Track every TAP we
+        # successfully created so a partial-failure path can sweep them.
+        provisioned_taps: list[str] = []
+        try:
+            tap_names: dict[int, str] = {}
+            for index in range(ethernet_count):
+                if index in attachment_by_index:
+                    tap = host_net.tap_name(lab_id, node_id, index)
+                    bridge = attachment_by_index[index]["bridge_name"]
+                    host_net.tap_add(tap)
+                    provisioned_taps.append(tap)
+                    host_net.link_master(tap, bridge)
+                    host_net.link_up(tap)
+                    tap_names[index] = tap
+        except Exception:
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise
+
+        # ----- Build per-NIC -netdev / -device argv ------------------------
+        for index in range(ethernet_count):
             device_args = (
                 f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
             )
             if machine == "q35" and index < max_nics:
                 device_args += f",bus=rp{index}"
-            cmd += [
-                "-netdev",
-                f"user,id=net{index}",
-                "-device",
-                device_args,
-            ]
+
+            if index in tap_names:
+                tap = tap_names[index]
+                cmd += [
+                    "-netdev",
+                    f"tap,id=net{index},ifname={tap},script=no,downscript=no",
+                    "-device",
+                    device_args,
+                ]
+            elif self._interface_uplink(node_interfaces, index):
+                # SLIRP opt-in (extras.uplink: true) — gives the NIC NAT
+                # access to the host's outbound network without a bridge.
+                cmd += [
+                    "-netdev",
+                    f"user,id=net{index}",
+                    "-device",
+                    device_args,
+                ]
+            else:
+                # No network attached and no uplink request — give the NIC
+                # an isolated ``hubport`` netdev (each in its own private
+                # hub, hubid={index}) so it appears in the guest but never
+                # reaches host networking.
+                cmd += [
+                    "-netdev",
+                    f"hubport,id=net{index},hubid={index}",
+                    "-device",
+                    device_args,
+                ]
 
         if iso_path:
             cmd += ["-cdrom", str(iso_path), "-boot", "order=dc"]
@@ -945,39 +1012,56 @@ class NodeRuntimeService:
             try:
                 cmd += shlex.split(extra_args)
             except ValueError as exc:
+                # Sweep TAPs we already created so the lab does not leak
+                # kernel objects when arg parsing rejects the launch.
+                for tap in provisioned_taps:
+                    host_net.try_link_del(tap)
                 raise NodeRuntimeError(f"Invalid qemu_options: {exc}") from exc
 
-        with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
-            process = subprocess.Popen(
-                cmd,
-                cwd=work_dir,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_handle,
-                stderr=stderr_handle,
-                start_new_session=True,
-            )
+        try:
+            with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
+                process = subprocess.Popen(
+                    cmd,
+                    cwd=work_dir,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_handle,
+                    stderr=stderr_handle,
+                    start_new_session=True,
+                )
+        except Exception:
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise
 
         time.sleep(0.1)
         if process.poll() is not None:
             error = self._tail_text(stderr_log, 40) or self._tail_text(stdout_log, 40)
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
             raise NodeRuntimeError(error or "QEMU exited immediately after start")
 
         process_info = psutil.Process(process.pid)
 
-        # US-201/US-203: register the PID into the runtime registry BEFORE
-        # any helper-verb call. QEMU does not use the helper today, but
-        # US-303 (hot-attach) will, and the registry is the single source
-        # of truth for pid authorization. Best-effort: a registry write
-        # failure does not abort the QEMU start path because nothing in
-        # the QEMU happy path needs the registry yet.
+        # US-201/US-203: register the PID into the runtime registry. On
+        # registry failure we kill the QEMU process and sweep the TAPs to
+        # keep the rollback symmetric with the docker start path
+        # (``_start_docker_node`` step 4).
         try:
-            runtime_pids.register(process.pid, "qemu", lab_id, int(node["id"]))
-        except Exception:  # noqa: BLE001 — best-effort, see comment above
-            pass
+            runtime_pids.register(process.pid, "qemu", lab_id, node_id)
+        except Exception as exc:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise NodeRuntimeError(
+                f"Failed to register QEMU PID in runtime registry: {exc}"
+            ) from exc
 
         return {
             "lab_id": lab_id,
-            "node_id": node["id"],
+            "node_id": node_id,
             "kind": "qemu",
             "name": node.get("name"),
             "console": console_mode,
@@ -995,8 +1079,143 @@ class NodeRuntimeService:
             "max_nics": max_nics,
             "hotplug_capable": hotplug_capable,
             "allocated_slots": allocated_slots,
+            "tap_names": list(provisioned_taps),
+            "interface_attachments": [
+                {
+                    "interface_index": a["interface_index"],
+                    "network_id": a["network_id"],
+                    "bridge_name": a["bridge_name"],
+                    "tap_name": tap_names.get(int(a["interface_index"])),
+                }
+                for a in attachments
+            ],
             "started_at": time.time(),
         }
+
+    @staticmethod
+    def _interface_uplink(interfaces: list[Any], interface_index: int) -> bool:
+        """Return True iff the interface's ``extras.uplink`` flag is set.
+
+        SLIRP/user-mode networking is opt-in per interface (US-302). When
+        the interface entry has no explicit network attachment, we keep
+        the legacy ``-netdev user`` only when the operator has marked the
+        interface as an uplink — otherwise the NIC is wired into an
+        isolated socket netdev to keep the guest from leaking onto the
+        host's outbound network.
+        """
+        for entry in interfaces or []:
+            if not isinstance(entry, dict):
+                continue
+            if int(entry.get("index", -1)) == int(interface_index):
+                extras = entry.get("extras") or {}
+                if isinstance(extras, dict) and bool(extras.get("uplink")):
+                    return True
+                return False
+        return False
+
+    def _qemu_attachments(
+        self, lab_data: dict[str, Any], node: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Resolve per-interface bridge attachments for a QEMU node.
+
+        Mirrors :meth:`_docker_attachments`: returns
+        ``{interface_index, network_id, bridge_name}`` records ordered by
+        ``interface_index``. Interfaces with no resolvable network (no
+        link, ``pnet`` external network, or missing network record) are
+        skipped — those NICs fall back to the SLIRP/opt-in uplink path.
+        """
+        lab_id = self._lab_id(lab_data)
+        networks = lab_data.get("networks", {}) or {}
+
+        node_id = int(node.get("id", 0))
+        link_map: dict[int, int] = {}
+        for link in lab_data.get("links", []) or []:
+            endpoints = (link.get("from") or {}, link.get("to") or {})
+            node_endpoint = next(
+                (
+                    endpoint for endpoint in endpoints
+                    if isinstance(endpoint, dict)
+                    and "node_id" in endpoint
+                    and int(endpoint.get("node_id", -1)) == node_id
+                ),
+                None,
+            )
+            network_endpoint = next(
+                (
+                    endpoint for endpoint in endpoints
+                    if isinstance(endpoint, dict) and "network_id" in endpoint
+                ),
+                None,
+            )
+            if node_endpoint and network_endpoint:
+                interface_index = int(node_endpoint.get("interface_index", 0))
+                network_id = int(network_endpoint.get("network_id", 0))
+                if network_id:
+                    link_map[interface_index] = network_id
+
+        attachments: list[dict[str, Any]] = []
+        seen_indices: set[int] = set()
+        interfaces = node.get("interfaces") or []
+        ethernet_count = int(node.get("ethernet", 0))
+        for index, interface in enumerate(interfaces):
+            if not isinstance(interface, dict):
+                continue
+            interface_index = int(interface.get("index", index))
+            if interface_index in seen_indices:
+                continue
+            network_id = int(interface.get("network_id") or 0)
+            if not network_id:
+                network_id = link_map.get(interface_index, 0)
+            if not network_id:
+                continue
+            network = networks.get(str(network_id))
+            if not isinstance(network, dict):
+                continue
+            network_type = str(network.get("type", "linux_bridge"))
+            if network_type.startswith("pnet"):
+                continue
+            runtime_record = network.get("runtime") or {}
+            bridge = runtime_record.get("bridge_name")
+            if not bridge:
+                bridge = host_net.bridge_name(lab_id, network_id)
+            seen_indices.add(interface_index)
+            attachments.append(
+                {
+                    "interface_index": interface_index,
+                    "network_id": network_id,
+                    "bridge_name": bridge,
+                }
+            )
+
+        # Also pick up interfaces that exist only via a `links[]` entry
+        # (no explicit ``interfaces[]`` record) — the QEMU NIC count is
+        # driven by ``ethernet`` and these still need a TAP.
+        for interface_index, network_id in link_map.items():
+            if interface_index in seen_indices:
+                continue
+            if interface_index >= ethernet_count:
+                continue
+            network = networks.get(str(network_id))
+            if not isinstance(network, dict):
+                continue
+            network_type = str(network.get("type", "linux_bridge"))
+            if network_type.startswith("pnet"):
+                continue
+            runtime_record = network.get("runtime") or {}
+            bridge = runtime_record.get("bridge_name")
+            if not bridge:
+                bridge = host_net.bridge_name(lab_id, network_id)
+            seen_indices.add(interface_index)
+            attachments.append(
+                {
+                    "interface_index": interface_index,
+                    "network_id": network_id,
+                    "bridge_name": bridge,
+                }
+            )
+
+        attachments.sort(key=lambda item: item["interface_index"])
+        return attachments
 
     def _resolve_qemu_machine(self, node: dict[str, Any]) -> tuple[str, int, bool]:
         """Resolve machine type, max_nics, and hotplug capability for a QEMU node.
@@ -1371,11 +1590,13 @@ class NodeRuntimeService:
     def _stop_qemu_runtime(self, runtime: dict[str, Any]) -> None:
         pid = runtime.get("pid")
         if not pid:
+            self._sweep_qemu_taps(runtime)
             return
 
         try:
             os.killpg(pid, signal.SIGTERM)
         except ProcessLookupError:
+            self._sweep_qemu_taps(runtime)
             self._unregister_pid(pid)
             return
 
@@ -1387,9 +1608,19 @@ class NodeRuntimeService:
             except ProcessLookupError:
                 pass
 
+        # US-302: sweep the per-NIC TAPs owned by this VM. Best-effort
+        # via ``try_link_del`` so already-removed TAPs (cleanup sweeper
+        # from US-206 ran first) do not raise.
+        self._sweep_qemu_taps(runtime)
+
         # US-201/US-203: drop the QEMU pid from the registry synchronously
         # so a recycled pid cannot inherit this entry's authorization.
         self._unregister_pid(pid)
+
+    @staticmethod
+    def _sweep_qemu_taps(runtime: dict[str, Any]) -> None:
+        for tap in runtime.get("tap_names", []) or []:
+            host_net.try_link_del(tap)
 
     @staticmethod
     def _unregister_pid(pid: int | None) -> None:
