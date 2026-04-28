@@ -168,6 +168,38 @@ def _mock_runtime_binaries(monkeypatch):
     )
 
 
+def test_resolve_qemu_machine_uses_inferred_q35_defaults_when_template_omits_capabilities(
+    monkeypatch, patched_settings, tmp_path
+):
+    templates_dir = tmp_path / "templates" / "qemu"
+    templates_dir.mkdir(parents=True)
+    (templates_dir / "legacy.yml").write_text(
+        """type: qemu
+name: Legacy Router
+cpu: 1
+ram: 512
+ethernet: 2
+console_type: telnet
+"""
+    )
+    monkeypatch.setattr(
+        "app.services.template_service.get_settings",
+        lambda: SimpleNamespace(
+            TEMPLATES_DIR=tmp_path / "templates",
+            IMAGES_DIR=patched_settings.IMAGES_DIR,
+        ),
+    )
+
+    service = NodeRuntimeService()
+    machine, max_nics, hotplug_capable = service._resolve_qemu_machine(
+        {"type": "qemu", "template": "legacy"}
+    )
+
+    assert machine == "q35"
+    assert max_nics == 8
+    assert hotplug_capable is True
+
+
 @pytest.fixture()
 def _us203_instance_id(monkeypatch, tmp_path):
     """Seed an instance_id so ``host_net.bridge_name`` does not blow up.
