@@ -1,4 +1,4 @@
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -15,6 +15,39 @@ NetworkType = Literal[
     "private", "private2", "private3",
     "nat0",
 ]
+
+
+class NetworkConfig(BaseModel):
+    """User-supplied network configuration.
+
+    US-204c: the optional ``cidr`` enables L3 IPAM from a free-list of
+    used IPs (``runtime.used_ips``). When ``cidr`` is unset the network is
+    L2-only. IPv6 CIDRs are rejected at create-network time per the
+    deferred-IPv6 §5 plan entry.
+    """
+
+    cidr: Optional[str] = None
+    gateway: Optional[str] = None
+    dhcp: bool = False
+
+
+class NetworkRuntime(BaseModel):
+    """Runtime/host-side state for a network record.
+
+    Persisted under ``networks[i].runtime`` in lab.json. Owned by
+    ``network_service`` (bridge name from US-202; IPAM free-list from
+    US-204c). The IPAM free-list is intentionally NOT a monotonic
+    counter — see plan §US-204c "IPAM data model (free-list, NOT a
+    counter)" for why.
+    """
+
+    bridge_name: Optional[str] = None
+    driver: Optional[str] = None
+    used_ips: List[str] = Field(default_factory=list)
+    # First host offset usable for allocation (skips network address and
+    # the conventional .1 gateway reservation). Operators may bump this
+    # if they need additional reserved low addresses.
+    first_offset: int = 2
 
 
 class NetworkBase(BaseModel):
@@ -40,6 +73,7 @@ class NetworkBase(BaseModel):
     implicit: bool = False
     smart: int = -1
     config: Dict[str, Any] = Field(default_factory=dict)
+    runtime: Dict[str, Any] = Field(default_factory=dict)
 
 
 class NetworkRead(NetworkBase):
@@ -56,6 +90,7 @@ class NetworkCreate(BaseModel):
     type: NetworkType = "linux_bridge"
     left: int = 0
     top: int = 0
+    config: Optional[NetworkConfig] = None
 
 
 class NetworkUpdate(BaseModel):
