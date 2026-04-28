@@ -2,8 +2,10 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
-  import { Handle, Position, useStore } from '@xyflow/svelte';
+  import { createEventDispatcher, getContext, onDestroy } from 'svelte';
+  import type { Readable } from 'svelte/store';
+  import { Handle, Position, useNodesData, useStore } from '@xyflow/svelte';
+  import { formatInterfaceName } from '$lib/services/interfaceNaming';
   import type { LiveMacState, NodeInterface, PortPosition } from '$lib/types';
   import { dragLinkStore, getDragLinkSnapshot } from '$lib/stores/dragLink';
   import { togglePortInfo } from '$lib/stores/portInfo';
@@ -22,6 +24,7 @@
   export let isSource = false;
   export let highlighted = false;
   export let liveMac: LiveMacState | undefined = undefined;
+  export let interfaceNamingScheme: string | null | undefined = undefined;
 
   const dispatch = createEventDispatcher<{
     'port:mousedown': { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition };
@@ -43,6 +46,8 @@
   // mouseup. ``clickStartCoords`` doubles as a "did we receive mousedown" flag.
   let clickStartTs = 0;
   let clickStartCoords: { x: number; y: number } | null = null;
+  let currentNodeData: { interface_naming_scheme?: string | null } | null = null;
+  let unsubscribeCurrentNode: (() => void) | null = null;
 
   $: stylePosition = (() => {
     const offsetPct = `${(position.offset * 100).toFixed(2)}%`;
@@ -79,12 +84,31 @@
   // component tree. Outside that context (e.g. unit tests) the Handle calls
   // useStore() and throws; the guard makes Port test-safe in isolation.
   let insideFlow = false;
+  const flowNodeId = getContext<string | undefined>('svelteflow__node_id');
+  let currentNodeStore: Readable<{ data: { interface_naming_scheme?: string | null } } | null> | null = null;
   try {
     useStore();
     insideFlow = true;
+    if (flowNodeId) {
+      currentNodeStore = useNodesData(flowNodeId) as Readable<{
+        data: { interface_naming_scheme?: string | null };
+      } | null>;
+    }
   } catch {
     insideFlow = false;
   }
+  if (currentNodeStore) {
+    unsubscribeCurrentNode = currentNodeStore.subscribe((value) => {
+      currentNodeData = value?.data ?? null;
+    });
+  }
+
+  $: resolvedInterfaceNamingScheme =
+    interfaceNamingScheme !== undefined
+      ? interfaceNamingScheme
+      : currentNodeData?.interface_naming_scheme;
+  $: renderedInterfaceName =
+    formatInterfaceName(resolvedInterfaceNamingScheme, interfaceIndex) || interfaceData.name;
 
   $: xyPosition = (() => {
     switch (position.side) {
@@ -126,7 +150,7 @@
         nodeId,
         interfaceIndex,
         port: position,
-        interfaceName: interfaceData.name,
+        interfaceName: renderedInterfaceName,
         plannedMac: interfaceData.planned_mac ?? null,
       },
       nearTarget: true,
@@ -165,7 +189,7 @@
           nodeId,
           interfaceIndex,
           port: position,
-          interfaceName: interfaceData.name,
+          interfaceName: renderedInterfaceName,
           plannedMac: interfaceData.planned_mac ?? null,
         },
         pointer: { x: event.clientX, y: event.clientY },
@@ -198,7 +222,7 @@
           nodeId,
           interfaceIndex,
           anchorRect: rect,
-          interfaceName: interfaceData.name,
+          interfaceName: renderedInterfaceName,
           plannedMac: interfaceData.planned_mac ?? null,
         });
         return;
@@ -224,7 +248,7 @@
         nodeId,
         interfaceIndex,
         port: position,
-        interfaceName: interfaceData.name,
+        interfaceName: renderedInterfaceName,
         plannedMac: interfaceData.planned_mac ?? null,
       },
       nearTarget: true,
@@ -234,6 +258,10 @@
       targetReachable: true,
     });
   }
+
+  onDestroy(() => {
+    unsubscribeCurrentNode?.();
+  });
 </script>
 
 <div
@@ -246,7 +274,7 @@
   data-port-live-state={liveMac?.state ?? ''}
   role="button"
   tabindex="-1"
-  aria-label={`Port ${interfaceData.name}`}
+  aria-label={`Port ${renderedInterfaceName}`}
   on:mousedown={handleMouseDown}
   on:mouseup={handleMouseUp}
   on:mouseenter={handleMouseEnter}
@@ -282,7 +310,7 @@
   {/if}
   {#if showTooltip}
     <PortTooltip
-      interfaceName={interfaceData.name}
+      interfaceName={renderedInterfaceName}
       plannedMac={interfaceData.planned_mac ?? undefined}
       liveMac={liveMac}
       placement={tooltipPlacement}

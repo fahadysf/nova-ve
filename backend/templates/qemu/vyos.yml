@@ -12,3 +12,5 @@ capabilities:
   hotplug: true
   max_nics: 8
   machine: q35
+interface_naming:
+  format: "eth{n}"

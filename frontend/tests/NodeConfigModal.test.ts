@@ -16,11 +16,12 @@
  * a canonical Svelte 5 testing pattern (flushSync or rerender).
  */
 
-import { render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen } from '@testing-library/svelte';
 import { describe, expect, it } from 'vitest';
 import { tick } from 'svelte';
 import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
-import type { NodeCatalog, NodeCatalogTemplate, TemplateCapabilities } from '$lib/types';
+import NodeConfigModalHarness from './NodeConfigModalHarness.svelte';
+import type { NodeCatalog, NodeCatalogTemplate, NodeData, TemplateCapabilities } from '$lib/types';
 
 function makeTemplate(caps?: TemplateCapabilities): NodeCatalogTemplate {
   return {
@@ -55,6 +56,27 @@ function makeCatalog(template: NodeCatalogTemplate): NodeCatalog {
     create_fields: [],
     edit_fields: [],
     runtime_editability: { always: [], stopped_only: [], immutable: [] },
+  };
+}
+
+function makeNode(overrides: Partial<NodeData> = {}): NodeData {
+  return {
+    id: 7,
+    name: 'vyos-1',
+    type: 'qemu',
+    template: 'vyos',
+    image: 'vyos-1.4',
+    console: 'telnet',
+    status: 0,
+    delay: 0,
+    cpu: 1,
+    ram: 1024,
+    ethernet: 4,
+    left: 100,
+    top: 120,
+    icon: 'Router.png',
+    interfaces: [],
+    ...overrides,
   };
 }
 
@@ -97,5 +119,58 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     expect(qemu.machine).toBe('q35');
     expect(docker.machine).toBeNull();
     expect(legacy.hotplug).toBe(false);
+  });
+
+  it('dispatches interface_naming_scheme in create payloads', async () => {
+    const catalog = makeCatalog(makeTemplate());
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'create', catalog, node: null },
+    });
+
+    await tick();
+    await fireEvent.change(screen.getByRole('combobox', { name: /interface naming/i }), {
+      target: { value: 'Port{n}' },
+    });
+    const createForm = screen.getByRole('dialog').querySelector('form');
+    expect(createForm).not.toBeNull();
+    await fireEvent.submit(createForm as HTMLFormElement);
+    await tick();
+
+    expect(screen.getByTestId('submit-payload').textContent).toBeTruthy();
+    expect(JSON.parse(screen.getByTestId('submit-payload').textContent ?? 'null')).toEqual(
+      expect.objectContaining({
+        mode: 'create',
+        payload: expect.objectContaining({
+          interface_naming_scheme: 'Port{n}',
+        }),
+      }),
+    );
+  });
+
+  it('dispatches interface_naming_scheme in edit payloads', async () => {
+    const catalog = makeCatalog(makeTemplate());
+    const node = makeNode({ interface_naming_scheme: 'eth{n}' });
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'edit', catalog, node },
+    });
+
+    await tick();
+    await fireEvent.change(screen.getByRole('combobox', { name: /interface naming/i }), {
+      target: { value: '' },
+    });
+    const editForm = screen.getByRole('dialog').querySelector('form');
+    expect(editForm).not.toBeNull();
+    await fireEvent.submit(editForm as HTMLFormElement);
+    await tick();
+
+    expect(screen.getByTestId('submit-payload').textContent).toBeTruthy();
+    expect(JSON.parse(screen.getByTestId('submit-payload').textContent ?? 'null')).toEqual(
+      expect.objectContaining({
+        mode: 'edit',
+        payload: expect.objectContaining({
+          interface_naming_scheme: null,
+        }),
+      }),
+    );
   });
 });

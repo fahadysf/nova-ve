@@ -204,6 +204,7 @@ export interface NodeData {
   extras?: Record<string, unknown>;
   /** Optional runtime/template capabilities echoed by newer backend responses. */
   capabilities?: TemplateCapabilities;
+  interface_naming_scheme?: string | null;
 }
 
 export interface NodeCatalogImage {

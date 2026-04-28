@@ -289,4 +289,54 @@ describe('Port (US-079)', () => {
     const handleLeft = root.querySelector('[data-testid="port-handle"]') as HTMLElement;
     expect(handleLeft.className).not.toContain('port-handle-hover');
   });
+
+  it('formats interface names from interfaceNamingScheme when one is set', () => {
+    render(Port, {
+      props: {
+        interfaceData: baseInterface,
+        position: basePosition,
+        nodeId: 7,
+        interfaceIndex: 0,
+        interfaceNamingScheme: 'GigabitEthernet0/0/{n}',
+      },
+    });
+
+    const root = findPortRoot();
+    expect(root.getAttribute('aria-label')).toBe('Port GigabitEthernet0/0/0');
+
+    dispatchMouse(root, 'mousedown', { x: 100, y: 200 });
+    dispatchMouse(root, 'mouseup', { x: 100, y: 200 });
+
+    const stored = get(selectedPortInfoStore);
+    expect(stored).not.toBeNull();
+    expect(stored?.kind).toBe('interface');
+    if (stored?.kind === 'interface') {
+      expect(stored.interfaceName).toBe('GigabitEthernet0/0/0');
+    }
+  });
+
+  it('falls back to the literal interface name when interfaceNamingScheme is null', () => {
+    render(Port, {
+      props: {
+        interfaceData: baseInterface,
+        position: basePosition,
+        nodeId: 7,
+        interfaceIndex: 0,
+        interfaceNamingScheme: null,
+      },
+    });
+
+    const root = findPortRoot();
+    expect(root.getAttribute('aria-label')).toBe('Port eth0');
+
+    dispatchMouse(root, 'mousedown', { x: 100, y: 200 });
+    dispatchMouse(root, 'mouseup', { x: 100, y: 200 });
+
+    const stored = get(selectedPortInfoStore);
+    expect(stored).not.toBeNull();
+    expect(stored?.kind).toBe('interface');
+    if (stored?.kind === 'interface') {
+      expect(stored.interfaceName).toBe('eth0');
+    }
+  });
 });
