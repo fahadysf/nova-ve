@@ -79,6 +79,39 @@ async def startup():
     from app.services.node_runtime_service import NodeRuntimeService
     NodeRuntimeService.start_heartbeat()
 
+    # US-206: backend-startup orphan sweep.  Scan the host for nove*/nve* kernel
+    # objects that belong to labs no longer on disk (or that survived a crash).
+    # Best-effort — never blocks startup, never raises.
+    try:
+        from app.services import host_net as _host_net
+        from app.services.lab_service import LabService as _LabService
+
+        _known_lab_ids: set[str] = set()
+        _labs_dir = settings.LABS_DIR
+        if _labs_dir.exists():
+            for _lab_file in _labs_dir.rglob("*.json"):
+                try:
+                    import json as _json
+                    _raw = _json.loads(_lab_file.read_text())
+                    _lid = str(_raw.get("id", "")).strip()
+                    if _lid:
+                        _known_lab_ids.add(_lid)
+                except Exception:
+                    pass
+
+        _removed_bridges = _host_net.sweep_orphan_bridges(_known_lab_ids)
+        _removed_ifaces = _host_net.sweep_orphan_ifaces(_known_lab_ids)
+        if _removed_bridges or _removed_ifaces:
+            _logger.warning(
+                "startup orphan-sweep: removed %d bridges %s and %d ifaces %s",
+                len(_removed_bridges), _removed_bridges,
+                len(_removed_ifaces), _removed_ifaces,
+            )
+        else:
+            _logger.info("startup orphan-sweep: no orphans found")
+    except Exception:
+        _logger.exception("startup orphan-sweep failed (non-fatal)")
+
 
 @app.on_event("shutdown")
 async def shutdown():
