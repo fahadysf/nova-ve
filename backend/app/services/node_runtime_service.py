@@ -1764,7 +1764,21 @@ class NodeRuntimeService:
         host_end = target.get("host_end") or host_net.veth_host_name(
             lab_id, int(node_id), int(interface_index)
         )
-        host_net.try_link_del(host_end)
+        # US-205 Codex critic v2: hot-detach must surface real kernel-side
+        # failures so the caller (link_service.delete_link) can leave
+        # lab.json + IPAM + runtime_attachments intact on error. We use
+        # ``link_del`` (raises) instead of ``try_link_del`` (swallows
+        # everything) but preserve idempotency by treating
+        # :class:`host_net.HostNetEINVAL` ("no such link") as success —
+        # someone (e.g. an orphan sweep) already removed the host-end.
+        # Any other :class:`host_net.HostNetError` propagates: the
+        # attachment row + host-end remain on the runtime record so the
+        # caller can roll back lab.json / IPAM consistently.
+        try:
+            host_net.link_del(host_end)
+        except host_net.HostNetEINVAL:
+            # Host-end already gone; fall through to runtime-record cleanup.
+            pass
 
         # Drop the attachment + host-end from the runtime record so
         # stop-time cleanup does not double-sweep.

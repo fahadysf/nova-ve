@@ -213,18 +213,91 @@ def _seed_docker_runtime(
     return runtime
 
 
-def _mock_host_net_for_detach(monkeypatch) -> dict:
-    """Capture try_link_del calls so tests can assert veth removal."""
+def _mock_host_net_for_detach(monkeypatch, *, raises=None) -> dict:
+    """Capture link_del / try_link_del calls so tests can assert veth removal.
+
+    ``raises`` (optional) — when set to an exception instance, ``link_del``
+    raises it instead of recording (lets fault-injection tests force a
+    helper failure).
+    """
     from app.services import host_net
 
-    calls: dict[str, list] = {"try_link_del": []}
+    calls: dict[str, list] = {"link_del": [], "try_link_del": []}
 
+    def _link_del(name):
+        calls["link_del"].append(name)
+        if raises is not None:
+            raise raises
+
+    monkeypatch.setattr(host_net, "link_del", _link_del)
     monkeypatch.setattr(
         host_net,
         "try_link_del",
         lambda name: calls["try_link_del"].append(name),
     )
     return calls
+
+
+class _RecordingLock:
+    """Thin proxy around ``threading.Lock`` that records every successful
+    ``acquire`` and ``release`` call so tests can assert serialization.
+    The proxy delegates to the real lock so semantics are preserved.
+    """
+
+    def __init__(self, real_lock, events: list, on_acquire=None, on_release=None):
+        self._real = real_lock
+        self._events = events
+        self._on_acquire = on_acquire
+        self._on_release = on_release
+
+    def acquire(self, blocking=True, timeout=-1):
+        if timeout != -1:
+            result = self._real.acquire(blocking, timeout)
+        else:
+            result = self._real.acquire(blocking)
+        if result:
+            self._events.append("acquire")
+            if self._on_acquire is not None:
+                self._on_acquire()
+        return result
+
+    def release(self):
+        self._events.append("release")
+        if self._on_release is not None:
+            self._on_release()
+        self._real.release()
+
+    def locked(self):
+        return self._real.locked()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *exc):
+        self.release()
+
+
+def _install_recording_lock(
+    monkeypatch, lab_id: str, node_id: int, iface: int, *,
+    on_acquire=None, on_release=None,
+) -> tuple[list, "_RecordingLock"]:
+    """Replace the ``runtime_mutex`` registry entry for ``(lab_id, node_id,
+    iface)`` with a :class:`_RecordingLock`. Returns ``(events_list, lock)``.
+
+    We swap the lock BEFORE any code path acquires it; the
+    ``_get_or_create`` registry uses ``dict.get`` which returns the
+    swapped instance.
+    """
+    from app.services.runtime_mutex import runtime_mutex
+
+    real = threading.Lock()
+    events: list[str] = []
+    proxy = _RecordingLock(real, events, on_acquire=on_acquire, on_release=on_release)
+    key = runtime_mutex._key(lab_id, node_id, iface)
+    with runtime_mutex._registry_lock:
+        runtime_mutex._locks[key] = proxy  # type: ignore[assignment]
+    return events, proxy
 
 
 # ---------------------------------------------------------------------------
@@ -342,9 +415,11 @@ async def test_us205_delete_link_calls_detach_on_running_docker(
     )
     assert saved["links"] == []
 
-    # Kernel-side: try_link_del was called with the host-end veth name.
-    assert host_end in calls["try_link_del"], (
-        f"expected try_link_del({host_end!r}); saw {calls['try_link_del']!r}"
+    # Kernel-side: link_del was called with the host-end veth name
+    # (Codex critic v2 HIGH #2 — hot-detach must use the raising variant
+    # so non-EINVAL failures surface to the caller).
+    assert host_end in calls["link_del"], (
+        f"expected link_del({host_end!r}); saw {calls['link_del']!r}"
     )
 
     # Runtime record cleaned up.
@@ -412,11 +487,13 @@ async def test_us205_stale_generation_does_not_delete_veth(
     )
     assert saved["links"] == []
 
-    # But the newer veth must NOT have been deleted.
-    assert calls["try_link_del"] == [], (
+    # But the newer veth must NOT have been deleted (stale-noop branch
+    # short-circuits BEFORE the host_net helper call).
+    assert calls["link_del"] == [], (
         "stale detach must not delete the host-end veth; "
-        f"saw {calls['try_link_del']!r}"
+        f"saw {calls['link_del']!r}"
     )
+    assert calls["try_link_del"] == []
 
     # The gen=2 attachment is still in the runtime record.
     updated_rt = svc._runtime_record(lab_id, 1, include_stopped=True)
@@ -432,6 +509,11 @@ async def test_us205_delete_link_acquires_mutex_per_node_iface(
     """delete_link must hold the per-(lab, node, iface) runtime mutex
     while running _delete_link_locked — concurrent calls on the SAME
     interface must serialize.
+
+    Codex critic v2 refactor: instead of a smoke test that only asserts
+    the link is eventually gone, we now record every ``acquire``/``release``
+    pair on the mutex registry's underlying ``threading.Lock`` and assert
+    that the two deletes ran in strict serial order — no interleaving.
     """
     async def _noop(*_a, **_kw):
         pass
@@ -443,26 +525,26 @@ async def test_us205_delete_link_acquires_mutex_per_node_iface(
         "lab.json",
         nodes={"1": _node(1)},
         networks={"5": _network(5)},
-        # Two separate links on the same (node=1, iface=0) are not valid
-        # topology, but for mutex-acquisition testing we use one link and
-        # fire two concurrent deletes — second returns idempotent True.
         links=[_link("lnk_001", 1, 0, 5)],
     )
 
     service = LinkService()
 
-    # Track mutex acquisition ordering by patching _delete_link_locked.
-    order: list[str] = []
+    # Wrap the underlying ``threading.Lock`` for (lab="lab", node=1, iface=0)
+    # in a recording proxy so every acquire/release is logged in order.
+    # We pre-install the proxy under the registry key BEFORE any caller
+    # touches it, so ``_get_or_create`` returns our proxy.
+    events, _proxy = _install_recording_lock(monkeypatch, "lab", 1, 0)
+
+    # Slow the critical section so the two deletes are guaranteed to
+    # contend. We slow ``_delete_link_locked`` itself.
     original_locked = service._delete_link_locked
 
-    async def patched_locked(**kwargs):
-        order.append("enter")
-        await asyncio.sleep(0.02)  # yield briefly inside critical section
-        result = await original_locked(**kwargs)
-        order.append("exit")
-        return result
+    async def slow_locked(**kwargs):
+        await asyncio.sleep(0.03)
+        return await original_locked(**kwargs)
 
-    service._delete_link_locked = patched_locked  # type: ignore[method-assign]
+    service._delete_link_locked = slow_locked  # type: ignore[method-assign]
 
     # Fire two concurrent deletes on the same link.
     r1, r2 = await asyncio.gather(
@@ -470,7 +552,7 @@ async def test_us205_delete_link_acquires_mutex_per_node_iface(
         service.delete_link(lab_name, "lnk_001"),
     )
 
-    # Exactly one should have found the link; the other returns (True, None).
+    # Exactly one finds the link, one returns idempotent (True, None).
     results = [r1, r2]
     successes = [r for r in results if r[0] is False]
     idempotent = [r for r in results if r[0] is True]
@@ -479,6 +561,26 @@ async def test_us205_delete_link_acquires_mutex_per_node_iface(
     # The link is gone.
     saved = json.loads((lab_settings.LABS_DIR / lab_name).read_text())
     assert saved["links"] == []
+
+    # Serialization assertion: events must alternate strictly
+    # acquire/release/acquire/release with NO nested acquires (would mean
+    # two callers held the mutex at once).
+    assert events.count("acquire") == events.count("release"), (
+        f"acquire/release imbalance: {events!r}"
+    )
+    assert events.count("acquire") >= 2, (
+        f"expected >=2 acquires for two concurrent deletes; saw {events!r}"
+    )
+    held = 0
+    for e in events:
+        if e == "acquire":
+            held += 1
+            assert held == 1, (
+                f"mutex held by >1 caller at once; events={events!r}"
+            )
+        else:
+            held -= 1
+    assert held == 0
 
 
 @pytest.mark.asyncio
@@ -607,3 +709,299 @@ async def test_us205_implicit_network_gc_still_works(lab_settings, monkeypatch):
     assert "9" not in saved["networks"], "implicit network should have been GC'd"
     assert deleted_net is not None
     assert deleted_net["id"] == 9
+
+
+# ---------------------------------------------------------------------------
+# Codex critic v2 backfill — Issue #94 comment 4336502919
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_us205_create_and_delete_serialize_on_same_iface(
+    lab_settings, monkeypatch
+):
+    """Codex critic v2 HIGH #1 backfill — concurrent ``create_link`` +
+    ``delete_link`` on the SAME ``(node, iface)`` MUST acquire the same
+    runtime mutex and serialize. With the bug present (create using path,
+    delete using id) the two would race; with the fix they share a lock.
+
+    We assert serialization by recording acquire/release on the underlying
+    ``threading.Lock`` and checking no two callers held it concurrently.
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    # Seed a lab with one existing link we can delete, and a second
+    # endpoint to attach to (network 6).
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": _node(1)},
+        networks={"5": _network(5), "6": _network(6)},
+        links=[_link("lnk_001", 1, 0, 5, attach_generation=1)],
+    )
+
+    # Both create_link and delete_link on the SAME (node=1, iface=0) MUST
+    # acquire the same lock. We pre-install a recording proxy at
+    # ("lab", 1, 0) so a single shared events list captures both callers.
+    held_lock = threading.Lock()
+    held_count = {"value": 0}
+    overlap_observed = {"value": False}
+
+    def _on_acquire():
+        with held_lock:
+            held_count["value"] += 1
+            if held_count["value"] > 1:
+                overlap_observed["value"] = True
+
+    def _on_release():
+        with held_lock:
+            held_count["value"] -= 1
+
+    events, _proxy = _install_recording_lock(
+        monkeypatch, "lab", 1, 0,
+        on_acquire=_on_acquire, on_release=_on_release,
+    )
+
+    service = LinkService()
+
+    # Slow the critical section so the two callers' mutex windows overlap
+    # in time. Slowing ``LabService.write_lab_json_static`` is observable
+    # in the create_link path (under lab_lock, after mutex acquired).
+    from app.services.lab_service import LabService as _LabService
+
+    original_write = _LabService.write_lab_json_static
+    slow_event = threading.Event()
+
+    def slow_write(*args, **kwargs):
+        if not slow_event.is_set():
+            slow_event.set()
+            time.sleep(0.05)
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(_LabService, "write_lab_json_static", staticmethod(slow_write))
+
+    # First delete the existing link on iface=0, then create a fresh one
+    # on iface=0 to network 6 — concurrent.
+    create_coro = service.create_link(
+        lab_name,
+        {"node_id": 1, "interface_index": 0},
+        {"network_id": 6},
+    )
+    delete_coro = service.delete_link(lab_name, "lnk_001")
+
+    await asyncio.gather(delete_coro, create_coro)
+
+    # Both callers acquired the SAME lock (("lab", 1, 0)) — proven by
+    # the events list capturing >= 2 acquire/release pairs.
+    assert events.count("acquire") >= 2, (
+        f"expected create+delete to BOTH acquire the (lab,1,0) mutex; "
+        f"events={events!r}"
+    )
+    assert events.count("acquire") == events.count("release")
+    assert not overlap_observed["value"], (
+        "two callers held the same per-(lab, node, iface) mutex at once: "
+        f"events={events!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_us205_mutex_keying_lab_id_differs_from_path(
+    lab_settings, monkeypatch
+):
+    """Codex critic v2 HIGH #1 backfill — when ``lab.id`` differs from
+    the file path, ``create_link`` and ``delete_link`` MUST still resolve
+    to the SAME mutex key. Pre-fix, create used the path and delete used
+    the id, so they grabbed DIFFERENT locks on the same logical interface.
+
+    We assert that both paths acquire-and-release the lock keyed by the
+    JSON ``id`` field (NOT by the file path).
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    # File on disk: ``mylab.json``; JSON ``id``: ``"lab"`` (different).
+    labs_dir = lab_settings.LABS_DIR
+    payload = {
+        "schema": 2,
+        "id": "lab",  # explicitly different from file basename
+        "meta": {"name": "mylab.json"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {"1": _node(1)},
+        "networks": {"5": _network(5), "6": _network(6)},
+        "links": [_link("lnk_001", 1, 0, 5, attach_generation=1)],
+        "defaults": {"link_style": "orthogonal"},
+    }
+    (labs_dir / "mylab.json").write_text(json.dumps(payload))
+
+    # The fix: both paths key on JSON id "lab", NOT path "mylab.json".
+    correct_events, _correct = _install_recording_lock(monkeypatch, "lab", 1, 0)
+    wrong_events, _wrong = _install_recording_lock(monkeypatch, "mylab.json", 1, 0)
+
+    service = LinkService()
+
+    # delete_link path — must use lab.id "lab", not "mylab.json".
+    await service.delete_link("mylab.json", "lnk_001")
+
+    # create_link path — must also use lab.id "lab".
+    await service.create_link(
+        "mylab.json",
+        {"node_id": 1, "interface_index": 0},
+        {"network_id": 6},
+    )
+
+    # Both paths should have acquired+released the CORRECT lock (id-keyed)
+    # exactly twice (once for delete, once for create) and NEVER touched
+    # the path-keyed lock.
+    assert correct_events.count("acquire") >= 2, (
+        f"expected both create+delete to use the id-keyed lock; "
+        f"correct_events={correct_events!r}"
+    )
+    assert wrong_events == [], (
+        "neither path should have used the path-keyed lock; "
+        f"wrong_events={wrong_events!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_us205_link_del_failure_leaves_state_intact(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Codex critic v2 HIGH #2 backfill — fault injection.
+
+    When ``host_net.link_del`` raises ``HostNetUnknown``, ``delete_link``
+    MUST NOT (a) remove the link from ``lab.json``, (b) remove the IP
+    from ``used_ips``, or (c) clear the runtime ``interface_attachments``
+    row. The exception MUST surface to the caller.
+    """
+    from app.services import host_net as host_net_mod
+
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    lab_id = "lab205fault"
+    attach_gen = 7
+    ip_seeded = "10.99.1.5"
+    host_end = host_net_mod.veth_host_name(lab_id, 1, 0)
+
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _node(1)},
+        networks={"5": _network(5, used_ips=[ip_seeded])},
+        links=[
+            _link("lnk_001", 1, 0, 5, attach_generation=attach_gen, ip=ip_seeded)
+        ],
+    )
+
+    svc = NodeRuntimeService()
+    rt = _seed_docker_runtime(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        pid=9100,
+        iface_attachments=[{
+            "interface_index": 0,
+            "network_id": 5,
+            "bridge_name": "novebr0005",
+            "host_end": host_end,
+            "attach_generation": attach_gen,
+        }],
+        monkeypatch=monkeypatch,
+    )
+    rt["interface_runtime"] = {"0": {"current_attach_generation": attach_gen}}
+    svc._persist_runtime(rt)
+
+    # Inject a non-EINVAL helper failure on link_del.
+    fault = host_net_mod.HostNetUnknown(
+        "simulated helper crash", returncode=1, stderr="bang"
+    )
+    _mock_host_net_for_detach(monkeypatch, raises=fault)
+
+    link_service = LinkService()
+    with pytest.raises(host_net_mod.HostNetUnknown):
+        await link_service.delete_link(f"{lab_id}.json", "lnk_001")
+
+    # (a) lab.json link still present.
+    saved = json.loads(
+        (lab_settings.LABS_DIR / f"{lab_id}.json").read_text()
+    )
+    assert any(lnk.get("id") == "lnk_001" for lnk in saved.get("links", [])), (
+        f"link should be intact on detach failure; saved={saved!r}"
+    )
+
+    # (b) used_ips unchanged.
+    used = saved["networks"]["5"]["runtime"].get("used_ips", [])
+    assert ip_seeded in used, (
+        f"IP must NOT be released on detach failure; used_ips={used!r}"
+    )
+
+    # (c) runtime attachment row still present.
+    updated_rt = svc._runtime_record(lab_id, 1, include_stopped=True)
+    assert updated_rt is not None
+    attachments = updated_rt.get("interface_attachments") or []
+    assert any(int(a.get("interface_index", -1)) == 0 for a in attachments), (
+        f"interface_attachments must be intact on detach failure; "
+        f"attachments={attachments!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_us205_idempotent_double_delete_no_op(
+    lab_settings, monkeypatch
+):
+    """Codex critic v2 backfill — calling ``delete_link`` twice on the
+    same id is idempotent: second call returns ``(True, None)`` with no
+    crash and ``used_ips`` is not mutated a second time.
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    lab_id = "lab205dbl"
+    ip_seeded = "10.99.1.7"
+
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _node(1)},
+        networks={"5": _network(5, used_ips=[ip_seeded, "10.99.1.8"])},
+        links=[
+            _link("lnk_001", 1, 0, 5, attach_generation=1, ip=ip_seeded)
+        ],
+    )
+
+    service = LinkService()
+
+    # First delete: link removed, ip released.
+    ok1, _ = await service.delete_link(f"{lab_id}.json", "lnk_001")
+    assert ok1 is False  # found-and-deleted
+
+    saved_after_first = json.loads(
+        (lab_settings.LABS_DIR / f"{lab_id}.json").read_text()
+    )
+    used_after_first = saved_after_first["networks"]["5"]["runtime"].get("used_ips", [])
+    assert ip_seeded not in used_after_first
+    assert "10.99.1.8" in used_after_first
+
+    # Second delete: idempotent (True, None) — no crash, no further mutation.
+    ok2, deleted_net = await service.delete_link(f"{lab_id}.json", "lnk_001")
+    assert ok2 is True
+    assert deleted_net is None
+
+    saved_after_second = json.loads(
+        (lab_settings.LABS_DIR / f"{lab_id}.json").read_text()
+    )
+    used_after_second = saved_after_second["networks"]["5"]["runtime"].get("used_ips", [])
+    # used_ips MUST NOT have been corrupted by the no-op delete.
+    assert used_after_second == used_after_first, (
+        f"second delete corrupted used_ips: "
+        f"before={used_after_first!r} after={used_after_second!r}"
+    )
