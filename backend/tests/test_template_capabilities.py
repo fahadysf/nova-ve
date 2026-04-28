@@ -29,14 +29,14 @@ def test_default_capabilities_docker():
 
 def test_default_capabilities_qemu():
     caps = _default_capabilities("qemu")
-    assert caps["hotplug"] is False
+    assert caps["hotplug"] is True
     assert caps["max_nics"] == 8
-    assert caps["machine"] == "pc"
+    assert caps["machine"] == "q35"
 
 
 def test_default_capabilities_iol():
     caps = _default_capabilities("iol")
-    assert caps["hotplug"] is False
+    assert caps["hotplug"] is True
     assert caps["max_nics"] == 8
 
 
@@ -47,7 +47,7 @@ def test_default_capabilities_iol():
 
 def test_validate_capabilities_none_returns_defaults_for_qemu():
     caps = _validate_capabilities(None, "qemu", "test.yml")
-    assert caps == {"hotplug": False, "max_nics": 8, "machine": "pc"}
+    assert caps == {"hotplug": True, "max_nics": 8, "machine": "q35"}
 
 
 def test_validate_capabilities_none_returns_defaults_for_docker():
@@ -204,10 +204,10 @@ console_type: telnet
     )
     tmpl = svc.get_template("qemu", "legacy")
     caps = tmpl.capabilities
-    # Inferred defaults: hotplug=False, max_nics=8, machine=pc
-    assert caps["hotplug"] is False
+    # Inferred defaults: hotplug=True, max_nics=8, machine=q35
+    assert caps["hotplug"] is True
     assert caps["max_nics"] == 8
-    assert caps["machine"] == "pc"
+    assert caps["machine"] == "q35"
 
 
 def test_template_invalid_capabilities_raises_on_load(svc):
