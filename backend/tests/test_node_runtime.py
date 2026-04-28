@@ -23,6 +23,19 @@ def reset_runtime_registry():
 
 
 @pytest.fixture(autouse=True)
+def _redirect_pids_registry(tmp_path_factory, monkeypatch):
+    """Always redirect ``runtime_pids`` to a tmp_path so registration in
+    QEMU/docker start paths cannot escape into ``/var/lib/nova-ve/runtime``.
+
+    Tests that explicitly seed an instance_id via ``_us203_instance_id``
+    override this with their own per-test path.
+    """
+    pids_dir = tmp_path_factory.mktemp("pids-default")
+    monkeypatch.setenv("NOVA_VE_PIDS_JSON", str(pids_dir / "pids.json"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def reset_guacamole_token_cache():
     _AUTH_TOKEN_CACHE.clear()
     yield
@@ -153,6 +166,87 @@ def _mock_runtime_binaries(monkeypatch):
         "app.services.node_runtime_service.NodeRuntimeService._resolve_binary",
         staticmethod(lambda binary: binary),
     )
+
+
+@pytest.fixture()
+def _us203_instance_id(monkeypatch, tmp_path):
+    """Seed an instance_id so ``host_net.bridge_name`` does not blow up.
+
+    Also redirects the runtime pid registry under ``tmp_path`` so the
+    backend's ``runtime_pids.register`` writes never touch the real
+    ``/var/lib/nova-ve/runtime/`` (which CI cannot write to).
+    """
+    instance_dir = tmp_path / "nova-ve-instance"
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    (instance_dir / "instance_id").write_text("test-instance-203")
+    monkeypatch.setenv("NOVA_VE_INSTANCE_DIR", str(instance_dir))
+
+    pids_path = tmp_path / "runtime" / "pids.json"
+    pids_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("NOVA_VE_PIDS_JSON", str(pids_path))
+    return "test-instance-203"
+
+
+def _us203_helper_mock(monkeypatch, *, present_bridges: set[str] | None = None):
+    """Capture every privileged-helper call. Returns the calls dict.
+
+    All US-203 tests MUST mock the helper — never spawn a real
+    ``ip link add`` in CI.
+    """
+    from app.services import host_net
+
+    if present_bridges is None:
+        present_bridges = set()
+
+    calls: dict[str, list] = {
+        "bridge_exists": [],
+        "veth_pair_add": [],
+        "link_master": [],
+        "link_up": [],
+        "link_netns": [],
+        "link_set_name_in_netns": [],
+        "addr_up_in_netns": [],
+        "link_del": [],
+    }
+
+    def fake_bridge_exists(name: str) -> bool:
+        calls["bridge_exists"].append(name)
+        return name in present_bridges
+
+    def fake_veth_pair_add(host_end: str, peer_end: str) -> None:
+        calls["veth_pair_add"].append((host_end, peer_end))
+
+    def fake_link_master(iface: str, bridge: str) -> None:
+        calls["link_master"].append((iface, bridge))
+
+    def fake_link_up(iface: str) -> None:
+        calls["link_up"].append(iface)
+
+    def fake_link_netns(iface: str, pid: int) -> None:
+        calls["link_netns"].append((iface, pid))
+
+    def fake_link_set_name_in_netns(pid: int, oldname: str, newname: str) -> None:
+        calls["link_set_name_in_netns"].append((pid, oldname, newname))
+
+    def fake_addr_up_in_netns(pid: int, iface: str) -> None:
+        calls["addr_up_in_netns"].append((pid, iface))
+
+    def fake_link_del(name: str) -> None:
+        calls["link_del"].append({"fn": "link_del", "name": name})
+
+    def fake_try_link_del(name: str) -> None:
+        calls["link_del"].append({"fn": "try_link_del", "name": name})
+
+    monkeypatch.setattr(host_net, "bridge_exists", fake_bridge_exists)
+    monkeypatch.setattr(host_net, "veth_pair_add", fake_veth_pair_add)
+    monkeypatch.setattr(host_net, "link_master", fake_link_master)
+    monkeypatch.setattr(host_net, "link_up", fake_link_up)
+    monkeypatch.setattr(host_net, "link_netns", fake_link_netns)
+    monkeypatch.setattr(host_net, "link_set_name_in_netns", fake_link_set_name_in_netns)
+    monkeypatch.setattr(host_net, "addr_up_in_netns", fake_addr_up_in_netns)
+    monkeypatch.setattr(host_net, "link_del", fake_link_del)
+    monkeypatch.setattr(host_net, "try_link_del", fake_try_link_del)
+    return calls
 
 
 @pytest.mark.asyncio
@@ -482,7 +576,11 @@ async def test_guacamole_auth_token_refreshes_when_cached_token_is_invalid(monke
 
 
 @pytest.mark.asyncio
-async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch, patched_settings):
+async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch, patched_settings, _us203_instance_id):
+    """US-203: containers always start with ``--network=none`` and we drive
+    veth setup manually via the privileged helper. No ``docker network
+    create`` / ``docker network connect`` calls are made.
+    """
     lab_data = {
         "schema": 2,
         "id": "lab-123",
@@ -524,6 +622,7 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
                 "visibility": True,
                 "implicit": False,
                 "config": {},
+                "runtime": {"bridge_name": "nove0000n1"},
             }
         },
         "links": [
@@ -552,8 +651,8 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
     }
 
     recorded_calls: list[list[str]] = []
-    existing_networks: set[str] = set()
     containers: dict[str, dict[str, object]] = {}
+    helper_mock = _us203_helper_mock(monkeypatch, present_bridges={"nove0000n1"})
 
     _mock_runtime_binaries(monkeypatch)
 
@@ -563,42 +662,11 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         args = cmd[3:] if len(cmd) > 2 and cmd[1] == "--host" else cmd[1:]
-        if args[:2] == ["network", "inspect"]:
-            network_name = args[2]
-            if network_name not in existing_networks:
-                return SimpleNamespace(returncode=1, stdout="", stderr="no such network")
-
-            attached = {
-                name: {}
-                for name, container in containers.items()
-                if network_name in container["networks"]
-            }
-            stdout = json.dumps([{"Name": network_name, "Containers": attached}])
-            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
-
-        if args[:2] == ["network", "create"]:
-            network_name = args[-1]
-            existing_networks.add(network_name)
-            return SimpleNamespace(returncode=0, stdout=f"{network_name}\n", stderr="")
-
-        if args[:2] == ["network", "connect"]:
-            network_name = args[-2]
-            container_name = args[-1]
-            containers[container_name]["networks"].add(network_name)
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-
-        if args[:2] == ["network", "rm"]:
-            network_name = args[-1]
-            existing_networks.discard(network_name)
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-
         if args[0] == "run":
             container_name = args[args.index("--name") + 1]
-            network_name = args[args.index("--network") + 1]
             containers[container_name] = {
                 "running": True,
                 "pid": 2200 + len(containers),
-                "networks": {network_name},
             }
             return SimpleNamespace(returncode=0, stdout=f"{container_name}-cid\n", stderr="")
 
@@ -637,28 +705,35 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
     )
 
     service = NodeRuntimeService()
-    runtime_a = service.start_node(lab_data, 1)
-    runtime_b = service.start_node(lab_data, 2)
+    service.start_node(lab_data, 1)
+    service.start_node(lab_data, 2)
 
-    assert runtime_a["network_names"] == ["nova-ve-lab123-net1"]
-    assert runtime_b["network_names"] == ["nova-ve-lab123-net1"]
+    # No `docker network create` / `docker network connect` calls fired.
+    assert not [c for c in recorded_calls if c[3:5] == ["network", "create"]]
+    assert not [c for c in recorded_calls if c[3:5] == ["network", "connect"]]
 
-    network_create_calls = [call for call in recorded_calls if call[3:5] == ["network", "create"]]
-    assert len(network_create_calls) == 1
-
-    run_calls = [call for call in recorded_calls if call[3] == "run"]
+    # Every `docker run` invocation has `--network none` and no aliasing.
+    run_calls = [c for c in recorded_calls if c[3] == "run"]
     assert len(run_calls) == 2
-    assert all("--network" in call for call in run_calls)
-    assert run_calls[0][run_calls[0].index("--network") + 1] == "nova-ve-lab123-net1"
-    assert run_calls[1][run_calls[1].index("--network") + 1] == "nova-ve-lab123-net1"
-    assert run_calls[0][run_calls[0].index("--network-alias") + 1] == "alpine-a"
-    assert run_calls[1][run_calls[1].index("--network-alias") + 1] == "alpine-b"
+    for call in run_calls:
+        assert call[call.index("--network") + 1] == "none"
+        assert "--network-alias" not in call
+
+    # Manual veth path was driven by the helper for every interface.
+    assert helper_mock["veth_pair_add"], "manual veth path not invoked"
+    assert helper_mock["link_master"], "veth host-end was not attached to bridge"
+    assert helper_mock["link_set_name_in_netns"], "peer was not renamed inside netns"
+
+    # Renamed names match `eth{interface_index}` exactly (non-negotiable).
+    for _pid, _old, new in helper_mock["link_set_name_in_netns"]:
+        assert new == "eth0"
 
     service.stop_node(lab_data, 1)
-    assert "nova-ve-lab123-net1" in existing_networks
-
     service.stop_node(lab_data, 2)
-    assert "nova-ve-lab123-net1" not in existing_networks
+
+    # Stop path swept the host-end veths.
+    swept = {entry["name"] for entry in helper_mock["link_del"] if entry["fn"] == "try_link_del"}
+    assert swept, "veth host-ends were not swept on stop"
 
 
 def test_linux_bridge_identifier_resolves_to_docker_bridge_driver(patched_settings):
@@ -806,7 +881,11 @@ def test_no_legacy_bridge_type_string_in_v2_lab(patched_settings):
 
 
 @pytest.mark.asyncio
-async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypatch, patched_settings):
+async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypatch, patched_settings, _us203_instance_id):
+    """Even when ``psutil`` cannot see the container PID (rootless docker
+    on macOS), the manual veth setup runs to completion and the runtime is
+    persisted as ``status == 2``.
+    """
     lab_data = {
         "schema": 2,
         "id": "lab-123",
@@ -835,6 +914,7 @@ async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypa
                 "visibility": True,
                 "implicit": False,
                 "config": {},
+                "runtime": {"bridge_name": "nove0000n1"},
             }
         },
         "links": [
@@ -854,25 +934,18 @@ async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypa
 
     def fake_run(cmd, capture_output=False, text=False, **_kwargs):
         args = cmd[3:] if len(cmd) > 2 and cmd[1] == "--host" else cmd[1:]
-        if args[:2] == ["network", "inspect"]:
-            return SimpleNamespace(returncode=1, stdout="", stderr="missing")
-        if args[:2] == ["network", "create"]:
-            return SimpleNamespace(returncode=0, stdout="created\n", stderr="")
         if args[0] == "run":
             return SimpleNamespace(returncode=0, stdout="container-id\n", stderr="")
         if args[:2] == ["inspect", "-f"] and args[2] == "{{.State.Pid}}":
             return SimpleNamespace(returncode=0, stdout="4321\n", stderr="")
         if args[:2] == ["inspect", "-f"] and args[2] == "{{.State.Running}}":
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
-        if args[0] == "stop":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if args[0] == "rm":
-            return SimpleNamespace(returncode=0, stdout="", stderr="")
-        if args[:2] == ["network", "rm"]:
+        if args[0] in {"stop", "rm"}:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     _mock_runtime_binaries(monkeypatch)
+    _us203_helper_mock(monkeypatch, present_bridges={"nove0000n1"})
     monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", fake_run)
 
     def fake_psutil_process(pid):
