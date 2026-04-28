@@ -84,7 +84,16 @@ async def create_network(
     if err is not None:
         return err
 
-    payload = await network_service.create_network(lab_path, request.model_dump())
+    try:
+        payload = await network_service.create_network(lab_path, request.model_dump())
+    except NetworkServiceError as exc:
+        body: Dict[str, Any] = {
+            "code": exc.code,
+            "status": "fail",
+            "message": exc.message,
+        }
+        body.update(exc.extra)
+        return JSONResponse(status_code=exc.code, content=body)
     return JSONResponse(
         status_code=201,
         content={

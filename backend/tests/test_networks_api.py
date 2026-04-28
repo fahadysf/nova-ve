@@ -110,7 +110,7 @@ def route_settings(tmp_path):
 
 
 @pytest.fixture()
-def patched_route_settings(monkeypatch, route_settings):
+def patched_route_settings(monkeypatch, tmp_path, route_settings):
     monkeypatch.setattr("app.services.lab_service.get_settings", lambda: route_settings)
     monkeypatch.setattr("app.services.template_service.get_settings", lambda: route_settings)
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: route_settings)
@@ -119,6 +119,18 @@ def patched_route_settings(monkeypatch, route_settings):
     monkeypatch.setattr("app.services.link_service.get_settings", lambda: route_settings)
     monkeypatch.setattr("app.services.network_service.get_settings", lambda: route_settings)
     monkeypatch.setattr("app.routers.labs.get_settings", lambda: route_settings)
+    # US-202: every network create/delete now derives a bridge name and
+    # invokes the privileged helper. Provide a per-test instance_id so
+    # bridge_name() works deterministically, and stub the helper so no
+    # real `ip link add` runs (CI is un-privileged + would corrupt host
+    # network state).
+    instance_dir = tmp_path / "nova-ve-instance"
+    instance_dir.mkdir()
+    (instance_dir / "instance_id").write_text("test-instance-uuid")
+    monkeypatch.setenv("NOVA_VE_INSTANCE_DIR", str(instance_dir))
+    monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
+    monkeypatch.setattr("app.services.host_net.bridge_del", lambda name: None)
+    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
     return route_settings
 
 
