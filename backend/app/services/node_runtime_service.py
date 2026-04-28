@@ -408,6 +408,14 @@ class NodeRuntimeService:
         invoke the privileged helper's ``read-iface-mac`` verb which performs
         ``nsenter -t <pid> -n cat /sys/class/net/<iface>/address`` after
         validating that ``pid`` is a runtime nova-ve registered.
+
+        The PID is resolved fresh on every call via ``docker inspect
+        {{.State.Pid}}`` (``_docker_container_pid``) — never from the cached
+        ``runtime["pid"]`` recorded at start time.  Docker restart policies
+        are explicitly supported (cf. start_node), so the kernel PID can
+        change after ``docker restart`` / crash-restart / PID rollover; using
+        the cached value risks reading a stale netns or, worst case, an
+        unrelated process's namespace if the PID was reused.
         """
         container_name = runtime.get("container_name")
         if not container_name:
@@ -419,18 +427,34 @@ class NodeRuntimeService:
                 "reason": "docker runtime not started",
             }
 
-        pid_raw = runtime.get("pid")
+        docker_binary = self._resolve_binary("docker")
+        if not docker_binary:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "docker",
+                "reason": "docker binary not found",
+            }
+
+        # Resolve PID fresh on every read — see docstring.
         try:
-            pid = int(pid_raw) if pid_raw is not None else 0
-        except (TypeError, ValueError):
-            pid = 0
+            pid = self._docker_container_pid(docker_binary, container_name) or 0
+        except Exception as exc:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "docker",
+                "reason": f"docker inspect pid failed: {exc}",
+            }
         if pid <= 0:
             return {
                 "state": "unavailable",
                 "planned_mac": planned_mac,
                 "live_mac": None,
                 "runtime_type": "docker",
-                "reason": "docker runtime has no pid",
+                "reason": "docker inspect returned no pid",
             }
 
         if not interface:
