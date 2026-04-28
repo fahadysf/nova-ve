@@ -1,7 +1,7 @@
 from typing import Any, Dict, Optional, Literal, List
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.schemas.port import PortPosition
 
@@ -45,6 +45,13 @@ class NodeBase(BaseModel):
     computed_sat: int = 0
     interfaces: List[NodeInterface] = Field(default_factory=list)
     extras: Dict[str, Any] = Field(default_factory=dict)
+    interface_naming_scheme: Optional[str] = None
+
+    @model_validator(mode='after')
+    def _check_iface_naming_scheme(self):
+        if self.type == 'docker' and self.interface_naming_scheme not in (None, 'eth{n}'):
+            raise ValueError("Docker nodes use eth{n} naming; field is system-fixed")
+        return self
 
 
 class NodeRead(NodeBase):
@@ -71,6 +78,13 @@ class NodeCreate(BaseModel):
     top: int = 0
     icon: Optional[str] = None
     extras: Dict[str, Any] = Field(default_factory=dict)
+    interface_naming_scheme: Optional[str] = None
+
+    @model_validator(mode='after')
+    def _check_iface_naming_scheme(self):
+        if self.type == 'docker' and self.interface_naming_scheme not in (None, 'eth{n}'):
+            raise ValueError("Docker nodes use eth{n} naming; field is system-fixed")
+        return self
 
 
 class NodeBatchCreate(BaseModel):
@@ -89,6 +103,13 @@ class NodeBatchCreate(BaseModel):
     top: int = 0
     icon: Optional[str] = None
     extras: Dict[str, Any] = Field(default_factory=dict)
+    interface_naming_scheme: Optional[str] = None
+
+    @model_validator(mode='after')
+    def _check_iface_naming_scheme(self):
+        if self.type == 'docker' and self.interface_naming_scheme not in (None, 'eth{n}'):
+            raise ValueError("Docker nodes use eth{n} naming; field is system-fixed")
+        return self
 
 
 class NodeUpdate(BaseModel):

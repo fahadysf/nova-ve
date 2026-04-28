@@ -300,6 +300,17 @@ class TemplateError(Exception):
 _INTERFACE_NAMING_FORMAT_PLACEHOLDERS = ("{n}", "{slot}", "{port}")
 
 
+def render_interface_name(fmt: str, index: int) -> str:
+    """Render an interface name from a format string and a 0-based interface index.
+
+    Supported placeholders (matching ``interface_naming.format`` contract):
+    - ``{n}``    — 0-based index (e.g. ``eth{n}`` → ``eth0``)
+    - ``{slot}`` — alias for ``{n}``
+    - ``{port}`` — 1-based index (e.g. ``Gi{port}`` → ``Gi1``)
+    """
+    return fmt.replace("{n}", str(index)).replace("{slot}", str(index)).replace("{port}", str(index + 1))
+
+
 def _validate_interface_naming(payload: dict[str, Any], source: str) -> dict[str, Any]:
     """Validate the optional ``interface_naming`` block on a template YAML.
 
