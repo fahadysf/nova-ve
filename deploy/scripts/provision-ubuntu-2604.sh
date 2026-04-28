@@ -191,6 +191,31 @@ PY
   chmod 0600 "${ENV_FILE}"
 }
 
+install_nova_ve_net_helper() {
+  # US-201: install the privileged network helper at /opt/nova-ve/bin and
+  # drop the sudoers fragment into /etc/sudoers.d after a visudo dry-run.
+  local helper_src="${REPO_ROOT}/deploy/nova-ve-net.py"
+  local sudoers_src="${REPO_ROOT}/deploy/nova-ve-sudoers"
+  local helper_dst="/opt/nova-ve/bin/nova-ve-net.py"
+  local sudoers_dst="/etc/sudoers.d/nova-ve"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "+ install -d -o root -g root -m 0755 /opt/nova-ve/bin"
+    echo "+ install -m 0755 -o root -g root ${helper_src} ${helper_dst}"
+    echo "+ visudo -cf ${sudoers_src}"
+    echo "+ install -m 0440 -o root -g root ${sudoers_src} ${sudoers_dst}"
+    return 0
+  fi
+
+  install -d -o root -g root -m 0755 /opt/nova-ve /opt/nova-ve/bin
+  install -m 0755 -o root -g root "${helper_src}" "${helper_dst}"
+  if ! visudo -cf "${sudoers_src}" >/dev/null; then
+    echo "visudo rejected ${sudoers_src}; aborting deploy" >&2
+    exit 1
+  fi
+  install -m 0440 -o root -g root "${sudoers_src}" "${sudoers_dst}"
+}
+
 require_target_host
 
 run apt-get update
@@ -213,8 +238,9 @@ run apt-get install -y --no-install-recommends \
   npm
 
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve
-run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole /var/lib/nova-ve/guacamole/db "${FRONTEND_ROOT}"
+run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole /var/lib/nova-ve/guacamole/db /var/lib/nova-ve/runtime "${FRONTEND_ROOT}"
 run chown -R "${APP_OWNER}:${APP_GROUP}" /var/lib/nova-ve
+install_nova_ve_net_helper
 run systemctl enable docker
 run systemctl restart docker
 run usermod -aG docker "${APP_OWNER}"

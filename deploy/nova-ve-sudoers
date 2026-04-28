@@ -1,0 +1,22 @@
+# nova-ve privileged network helper — sudoers fragment.
+#
+# Installed by deploy/scripts/provision-ubuntu-2604.sh to
+# /etc/sudoers.d/nova-ve (mode 0440, owner root).  The deploy script
+# validates the file with ``visudo -cf`` before installing it; visudo
+# rejects a malformed fragment so a typo cannot brick sudo.
+#
+# Spec: .omc/plans/network-runtime-wiring.md § US-201.
+#
+# Why this is safe despite the trailing ``*``:
+#   * the helper itself uses ``subprocess.run([...], shell=False)`` —
+#     argv is never spliced into a shell string;
+#   * each verb maps to ONE fixed ``ip`` / ``nsenter ip`` invocation;
+#   * every argv argument is validated against a tight regex BEFORE
+#     any subprocess is spawned;
+#   * pid-taking verbs additionally consult the runtime registry at
+#     /var/lib/nova-ve/runtime/pids.json to constrain operations to
+#     processes that nova-ve itself spawned.
+#
+# Therefore the only thing the ``*`` controls is sudo's own argv
+# splitting; the helper closes the shell-injection class structurally.
+ubuntu ALL=(root) NOPASSWD: /opt/nova-ve/bin/nova-ve-net.py *
