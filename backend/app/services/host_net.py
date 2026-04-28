@@ -163,6 +163,32 @@ def tap_name(lab_id: str, node_id: int, iface: int) -> str:
     return name
 
 
+def veth_host_name(lab_id: str, node_id: int, iface: int) -> str:
+    """Return the host-side veth name for a docker container NIC.
+
+    Format: nve{lab_hash:04x}d{node_id}i{iface}h
+    Max length: 14 chars (TAP base + 'h' suffix).
+    """
+    instance_id = get_instance_id()
+    h = _lab_hash(lab_id, instance_id)
+    name = f"nve{h:04x}d{node_id}i{iface}h"
+    assert len(name) <= 14, f"veth_host_name overflow: {name!r} ({len(name)} chars)"
+    return name
+
+
+def veth_peer_name(lab_id: str, node_id: int, iface: int) -> str:
+    """Return the container-peer veth name (pre-rename).
+
+    Format: nve{lab_hash:04x}d{node_id}i{iface}p
+    The peer is renamed to ``eth{iface}`` after being moved into the netns.
+    """
+    instance_id = get_instance_id()
+    h = _lab_hash(lab_id, instance_id)
+    name = f"nve{h:04x}d{node_id}i{iface}p"
+    assert len(name) <= 14, f"veth_peer_name overflow: {name!r} ({len(name)} chars)"
+    return name
+
+
 # ---------------------------------------------------------------------------
 # Privileged helper invocation (US-201 wrapper)
 # ---------------------------------------------------------------------------
@@ -258,3 +284,84 @@ def bridge_del(name: str) -> None:
     Raises :class:`HostNetEINVAL` if the bridge does not exist.
     """
     _invoke_helper("bridge-del", name)
+
+
+# ---------------------------------------------------------------------------
+# Veth / link helpers (US-203 / US-204 — manual veth + nsenter rename)
+# ---------------------------------------------------------------------------
+
+
+def veth_pair_add(host_end: str, peer_end: str) -> None:
+    """Create a veth pair via the privileged helper.
+
+    ``host_end`` and ``peer_end`` must match ``RE_VETH_NAME`` in the helper
+    (``nve<hash>d<node>i<iface>[hp]``). Raises :class:`HostNetEEXIST` if a
+    link with either name already exists.
+    """
+    _invoke_helper("veth-pair-add", host_end, peer_end)
+
+
+def link_master(iface: str, bridge: str) -> None:
+    """Attach ``iface`` to ``bridge`` (``ip link set <iface> master <bridge>``)."""
+    _invoke_helper("link-master", iface, bridge)
+
+
+def link_set_nomaster(iface: str) -> None:
+    """Detach ``iface`` from its current master."""
+    _invoke_helper("link-set-nomaster", iface)
+
+
+def link_netns(iface: str, pid: int) -> None:
+    """Move ``iface`` into the netns of ``pid`` (``ip link set ... netns <pid>``).
+
+    The pid MUST be present in the runtime registry (``runtime_pids.register``)
+    before this call — the helper rejects unregistered pids with exit 2.
+    """
+    _invoke_helper("link-netns", iface, str(int(pid)))
+
+
+def link_up(iface: str) -> None:
+    """Bring ``iface`` up on the host (``ip link set <iface> up``)."""
+    _invoke_helper("link-up", iface)
+
+
+def link_set_name_in_netns(pid: int, oldname: str, newname: str) -> None:
+    """Rename ``oldname`` to ``newname`` inside ``pid``'s netns.
+
+    Used to rename the veth peer (``...p``) to ``eth{iface}`` after it has
+    been moved into the container's netns.
+    """
+    _invoke_helper("link-set-name-in-netns", str(int(pid)), oldname, newname)
+
+
+def addr_up_in_netns(pid: int, iface: str) -> None:
+    """Bring ``iface`` up inside ``pid``'s netns."""
+    _invoke_helper("addr-up-in-netns", str(int(pid)), iface)
+
+
+def link_del(name: str) -> None:
+    """Delete a host-side link (TAP or veth host-end) via the helper.
+
+    The helper reuses the ``tap-del`` verb (``ip link del``) which works for
+    veth host-ends as well — deleting the host end auto-removes the peer.
+    """
+    _invoke_helper("tap-del", name)
+
+
+def try_link_del(name: str) -> None:
+    """Best-effort link deletion — swallows :class:`HostNetEINVAL` (already gone).
+
+    Used in rollback / cleanup paths where the kernel object may already
+    have been removed by an earlier step or an external sweeper.
+    """
+    try:
+        link_del(name)
+    except HostNetEINVAL:
+        return
+    except HostNetValidationError:
+        # Validation failures should not be silenced — propagate so the
+        # caller sees the bug.
+        raise
+    except HostNetError:
+        # Any other helper failure is still best-effort: log and continue.
+        logger.warning("try_link_del(%s): non-fatal cleanup failure", name)

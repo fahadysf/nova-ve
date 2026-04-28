@@ -41,6 +41,7 @@ from typing import Any, Callable, Iterator
 import psutil
 
 from app.config import get_settings
+from app.services import host_net, runtime_pids
 
 
 _DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
@@ -962,6 +963,18 @@ class NodeRuntimeService:
             raise NodeRuntimeError(error or "QEMU exited immediately after start")
 
         process_info = psutil.Process(process.pid)
+
+        # US-201/US-203: register the PID into the runtime registry BEFORE
+        # any helper-verb call. QEMU does not use the helper today, but
+        # US-303 (hot-attach) will, and the registry is the single source
+        # of truth for pid authorization. Best-effort: a registry write
+        # failure does not abort the QEMU start path because nothing in
+        # the QEMU happy path needs the registry yet.
+        try:
+            runtime_pids.register(process.pid, "qemu", lab_id, int(node["id"]))
+        except Exception:  # noqa: BLE001 — best-effort, see comment above
+            pass
+
         return {
             "lab_id": lab_id,
             "node_id": node["id"],
@@ -1038,6 +1051,29 @@ class NodeRuntimeService:
         return machine, max_nics, hotplug_capable
 
     def _start_docker_node(self, lab_data: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
+        """US-203: containers always start with ``--network=none``.
+
+        Sequence (rollback-safe):
+
+          1. Pre-flight: confirm every declared network's bridge exists on
+             the host (``host_net.bridge_exists``).
+          2. ``docker run --network=none ...`` — no Docker-managed network.
+          3. ``docker inspect`` to get the container PID.
+          4. Register the PID into ``/var/lib/nova-ve/runtime/pids.json``
+             via ``runtime_pids.register`` BEFORE any helper-verb call
+             (US-201 sequencing contract).
+          5. For each declared interface, attach manually via the privileged
+             helper: ``veth_pair_add`` → ``link_master`` (host end ↔ bridge)
+             → ``link_up`` (host end) → ``link_netns`` (peer → container)
+             → ``link_set_name_in_netns`` (rename peer to ``eth{iface}``)
+             → ``addr_up_in_netns`` (bring ``eth{iface}`` up).
+          6. On any failure mid-sequence: roll back to a clean state
+             (``try_link_del`` host-ends, ``docker rm -f`` the container,
+             ``runtime_pids.unregister``) and raise ``NodeRuntimeError``.
+
+        Docker plays NO role in networking — no ``docker network create``,
+        no ``docker network connect``, no ``--network-alias``.
+        """
         docker_binary = self._resolve_binary("docker")
         if not docker_binary:
             raise NodeRuntimeError("Docker binary not found")
@@ -1048,10 +1084,25 @@ class NodeRuntimeService:
         container_name = self._container_name(lab_id, node["id"])
         network_specs = self._docker_network_specs(lab_data, node)
         extras = _node_extras(node)
+        node_id = int(node["id"])
 
-        for spec in network_specs:
-            self._ensure_docker_network(docker_binary, spec)
+        # ----- Step 1: pre-flight bridge presence check ---------------------
+        # Every declared network must have its bridge present on the host
+        # before we start the container. This catches the case where US-202
+        # has not yet provisioned the bridge (e.g. cold lab.json without
+        # `runtime.bridge_name`) and surfaces a typed error rather than
+        # crashing later in the helper-verb sequence.
+        attachments: list[dict[str, Any]] = self._docker_attachments(lab_data, node)
+        for attachment in attachments:
+            bridge = attachment["bridge_name"]
+            if not host_net.bridge_exists(bridge):
+                raise NodeRuntimeError(
+                    f"Bridge {bridge} for network_id={attachment['network_id']} "
+                    f"is not present on the host; provision it via create_network "
+                    f"(US-202) before starting the node."
+                )
 
+        # ----- Build the docker run command (no networking flags) ----------
         cmd = [
             docker_binary,
             "--host",
@@ -1067,6 +1118,8 @@ class NodeRuntimeService:
             f"{node.get('ram', 1024)}m",
             "--hostname",
             self._docker_network_alias(node),
+            "--network",
+            "none",
             "-p",
             f"{console_port}:{self._container_console_port(console_mode)}",
         ]
@@ -1093,62 +1146,72 @@ class NodeRuntimeService:
             except ValueError as exc:
                 raise NodeRuntimeError(f"Invalid extra_args: {exc}") from exc
 
-        if network_specs:
-            cmd += [
-                "--network",
-                network_specs[0]["name"],
-                "--network-alias",
-                self._docker_network_alias(node),
-            ]
+        cmd += [str(node.get("image"))]
 
-        cmd += [
-            str(node.get("image")),
-        ]
-
+        # ----- Step 2: docker run -d --network=none ------------------------
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise NodeRuntimeError(result.stderr.strip() or result.stdout.strip() or "Failed to start Docker container")
-
-        for spec in network_specs[1:]:
-            attach = subprocess.run(
-                [
-                    docker_binary,
-                    "--host",
-                    self.settings.DOCKER_HOST,
-                    "network",
-                    "connect",
-                    "--alias",
-                    self._docker_network_alias(node),
-                    spec["name"],
-                    container_name,
-                ],
-                capture_output=True,
-                text=True,
+            raise NodeRuntimeError(
+                result.stderr.strip()
+                or result.stdout.strip()
+                or "Failed to start Docker container"
             )
-            if attach.returncode != 0:
-                self._stop_docker_runtime(
-                    {
-                        "container_name": container_name,
-                        "network_names": [item["name"] for item in network_specs],
-                    }
-                )
-                raise NodeRuntimeError(
-                    attach.stderr.strip() or attach.stdout.strip() or "Failed to attach Docker network"
-                )
 
+        # ----- Step 3: resolve PID via docker inspect ----------------------
         pid = self._docker_container_pid(docker_binary, container_name)
-        pid_create_time = None
-        if pid:
-            try:
-                pid_create_time = psutil.Process(pid).create_time()
-            except psutil.Error:
-                pid = None
+        if not pid:
+            # Container started but we cannot find its PID — bail and clean.
+            self._docker_force_remove(docker_binary, container_name)
+            raise NodeRuntimeError(
+                "Could not resolve container PID via docker inspect; "
+                "cannot proceed with manual veth setup"
+            )
 
-        work_dir = self._work_dir(lab_id, node["id"])
+        pid_create_time: float | None = None
+        try:
+            pid_create_time = psutil.Process(pid).create_time()
+        except psutil.Error:
+            # PID resolved but psutil cannot see it (privilege boundary in
+            # rootless docker). The helper still authorizes via the registry,
+            # so we keep the pid but skip the create_time fingerprint.
+            pid_create_time = None
+
+        # ----- Step 4: register PID BEFORE any helper-verb call ------------
+        try:
+            runtime_pids.register(pid, "docker", lab_id, node_id)
+        except Exception as exc:
+            self._docker_force_remove(docker_binary, container_name)
+            raise NodeRuntimeError(
+                f"Failed to register container PID in runtime registry: {exc}"
+            ) from exc
+
+        # ----- Step 5: manual veth + nsenter rename per interface ----------
+        provisioned_host_ends: list[str] = []
+        try:
+            for attachment in attachments:
+                self._attach_docker_interface_initial(
+                    lab_id=lab_id,
+                    node_id=node_id,
+                    pid=pid,
+                    attachment=attachment,
+                    provisioned_host_ends=provisioned_host_ends,
+                )
+        except Exception:
+            # ----- Step 6: rollback on partial veth setup -----------------
+            for host_end in provisioned_host_ends:
+                host_net.try_link_del(host_end)
+            self._docker_force_remove(docker_binary, container_name)
+            try:
+                runtime_pids.unregister(pid)
+            except Exception:
+                pass
+            raise
+
+        work_dir = self._work_dir(lab_id, node_id)
         work_dir.mkdir(parents=True, exist_ok=True)
         return {
             "lab_id": lab_id,
-            "node_id": node["id"],
+            "node_id": node_id,
             "kind": "docker",
             "name": node.get("name"),
             "console": console_mode,
@@ -1161,9 +1224,149 @@ class NodeRuntimeService:
             "stdout_log": str(work_dir / "stdout.log"),
             "stderr_log": str(work_dir / "stderr.log"),
             "command": cmd,
+            # network_names retained for backwards compatibility with
+            # existing readers (live-MAC, log readers); no Docker network
+            # actually exists post-US-203.
             "network_names": [spec["name"] for spec in network_specs],
+            "veth_host_ends": list(provisioned_host_ends),
+            "interface_attachments": [
+                {
+                    "interface_index": a["interface_index"],
+                    "network_id": a["network_id"],
+                    "bridge_name": a["bridge_name"],
+                    "host_end": host_net.veth_host_name(
+                        lab_id, node_id, a["interface_index"]
+                    ),
+                }
+                for a in attachments
+            ],
             "started_at": time.time(),
         }
+
+    def _attach_docker_interface_initial(
+        self,
+        *,
+        lab_id: str,
+        node_id: int,
+        pid: int,
+        attachment: dict[str, Any],
+        provisioned_host_ends: list[str],
+    ) -> None:
+        """Attach a single interface for a freshly-started container.
+
+        On any failure mid-sequence, raises and the caller rolls back. This
+        helper appends the host-end name to ``provisioned_host_ends``
+        BEFORE the kernel object is created so the rollback path can sweep
+        a partially-created pair (``ip link add`` is the first step that
+        leaks state).
+        """
+        interface_index = attachment["interface_index"]
+        bridge = attachment["bridge_name"]
+        host_end = host_net.veth_host_name(lab_id, node_id, interface_index)
+        peer_end = host_net.veth_peer_name(lab_id, node_id, interface_index)
+        netns_iface = f"eth{interface_index}"
+
+        # Track host_end BEFORE creation so rollback sweeps a partial pair.
+        provisioned_host_ends.append(host_end)
+        host_net.veth_pair_add(host_end, peer_end)
+        host_net.link_master(host_end, bridge)
+        host_net.link_up(host_end)
+        host_net.link_netns(peer_end, pid)
+        host_net.link_set_name_in_netns(pid, peer_end, netns_iface)
+        host_net.addr_up_in_netns(pid, netns_iface)
+
+    def _docker_force_remove(self, docker_binary: str, container_name: str) -> None:
+        """Force-remove a container, swallowing any error (best-effort cleanup)."""
+        subprocess.run(
+            [
+                docker_binary,
+                "--host",
+                self.settings.DOCKER_HOST,
+                "rm",
+                "-f",
+                container_name,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+    def _docker_attachments(
+        self, lab_data: dict[str, Any], node: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        """Resolve per-interface attachment records for a docker node.
+
+        Each record is ``{interface_index, network_id, bridge_name}`` and
+        the list is ordered by ``interface_index`` ascending — the same
+        order used to drive the manual veth setup so ``eth0`` is always
+        the first interface declared on the node.
+
+        Skips interfaces with no resolvable network (no link, ``pnet``
+        external network, or missing network record) — the container will
+        simply have fewer interfaces than declared.
+        """
+        lab_id = self._lab_id(lab_data)
+        networks = lab_data.get("networks", {}) or {}
+
+        node_id = int(node.get("id", 0))
+        link_map: dict[int, int] = {}
+        for link in lab_data.get("links", []) or []:
+            endpoints = (link.get("from") or {}, link.get("to") or {})
+            node_endpoint = next(
+                (
+                    endpoint for endpoint in endpoints
+                    if isinstance(endpoint, dict)
+                    and "node_id" in endpoint
+                    and int(endpoint.get("node_id", -1)) == node_id
+                ),
+                None,
+            )
+            network_endpoint = next(
+                (
+                    endpoint for endpoint in endpoints
+                    if isinstance(endpoint, dict) and "network_id" in endpoint
+                ),
+                None,
+            )
+            if node_endpoint and network_endpoint:
+                interface_index = int(node_endpoint.get("interface_index", 0))
+                network_id = int(network_endpoint.get("network_id", 0))
+                if network_id:
+                    link_map[interface_index] = network_id
+
+        attachments: list[dict[str, Any]] = []
+        seen_indices: set[int] = set()
+        for index, interface in enumerate(node.get("interfaces", []) or []):
+            if not isinstance(interface, dict):
+                continue
+            interface_index = int(interface.get("index", index))
+            if interface_index in seen_indices:
+                continue
+            network_id = int(interface.get("network_id") or 0)
+            if not network_id:
+                network_id = link_map.get(interface_index, 0)
+            if not network_id:
+                continue
+            network = networks.get(str(network_id))
+            if not isinstance(network, dict):
+                continue
+            network_type = str(network.get("type", "linux_bridge"))
+            if network_type.startswith("pnet"):
+                continue
+            runtime_record = network.get("runtime") or {}
+            bridge = runtime_record.get("bridge_name")
+            if not bridge:
+                # Pre-Wave-6 lab.json — derive the canonical name on the fly.
+                bridge = host_net.bridge_name(lab_id, network_id)
+            seen_indices.add(interface_index)
+            attachments.append(
+                {
+                    "interface_index": interface_index,
+                    "network_id": network_id,
+                    "bridge_name": bridge,
+                }
+            )
+        attachments.sort(key=lambda item: item["interface_index"])
+        return attachments
 
     def _stop_qemu_runtime(self, runtime: dict[str, Any]) -> None:
         pid = runtime.get("pid")
@@ -1173,6 +1376,7 @@ class NodeRuntimeService:
         try:
             os.killpg(pid, signal.SIGTERM)
         except ProcessLookupError:
+            self._unregister_pid(pid)
             return
 
         try:
@@ -1182,6 +1386,19 @@ class NodeRuntimeService:
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+        # US-201/US-203: drop the QEMU pid from the registry synchronously
+        # so a recycled pid cannot inherit this entry's authorization.
+        self._unregister_pid(pid)
+
+    @staticmethod
+    def _unregister_pid(pid: int | None) -> None:
+        if not pid:
+            return
+        try:
+            runtime_pids.unregister(int(pid))
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
 
     def _stop_docker_runtime(self, runtime: dict[str, Any]) -> None:
         docker_binary = self._resolve_binary("docker")
@@ -1202,7 +1419,22 @@ class NodeRuntimeService:
             capture_output=True,
             text=True,
         )
-        self._prune_docker_networks(docker_binary, runtime.get("network_names", []))
+
+        # US-203: sweep veth host-ends owned by this container. The peer end
+        # was renamed into the container netns and is destroyed when the
+        # container exits, but the host end persists until we remove it.
+        for host_end in runtime.get("veth_host_ends", []) or []:
+            host_net.try_link_del(host_end)
+
+        # US-201/US-203: unregister the PID from the runtime registry. Done
+        # synchronously here (not deferred to the heartbeat) so a recycled
+        # PID cannot reuse this entry's authorization.
+        self._unregister_pid(runtime.get("pid"))
+
+        # US-203: no Docker network record exists for nova-ve labs any
+        # more. ``network_names`` is retained on the runtime record only
+        # for backwards-compatibility with live-MAC reads — we do NOT
+        # prune any docker network here.
 
     def _ensure_qemu_overlay(self, work_dir: Path, node: dict[str, Any]) -> Path:
         overlay_path = work_dir / "virtioa.qcow2"
