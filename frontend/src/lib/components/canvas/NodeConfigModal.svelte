@@ -35,6 +35,7 @@
     console: NodeData['console'];
     delay: number;
     extras: ExtrasMap;
+    interface_naming_scheme: string | null;
   };
 
   type EditSubmitPayload = {
@@ -47,6 +48,7 @@
     console: NodeData['console'];
     delay: number;
     extras: ExtrasMap;
+    interface_naming_scheme: string | null;
   };
 
   const dispatch = createEventDispatcher<{
@@ -59,6 +61,17 @@
     { key: 'docker', label: 'Docker', icon: Container },
     { key: 'iol', label: 'IOL', icon: Network },
     { key: 'dynamips', label: 'Dynamips', icon: HardDrive },
+  ];
+  const DEFAULT_INTERFACE_NAMING = '';
+  const COMMON_INTERFACE_NAMING_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+    { value: DEFAULT_INTERFACE_NAMING, label: 'Default' },
+    { value: 'GigabitEthernet0/0/{n}', label: 'GigabitEthernet0/0/{n}' },
+    { value: 'eth{n}', label: 'eth{n}' },
+    { value: 'Port{n}', label: 'Port{n}' },
+  ];
+  const DOCKER_INTERFACE_NAMING_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
+    { value: DEFAULT_INTERFACE_NAMING, label: 'Default' },
+    { value: 'eth{n}', label: 'eth{n}' },
   ];
 
   let selectedType: NodeTypeKey = 'qemu';
@@ -75,6 +88,7 @@
   let consoleMode: NodeData['console'] = 'telnet';
   let delay = 0;
   let extras: ExtrasMap = {};
+  let interfaceNamingScheme = DEFAULT_INTERFACE_NAMING;
   let dirty: Record<string, boolean> = {};
   let lastSignature = '';
 
@@ -108,6 +122,14 @@
 
   function extrasSchemaFor(template: NodeCatalogTemplate | undefined): NodeCatalogExtraField[] {
     return template?.extras_schema ?? [];
+  }
+
+  function interfaceNamingOptionsFor(type: NodeTypeKey): ReadonlyArray<{ value: string; label: string }> {
+    return type === 'docker' ? DOCKER_INTERFACE_NAMING_OPTIONS : COMMON_INTERFACE_NAMING_OPTIONS;
+  }
+
+  function normalizedInterfaceNamingScheme(): string | null {
+    return interfaceNamingScheme || null;
   }
 
   function defaultExtrasFromTemplate(template: NodeCatalogTemplate | undefined): ExtrasMap {
@@ -152,6 +174,7 @@
       ethernet = node.ethernet;
       consoleMode = node.console;
       delay = node.delay ?? 0;
+      interfaceNamingScheme = node.interface_naming_scheme ?? DEFAULT_INTERFACE_NAMING;
       const baseExtras = defaultExtrasFromTemplate(matchingTemplate);
       const persistedExtras = ((node as unknown as { extras?: ExtrasMap }).extras ?? {}) as ExtrasMap;
       extras = { ...baseExtras, ...persistedExtras };
@@ -165,6 +188,7 @@
     name = '';
     count = 1;
     placement = 'grid';
+    interfaceNamingScheme = DEFAULT_INTERFACE_NAMING;
     resetDirty();
     applyTemplateDefaults(templateForId(templateValue), { force: true });
   }
@@ -293,6 +317,7 @@
           console: consoleMode,
           delay,
           extras,
+          interface_naming_scheme: normalizedInterfaceNamingScheme(),
         },
       });
       return;
@@ -319,6 +344,7 @@
         console: consoleMode,
         delay,
         extras,
+        interface_naming_scheme: normalizedInterfaceNamingScheme(),
       },
     });
   }
@@ -329,6 +355,10 @@
 
   $: selectedTemplate = templateForId(selectedTemplateId);
   $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
+  $: availableInterfaceNamingOptions = interfaceNamingOptionsFor(selectedType);
+  $: if (!availableInterfaceNamingOptions.some((option) => option.value === interfaceNamingScheme)) {
+    interfaceNamingScheme = DEFAULT_INTERFACE_NAMING;
+  }
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
   $: if (open && catalog && signature !== lastSignature) {
     lastSignature = signature;
@@ -537,6 +567,21 @@
                   disabled={isStoppedOnly('delay')}
                   class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
+              </label>
+              <label class="block">
+                <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Interface naming</div>
+                <select
+                  bind:value={interfaceNamingScheme}
+                  on:change={() => markDirty('interfaceNamingScheme')}
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
+                >
+                  {#each availableInterfaceNamingOptions as option}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
+                </select>
+                <div class="mt-1 text-[11px] text-slate-500">
+                  Default keeps template or platform naming. Set an override to render ports from the selected format.
+                </div>
               </label>
               {#if mode === 'create'}
                 <label class="block">
