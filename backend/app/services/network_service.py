@@ -3,19 +3,25 @@
 
 """Per-resource network service for v2 lab.json mutations.
 
-US-063 + US-064. All mutations acquire the per-lab flock, persist via
-:class:`LabService`, recompute the MAC registry, and publish WS events.
+US-063 + US-064 — JSON-side mutations under the per-lab flock.
+US-202 — ``create_network`` / ``delete_network`` provision and tear down
+the matching Linux bridge via the privileged helper, persisting
+``runtime.bridge_name`` on the network record.
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import get_settings
+from app.services import host_net
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.link_service import _refcount, _recompute_mac_registry
 from app.services.ws_hub import ws_hub
+
+logger = logging.getLogger("nova-ve")
 
 
 class NetworkServiceError(Exception):
@@ -66,11 +72,13 @@ class NetworkService:
 
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
+            lab_id = str(data.get("id") or normalized)
             networks = data.setdefault("networks", {})
             next_id = max(
                 (int(key) for key in networks.keys() if str(key).isdigit()),
                 default=0,
             ) + 1
+            bridge = host_net.bridge_name(lab_id, next_id)
             network = {
                 "id": next_id,
                 "name": request.get("name", "Net"),
@@ -87,10 +95,34 @@ class NetworkService:
                 "implicit": False,
                 "smart": -1,
                 "config": {},
+                "runtime": {"bridge_name": bridge},
             }
             networks[str(next_id)] = network
             data.pop("topology", None)
+            # Persist BEFORE provisioning so on-disk state never leads the
+            # kernel state. If bridge_add then fails we roll the file back.
             LabService.write_lab_json_static(normalized, data)
+            try:
+                # Idempotent: pre-existing bridge with the right name is a
+                # no-op (e.g. backend restarted mid-create, or US-202b
+                # backfill already provisioned it).
+                if not host_net.bridge_exists(bridge):
+                    host_net.bridge_add(bridge)
+            except host_net.HostNetError as exc:
+                # Roll back the JSON write — never leave inconsistent state.
+                networks.pop(str(next_id), None)
+                data["networks"] = networks
+                LabService.write_lab_json_static(normalized, data)
+                logger.error(
+                    "create_network: bridge_add(%s) failed (%s); rolled back lab.json",
+                    bridge,
+                    exc,
+                )
+                raise NetworkServiceError(
+                    409,
+                    f"Failed to provision bridge {bridge}: {exc}",
+                    extra={"bridge": bridge},
+                ) from exc
             _recompute_mac_registry(normalized, data)
             payload = _serialize_network(network, 0)
 
@@ -122,6 +154,34 @@ class NetworkService:
             data.pop("topology", None)
             LabService.write_lab_json_static(normalized, data)
             _recompute_mac_registry(normalized, data)
+            # Tear down the bridge AFTER the JSON write commits. Best-effort:
+            # a bridge that has already been removed (e.g. by the orphan
+            # sweeper from US-206) is logged but not propagated as a 5xx —
+            # the network record is gone either way.
+            runtime = network.get("runtime") or {}
+            bridge = runtime.get("bridge_name")
+            if not bridge:
+                # Pre-Wave-6 record — recompute the name to clean up.
+                lab_id = str(data.get("id") or normalized)
+                try:
+                    bridge = host_net.bridge_name(lab_id, int(network_id))
+                except Exception:  # noqa: BLE001 — defensive
+                    bridge = None
+            if bridge:
+                try:
+                    host_net.bridge_del(bridge)
+                except host_net.HostNetEINVAL:
+                    logger.info(
+                        "delete_network: bridge %s already absent; nothing to do",
+                        bridge,
+                    )
+                except host_net.HostNetError as exc:
+                    logger.warning(
+                        "delete_network: bridge_del(%s) failed (%s); "
+                        "JSON record removed regardless",
+                        bridge,
+                        exc,
+                    )
 
         await ws_hub.publish(normalized, "network_deleted", {"network": removed})
         return removed

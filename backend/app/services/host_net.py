@@ -1,7 +1,8 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 """
-host_net — Linux bridge / TAP name helpers and instance-ID provisioning.
+host_net — Linux bridge / TAP name helpers, instance-ID provisioning, and
+thin Python wrappers around the privileged ``nova-ve-net.py`` helper.
 
 Bridge name format : nove{lab_hash:04x}n{network_id}   (≤14 chars, network_id ≤ 99999)
 TAP name format    : nve{lab_hash:04x}d{node_id}i{iface}  (≤13 chars, node_id ≤ 999, iface ≤ 99)
@@ -17,12 +18,18 @@ Precedence rules (file-wins with explicit env override):
   2. If NOVA_VE_INSTANCE_ID is set AND NOVA_VE_INSTANCE_ID_OVERRIDE_OK=1 → use env value
      (WARNING logged on every call).
   3. Otherwise → raise HostNetInstanceIdMissing.
+
+Privileged helper (US-201) is invoked via:
+  sudo $NOVA_VE_HELPER_BIN <verb> [args...]
+where NOVA_VE_HELPER_BIN defaults to /opt/nova-ve/bin/nova-ve-net.py.
 """
 
 import hashlib
 import logging
 import os
+import subprocess
 from pathlib import Path
+from typing import Sequence
 
 logger = logging.getLogger("nova-ve")
 
@@ -38,6 +45,31 @@ class HostNetInstanceIdMissing(RuntimeError):
     instance_id file was removed).  The backend MUST NOT start without a
     valid instance ID — bridge name collisions across hosts would result.
     """
+
+
+class HostNetError(RuntimeError):
+    """Base class for nova-ve-net helper invocation failures."""
+
+    def __init__(self, message: str, *, returncode: int = 0, stderr: str = ""):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+
+
+class HostNetValidationError(HostNetError):
+    """Helper rejected an argument (regex / ownership) → exit code 2."""
+
+
+class HostNetEEXIST(HostNetError):
+    """The kernel object already exists (e.g. duplicate bridge name)."""
+
+
+class HostNetEINVAL(HostNetError):
+    """The helper's underlying ``ip`` invocation rejected the request."""
+
+
+class HostNetUnknown(HostNetError):
+    """Unknown verb or unparseable failure."""
 
 
 # ---------------------------------------------------------------------------
@@ -129,3 +161,100 @@ def tap_name(lab_id: str, node_id: int, iface: int) -> str:
     name = f"nve{h:04x}d{node_id}i{iface}"
     assert len(name) <= 14, f"tap_name overflow: {name!r} ({len(name)} chars)"
     return name
+
+
+# ---------------------------------------------------------------------------
+# Privileged helper invocation (US-201 wrapper)
+# ---------------------------------------------------------------------------
+
+_HELPER_BIN_DEFAULT = "/opt/nova-ve/bin/nova-ve-net.py"
+_SUDO_BIN_DEFAULT = "/usr/bin/sudo"
+_IP_BIN_DEFAULT = "/sbin/ip"
+
+
+def _helper_bin() -> str:
+    return os.environ.get("NOVA_VE_HELPER_BIN", _HELPER_BIN_DEFAULT)
+
+
+def _sudo_bin() -> str:
+    return os.environ.get("NOVA_VE_SUDO_BIN", _SUDO_BIN_DEFAULT)
+
+
+def _ip_bin() -> str:
+    return os.environ.get("NOVA_VE_IP_BIN", _IP_BIN_DEFAULT)
+
+
+def _run(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
+    """Spawn ``argv`` (shell=False) and return the completed process.
+
+    Captures stdout+stderr as text. Tests monkey-patch this function.
+    """
+    return subprocess.run(
+        list(argv),
+        shell=False,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def _classify_helper_failure(
+    stderr: str, returncode: int
+) -> HostNetError:
+    """Map helper exit code + stderr to a typed exception."""
+    msg = stderr.strip() or f"nova-ve-net.py exited with {returncode}"
+    if returncode == 2:
+        return HostNetValidationError(msg, returncode=returncode, stderr=stderr)
+    if returncode == 3:
+        return HostNetUnknown(msg, returncode=returncode, stderr=stderr)
+    # exit 1 — underlying ``ip`` invocation failed.
+    lower = stderr.lower()
+    if "exists" in lower or "file exists" in lower:
+        return HostNetEEXIST(msg, returncode=returncode, stderr=stderr)
+    if "does not exist" in lower or "cannot find" in lower or "no such" in lower:
+        return HostNetEINVAL(msg, returncode=returncode, stderr=stderr)
+    return HostNetEINVAL(msg, returncode=returncode, stderr=stderr)
+
+
+def _invoke_helper(verb: str, *args: str) -> "subprocess.CompletedProcess[str]":
+    """Run ``sudo <helper> <verb> [args...]`` and raise typed errors on failure."""
+    argv = [_sudo_bin(), "-n", _helper_bin(), verb, *args]
+    proc = _run(argv)
+    if proc.returncode != 0:
+        raise _classify_helper_failure(proc.stderr or "", proc.returncode)
+    return proc
+
+
+def bridge_exists(name: str) -> bool:
+    """Return True if a Linux interface with ``name`` is currently present.
+
+    Used for idempotency in ``create_network``: we re-use a pre-existing
+    bridge with the right name rather than failing on EEXIST. The query
+    runs without sudo (``ip link show`` is unprivileged read access).
+    """
+    try:
+        proc = _run([_ip_bin(), "link", "show", name])
+    except FileNotFoundError:
+        # ``ip`` missing entirely — treat as "no" so callers see a real
+        # bridge_add error if they go on to provision.
+        return False
+    return proc.returncode == 0
+
+
+def bridge_add(name: str) -> None:
+    """Create a Linux bridge with ``name`` via the privileged helper.
+
+    Raises :class:`HostNetEEXIST` if the bridge already exists, or other
+    :class:`HostNetError` subclasses on validation / kernel failures.
+    Idempotency is the *caller's* responsibility — call
+    :func:`bridge_exists` first if no-op-on-exists semantics are desired.
+    """
+    _invoke_helper("bridge-add", name)
+
+
+def bridge_del(name: str) -> None:
+    """Delete the Linux bridge ``name`` via the privileged helper.
+
+    Raises :class:`HostNetEINVAL` if the bridge does not exist.
+    """
+    _invoke_helper("bridge-del", name)
