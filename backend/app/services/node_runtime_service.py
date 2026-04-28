@@ -1494,6 +1494,124 @@ class NodeRuntimeService:
         host_net.link_set_name_in_netns(pid, peer_end, netns_iface)
         host_net.addr_up_in_netns(pid, netns_iface)
 
+    def attach_docker_interface(
+        self,
+        lab_id: str,
+        node_id: int,
+        network_id: int,
+        interface_index: int,
+        *,
+        bridge_name: str | None = None,
+    ) -> dict[str, Any]:
+        """US-204: hot-attach a new interface to an already-running Docker node.
+
+        Symmetric with the initial-attach path used by ``_start_docker_node``
+        (US-203): both invoke the same 6-step ``_attach_docker_interface_initial``
+        helper so host-side iface naming (``nve…d…i…h``) is identical between
+        first-NIC and Nth-NIC attachments — there is no special-case for the
+        first NIC.
+
+        Sequence:
+
+          1. Pre-flight: confirm the runtime record exists, the container is
+             alive, and the kind is ``docker`` (rejects QEMU / stopped nodes
+             with ``NodeRuntimeError``).
+          2. Resolve / verify the target bridge name. Surface a typed
+             ``NodeRuntimeError`` when the bridge is not present on the host
+             (US-202 must have created it).
+          3. Drive the same per-iface attach sequence as initial attach via
+             ``_attach_docker_interface_initial``: ``veth_pair_add`` →
+             ``link_master`` → ``link_up`` → ``link_netns`` →
+             ``link_set_name_in_netns`` → ``addr_up_in_netns``.
+          4. On any failure mid-sequence, sweep the partial host-end veth
+             (``host_net.try_link_del``) and re-raise.
+          5. On success, append the new attachment to the runtime record's
+             ``interface_attachments`` + ``veth_host_ends`` lists and persist.
+
+        Returns the attachment record describing the newly-created host-side
+        objects, suitable for the link router to surface back to the caller.
+        """
+        runtime = self._runtime_record(lab_id, node_id)
+        if runtime is None:
+            raise NodeRuntimeError(
+                f"Cannot hot-attach interface: node {node_id} in lab {lab_id} is "
+                "not running (no runtime record)."
+            )
+        if runtime.get("kind") != "docker":
+            raise NodeRuntimeError(
+                f"Cannot hot-attach docker interface: node {node_id} runtime kind is "
+                f"{runtime.get('kind')!r}, expected 'docker'."
+            )
+
+        pid = runtime.get("pid")
+        if not pid:
+            raise NodeRuntimeError(
+                f"Cannot hot-attach interface: node {node_id} has no resolved "
+                "container PID."
+            )
+
+        # Reject duplicate interface indices on the same node — the host_end
+        # name only encodes (lab, node, iface), so re-attaching the same iface
+        # would collide on ``ip link add``.
+        existing_attachments = runtime.get("interface_attachments") or []
+        for existing in existing_attachments:
+            if int(existing.get("interface_index", -1)) == int(interface_index):
+                raise NodeRuntimeError(
+                    f"interface_index={interface_index} already attached on "
+                    f"node {node_id}; detach before re-attaching."
+                )
+
+        bridge = bridge_name or host_net.bridge_name(lab_id, int(network_id))
+        if not host_net.bridge_exists(bridge):
+            raise NodeRuntimeError(
+                f"Bridge {bridge} for network_id={network_id} is not present on "
+                "the host; provision it via create_network (US-202) before "
+                "hot-attaching interfaces."
+            )
+
+        attachment = {
+            "interface_index": int(interface_index),
+            "network_id": int(network_id),
+            "bridge_name": bridge,
+        }
+
+        provisioned_host_ends: list[str] = []
+        try:
+            self._attach_docker_interface_initial(
+                lab_id=lab_id,
+                node_id=int(node_id),
+                pid=int(pid),
+                attachment=attachment,
+                provisioned_host_ends=provisioned_host_ends,
+            )
+        except Exception:
+            for host_end in provisioned_host_ends:
+                host_net.try_link_del(host_end)
+            raise
+
+        host_end = host_net.veth_host_name(lab_id, int(node_id), int(interface_index))
+        new_attachment = {
+            "interface_index": int(interface_index),
+            "network_id": int(network_id),
+            "bridge_name": bridge,
+            "host_end": host_end,
+        }
+
+        # Persist the new attachment onto the runtime record so stop-time
+        # cleanup sweeps the host-end veth (matches initial-attach contract
+        # at ``_stop_docker_runtime``).
+        with self._lock:
+            attachments_list = list(runtime.get("interface_attachments") or [])
+            attachments_list.append(new_attachment)
+            runtime["interface_attachments"] = attachments_list
+            host_ends = list(runtime.get("veth_host_ends") or [])
+            if host_end not in host_ends:
+                host_ends.append(host_end)
+            runtime["veth_host_ends"] = host_ends
+        self._persist_runtime(runtime)
+
+        return new_attachment
+
     def _docker_force_remove(self, docker_binary: str, container_name: str) -> None:
         """Force-remove a container, swallowing any error (best-effort cleanup)."""
         subprocess.run(

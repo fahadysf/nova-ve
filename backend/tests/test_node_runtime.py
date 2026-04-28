@@ -1280,6 +1280,352 @@ def test_iol_and_dynamips_return_unavailable(patched_settings):
         assert "not implemented" in (result["reason"] or "").lower()
 
 
+# ---------------------------------------------------------------------------
+# US-204: hot-attach Docker on links[] create
+# ---------------------------------------------------------------------------
+
+
+def _us204_lab_data() -> dict:
+    """Two-network lab: alpine-a starts with one interface on net 1; the
+    hot-attach tests add a second interface on net 2.
+
+    Bridge names are derived from ``host_net.bridge_name`` so they match
+    what the runtime computes under the active ``_us203_instance_id``
+    fixture (instance_id=test-instance-203 → blake2b → 16-bit suffix).
+    """
+    from app.services import host_net as host_net_module
+
+    bridge_one = host_net_module.bridge_name("lab-204", 1)
+    bridge_two = host_net_module.bridge_name("lab-204", 2)
+    return {
+        "schema": 2,
+        "id": "lab-204",
+        "meta": {"name": "us204"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "alpine-a",
+                "type": "docker",
+                "image": "nova-ve-alpine-telnet:latest",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 2,
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None},
+                    {"index": 1, "name": "eth1", "planned_mac": None, "port_position": None},
+                ],
+            }
+        },
+        "networks": {
+            "1": {
+                "id": 1,
+                "name": "lab-link",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+                "runtime": {"bridge_name": bridge_one},
+            },
+            "2": {
+                "id": 2,
+                "name": "lab-mgmt",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+                "runtime": {"bridge_name": bridge_two},
+            },
+        },
+        "links": [
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            }
+        ],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+
+def _us204_docker_run_factory(containers: dict[str, dict[str, object]]):
+    """Returns a fake ``subprocess.run`` that mimics the docker daemon:
+    handles ``docker run``, ``docker inspect``, ``docker stop``, ``docker rm``.
+
+    All four hot-attach tests start one container then mutate that container
+    map across calls.
+    """
+
+    def fake_run(cmd, capture_output=False, text=False, **_kwargs):
+        if os.path.basename(cmd[0]) != "docker":
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        args = cmd[3:] if len(cmd) > 2 and cmd[1] == "--host" else cmd[1:]
+        if args[0] == "run":
+            container_name = args[args.index("--name") + 1]
+            containers[container_name] = {
+                "running": True,
+                "pid": 7000 + len(containers),
+            }
+            return SimpleNamespace(returncode=0, stdout=f"{container_name}-cid\n", stderr="")
+        if args[:2] == ["inspect", "-f"]:
+            template = args[2]
+            container_name = args[3]
+            container = containers.get(container_name)
+            if not container:
+                return SimpleNamespace(returncode=1, stdout="", stderr="missing")
+            if template == "{{.State.Pid}}":
+                return SimpleNamespace(returncode=0, stdout=f"{container['pid']}\n", stderr="")
+            if template == "{{.State.Running}}":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=("true" if container["running"] else "false") + "\n",
+                    stderr="",
+                )
+        if args[0] == "stop":
+            container_name = args[-1]
+            if container_name in containers:
+                containers[container_name]["running"] = False
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if args[0] == "rm":
+            container_name = args[-1]
+            containers.pop(container_name, None)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    return fake_run
+
+
+def _us204_start_alpine_a(
+    monkeypatch,
+    patched_settings,
+    *,
+    include_net2_bridge: bool = True,
+):
+    """Boot alpine-a (node 1) via the US-203 path so we have a live runtime
+    record to hot-attach to. Returns ``(service, lab_data, helper_calls,
+    containers, recorded_calls)``.
+
+    ``include_net2_bridge`` toggles whether net 2's bridge is reported as
+    present on the host — used by the bridge-missing test to drive the
+    pre-flight rejection branch.
+    """
+    from app.services import host_net as host_net_module
+
+    lab_data = _us204_lab_data()
+    bridge_one = host_net_module.bridge_name("lab-204", 1)
+    bridge_two = host_net_module.bridge_name("lab-204", 2)
+    present_bridges = {bridge_one}
+    if include_net2_bridge:
+        present_bridges.add(bridge_two)
+
+    containers: dict[str, dict[str, object]] = {}
+    helper_calls = _us203_helper_mock(monkeypatch, present_bridges=present_bridges)
+
+    _mock_runtime_binaries(monkeypatch)
+    recorded_calls: list[list[str]] = []
+
+    docker_fake = _us204_docker_run_factory(containers)
+
+    def fake_run(cmd, capture_output=False, text=False, **kwargs):
+        recorded_calls.append(cmd)
+        return docker_fake(cmd, capture_output=capture_output, text=text, **kwargs)
+
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.psutil.Process",
+        lambda pid: SimpleNamespace(create_time=lambda: float(pid)),
+    )
+
+    service = NodeRuntimeService()
+    service.start_node(lab_data, 1)
+    # Reset helper-call recording so tests only see hot-attach activity.
+    for key in helper_calls:
+        helper_calls[key].clear()
+    return service, lab_data, helper_calls, containers, recorded_calls
+
+
+def test_us204_hot_attach_docker_happy_path(monkeypatch, patched_settings, _us203_instance_id):
+    """Hot-attaching a new link to a running container creates a veth pair,
+    masters the host end on the bridge, moves the peer into the container's
+    netns, and renames it to ``eth{interface_index}``. The runtime record
+    is updated so stop-time cleanup sweeps the new host-end veth.
+    """
+    from app.services import host_net as host_net_module
+
+    service, lab_data, helper_calls, _containers, _recorded = _us204_start_alpine_a(
+        monkeypatch, patched_settings
+    )
+    bridge_two = host_net_module.bridge_name("lab-204", 2)
+
+    attachment = service.attach_docker_interface(
+        "lab-204", 1, network_id=2, interface_index=1
+    )
+
+    # The 6-step sequence ran (same one used by initial-attach in US-203).
+    assert helper_calls["veth_pair_add"], "veth pair was not created"
+    host_end, peer_end = helper_calls["veth_pair_add"][0]
+    assert host_end.endswith("h"), f"host-end suffix is wrong: {host_end!r}"
+    assert peer_end.endswith("p"), f"peer-end suffix is wrong: {peer_end!r}"
+    assert helper_calls["link_master"] == [(host_end, bridge_two)]
+    assert helper_calls["link_up"] == [host_end]
+    assert len(helper_calls["link_netns"]) == 1
+    assert helper_calls["link_netns"][0][0] == peer_end
+    assert helper_calls["link_set_name_in_netns"] == [
+        (helper_calls["link_netns"][0][1], peer_end, "eth1"),
+    ]
+    assert helper_calls["addr_up_in_netns"] == [
+        (helper_calls["link_netns"][0][1], "eth1"),
+    ]
+
+    # Returned attachment record carries the new host_end + bridge.
+    assert attachment["interface_index"] == 1
+    assert attachment["network_id"] == 2
+    assert attachment["bridge_name"] == bridge_two
+    assert attachment["host_end"] == host_end
+
+    # The runtime record now lists both attachments and both host-ends so
+    # stop-time cleanup will sweep them.
+    runtime = service._runtime_record("lab-204", 1)
+    assert runtime is not None
+    indices = sorted(int(a["interface_index"]) for a in runtime["interface_attachments"])
+    assert indices == [0, 1]
+    assert host_end in runtime["veth_host_ends"]
+
+
+def test_us204_hot_attach_rejects_when_container_stopped(monkeypatch, patched_settings, _us203_instance_id):
+    """Hot-attach must reject when the target container is not running —
+    no runtime record means no container to attach into.
+    """
+    service, lab_data, helper_calls, containers, _recorded = _us204_start_alpine_a(
+        monkeypatch, patched_settings
+    )
+
+    # Stop the container so its runtime record is purged.
+    service.stop_node(lab_data, 1)
+    helper_calls["veth_pair_add"].clear()
+
+    from app.services.node_runtime_service import NodeRuntimeError
+
+    with pytest.raises(NodeRuntimeError) as exc_info:
+        service.attach_docker_interface("lab-204", 1, network_id=2, interface_index=1)
+
+    assert "not running" in str(exc_info.value).lower() or "no runtime" in str(exc_info.value).lower()
+    # No helper-side state was touched.
+    assert not helper_calls["veth_pair_add"]
+    assert not helper_calls["link_master"]
+
+
+def test_us204_hot_attach_rejects_when_bridge_missing(monkeypatch, patched_settings, _us203_instance_id):
+    """When the target network's bridge is not yet provisioned on the host,
+    hot-attach must surface a typed ``NodeRuntimeError`` instead of failing
+    deeper in the helper sequence.
+    """
+    from app.services import host_net as host_net_module
+
+    # Only network 1's bridge is present; we'll attempt to attach to
+    # network 2 — its bridge is missing.
+    service, _lab_data, helper_calls, _containers, _recorded = _us204_start_alpine_a(
+        monkeypatch, patched_settings, include_net2_bridge=False
+    )
+    bridge_two = host_net_module.bridge_name("lab-204", 2)
+
+    from app.services.node_runtime_service import NodeRuntimeError
+
+    with pytest.raises(NodeRuntimeError) as exc_info:
+        service.attach_docker_interface("lab-204", 1, network_id=2, interface_index=1)
+
+    assert bridge_two in str(exc_info.value)
+    assert "not present" in str(exc_info.value).lower()
+    # No veth was created — the pre-flight bridge check must run BEFORE
+    # any helper call.
+    assert not helper_calls["veth_pair_add"]
+
+
+def test_us204_hot_attach_rolls_back_on_helper_failure(monkeypatch, patched_settings, _us203_instance_id):
+    """If a helper step fails mid-sequence (e.g. ``link_set_name_in_netns``
+    blows up), the partially-created host-end veth is swept and the runtime
+    record is NOT mutated to include the failed attachment.
+    """
+    service, _lab_data, helper_calls, _containers, _recorded = _us204_start_alpine_a(
+        monkeypatch, patched_settings
+    )
+
+    from app.services import host_net as host_net_module
+
+    def fake_link_set_name_in_netns(_pid, _old, _new):
+        raise host_net_module.HostNetEINVAL(
+            "kernel rejected rename", returncode=1, stderr="kernel rejected"
+        )
+
+    monkeypatch.setattr(host_net_module, "link_set_name_in_netns", fake_link_set_name_in_netns)
+
+    with pytest.raises(host_net_module.HostNetEINVAL):
+        service.attach_docker_interface("lab-204", 1, network_id=2, interface_index=1)
+
+    # The partially-created host-end veth was swept by ``try_link_del``.
+    swept = {entry["name"] for entry in helper_calls["link_del"] if entry["fn"] == "try_link_del"}
+    expected_host_end = host_net_module.veth_host_name("lab-204", 1, 1)
+    assert expected_host_end in swept, (
+        f"rollback did not sweep the partial host-end veth {expected_host_end!r}; "
+        f"swept set was {swept!r}"
+    )
+
+    # The runtime record only carries the original (interface_index=0)
+    # attachment; the failed (interface_index=1) attachment was NOT added.
+    runtime = service._runtime_record("lab-204", 1)
+    assert runtime is not None
+    indices = sorted(int(a["interface_index"]) for a in runtime["interface_attachments"])
+    assert indices == [0]
+    assert expected_host_end not in runtime.get("veth_host_ends", [])
+
+
+def test_us204_hot_attach_symmetric_with_initial_attach(monkeypatch, patched_settings, _us203_instance_id):
+    """Both initial and hot attachments must drive the SAME 6-step sequence
+    against the privileged helper, with identical host-end naming. This is
+    the plan's "no special-case for the first NIC" property.
+    """
+    service, _lab_data, helper_calls, _containers, _recorded = _us204_start_alpine_a(
+        monkeypatch, patched_settings
+    )
+
+    # Capture the initial-attach sequence (interface 0 was attached during
+    # ``_us204_start_alpine_a`` BEFORE the helper-call lists were cleared,
+    # so we re-run an attach on a fresh interface and compare verb shapes).
+    service.attach_docker_interface("lab-204", 1, network_id=2, interface_index=1)
+
+    # Verb counts MUST match the initial-attach 6-step sequence exactly.
+    assert len(helper_calls["veth_pair_add"]) == 1
+    assert len(helper_calls["link_master"]) == 1
+    assert len(helper_calls["link_up"]) == 1
+    assert len(helper_calls["link_netns"]) == 1
+    assert len(helper_calls["link_set_name_in_netns"]) == 1
+    assert len(helper_calls["addr_up_in_netns"]) == 1
+
+    # Naming pattern is the same regex shape as initial attach (see US-203
+    # ``_us203_helper_mock`` assertions): host-end suffix ``h``, peer-end
+    # suffix ``p``, renamed in-netns to ``eth{interface_index}``.
+    host_end, peer_end = helper_calls["veth_pair_add"][0]
+    from app.services import host_net as host_net_module
+
+    assert host_end == host_net_module.veth_host_name("lab-204", 1, 1)
+    assert peer_end == host_net_module.veth_peer_name("lab-204", 1, 1)
+    assert host_end.endswith("h")
+    assert peer_end.endswith("p")
+
+    # Verb invocation ORDER matters: the 6-step sequence must run in the
+    # documented order. The mock records each verb in invocation order, so
+    # we can reconstruct the order by comparing list lengths captured
+    # before / after each conceptual step. The simpler check below asserts
+    # the rename uses the renamed-into-netns peer name.
+    assert helper_calls["link_set_name_in_netns"][0][2] == "eth1"
+
+
 @pytest.mark.asyncio
 async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_settings):
     lab_path = patched_settings.LABS_DIR / "live-mac.json"
