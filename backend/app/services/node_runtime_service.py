@@ -1503,7 +1503,40 @@ class NodeRuntimeService:
         *,
         bridge_name: str | None = None,
     ) -> dict[str, Any]:
-        """US-204: hot-attach a new interface to an already-running Docker node.
+        """US-204 / US-204b: PUBLIC hot-attach.
+
+        Acquires the per-``(lab_id, node_id, interface_index)`` mutex
+        internally and delegates to the private locked helper. Used by
+        start-path callers and any other caller that does NOT already
+        hold the mutex on entry. ``link_service.create_link`` instead
+        acquires the mutex itself and calls
+        :meth:`_attach_docker_interface_locked` directly to avoid double-
+        acquiring (the deadlock case).
+
+        Returns the attachment record (which includes ``attach_generation``
+        per US-204b) describing the newly-created host-side objects.
+        """
+        from app.services.runtime_mutex import runtime_mutex
+
+        with runtime_mutex.acquire_sync(lab_id, node_id, interface_index):
+            return self._attach_docker_interface_locked(
+                lab_id,
+                node_id,
+                network_id,
+                interface_index,
+                bridge_name=bridge_name,
+            )
+
+    def _attach_docker_interface_locked(
+        self,
+        lab_id: str,
+        node_id: int,
+        network_id: int,
+        interface_index: int,
+        *,
+        bridge_name: str | None = None,
+    ) -> dict[str, Any]:
+        """US-204 / US-204b: PRIVATE hot-attach. Mutex MUST be held.
 
         Symmetric with the initial-attach path used by ``_start_docker_node``
         (US-203): both invoke the same 6-step ``_attach_docker_interface_initial``
@@ -1513,24 +1546,39 @@ class NodeRuntimeService:
 
         Sequence:
 
-          1. Pre-flight: confirm the runtime record exists, the container is
+          1. Defensive contract: assert the per-``(lab, node, iface)`` mutex
+             is held (US-204b — Codex v5 finding #1). Catches start-path-
+             bypass bugs at the layer that has the most context.
+          2. Pre-flight: confirm the runtime record exists, the container is
              alive, and the kind is ``docker`` (rejects QEMU / stopped nodes
              with ``NodeRuntimeError``).
-          2. Resolve / verify the target bridge name. Surface a typed
+          3. Resolve / verify the target bridge name. Surface a typed
              ``NodeRuntimeError`` when the bridge is not present on the host
              (US-202 must have created it).
-          3. Drive the same per-iface attach sequence as initial attach via
+          4. Drive the same per-iface attach sequence as initial attach via
              ``_attach_docker_interface_initial``: ``veth_pair_add`` →
              ``link_master`` → ``link_up`` → ``link_netns`` →
              ``link_set_name_in_netns`` → ``addr_up_in_netns``.
-          4. On any failure mid-sequence, sweep the partial host-end veth
+          5. On any failure mid-sequence, sweep the partial host-end veth
              (``host_net.try_link_del``) and re-raise.
-          5. On success, append the new attachment to the runtime record's
-             ``interface_attachments`` + ``veth_host_ends`` lists and persist.
+          6. On success, bump ``current_attach_generation`` on the runtime
+             record's interface entry, append the new attachment + host-end
+             to the runtime, and persist.
 
-        Returns the attachment record describing the newly-created host-side
-        objects, suitable for the link router to surface back to the caller.
+        Returns the attachment record (``attach_generation`` included) for
+        the link router / link_service to stamp on ``Link.runtime``.
         """
+        from app.services.runtime_mutex import runtime_mutex
+
+        # Defensive contract: catches accidental bypass of the public API.
+        assert runtime_mutex.is_held(lab_id, node_id, interface_index), (
+            f"_attach_docker_interface_locked called without the per-"
+            f"(lab, node, iface) mutex held for "
+            f"({lab_id!r}, {node_id}, {interface_index}); use the public "
+            f"attach_docker_interface(...) entrypoint or acquire "
+            f"runtime_mutex.acquire(...) yourself."
+        )
+
         runtime = self._runtime_record(lab_id, node_id)
         if runtime is None:
             raise NodeRuntimeError(
@@ -1590,11 +1638,20 @@ class NodeRuntimeService:
             raise
 
         host_end = host_net.veth_host_name(lab_id, int(node_id), int(interface_index))
+
+        # US-204b: bump the per-interface ``current_attach_generation``
+        # atomically with the runtime-record write so the new generation is
+        # never visible without the matching attachment present.
+        new_generation = self._bump_interface_attach_generation(
+            runtime, int(interface_index)
+        )
+
         new_attachment = {
             "interface_index": int(interface_index),
             "network_id": int(network_id),
             "bridge_name": bridge,
             "host_end": host_end,
+            "attach_generation": new_generation,
         }
 
         # Persist the new attachment onto the runtime record so stop-time
@@ -1611,6 +1668,153 @@ class NodeRuntimeService:
         self._persist_runtime(runtime)
 
         return new_attachment
+
+    def detach_docker_interface(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        *,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """US-204b PUBLIC hot-detach. Acquires the mutex; delegates to
+        :meth:`_detach_docker_interface_locked`. Mirrors the public/private
+        split of attach (full detach IPAM-release semantics arrive in
+        US-205; US-204b ships the gen-token freshness check + the kernel-
+        side veth removal).
+        """
+        from app.services.runtime_mutex import runtime_mutex
+
+        with runtime_mutex.acquire_sync(lab_id, node_id, interface_index):
+            return self._detach_docker_interface_locked(
+                lab_id,
+                node_id,
+                interface_index,
+                expected_generation=expected_generation,
+            )
+
+    def _detach_docker_interface_locked(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        *,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """US-204b PRIVATE hot-detach. Mutex MUST be held.
+
+        Generation-token semantics (US-204b — Codex v5 finding #2): if
+        ``expected_generation`` is supplied and does NOT equal the
+        runtime's ``current_attach_generation`` for this interface, the
+        detach is logged + no-ops. The matching link's
+        ``Link.runtime.attach_generation`` was stamped under ``lab_lock``
+        at attach time, so a "newer attach already happened" reading is
+        unambiguous.
+
+        Returns a dict with at least ``state`` ∈
+        ``{"detached", "stale_noop", "absent"}``.
+        """
+        from app.services.runtime_mutex import runtime_mutex
+
+        assert runtime_mutex.is_held(lab_id, node_id, interface_index), (
+            f"_detach_docker_interface_locked called without the per-"
+            f"(lab, node, iface) mutex held for "
+            f"({lab_id!r}, {node_id}, {interface_index})."
+        )
+
+        runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
+        if runtime is None:
+            return {"state": "absent", "reason": "no runtime record"}
+
+        # Locate the matching attachment record. Missing means the iface is
+        # already detached — idempotent no-op.
+        attachments = runtime.get("interface_attachments") or []
+        target = None
+        target_index = None
+        for index, entry in enumerate(attachments):
+            if int(entry.get("interface_index", -1)) == int(interface_index):
+                target = entry
+                target_index = index
+                break
+        if target is None:
+            return {"state": "absent", "reason": "no attachment record"}
+
+        # US-204b generation-token check. Use the interface's
+        # ``current_attach_generation`` (the freshness oracle) — NOT the
+        # attachment's own ``attach_generation`` — so a fresh re-attach
+        # (which bumped ``current_attach_generation`` past the caller's
+        # ``expected_generation``) correctly invalidates a stale rollback.
+        current_gen = self._interface_attach_generation(runtime, int(interface_index))
+        if expected_generation is not None and int(expected_generation) != int(current_gen):
+            _logger.info(
+                "stale detach for gen %s (current %s), ignoring "
+                "(lab=%s node=%s iface=%s)",
+                expected_generation,
+                current_gen,
+                lab_id,
+                node_id,
+                interface_index,
+            )
+            return {
+                "state": "stale_noop",
+                "expected_generation": int(expected_generation),
+                "current_attach_generation": int(current_gen),
+            }
+
+        host_end = target.get("host_end") or host_net.veth_host_name(
+            lab_id, int(node_id), int(interface_index)
+        )
+        host_net.try_link_del(host_end)
+
+        # Drop the attachment + host-end from the runtime record so
+        # stop-time cleanup does not double-sweep.
+        with self._lock:
+            attachments_list = list(runtime.get("interface_attachments") or [])
+            if target_index is not None and target_index < len(attachments_list):
+                attachments_list.pop(target_index)
+            runtime["interface_attachments"] = attachments_list
+            host_ends = [
+                h for h in (runtime.get("veth_host_ends") or [])
+                if h != host_end
+            ]
+            runtime["veth_host_ends"] = host_ends
+        self._persist_runtime(runtime)
+
+        return {
+            "state": "detached",
+            "host_end": host_end,
+            "current_attach_generation": int(current_gen),
+        }
+
+    @staticmethod
+    def _bump_interface_attach_generation(
+        runtime: dict[str, Any], interface_index: int
+    ) -> int:
+        """US-204b: increment ``current_attach_generation`` for the named
+        interface on the runtime record. Returns the new generation value.
+
+        The runtime record carries an ``interface_runtime`` map keyed by
+        stringified interface_index — we do not mutate ``node.interfaces``
+        here because that is part of the lab.json schema persisted by
+        ``LabService.write_lab_json_static`` under ``lab_lock``;
+        ``link_service.create_link`` is responsible for the lab.json side
+        of the bump. Here we only track the in-memory / runtime-state
+        copy used by the gen-check during detach.
+        """
+        iface_runtime = runtime.setdefault("interface_runtime", {})
+        key = str(int(interface_index))
+        record = iface_runtime.setdefault(key, {"current_attach_generation": 0})
+        new_gen = int(record.get("current_attach_generation", 0)) + 1
+        record["current_attach_generation"] = new_gen
+        return new_gen
+
+    @staticmethod
+    def _interface_attach_generation(
+        runtime: dict[str, Any], interface_index: int
+    ) -> int:
+        iface_runtime = runtime.get("interface_runtime") or {}
+        record = iface_runtime.get(str(int(interface_index))) or {}
+        return int(record.get("current_attach_generation", 0))
 
     def _docker_force_remove(self, docker_binary: str, container_name: str) -> None:
         """Force-remove a container, swallowing any error (best-effort cleanup)."""
