@@ -453,6 +453,25 @@ def addr_up_in_netns(pid: int, iface: str) -> None:
     _invoke_helper("addr-up-in-netns", str(int(pid)), iface)
 
 
+def tap_add(name: str) -> None:
+    """Create a Linux TAP device with ``name`` via the privileged helper.
+
+    Used by the QEMU start path (US-302): one TAP per NIC, attached to the
+    network's bridge before QEMU launches with ``-netdev tap,ifname=...``.
+    Raises :class:`HostNetEEXIST` if a link with ``name`` already exists.
+    """
+    _invoke_helper("tap-add", name)
+
+
+def tap_del(name: str) -> None:
+    """Delete a Linux TAP device via the privileged helper.
+
+    The helper's ``tap-del`` verb is ``ip link del <name>``; it also works
+    for veth host-ends. Raises :class:`HostNetEINVAL` if the link is gone.
+    """
+    _invoke_helper("tap-del", name)
+
+
 def link_del(name: str) -> None:
     """Delete a host-side link (TAP or veth host-end) via the helper.
 
