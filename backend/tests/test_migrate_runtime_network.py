@@ -12,6 +12,8 @@ Covers:
   - per-lab rollback on simulated bridge_add failure
   - abort on docker network inspect failure (no docker network rm called)
   - rollback restores old Docker network from captured inspect JSON
+  - stamps node.machine_override='pc' on pre-Wave-7 QEMU nodes
+    (compat discriminator — see plan :397-400)
 """
 
 from __future__ import annotations
@@ -109,10 +111,13 @@ def test_already_migrated_is_noop(instance_id, tmp_path):
         networks={"1": _net(1, bridge_name=bridge)},
     )
 
-    checked, backfilled = mig.process_lab(lab_path, labs_dir, backup_dir, dry_run=False)
+    checked, backfilled, nodes_stamped = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=False
+    )
 
     assert checked == 1
     assert backfilled == 0
+    assert nodes_stamped == 0
     # File is untouched (no backup taken since nothing changed).
     assert not backup_dir.exists() or not any(backup_dir.iterdir())
 
@@ -149,10 +154,13 @@ def test_fills_missing_bridge_name(instance_id, tmp_path, monkeypatch):
     )
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
 
-    checked, backfilled = mig.process_lab(lab_path, labs_dir, backup_dir, dry_run=False)
+    checked, backfilled, nodes_stamped = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=False
+    )
 
     assert checked == 2
     assert backfilled == 2
+    assert nodes_stamped == 0
 
     saved = json.loads(lab_path.read_text())
     expected_1 = host_net.bridge_name("lab-fill", 1)
@@ -189,11 +197,15 @@ def test_idempotent_second_run(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
 
-    _, backfilled_1 = mig.process_lab(lab_path, labs_dir, backup_dir, dry_run=False)
+    _, backfilled_1, _ = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=False
+    )
     assert backfilled_1 == 1
 
     # Second run — should be zero.
-    _, backfilled_2 = mig.process_lab(lab_path, labs_dir, backup_dir, dry_run=False)
+    _, backfilled_2, _ = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=False
+    )
     assert backfilled_2 == 0
 
 
@@ -227,9 +239,12 @@ def test_dry_run_does_not_write(instance_id, tmp_path, monkeypatch):
     )
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
 
-    checked, backfilled = mig.process_lab(lab_path, labs_dir, backup_dir, dry_run=True)
+    checked, backfilled, nodes_stamped = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=True
+    )
 
     assert backfilled == 1
+    assert nodes_stamped == 0
     # File must be unchanged.
     assert lab_path.read_text() == original_text
     # No host changes.
@@ -512,3 +527,102 @@ def test_main_nonexistent_labs_dir(tmp_path):
     """main() exits 1 when labs_dir does not exist."""
     rc = mig.main(["--labs-dir", str(tmp_path / "nonexistent")])
     assert rc == 1
+
+
+# ---------------------------------------------------------------------------
+# node.machine_override='pc' backfill (compat discriminator — plan :397-400)
+# ---------------------------------------------------------------------------
+
+
+def test_migrate_stamps_machine_override(instance_id, tmp_path, monkeypatch):
+    """Pre-Wave-7 QEMU nodes get machine_override='pc' stamped.
+
+    Acceptance criteria from .omc/plans/network-runtime-wiring.md:397-400:
+      (a) QEMU nodes lacking machine_override get 'pc' stamped on every one.
+      (b) docker/iol/dynamips nodes are untouched.
+      (c) QEMU nodes already carrying machine_override (e.g. user-set 'q35')
+          are untouched (idempotency contract).
+      (d) Re-running the migration on an already-stamped lab is a no-op.
+    """
+    labs_dir = tmp_path / "labs"
+    labs_dir.mkdir()
+    backup_dir = tmp_path / "backup"
+
+    # Mix of node types covering all four acceptance branches.
+    nodes = {
+        # (a) pre-Wave-7 QEMU nodes — no machine_override key at all.
+        "1": {"id": 1, "name": "vyos-1", "type": "qemu", "status": 0},
+        "2": {"id": 2, "name": "csr-1", "type": "qemu", "status": 0},
+        # (b) non-QEMU nodes must NOT be touched, even if their type lacks the
+        # field (machine_override is QEMU-specific in the spec).
+        "3": {"id": 3, "name": "alpine-a", "type": "docker", "status": 0},
+        "4": {"id": 4, "name": "iol-1", "type": "iol", "status": 0},
+        "5": {"id": 5, "name": "dyn-1", "type": "dynamips", "status": 0},
+        # (c) user-set machine_override='q35' must be preserved.
+        "6": {
+            "id": 6,
+            "name": "vyos-q35",
+            "type": "qemu",
+            "status": 0,
+            "machine_override": "q35",
+        },
+        # An already-'pc' QEMU node — must remain 'pc' (no double-stamp).
+        "7": {
+            "id": 7,
+            "name": "vyos-pc",
+            "type": "qemu",
+            "status": 0,
+            "machine_override": "pc",
+        },
+    }
+    lab_path = _make_lab(
+        labs_dir,
+        lab_id="lab-mach",
+        nodes=nodes,
+        networks={"1": _net(1)},
+    )
+
+    monkeypatch.setattr(
+        mig,
+        "_docker_network_inspect",
+        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+    )
+    monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
+    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
+
+    checked, backfilled, nodes_stamped = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=False
+    )
+
+    assert checked == 1
+    assert backfilled == 1
+    # Two pre-Wave-7 QEMU nodes (ids 1 and 2) should have been stamped.
+    assert nodes_stamped == 2
+
+    saved = json.loads(lab_path.read_text())
+    saved_nodes = saved["nodes"]
+
+    # (a) Pre-Wave-7 QEMU nodes — stamped 'pc'.
+    assert saved_nodes["1"]["machine_override"] == "pc"
+    assert saved_nodes["2"]["machine_override"] == "pc"
+
+    # (b) Docker / iol / dynamips nodes — untouched, no machine_override added.
+    assert "machine_override" not in saved_nodes["3"]
+    assert "machine_override" not in saved_nodes["4"]
+    assert "machine_override" not in saved_nodes["5"]
+
+    # (c) User-set values preserved.
+    assert saved_nodes["6"]["machine_override"] == "q35"
+    assert saved_nodes["7"]["machine_override"] == "pc"
+
+    # (d) Re-running the migration is a no-op for nodes (already stamped) AND
+    # for networks (already migrated above).
+    text_after_first = lab_path.read_text()
+    checked2, backfilled2, nodes_stamped2 = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=False
+    )
+    assert checked2 == 1
+    assert backfilled2 == 0
+    assert nodes_stamped2 == 0
+    # File contents must be identical on a second pass (no spurious rewrite).
+    assert lab_path.read_text() == text_after_first

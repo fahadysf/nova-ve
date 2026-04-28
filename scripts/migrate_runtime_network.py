@@ -7,6 +7,15 @@ Backfills ``runtime.bridge_name`` on every network record that is missing
 it.  Networks created by US-202 already have the field; this script is a
 no-op for those labs (idempotent).
 
+In the same read-modify-write cycle, this script also stamps
+``node.machine_override = 'pc'`` on every QEMU node that lacks the field
+(pre-Wave-7 labs — see ``.omc/plans/network-runtime-wiring.md:397-400``).
+This is the load-bearing compatibility discriminator that prevents
+US-301's ``_resolve_qemu_machine()`` resolver from silently pivoting
+legacy labs from ``pc`` to ``q35`` on first restart post-migration.
+Nodes whose ``machine_override`` is already set (e.g. user-chosen
+``'q35'``) are left untouched, preserving idempotency.
+
 For labs created *before* Wave 6 (US-202), networks may have a legacy
 Docker network bound to them (created by the old ``_ensure_docker_network``
 path).  The migration sequence for each such network is:
@@ -345,6 +354,34 @@ def _rollback_lab(
 
 
 # ---------------------------------------------------------------------------
+# Pre-Wave-7 node.machine_override backfill (compat discriminator)
+# ---------------------------------------------------------------------------
+
+
+def _stamp_machine_override(nodes: dict[str, Any]) -> int:
+    """Mutate ``nodes`` in place: stamp ``machine_override='pc'`` on every
+    QEMU node that lacks the field. Returns the count of nodes stamped.
+
+    Only QEMU nodes are touched. Docker/iol/dynamips nodes are left alone.
+    A node is considered "lacking" the field if ``machine_override`` is
+    missing OR explicitly ``None``. Any other value (e.g. user-chosen
+    ``'q35'``) is preserved — that is the idempotency contract required by
+    ``.omc/plans/network-runtime-wiring.md:397-400``.
+    """
+    stamped = 0
+    for _key, node in nodes.items():
+        if not isinstance(node, dict):
+            continue
+        if node.get("type") != "qemu":
+            continue
+        if node.get("machine_override") is not None:
+            continue
+        node["machine_override"] = "pc"
+        stamped += 1
+    return stamped
+
+
+# ---------------------------------------------------------------------------
 # Per-lab processing
 # ---------------------------------------------------------------------------
 
@@ -355,10 +392,13 @@ def process_lab(
     backup_dir: Path,
     *,
     dry_run: bool,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Process a single lab file.
 
-    Returns ``(networks_checked, networks_backfilled)``.
+    Returns ``(networks_checked, networks_backfilled, nodes_stamped)``.
+    ``nodes_stamped`` counts QEMU nodes that received
+    ``machine_override='pc'`` in this pass.
+
     Raises on unrecoverable per-lab errors (caller catches and continues).
     """
     try:
@@ -372,11 +412,10 @@ def process_lab(
         data: dict[str, Any] = json.loads(raw)
 
         if not isinstance(data, dict) or data.get("schema") != 2:
-            return 0, 0
+            return 0, 0, 0
 
         networks: dict[str, Any] = data.get("networks") or {}
-        if not networks:
-            return 0, 0
+        nodes: dict[str, Any] = data.get("nodes") or {}
 
         lab_id = str(data.get("id") or lab_id_path)
         checked = 0
@@ -394,9 +433,18 @@ def process_lab(
             if not runtime.get("bridge_name"):
                 to_migrate.append((net_id, network))
 
-        if not to_migrate:
+        # Count pre-Wave-7 QEMU nodes that need machine_override='pc'.
+        nodes_to_stamp = sum(
+            1
+            for n in nodes.values()
+            if isinstance(n, dict)
+            and n.get("type") == "qemu"
+            and n.get("machine_override") is None
+        )
+
+        if not to_migrate and nodes_to_stamp == 0:
             # Already fully migrated — idempotent no-op.
-            return checked, 0
+            return checked, 0, 0
 
         if dry_run:
             for net_id, _net in to_migrate:
@@ -405,7 +453,13 @@ def process_lab(
                     f"[migrate_runtime_network] DRY RUN: {lab_path.name} "
                     f"network {net_id} → would stamp runtime.bridge_name={bridge}"
                 )
-            return checked, len(to_migrate)
+            if nodes_to_stamp:
+                print(
+                    f"[migrate_runtime_network] DRY RUN: {lab_path.name} "
+                    f"would stamp machine_override='pc' on {nodes_to_stamp} "
+                    "QEMU node(s)"
+                )
+            return checked, len(to_migrate), nodes_to_stamp
 
         # Take a backup of the lab.json before any modifications.
         backup_dir.mkdir(parents=True, exist_ok=True)
@@ -455,7 +509,13 @@ def process_lab(
             runtime["bridge_name"] = bridge
             networks[str(net_id)] = network
 
+        # Step 6: Stamp machine_override='pc' on pre-Wave-7 QEMU nodes
+        # (US-202b compat discriminator — see plan :397-400). Done in the
+        # same read-modify-write cycle so we never double-write the file.
+        nodes_stamped = _stamp_machine_override(nodes)
+
         data["networks"] = networks
+        data["nodes"] = nodes
         data.pop("topology", None)
 
         # Atomic write.
@@ -467,7 +527,7 @@ def process_lab(
             tmp_path.unlink(missing_ok=True)
             raise
 
-    return checked, len(to_migrate)
+    return checked, len(to_migrate), nodes_stamped
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +598,7 @@ def main(argv: list[str] | None = None) -> int:
     lab_files = sorted(labs_dir.rglob("*.json"))
     total_labs = 0
     total_backfilled = 0
+    total_nodes_stamped = 0
     errors = 0
 
     for lab_path in lab_files:
@@ -548,7 +609,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         try:
-            checked, backfilled = process_lab(
+            checked, backfilled, nodes_stamped = process_lab(
                 lab_path, labs_dir, backup_dir, dry_run=dry_run
             )
         except Exception as exc:
@@ -559,17 +620,23 @@ def main(argv: list[str] | None = None) -> int:
             errors += 1
             continue
 
-        if checked == 0:
+        if checked == 0 and nodes_stamped == 0:
             continue
 
         total_labs += 1
         total_backfilled += backfilled
+        total_nodes_stamped += nodes_stamped
 
-        if backfilled > 0:
+        if backfilled > 0 or nodes_stamped > 0:
             action = "would backfill" if dry_run else "backfilled"
+            parts: list[str] = []
+            if backfilled > 0:
+                parts.append(f"runtime.bridge_name on {backfilled} network(s)")
+            if nodes_stamped > 0:
+                parts.append(f"machine_override='pc' on {nodes_stamped} QEMU node(s)")
             print(
                 f"[migrate_runtime_network] {lab_path.name}: {action} "
-                f"runtime.bridge_name on {backfilled} network(s)"
+                + " and ".join(parts)
             )
         else:
             print(
@@ -579,7 +646,8 @@ def main(argv: list[str] | None = None) -> int:
     suffix = " (dry run)" if dry_run else ""
     print(
         f"[migrate_runtime_network] Done{suffix}. "
-        f"labs={total_labs}, networks_backfilled={total_backfilled}, errors={errors}"
+        f"labs={total_labs}, networks_backfilled={total_backfilled}, "
+        f"nodes_stamped={total_nodes_stamped}, errors={errors}"
     )
     if errors and not dry_run:
         print(
