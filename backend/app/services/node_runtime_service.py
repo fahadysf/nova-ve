@@ -138,6 +138,11 @@ class NodeRuntimeService:
         # Dependency-injectable hooks so tests can monkey-patch QMP/docker IO.
         self._qmp_client: Callable[[str, str], dict] = _default_qmp_client
         self._docker_inspect: Callable[[str, str, str], dict] = _default_docker_inspect
+        # US-205b: read MAC from inside the container's netns via the privileged
+        # helper.  After US-207 containers run with ``--network=none`` so
+        # ``docker inspect .NetworkSettings.Networks`` is empty; sysfs is the
+        # only source of truth for the live MAC.
+        self._read_iface_mac: Callable[[int, str], str] = host_net.read_iface_mac
         self._load_registry()
 
     @classmethod
@@ -394,6 +399,16 @@ class NodeRuntimeService:
         lab_data: dict[str, Any] | None,
         interface: dict[str, Any] | None,
     ) -> dict[str, Any]:
+        """Read the live MAC of a Docker container's NIC from inside its netns.
+
+        US-205b: after US-207 containers start with ``--network=none`` so
+        ``docker inspect .NetworkSettings.Networks`` is permanently empty.
+        The MAC for ``eth{interface_index}`` (created by US-204's veth + nsenter
+        rename path) lives only in sysfs inside the container's netns.  We
+        invoke the privileged helper's ``read-iface-mac`` verb which performs
+        ``nsenter -t <pid> -n cat /sys/class/net/<iface>/address`` after
+        validating that ``pid`` is a runtime nova-ve registered.
+        """
         container_name = runtime.get("container_name")
         if not container_name:
             return {
@@ -404,81 +419,53 @@ class NodeRuntimeService:
                 "reason": "docker runtime not started",
             }
 
-        docker_binary = self._resolve_binary("docker") or "docker"
+        pid_raw = runtime.get("pid")
         try:
-            inspected = self._docker_inspect(docker_binary, self.settings.DOCKER_HOST, container_name)
+            pid = int(pid_raw) if pid_raw is not None else 0
+        except (TypeError, ValueError):
+            pid = 0
+        if pid <= 0:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "docker",
+                "reason": "docker runtime has no pid",
+            }
+
+        if not interface:
+            return {
+                "state": "unavailable",
+                "planned_mac": planned_mac,
+                "live_mac": None,
+                "runtime_type": "docker",
+                "reason": "interface metadata missing",
+            }
+        try:
+            interface_index = int(interface.get("index", 0))
+        except (TypeError, ValueError):
+            interface_index = 0
+        iface_name = f"eth{interface_index}"
+
+        try:
+            live_mac_raw = self._read_iface_mac(pid, iface_name)
         except Exception as exc:
             return {
                 "state": "unavailable",
                 "planned_mac": planned_mac,
                 "live_mac": None,
                 "runtime_type": "docker",
-                "reason": f"docker inspect failed: {exc}",
+                "reason": f"read-iface-mac failed: {exc}",
             }
 
-        target_network_name: str | None = None
-        if interface and lab_data is not None:
-            network_id = 0
-            try:
-                network_id = int(interface.get("network_id") or 0)
-            except (TypeError, ValueError):
-                network_id = 0
-            if not network_id:
-                try:
-                    interface_index = int(interface.get("index", 0))
-                except (TypeError, ValueError):
-                    interface_index = 0
-                node_id_value = 0
-                try:
-                    node_id_value = int(runtime.get("node_id", 0))
-                except (TypeError, ValueError):
-                    node_id_value = 0
-                for link in lab_data.get("links") or []:
-                    endpoints = (link.get("from") or {}, link.get("to") or {})
-                    node_endpoint = next(
-                        (
-                            endpoint for endpoint in endpoints
-                            if isinstance(endpoint, dict)
-                            and "node_id" in endpoint
-                            and int(endpoint.get("node_id", -1)) == node_id_value
-                            and int(endpoint.get("interface_index", -1)) == interface_index
-                        ),
-                        None,
-                    )
-                    network_endpoint = next(
-                        (
-                            endpoint for endpoint in endpoints
-                            if isinstance(endpoint, dict) and "network_id" in endpoint
-                        ),
-                        None,
-                    )
-                    if node_endpoint and network_endpoint:
-                        try:
-                            network_id = int(network_endpoint.get("network_id", 0))
-                        except (TypeError, ValueError):
-                            network_id = 0
-                        break
-            if network_id:
-                target_network_name = self._docker_network_name(lab_id, network_id)
-
-        live_mac: str | None = None
-        if target_network_name:
-            networks = inspected.get("Networks") or {}
-            entry = networks.get(target_network_name)
-            if isinstance(entry, dict) and entry.get("MacAddress"):
-                live_mac = str(entry["MacAddress"])
-        if live_mac is None:
-            top_mac = inspected.get("MacAddress")
-            if top_mac:
-                live_mac = str(top_mac)
-
+        live_mac = (live_mac_raw or "").strip()
         if not live_mac:
             return {
                 "state": "unavailable",
                 "planned_mac": planned_mac,
                 "live_mac": None,
                 "runtime_type": "docker",
-                "reason": "docker inspect returned no MacAddress",
+                "reason": "read-iface-mac returned empty MAC",
             }
 
         state = "confirmed" if planned_mac.lower() == live_mac.lower() else "mismatch"

@@ -453,6 +453,19 @@ def addr_up_in_netns(pid: int, iface: str) -> None:
     _invoke_helper("addr-up-in-netns", str(int(pid)), iface)
 
 
+def read_iface_mac(pid: int, iface: str) -> str:
+    """Return the MAC of ``iface`` inside ``pid``'s netns (US-205b).
+
+    Wraps the helper's ``read-iface-mac`` verb (``nsenter -t <pid> -n cat
+    /sys/class/net/<iface>/address``).  Used by ``_read_docker_live_mac``
+    after US-207 made ``--network=none`` containers leave Docker's
+    ``.NetworkSettings.Networks`` empty — the only place a Docker
+    container's NIC MAC lives is now sysfs inside its own netns.
+    """
+    proc = _invoke_helper("read-iface-mac", str(int(pid)), iface)
+    return (proc.stdout or "").strip()
+
+
 def tap_add(name: str) -> None:
     """Create a Linux TAP device with ``name`` via the privileged helper.
 
