@@ -571,12 +571,12 @@ class LinkService:
         lab_id = str(lab_data.get("id") or lab_path)
         nodes = lab_data.get("nodes") or {}
 
-        # Pre-pass: identify candidate (node_id, interface_index, network_id)
+        # Pre-pass: identify candidate (node_id, interface_index, network_id, kind)
         # tuples whose node is currently running. We defer bridge_name
         # resolution (which requires a per-host instance_id) until we know
         # there is at least one candidate — labs that never start nodes
         # never trigger the instance_id read.
-        pending: List[Tuple[int, int, int]] = []
+        pending: List[Tuple[int, int, int, str]] = []
         for link in concrete_links:
             node_endpoint = None
             network_endpoint = None
@@ -603,11 +603,13 @@ class LinkService:
             runtime = runtime_service._runtime_record(lab_id, node_id)
             if runtime is None:
                 continue
-            if runtime.get("kind") != "docker":
-                # QEMU hot-attach is US-303, not US-204.
+            kind = str(runtime.get("kind") or "")
+            if kind not in ("docker", "qemu"):
+                # Other runtime kinds (iol, dynamips, vpcs) have no hot-add
+                # path yet — initial-attach at start time covers them.
                 continue
 
-            pending.append((node_id, interface_index, network_id))
+            pending.append((node_id, interface_index, network_id, kind))
 
         if not pending:
             return False
@@ -623,15 +625,17 @@ class LinkService:
             resolved_implicit_bridge = (int(implicit_net_id), implicit_name)
 
         # Now resolve a bridge name for every pending target.
-        attach_targets: List[Tuple[int, int, int, str]] = []
-        for node_id, interface_index, network_id in pending:
+        attach_targets: List[Tuple[int, int, int, str, str]] = []
+        for node_id, interface_index, network_id, kind in pending:
             bridge = self._resolve_bridge_name(
                 lab_id=lab_id,
                 network_id=network_id,
                 networks=lab_data.get("networks") or {},
                 implicit_bridge=resolved_implicit_bridge,
             )
-            attach_targets.append((node_id, interface_index, network_id, bridge))
+            attach_targets.append(
+                (node_id, interface_index, network_id, bridge, kind)
+            )
 
         # Provision the implicit network's bridge exactly once before any
         # attach call (Codex critic v4 new defect #3). Idempotent: pre-existing
@@ -646,20 +650,32 @@ class LinkService:
 
         # Attach each target. On the FIRST failure, sweep the bridges + every
         # already-attached interface so we leave no host-side leftover.
-        attached: List[Tuple[int, int]] = []
+        # ``attached`` carries the kind so rollback can pick the matching
+        # cleanup path (veth host-end for docker, TAP for qemu).
+        attached: List[Tuple[int, int, str]] = []
         try:
-            for node_id, interface_index, network_id, bridge in attach_targets:
+            for node_id, interface_index, network_id, bridge, kind in attach_targets:
                 # US-204b: the per-(lab, node, iface) mutex is held by the
                 # caller (``create_link``). Call the PRIVATE locked helper
                 # directly to avoid double-acquiring the same mutex.
-                attachment = runtime_service._attach_docker_interface_locked(
-                    lab_id,
-                    node_id,
-                    network_id,
-                    interface_index,
-                    bridge_name=bridge,
-                )
-                attached.append((node_id, interface_index))
+                if kind == "docker":
+                    attachment = runtime_service._attach_docker_interface_locked(
+                        lab_id,
+                        node_id,
+                        network_id,
+                        interface_index,
+                        bridge_name=bridge,
+                    )
+                else:
+                    # US-303: QEMU hot-add via QMP.
+                    attachment = runtime_service._attach_qemu_interface_locked(
+                        lab_id,
+                        node_id,
+                        network_id,
+                        interface_index,
+                        bridge_name=bridge,
+                    )
+                attached.append((node_id, interface_index, kind))
 
                 # US-204b: stamp the link's ``runtime.attach_generation``
                 # under lab_lock — atomic with the lab.json write so the
@@ -675,23 +691,64 @@ class LinkService:
                     attach_generation=attach_generation,
                 )
         except (NodeRuntimeError, host_net.HostNetError):
-            for node_id, interface_index in attached:
-                host_end = host_net.veth_host_name(lab_id, node_id, interface_index)
-                host_net.try_link_del(host_end)
-                # Best-effort: drop the rolled-back attachment from the
-                # runtime record so subsequent reads stay consistent.
-                runtime = runtime_service._runtime_record(lab_id, node_id)
-                if runtime is not None:
+            for node_id, interface_index, kind in attached:
+                if kind == "docker":
+                    host_end = host_net.veth_host_name(lab_id, node_id, interface_index)
+                    host_net.try_link_del(host_end)
+                    # Best-effort: drop the rolled-back attachment from the
+                    # runtime record so subsequent reads stay consistent.
+                    runtime = runtime_service._runtime_record(lab_id, node_id)
+                    if runtime is not None:
+                        attachments = [
+                            a for a in (runtime.get("interface_attachments") or [])
+                            if int(a.get("interface_index", -1)) != interface_index
+                        ]
+                        runtime["interface_attachments"] = attachments
+                        host_ends = [
+                            h for h in (runtime.get("veth_host_ends") or [])
+                            if h != host_end
+                        ]
+                        runtime["veth_host_ends"] = host_ends
+                        runtime_service._persist_runtime(runtime)
+                elif kind == "qemu":
+                    # US-303 inverse: attach_qemu_interface ran the full
+                    # 6-step rollback for the FAILING target itself; for
+                    # earlier successful targets we tear down the QMP
+                    # device + netdev + TAP here. Best-effort throughout.
+                    runtime = runtime_service._runtime_record(lab_id, node_id)
+                    if runtime is None:
+                        continue
+                    socket_path = runtime.get("qmp_socket") or ""
+                    netdev_id = f"net{interface_index}"
+                    device_id = f"dev{interface_index}"
+                    tap = host_net.tap_name(lab_id, node_id, interface_index)
+                    if socket_path:
+                        try:
+                            runtime_service._qmp_command(
+                                socket_path, "device_del", {"id": device_id}
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            runtime_service._qmp_command(
+                                socket_path, "netdev_del", {"id": netdev_id}
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                    try:
+                        host_net.link_set_nomaster(tap)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    host_net.try_link_del(tap)
                     attachments = [
                         a for a in (runtime.get("interface_attachments") or [])
                         if int(a.get("interface_index", -1)) != interface_index
                     ]
                     runtime["interface_attachments"] = attachments
-                    host_ends = [
-                        h for h in (runtime.get("veth_host_ends") or [])
-                        if h != host_end
+                    tap_names = [
+                        t for t in (runtime.get("tap_names") or []) if t != tap
                     ]
-                    runtime["veth_host_ends"] = host_ends
+                    runtime["tap_names"] = tap_names
                     runtime_service._persist_runtime(runtime)
             if provisioned_implicit_bridge is not None:
                 try:
