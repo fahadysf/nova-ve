@@ -1003,10 +1003,19 @@ class LinkService:
         # ------------------------------------------------------------------
         if node_eps:
             from app.services.node_runtime_service import (  # noqa: WPS433
+                NodeRuntimeError,
+                NodeRuntimeQMPTimeout,
                 NodeRuntimeService,
             )
 
             runtime_service = NodeRuntimeService()
+            # US-304: collect (node_id, iface_idx, kind) so we can
+            # tear down qemu + docker endpoints on the same link in
+            # the right order. For multi-endpoint mixed-kind links,
+            # surface the FIRST error and best-effort log the
+            # secondary cleanup attempt — partial-failure detach is
+            # better than no detach.
+            primary_error: Exception | None = None
             for node_id, iface_idx in node_eps:
                 runtime = runtime_service._runtime_record(
                     mutex_lab_id, node_id, include_stopped=True
@@ -1015,20 +1024,72 @@ class LinkService:
                     # Stopped node — no kernel-side work; proceed to JSON
                     # cleanup so the link record disappears.
                     continue
-                if runtime.get("kind") != "docker":
-                    # QEMU hot-detach is US-303.
-                    continue
-                # Any non-EINVAL ``host_net.HostNetError`` (or
-                # ``NodeRuntimeError``) propagates — caller leaves JSON +
-                # IPAM intact and surfaces the error.
-                runtime_service._detach_docker_interface_locked(
-                    mutex_lab_id,
-                    int(node_id),
-                    int(iface_idx),
-                    expected_generation=(
-                        int(attach_generation) if attach_generation else None
-                    ),
-                )
+                kind = str(runtime.get("kind") or "")
+                if kind == "docker":
+                    try:
+                        runtime_service._detach_docker_interface_locked(
+                            mutex_lab_id,
+                            int(node_id),
+                            int(iface_idx),
+                            expected_generation=(
+                                int(attach_generation) if attach_generation else None
+                            ),
+                        )
+                    except RuntimeMutexContention as exc:
+                        # Surface as 409 to the router (mirrors create_link).
+                        raise LinkContentionError(exc) from exc
+                    except (
+                        NodeRuntimeError,
+                        NodeRuntimeQMPTimeout,
+                        host_net.HostNetError,
+                    ) as exc:
+                        if primary_error is None:
+                            primary_error = exc
+                        else:
+                            _logger.exception(
+                                "delete_link: secondary docker detach failed "
+                                "(lab=%s node=%s iface=%s) — primary error already "
+                                "raised: %s",
+                                mutex_lab_id,
+                                node_id,
+                                iface_idx,
+                                primary_error,
+                            )
+                elif kind == "qemu":
+                    # US-304: hot-detach via QMP. Mutex is held by the
+                    # caller (delete_link) so we use the PRIVATE locked
+                    # helper directly to avoid re-acquiring on the same
+                    # thread.
+                    try:
+                        runtime_service._detach_qemu_interface_locked(
+                            mutex_lab_id,
+                            int(node_id),
+                            int(iface_idx),
+                            lab_path=normalized,
+                        )
+                    except RuntimeMutexContention as exc:
+                        raise LinkContentionError(exc) from exc
+                    except (
+                        NodeRuntimeError,
+                        NodeRuntimeQMPTimeout,
+                        host_net.HostNetError,
+                    ) as exc:
+                        if primary_error is None:
+                            primary_error = exc
+                        else:
+                            _logger.exception(
+                                "delete_link: secondary qemu detach failed "
+                                "(lab=%s node=%s iface=%s) — primary error already "
+                                "raised: %s",
+                                mutex_lab_id,
+                                node_id,
+                                iface_idx,
+                                primary_error,
+                            )
+                # Any other runtime kind (iol, dynamips, vpcs) — no
+                # hot-detach path yet; fall through to JSON cleanup.
+            if primary_error is not None:
+                raise primary_error
 
         # ------------------------------------------------------------------
         # Phase 3 — release the IP via ``network_service._release_ip`` (its
