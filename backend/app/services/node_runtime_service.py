@@ -2561,14 +2561,21 @@ class NodeRuntimeService:
                 )
         else:
             # ----- Step 3b: forced fallback ---------------------------
+            # Codex hotfix HIGH-2: ``link_set_nomaster`` failure is a
+            # HARD detach failure. Previously we swallowed it, then
+            # still tore down runtime state, released the slot, bumped
+            # the generation, and let ``link_service.delete_link``
+            # remove the link from ``lab.json`` — leaving live bridge
+            # connectivity behind while reporting success and making
+            # retry impossible because the attachment row was gone.
+            #
+            # Re-raise as ``host_net.HostNetError`` so ``delete_link``
+            # surfaces the failure to the caller, leaves
+            # ``interface_attachments`` / ``allocated_slots`` /
+            # ``current_attach_generation`` UNCHANGED, and keeps
+            # ``lab.json`` + IPAM intact for retry.
             forced_fallback = True
-            try:
-                host_net.link_set_nomaster(tap)
-            except host_net.HostNetError:
-                _logger.exception(
-                    "us-304 forced-fallback: link_set_nomaster(%s) failed",
-                    tap,
-                )
+            host_net.link_set_nomaster(tap)
             # Publish a ws_hub warning so the UI can surface that the
             # guest did not eject the NIC.
             try:

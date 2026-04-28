@@ -1259,3 +1259,183 @@ def test_us304_stale_generation_locked_helper_returns_stale_noop(
     updated_rt = svc._runtime_record(lab_id, 1, include_stopped=True)
     assert updated_rt is not None
     assert len(updated_rt.get("interface_attachments") or []) == 1
+
+
+# ---------------------------------------------------------------------------
+# Codex hotfix HIGH-2 — link_set_nomaster failure in forced fallback
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_us304_forced_fallback_link_set_nomaster_failure_aborts_cleanup(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Forced-fallback path: when ``host_net.link_set_nomaster(tap)``
+    raises :class:`host_net.HostNetError`, the kernel-side detach has
+    NOT happened (TAP is still bridged). The detach MUST abort with
+    the original error rather than:
+      * dropping the attachment row from runtime,
+      * releasing the slot,
+      * bumping the generation,
+      * letting ``link_service.delete_link`` clear ``lab.json`` / IPAM.
+
+    Otherwise we report success while leaving live bridge connectivity
+    behind, and retry is impossible because the attachment row is gone.
+
+    Regression for codex hotfix HIGH-2.
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    lab_id = "lab304nomast"
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+        links=[_link("lnk_001", 1, 2, 5, attach_generation=1)],
+    )
+
+    svc = NodeRuntimeService()
+    pre_runtime = _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+    pre_attachments = list(pre_runtime["interface_attachments"])
+    pre_allocated_slots = list(pre_runtime["allocated_slots"])
+    pre_gen = svc._interface_attach_generation(pre_runtime, 2)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["device_del"] = {"return": {}}
+    # Device persists past the bounded poll → triggers forced fallback.
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_device("dev2")
+    monkeypatch.setattr(
+        "app.services.node_runtime_service._default_qmp_client", fake_qmp
+    )
+    svc._qmp_client = fake_qmp
+
+    calls = _patch_host_net(monkeypatch)
+
+    # Force ``link_set_nomaster`` to raise — the forced fallback must
+    # propagate this error rather than swallow it.
+    def _link_set_nomaster_fail(name):
+        calls["link_set_nomaster"].append(name)
+        raise host_net.HostNetError(f"simulated nomaster failure for {name}")
+
+    monkeypatch.setattr(
+        host_net, "link_set_nomaster", _link_set_nomaster_fail
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda _s: None
+    )
+
+    expected_tap = host_net.tap_name(lab_id, 1, 2)
+
+    link_service = LinkService()
+    with pytest.raises(host_net.HostNetError, match="simulated nomaster"):
+        await link_service.delete_link(lab_name, "lnk_001")
+
+    # ``link_set_nomaster`` was attempted with the canonical TAP name.
+    assert calls["link_set_nomaster"] == [expected_tap]
+
+    # No tap_del / netdev_del — forced fallback intentionally skips
+    # those; HIGH-2 specifically requires we DON'T forge ahead with
+    # cleanup just because the kernel-side detach failed.
+    assert calls["tap_del"] == []
+
+    # Runtime state UNCHANGED — attachment + slot + generation intact
+    # for retry.
+    rt_after = svc._runtime_record(lab_id, 1, include_stopped=True)
+    assert rt_after is not None
+    assert rt_after["interface_attachments"] == pre_attachments, (
+        f"forced-fallback nomaster failure must not drop the attachment; "
+        f"before={pre_attachments!r} after={rt_after['interface_attachments']!r}"
+    )
+    assert rt_after["allocated_slots"] == pre_allocated_slots, (
+        f"forced-fallback nomaster failure must not release the slot; "
+        f"before={pre_allocated_slots!r} after={rt_after['allocated_slots']!r}"
+    )
+    post_gen = svc._interface_attach_generation(rt_after, 2)
+    assert post_gen == pre_gen, (
+        f"forced-fallback nomaster failure must not bump the generation; "
+        f"before={pre_gen} after={post_gen}"
+    )
+
+    # ``lab.json`` link record + IPAM are intact for retry —
+    # ``delete_link`` runs the kernel detach BEFORE ``lab.json``
+    # cleanup, so the raised error short-circuits the JSON write.
+    saved = json.loads(
+        (lab_settings.LABS_DIR / f"{lab_id}.json").read_text()
+    )
+    assert any(str(link.get("id")) == "lnk_001" for link in saved.get("links", [])), (
+        f"forced-fallback nomaster failure must leave the link in lab.json "
+        f"for retry; saved={saved!r}"
+    )
+
+
+def test_us304_locked_helper_propagates_link_set_nomaster_error(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Direct call into ``_detach_qemu_interface_locked`` with
+    ``host_net.link_set_nomaster`` raising must propagate the error and
+    leave runtime state untouched. Companion regression for HIGH-2 that
+    exercises the locked helper independently of ``delete_link``.
+    """
+    lab_id = "lab304nomastlck"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    pre_runtime = _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+    pre_attachments = list(pre_runtime["interface_attachments"])
+    pre_allocated_slots = list(pre_runtime["allocated_slots"])
+    pre_tap_names = list(pre_runtime["tap_names"])
+    pre_gen = svc._interface_attach_generation(pre_runtime, 2)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["device_del"] = {"return": {}}
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_device("dev2")
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    def _link_set_nomaster_fail(name):
+        calls["link_set_nomaster"].append(name)
+        raise host_net.HostNetError(f"nomaster failed: {name}")
+
+    monkeypatch.setattr(
+        host_net, "link_set_nomaster", _link_set_nomaster_fail
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda _s: None
+    )
+
+    with pytest.raises(host_net.HostNetError, match="nomaster failed"):
+        svc.detach_qemu_interface(lab_id, 1, 2)
+
+    # Runtime state UNCHANGED.
+    rt_after = svc._runtime_record(lab_id, 1, include_stopped=True)
+    assert rt_after is not None
+    assert rt_after["interface_attachments"] == pre_attachments
+    assert rt_after["allocated_slots"] == pre_allocated_slots
+    assert rt_after["tap_names"] == pre_tap_names
+    assert svc._interface_attach_generation(rt_after, 2) == pre_gen
+
+    # tap_del was NOT called.
+    assert calls["tap_del"] == []
