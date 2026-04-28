@@ -16,11 +16,14 @@ import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
+from contextlib import AsyncExitStack
+
 from app.config import get_settings
 from app.services import host_net
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.link_utils import _endpoint_key, _link_pair_key  # noqa: F401 — re-exported
+from app.services.runtime_mutex import runtime_mutex
 from app.services.ws_hub import ws_hub
 
 
@@ -141,6 +144,8 @@ def _serialize_link(link: dict) -> dict:
         "color": link.get("color", ""),
         "width": link.get("width", "1"),
         "metrics": link.get("metrics", {}),
+        # US-204b: generation token stamped at hot-attach time.
+        "runtime": link.get("runtime", {"attach_generation": 0}),
     }
 
 
@@ -237,6 +242,64 @@ class LinkService:
 
         labs_dir = get_settings().LABS_DIR
         ws_events: List[Tuple[str, dict]] = []
+
+        # US-204b: acquire the per-(lab, node, iface) runtime mutex BEFORE
+        # entering lab_lock so the hot-attach kernel sequence is serialized
+        # against any concurrent create_link / delete_link on the same
+        # interface. Unrelated (node, iface) pairs acquire distinct mutexes
+        # and never block each other. We acquire one mutex per node-side
+        # endpoint (network endpoints don't have a per-iface mutex) and
+        # rely on a deterministic order to avoid deadlocks when both
+        # endpoints are nodes.
+        node_keys: List[Tuple[int, int]] = []
+        for endpoint in (endpoint_a, endpoint_b):
+            if "node_id" in endpoint:
+                node_keys.append(
+                    (int(endpoint["node_id"]), int(endpoint.get("interface_index", 0)))
+                )
+        # Sort so concurrent calls always acquire the locks in the same
+        # global order (deadlock prevention).
+        node_keys.sort()
+
+        # Use a placeholder lab_id for mutex keying — the lab_id is the
+        # lab.json's ``id`` field if present, else the path. Resolved below
+        # under the lab_lock; for the mutex we use the normalized path
+        # since that is what every concurrent caller in this process sees.
+        mutex_lab_id = normalized
+
+        async with AsyncExitStack() as stack:
+            for node_id, interface_index in node_keys:
+                await stack.enter_async_context(
+                    runtime_mutex.acquire(mutex_lab_id, node_id, interface_index)
+                )
+            return await self._create_link_locked(
+                normalized=normalized,
+                labs_dir=labs_dir,
+                endpoint_a=endpoint_a,
+                endpoint_b=endpoint_b,
+                style_override=style_override,
+                idempotency_key=idempotency_key,
+                ws_events=ws_events,
+                mutex_lab_id=mutex_lab_id,
+            )
+
+    async def _create_link_locked(
+        self,
+        *,
+        normalized: str,
+        labs_dir,
+        endpoint_a: dict,
+        endpoint_b: dict,
+        style_override: Optional[str],
+        idempotency_key: Optional[str],
+        ws_events: List[Tuple[str, dict]],
+        mutex_lab_id: str,
+    ) -> Tuple[dict, Optional[dict], bool]:
+        """Per-iface mutex(es) ARE held by the caller (US-204b). This
+        helper does the lab_lock-bounded mutation + hot-attach work.
+        """
+        link_payload: dict
+        network_payload: Optional[dict] = None
 
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
@@ -387,7 +450,7 @@ class LinkService:
             # roll back lab.json atomically on host-side failure.
             # ----------------------------------------------------------
             try:
-                self._hot_attach_running_endpoints(
+                stamped = self._hot_attach_running_endpoints(
                     lab_path=normalized,
                     lab_data=data,
                     implicit_bridge=implicit_bridge_to_provision,
@@ -402,6 +465,23 @@ class LinkService:
                     exc,
                 )
                 raise
+
+            # US-204b: persist the generation stamps written into ``data``
+            # by the hot-attach pass. We re-write lab.json inside the same
+            # lab_lock so the link's ``runtime.attach_generation`` and the
+            # node interface's ``runtime.current_attach_generation`` land
+            # atomically with the rest of this create_link mutation.
+            if stamped:
+                data.pop("topology", None)
+                LabService.write_lab_json_static(normalized, data)
+                # ``link_payload`` was built before the generation was
+                # known; refresh it from the now-stamped link record so
+                # the API response carries the canonical value.
+                link_id = str(link_payload.get("id", "") or "")
+                for link in data.get("links", []) or []:
+                    if str(link.get("id", "")) == link_id:
+                        link_payload = _link_with_state(link)
+                        break
 
         for event_type, payload in ws_events:
             await ws_hub.publish(normalized, event_type, payload)
@@ -423,7 +503,7 @@ class LinkService:
         lab_data: dict,
         implicit_bridge: Optional[Tuple[int, Optional[str]]],
         concrete_links: List[dict],
-    ) -> None:
+    ) -> bool:
         """US-204: hot-attach Docker for every concrete node↔network link
         whose node endpoint is currently running.
 
@@ -437,6 +517,11 @@ class LinkService:
         network is provisioned exactly once before any hot-attach call (the
         plan's "implicit network's bridge is created via ``host_net.bridge_add``
         exactly once, before either attach call" requirement).
+
+        Returns ``True`` if at least one link was hot-attached + stamped
+        with a generation token, ``False`` otherwise (no running endpoints
+        to mutate). The caller uses this to decide whether to re-persist
+        lab.json with the generation stamps.
 
         On any failure, raises and the caller rolls back lab.json.
         """
@@ -495,7 +580,7 @@ class LinkService:
             pending.append((node_id, interface_index, network_id))
 
         if not pending:
-            return
+            return False
 
         # Resolve the implicit network's bridge name lazily — only now do we
         # know there is at least one running endpoint that needs the kernel
@@ -534,7 +619,10 @@ class LinkService:
         attached: List[Tuple[int, int]] = []
         try:
             for node_id, interface_index, network_id, bridge in attach_targets:
-                runtime_service.attach_docker_interface(
+                # US-204b: the per-(lab, node, iface) mutex is held by the
+                # caller (``create_link``). Call the PRIVATE locked helper
+                # directly to avoid double-acquiring the same mutex.
+                attachment = runtime_service._attach_docker_interface_locked(
                     lab_id,
                     node_id,
                     network_id,
@@ -542,6 +630,20 @@ class LinkService:
                     bridge_name=bridge,
                 )
                 attached.append((node_id, interface_index))
+
+                # US-204b: stamp the link's ``runtime.attach_generation``
+                # under lab_lock — atomic with the lab.json write so the
+                # link record's generation is never out of sync with the
+                # node interface's ``current_attach_generation`` written
+                # by the runtime service.
+                attach_generation = int(attachment.get("attach_generation", 0))
+                self._stamp_link_attach_generation(
+                    lab_data=lab_data,
+                    node_id=node_id,
+                    interface_index=interface_index,
+                    network_id=network_id,
+                    attach_generation=attach_generation,
+                )
         except (NodeRuntimeError, host_net.HostNetError):
             for node_id, interface_index in attached:
                 host_end = host_net.veth_host_name(lab_id, node_id, interface_index)
@@ -567,6 +669,59 @@ class LinkService:
                 except host_net.HostNetError:
                     pass
             raise
+
+        return bool(attached)
+
+    @staticmethod
+    def _stamp_link_attach_generation(
+        *,
+        lab_data: dict,
+        node_id: int,
+        interface_index: int,
+        network_id: int,
+        attach_generation: int,
+    ) -> None:
+        """US-204b: stamp ``Link.runtime.attach_generation`` on the link
+        whose endpoints match ``(node_id, interface_index, network_id)``
+        and bump
+        ``node.interfaces[interface_index].runtime.current_attach_generation``
+        on the matching node. Both writes happen under ``lab_lock`` and
+        the lab.json is re-persisted by the caller.
+        """
+        for link in lab_data.get("links", []) or []:
+            endpoints = (link.get("from"), link.get("to"))
+            node_match = False
+            network_match = False
+            for endpoint in endpoints:
+                if not isinstance(endpoint, dict):
+                    continue
+                if (
+                    "node_id" in endpoint
+                    and int(endpoint.get("node_id", -1)) == int(node_id)
+                    and int(endpoint.get("interface_index", -1)) == int(interface_index)
+                ):
+                    node_match = True
+                if (
+                    "network_id" in endpoint
+                    and int(endpoint.get("network_id", -1)) == int(network_id)
+                ):
+                    network_match = True
+            if node_match and network_match:
+                runtime_record = link.setdefault("runtime", {})
+                runtime_record["attach_generation"] = int(attach_generation)
+                break
+
+        nodes = lab_data.get("nodes") or {}
+        node_record = nodes.get(str(node_id))
+        if isinstance(node_record, dict):
+            interfaces = node_record.get("interfaces") or []
+            for iface in interfaces:
+                if not isinstance(iface, dict):
+                    continue
+                if int(iface.get("index", -1)) == int(interface_index):
+                    iface_runtime = iface.setdefault("runtime", {})
+                    iface_runtime["current_attach_generation"] = int(attach_generation)
+                    break
 
     @staticmethod
     def _resolve_bridge_name(

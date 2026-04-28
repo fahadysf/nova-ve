@@ -48,6 +48,20 @@ class LinkMetrics(BaseModel):
     jitter_ms: int = 0
 
 
+class LinkRuntime(BaseModel):
+    """US-204b: per-link runtime state stamped at hot-attach time.
+
+    ``attach_generation`` is the canonical generation value for THIS
+    link's specific attach. Stamped on the link record at the moment
+    ``attach_*_interface`` succeeds (atomic with the ``used_ips`` write
+    under ``lab_lock``). ``link_service.delete_link`` reads this value
+    and passes it as ``expected_generation=N`` to ``detach_*_interface``
+    so a stale rollback never undoes a newer attach.
+    """
+
+    attach_generation: int = 0
+
+
 class Link(BaseModel):
     """Topology link between two endpoints in the v2 schema."""
 
@@ -61,3 +75,4 @@ class Link(BaseModel):
     color: str = ""
     width: str = "1"
     metrics: LinkMetrics = Field(default_factory=LinkMetrics)
+    runtime: LinkRuntime = Field(default_factory=LinkRuntime)
