@@ -6,6 +6,21 @@ from pydantic import BaseModel, Field, model_validator
 from app.schemas.port import PortPosition
 
 
+class NodeInterfaceRuntime(BaseModel):
+    """US-204b: per-interface runtime state used as the freshness oracle
+    for stale-rollback detection.
+
+    ``current_attach_generation`` is bumped on every successful attach to
+    this interface. ``link_service.delete_link`` compares the link's
+    captured ``attach_generation`` with the node interface's
+    ``current_attach_generation``; if equal the link's attach is still
+    authoritative and detach proceeds, if different a newer attach has
+    happened and the detach is logged + no-ops.
+    """
+
+    current_attach_generation: int = 0
+
+
 class NodeInterface(BaseModel):
     """v2 node interface entry.
 
@@ -18,6 +33,7 @@ class NodeInterface(BaseModel):
     name: str
     planned_mac: Optional[str] = None
     port_position: Optional[PortPosition] = None
+    runtime: NodeInterfaceRuntime = Field(default_factory=NodeInterfaceRuntime)
 
 
 class NodeBase(BaseModel):
