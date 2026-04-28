@@ -1179,42 +1179,48 @@ def _seed_docker_runtime(service) -> None:
 
 
 def test_docker_live_mac_read_confirmed(monkeypatch, patched_settings):
+    """US-205b: live MAC read via netns sysfs returns confirmed match."""
     _mock_runtime_binaries(monkeypatch)
     service = NodeRuntimeService()
     _seed_docker_runtime(service)
 
-    def _inspect(docker_binary, docker_host, container_name):
-        return {
-            "MacAddress": "",
-            "Networks": {
-                "nova-ve-lablivedocke-net1": {"MacAddress": "02:42:ac:11:00:05"},
-            },
-        }
+    # PID is resolved fresh via ``docker inspect {{.State.Pid}}`` on every read.
+    monkeypatch.setattr(service, "_docker_container_pid", lambda _b, _n: 8888)
 
-    service._docker_inspect = _inspect
+    calls: list[tuple[int, str]] = []
+
+    def _read_iface_mac(pid: int, iface: str) -> str:
+        calls.append((pid, iface))
+        return "02:42:ac:11:00:05\n"
+
+    service._read_iface_mac = _read_iface_mac
 
     result = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
 
     assert result["state"] == "confirmed"
     assert result["runtime_type"] == "docker"
     assert result["live_mac"].lower() == "02:42:ac:11:00:05"
+    # MAC is read inside the container's netns for eth{interface_index}.
+    assert calls == [(8888, "eth0")]
 
 
 def test_docker_live_mac_read_mismatch_multi_network(monkeypatch, patched_settings):
+    """US-205b: per-iface netns read returns the correct NIC's MAC across multi-NIC nodes."""
     _mock_runtime_binaries(monkeypatch)
     service = NodeRuntimeService()
     _seed_docker_runtime(service)
 
-    def _inspect(docker_binary, docker_host, container_name):
-        return {
-            "MacAddress": "02:42:ac:11:00:05",
-            "Networks": {
-                "nova-ve-lablivedocke-net1": {"MacAddress": "02:42:ac:11:00:05"},
-                "nova-ve-lablivedocke-net2": {"MacAddress": "ff:ff:ff:ff:ff:ff"},
-            },
-        }
+    monkeypatch.setattr(service, "_docker_container_pid", lambda _b, _n: 8888)
 
-    service._docker_inspect = _inspect
+    macs_by_iface = {
+        "eth0": "02:42:ac:11:00:05",
+        "eth1": "ff:ff:ff:ff:ff:ff",
+    }
+
+    def _read_iface_mac(pid: int, iface: str) -> str:
+        return macs_by_iface[iface]
+
+    service._read_iface_mac = _read_iface_mac
 
     result = service.read_live_mac("lab-live-docker", 5, 1, lab_data=_DOCKER_LAB_DATA)
 
@@ -1223,20 +1229,288 @@ def test_docker_live_mac_read_mismatch_multi_network(monkeypatch, patched_settin
     assert result["planned_mac"] == "02:42:ac:22:00:05"
 
 
-def test_docker_live_mac_read_unavailable_when_inspect_fails(monkeypatch, patched_settings):
+def test_docker_live_mac_read_unavailable_when_helper_fails(monkeypatch, patched_settings):
+    """US-205b: helper failure (e.g. nsenter EPERM) degrades to unavailable, never raises."""
     _mock_runtime_binaries(monkeypatch)
     service = NodeRuntimeService()
     _seed_docker_runtime(service)
 
-    def _inspect(docker_binary, docker_host, container_name):
-        raise RuntimeError("docker daemon offline")
+    monkeypatch.setattr(service, "_docker_container_pid", lambda _b, _n: 8888)
 
-    service._docker_inspect = _inspect
+    def _read_iface_mac(pid: int, iface: str) -> str:
+        raise RuntimeError("nsenter: failed to enter netns")
+
+    service._read_iface_mac = _read_iface_mac
 
     result = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
 
     assert result["state"] == "unavailable"
-    assert "docker" in (result["reason"] or "").lower()
+    assert "read-iface-mac" in (result["reason"] or "")
+
+
+def test_docker_live_mac_does_not_parse_network_settings(monkeypatch, patched_settings):
+    """US-205b regression: post-US-207 ``--network=none`` containers have an
+    empty ``.NetworkSettings.Networks`` so live-MAC MUST come from sysfs via
+    nsenter — parsing ``.NetworkSettings`` is forbidden because it would
+    always return null and silently break Wave 4's MAC-mismatch detection.
+
+    Note: ``docker inspect {{.State.Pid}}`` is now called on every read to
+    refresh the container's kernel PID (codex critic finding); only the
+    ``.NetworkSettings``-style inspect (``_docker_inspect`` hook) is forbidden.
+    """
+    _mock_runtime_binaries(monkeypatch)
+    service = NodeRuntimeService()
+    _seed_docker_runtime(service)
+
+    monkeypatch.setattr(service, "_docker_container_pid", lambda _b, _n: 8888)
+
+    def _inspect_must_not_be_called(*_args, **_kwargs):
+        raise AssertionError(
+            "_read_docker_live_mac must not parse .NetworkSettings post-US-207 "
+            "(containers run with --network=none and .NetworkSettings.Networks "
+            "is permanently empty)"
+        )
+
+    service._docker_inspect = _inspect_must_not_be_called
+
+    def _read_iface_mac(pid: int, iface: str) -> str:
+        assert pid == 8888
+        assert iface == "eth0"
+        return "02:42:ac:11:00:05"
+
+    service._read_iface_mac = _read_iface_mac
+
+    result = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
+
+    assert result["state"] == "confirmed"
+    assert result["live_mac"].lower() == "02:42:ac:11:00:05"
+
+
+def test_docker_live_mac_unavailable_when_runtime_pid_missing(monkeypatch, patched_settings):
+    """US-205b: when ``docker inspect {{.State.Pid}}`` returns 0 (container
+    exited / never ran) the live-MAC read must degrade to unavailable rather
+    than passing pid=0 to nsenter.
+
+    Codex critic follow-up: this also exercises the stale-PID guard on the
+    fresh-inspect path (``_docker_container_pid`` returns 0 — read_iface_mac
+    must NOT be invoked).
+    """
+    _mock_runtime_binaries(monkeypatch)
+    service = NodeRuntimeService()
+    _seed_docker_runtime(service)
+
+    # Freshly-inspected PID is 0 (container exited / not running).
+    monkeypatch.setattr(service, "_docker_container_pid", lambda _b, _n: 0)
+
+    def _read_iface_mac_must_not_be_called(*_args, **_kwargs):
+        raise AssertionError(
+            "read_iface_mac must not be invoked when fresh inspect returns pid=0"
+        )
+
+    service._read_iface_mac = _read_iface_mac_must_not_be_called
+
+    result = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
+
+    assert result["state"] == "unavailable"
+    assert "pid" in (result["reason"] or "").lower()
+
+
+def test_docker_live_mac_unavailable_when_helper_returns_empty(monkeypatch, patched_settings):
+    """US-205b: empty stdout from helper (e.g. iface not yet attached) -> unavailable."""
+    _mock_runtime_binaries(monkeypatch)
+    service = NodeRuntimeService()
+    _seed_docker_runtime(service)
+
+    monkeypatch.setattr(service, "_docker_container_pid", lambda _b, _n: 8888)
+
+    service._read_iface_mac = lambda pid, iface: "   \n"
+
+    result = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
+
+    assert result["state"] == "unavailable"
+    assert "empty" in (result["reason"] or "").lower()
+
+
+def test_docker_live_mac_resolves_pid_freshly_on_every_read(monkeypatch, patched_settings):
+    """US-205b codex critic finding: PID must be resolved via fresh
+    ``docker inspect {{.State.Pid}}`` on every read — never from
+    ``runtime["pid"]`` (captured once at start time).
+
+    Docker restart policies are explicitly supported (see ``start_node`` step
+    1333 — ``--restart unless-stopped``), so the kernel PID can change after
+    ``docker restart`` / crash-restart / PID rollover.  Using the cached
+    runtime PID would either read a stale netns or — worst case — inspect an
+    unrelated process's namespace if the PID was reused.
+
+    Two consecutive reads against the same runtime simulate a container
+    restart by returning a different PID from ``_docker_container_pid``: each
+    read must invoke the helper again and pass the latest PID to
+    ``read_iface_mac``.
+    """
+    _mock_runtime_binaries(monkeypatch)
+    service = NodeRuntimeService()
+    _seed_docker_runtime(service)
+
+    pid_inspect_calls: list[tuple[str, str]] = []
+    pid_sequence = iter([8888, 9999])
+
+    def _fake_pid(docker_binary: str, container_name: str) -> int:
+        pid_inspect_calls.append((docker_binary, container_name))
+        return next(pid_sequence)
+
+    monkeypatch.setattr(service, "_docker_container_pid", _fake_pid)
+
+    iface_calls: list[tuple[int, str]] = []
+
+    def _read_iface_mac(pid: int, iface: str) -> str:
+        iface_calls.append((pid, iface))
+        return "02:42:ac:11:00:05"
+
+    service._read_iface_mac = _read_iface_mac
+
+    # First read: fresh inspect returns pid=8888.
+    r1 = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
+    # Second read: fresh inspect returns pid=9999 (simulated restart).
+    r2 = service.read_live_mac("lab-live-docker", 5, 0, lab_data=_DOCKER_LAB_DATA)
+
+    assert r1["state"] == "confirmed"
+    assert r2["state"] == "confirmed"
+
+    # Each read called _docker_container_pid exactly once (no caching).
+    assert len(pid_inspect_calls) == 2, pid_inspect_calls
+    # Container name plumbs through unchanged.
+    assert all(call[1] == "nova-ve-lablivedocke-5" for call in pid_inspect_calls)
+
+    # Each read passed the latest fresh PID to read_iface_mac (no stale value).
+    assert iface_calls == [(8888, "eth0"), (9999, "eth0")]
+
+    # The cached runtime["pid"] (8888) was never reused — proven by the
+    # second read using 9999 even though _seed_docker_runtime stored 8888.
+    assert service._registry[service._key("lab-live-docker", 5)]["pid"] == 8888
+
+
+@pytest.mark.skipif(
+    os.geteuid() != 0 or subprocess.run(
+        ["sh", "-c", "command -v docker"], capture_output=True
+    ).returncode != 0,
+    reason=(
+        "privileged integration test: requires root (for nsenter into a "
+        "container netns) and a working docker CLI on PATH"
+    ),
+)
+def test_docker_live_mac_privileged_against_real_network_none_container(
+    monkeypatch, patched_settings, tmp_path
+):
+    """US-205b plan requirement (network-runtime-wiring.md:342): start a
+    real ``alpine`` container with ``--network=none`` and exercise
+    ``_read_docker_live_mac`` against it end-to-end.
+
+    Containers started with ``--network=none`` have no ``eth0`` (the only
+    in-netns iface is ``lo``), so the legitimate post-US-207 outcome is that
+    the function returns ``unavailable`` rather than a stale string.  We
+    cross-check by entering the container netns directly with ``nsenter``
+    and confirming there is no ``/sys/class/net/eth0/address`` to read.
+    """
+    container_name = f"nova-ve-test-us205b-{secrets.token_hex(4)}"
+    run = subprocess.run(
+        [
+            "docker", "run", "-d", "--rm",
+            "--network=none",
+            "--name", container_name,
+            "alpine", "sleep", "60",
+        ],
+        capture_output=True, text=True,
+    )
+    if run.returncode != 0:
+        pytest.skip(f"docker run failed (no docker daemon?): {run.stderr.strip()}")
+    container_id = run.stdout.strip()
+    try:
+        pid_inspect = subprocess.run(
+            ["docker", "inspect", "-f", "{{.State.Pid}}", container_name],
+            capture_output=True, text=True, check=True,
+        )
+        real_pid = int(pid_inspect.stdout.strip())
+        assert real_pid > 0
+
+        # Cross-check via nsenter: --network=none means no eth0.
+        nsenter = subprocess.run(
+            ["nsenter", "-t", str(real_pid), "-n",
+             "cat", "/sys/class/net/eth0/address"],
+            capture_output=True, text=True,
+        )
+        assert nsenter.returncode != 0, (
+            f"--network=none container unexpectedly has eth0: {nsenter.stdout!r}"
+        )
+
+        service = NodeRuntimeService()
+        # Seed a runtime with a deliberately stale (and wrong) cached pid to
+        # prove the function does NOT read it; only fresh docker inspect.
+        runtime = {
+            "lab_id": "lab-live-real",
+            "node_id": 7,
+            "kind": "docker",
+            "name": "alpine-real",
+            "console": "telnet",
+            "console_port": 22000,
+            "container_name": container_name,
+            "container_id": container_id,
+            "pid": 1,  # deliberately wrong / stale — must be ignored
+            "pid_create_time": 0.0,
+            "work_dir": str(tmp_path),
+            "stdout_log": str(tmp_path / "stdout.log"),
+            "stderr_log": str(tmp_path / "stderr.log"),
+            "command": [],
+            "network_names": [],
+            "started_at": 1.0,
+        }
+        service._registry[service._key("lab-live-real", 7)] = runtime
+
+        lab_data = {
+            "schema": 2,
+            "id": "lab-live-real",
+            "meta": {"name": "live-real"},
+            "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+            "nodes": {
+                "7": {
+                    "id": 7,
+                    "name": "alpine-real",
+                    "type": "docker",
+                    "image": "alpine",
+                    "console": "telnet",
+                    "cpu": 1,
+                    "ram": 256,
+                    "ethernet": 1,
+                    "interfaces": [
+                        {
+                            "index": 0,
+                            "name": "eth0",
+                            "planned_mac": "02:42:ac:11:00:07",
+                            "port_position": None,
+                            "network_id": 1,
+                        },
+                    ],
+                }
+            },
+            "networks": {
+                "1": {"id": 1, "name": "lab-link", "type": "linux_bridge",
+                      "visibility": True, "implicit": False, "config": {}},
+            },
+            "links": [],
+            "defaults": {"link_style": "orthogonal"},
+        }
+
+        result = service.read_live_mac("lab-live-real", 7, 0, lab_data=lab_data)
+
+        # --network=none -> no eth0 inside the netns -> function must report
+        # unavailable, not a stale or fabricated MAC.
+        assert result["state"] == "unavailable", result
+        assert result["live_mac"] is None, result
+        assert result["runtime_type"] == "docker"
+    finally:
+        subprocess.run(
+            ["docker", "rm", "-f", container_name],
+            capture_output=True, text=True,
+        )
 
 
 def test_iol_and_dynamips_return_unavailable(patched_settings):
