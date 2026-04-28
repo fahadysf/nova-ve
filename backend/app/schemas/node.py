@@ -46,6 +46,11 @@ class NodeBase(BaseModel):
     interfaces: List[NodeInterface] = Field(default_factory=list)
     extras: Dict[str, Any] = Field(default_factory=dict)
     interface_naming_scheme: Optional[str] = None
+    # US-301: pinned QEMU machine type. ``None`` means "inherit from
+    # ``template.capabilities.machine``"; pre-Wave-7 nodes are stamped
+    # with ``'pc'`` by ``scripts/migrate_runtime_network.py`` so the q35
+    # default never silently changes their PCI topology.
+    machine_override: Optional[Literal["pc", "q35"]] = None
 
     @model_validator(mode='after')
     def _check_iface_naming_scheme(self):

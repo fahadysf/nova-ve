@@ -1,5 +1,26 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
+"""Node runtime adapter for QEMU and Docker labs.
+
+US-301 — pcie-root-port slot policy
+------------------------------------
+QEMU PCI hot-plug requires pre-allocated ``pcie-root-port`` chassis on q35.
+At VM start we pre-allocate ``template.capabilities.max_nics`` root ports.
+Slot 0 is reserved on q35 (the root complex itself); the first usable slot
+is ``1``. Initial NICs declared at boot occupy ``rp0..rp{N-1}`` in
+``interface_index`` order. Hot-add (US-303) scans for free slots starting
+from ``rp{max_nics-1}`` downward so additions never collide with the
+boot-time positional layout. Hot-remove (US-304) frees the matching slot.
+
+Machine-type discrimination:
+- ``node.machine_override`` (set by ``scripts/migrate_runtime_network.py``
+  on pre-Wave-7 QEMU nodes) wins if present.
+- Otherwise the launcher reads ``template.capabilities.machine`` (default
+  ``q35`` for new templates, ``pc`` for legacy YAMLs that omit the field
+  via inferred defaults).
+- Templates with ``capabilities.machine='pc' AND hotplug=true`` are
+  rejected at template-load time (template_service._validate_capabilities).
+"""
 
 import asyncio
 import base64
@@ -845,6 +866,8 @@ class NodeRuntimeService:
                 f"QEMU binary not found for arch {architecture}: {self.settings.QEMU_BINARY}"
             )
 
+        machine, max_nics, hotplug_capable = self._resolve_qemu_machine(node)
+
         work_dir = self._work_dir(lab_id, node["id"])
         work_dir.mkdir(parents=True, exist_ok=True)
         overlay_path = self._ensure_qemu_overlay(work_dir, node)
@@ -860,7 +883,7 @@ class NodeRuntimeService:
             "-display",
             "none",
             "-machine",
-            f"type=pc,accel={accel}",
+            f"type={machine},accel={accel}",
             "-smp",
             str(node.get("cpu", 1)),
             "-m",
@@ -886,14 +909,31 @@ class NodeRuntimeService:
         qmp_socket_path = work_dir / "qmp.sock"
         cmd += ["-qmp", f"unix:{qmp_socket_path},server,nowait"]
 
+        # US-301: q35 pre-allocates pcie-root-port chassis for hot-plug.
+        # Slot 0 is reserved on q35 (root complex); first usable slot is 1.
+        allocated_slots: list[int] = []
+        if machine == "q35" and max_nics > 0:
+            for i in range(max_nics):
+                slot = i + 1
+                cmd += [
+                    "-device",
+                    f"pcie-root-port,id=rp{i},chassis={slot},slot={slot}",
+                ]
+                allocated_slots.append(i)
+
         nic_model = _extra_str(extras, "qemu_nic") or "e1000"
         first_mac = node.get("firstmac") or extras.get("firstmac")
         for index in range(int(node.get("ethernet", 0))):
+            device_args = (
+                f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
+            )
+            if machine == "q35" and index < max_nics:
+                device_args += f",bus=rp{index}"
             cmd += [
                 "-netdev",
                 f"user,id=net{index}",
                 "-device",
-                f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}",
+                device_args,
             ]
 
         if iso_path:
@@ -938,8 +978,64 @@ class NodeRuntimeService:
             "stderr_log": str(stderr_log),
             "qmp_socket": str(qmp_socket_path),
             "command": cmd,
+            "machine": machine,
+            "max_nics": max_nics,
+            "hotplug_capable": hotplug_capable,
+            "allocated_slots": allocated_slots,
             "started_at": time.time(),
         }
+
+    def _resolve_qemu_machine(self, node: dict[str, Any]) -> tuple[str, int, bool]:
+        """Resolve machine type, max_nics, and hotplug capability for a QEMU node.
+
+        Resolution chain (US-301):
+        1. ``node.machine_override`` (set by US-202b migration on pre-Wave-7 nodes
+           or by an operator opt-in flow) — wins unconditionally.
+        2. ``template.capabilities.machine`` from the YAML template — new
+           templates default to ``q35``; legacy YAMLs default to ``pc`` via
+           ``_default_capabilities`` inferred defaults.
+        3. Final fallback ``pc`` if no template can be resolved.
+
+        Returns ``(machine, max_nics, hotplug_capable)``. ``max_nics`` is read
+        from the same template's ``capabilities.max_nics`` (default 8).
+        """
+        override = node.get("machine_override")
+        capabilities: dict[str, Any] = {}
+        try:
+            from app.services.template_service import (  # local to avoid cycles
+                TemplateError,
+                TemplateService,
+            )
+
+            template_key = str(node.get("template") or "").strip()
+            if template_key:
+                try:
+                    template = TemplateService().get_template("qemu", template_key)
+                    capabilities = dict(template.capabilities or {})
+                except TemplateError:
+                    capabilities = {}
+        except ImportError:
+            capabilities = {}
+
+        if isinstance(override, str) and override in ("pc", "q35"):
+            machine = override
+        else:
+            template_machine = capabilities.get("machine")
+            if isinstance(template_machine, str) and template_machine in ("pc", "q35"):
+                machine = template_machine
+            else:
+                machine = "pc"
+
+        max_nics_value = capabilities.get("max_nics", 8)
+        try:
+            max_nics = int(max_nics_value)
+        except (TypeError, ValueError):
+            max_nics = 8
+        if max_nics < 1:
+            max_nics = 8
+
+        hotplug_capable = bool(capabilities.get("hotplug", False)) and machine == "q35"
+        return machine, max_nics, hotplug_capable
 
     def _start_docker_node(self, lab_data: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
         docker_binary = self._resolve_binary("docker")
