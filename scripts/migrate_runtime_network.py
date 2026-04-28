@@ -188,6 +188,15 @@ class _NetworkJournalEntry:
         self.bridge_added: bool = False
 
 
+class DockerNetworkInspectError(RuntimeError):
+    """Raised when docker network inspect cannot safely provide rollback state."""
+
+
+def _is_missing_docker_network(stderr: str) -> bool:
+    """Return True when docker reports the network does not exist."""
+    return "Error: No such network" in stderr
+
+
 def _get_docker_net_name(network: dict[str, Any], lab_id: str) -> str | None:
     """Derive the likely legacy Docker network name from a network record.
 
@@ -229,8 +238,22 @@ def _migrate_network(
         # Step 1: Assert no containers attached.
         inspect_proc = _docker_network_inspect(docker_net)
         if inspect_proc.returncode != 0:
-            # Network does not exist — nothing to clean up on the Docker side.
-            docker_net = None
+            inspect_stderr = inspect_proc.stderr.rstrip("\n")
+            if (
+                inspect_proc.returncode == 1
+                and _is_missing_docker_network(inspect_stderr)
+            ):
+                # Network does not exist — nothing to clean up on the Docker side.
+                docker_net = None
+            else:
+                detail = inspect_stderr or (
+                    f"docker network inspect '{docker_net}' exited "
+                    f"{inspect_proc.returncode} with no stderr"
+                )
+                raise DockerNetworkInspectError(
+                    "could not capture network state for rollback; refusing to proceed\n"
+                    f"{detail}"
+                )
         else:
             try:
                 inspect_data = json.loads(inspect_proc.stdout)

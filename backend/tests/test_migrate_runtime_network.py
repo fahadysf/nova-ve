@@ -91,6 +91,15 @@ def _net(net_id: int, *, bridge_name: str | None = None) -> dict[str, Any]:
     return n
 
 
+def _missing_network_inspect_result(name: str) -> SimpleNamespace:
+    """Simulate Docker's 'network absent' inspect failure."""
+    return SimpleNamespace(
+        returncode=1,
+        stdout="",
+        stderr=f"Error: No such network: {name}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # No-op on already-migrated lab
 # ---------------------------------------------------------------------------
@@ -145,7 +154,7 @@ def test_fills_missing_bridge_name(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
 
@@ -185,7 +194,7 @@ def test_idempotent_second_run(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
@@ -224,7 +233,7 @@ def test_dry_run_does_not_write(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     monkeypatch.setattr(
         "app.services.host_net.bridge_add",
@@ -261,7 +270,7 @@ def test_main_dry_run_does_not_write(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
@@ -309,7 +318,7 @@ def test_precondition_stopped_node_passes(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
@@ -342,7 +351,7 @@ def test_migrate_aborts_on_unfingerprinted_bridge(instance_id, tmp_path, monkeyp
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     bridge = host_net.bridge_name("lab-fail", 1)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: name == bridge)
@@ -465,6 +474,95 @@ def test_migrate_runtime_network_aborts_on_inspect_failure(
     assert rm_calls == []
 
 
+def test_migrate_aborts_on_inspect_daemon_failure(
+    instance_id, tmp_path, monkeypatch, capsys
+):
+    """Non-absence inspect failures abort the lab and return a non-zero exit."""
+    labs_dir = tmp_path / "labs"
+    labs_dir.mkdir()
+
+    net = _net(1)
+    net["config"] = {"docker_network": "nova-ve-lab-daemon-fail-Net1"}
+    _make_lab(
+        labs_dir,
+        lab_id="lab-daemon-fail",
+        networks={"1": net},
+    )
+
+    monkeypatch.setattr(
+        mig,
+        "_docker_network_inspect",
+        lambda name: SimpleNamespace(
+            returncode=125,
+            stdout="",
+            stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+        ),
+    )
+
+    rm_calls: list[str] = []
+    monkeypatch.setattr(
+        mig,
+        "_docker_network_rm",
+        lambda name: rm_calls.append(name) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
+    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
+    monkeypatch.setattr("app.services.host_net.bridge_del", lambda name: None)
+
+    rc = mig.main(["--labs-dir", str(labs_dir)])
+
+    captured = capsys.readouterr()
+    assert rc == 2
+    assert rm_calls == []
+    assert "could not capture network state for rollback; refusing to proceed" in captured.err
+    assert (
+        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+        "Is the docker daemon running?"
+    ) in captured.err
+
+
+def test_migrate_continues_on_no_such_network_inspect_error(
+    instance_id, tmp_path, monkeypatch
+):
+    """Exit 1 with Docker's 'No such network' stderr is treated as absent."""
+    from app.services import host_net
+
+    labs_dir = tmp_path / "labs"
+    labs_dir.mkdir()
+    backup_dir = tmp_path / "backup"
+
+    lab_path = _make_lab(
+        labs_dir,
+        lab_id="lab-no-such-network",
+        networks={"1": _net(1)},
+    )
+
+    monkeypatch.setattr(
+        mig,
+        "_docker_network_inspect",
+        _missing_network_inspect_result,
+    )
+
+    bridge_add_calls: list[str] = []
+    monkeypatch.setattr(
+        "app.services.host_net.bridge_add",
+        lambda name: bridge_add_calls.append(name),
+    )
+    monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
+
+    checked, backfilled, nodes_stamped = mig.process_lab(
+        lab_path, labs_dir, backup_dir, dry_run=False
+    )
+
+    saved = json.loads(lab_path.read_text())
+    expected = host_net.bridge_name("lab-no-such-network", 1)
+    assert checked == 1
+    assert backfilled == 1
+    assert nodes_stamped == 0
+    assert saved["networks"]["1"]["runtime"]["bridge_name"] == expected
+    assert bridge_add_calls == [expected]
+
+
 # ---------------------------------------------------------------------------
 # Non-zero exit from main() when errors occur
 # ---------------------------------------------------------------------------
@@ -486,7 +584,7 @@ def test_main_returns_2_on_error(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     bridge = host_net.bridge_name("lab-err", 1)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: name == bridge)
@@ -563,7 +661,7 @@ def test_migrate_stamps_machine_override(instance_id, tmp_path, monkeypatch):
     monkeypatch.setattr(
         mig,
         "_docker_network_inspect",
-        lambda name: SimpleNamespace(returncode=1, stdout="", stderr=""),
+        _missing_network_inspect_result,
     )
     monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
