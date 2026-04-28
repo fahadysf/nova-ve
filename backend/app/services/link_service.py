@@ -1060,12 +1060,22 @@ class LinkService:
                     # caller (delete_link) so we use the PRIVATE locked
                     # helper directly to avoid re-acquiring on the same
                     # thread.
+                    #
+                    # US-204b freshness contract (codex hotfix HIGH-1):
+                    # pass ``expected_generation`` so a stale rollback
+                    # cannot tear down a NEWER QEMU NIC on the same iface
+                    # — QMP IDs reuse ``dev{iface}`` / ``net{iface}`` and
+                    # without the gen check the docker-path safety net
+                    # was silently bypassed on the qemu side.
                     try:
                         runtime_service._detach_qemu_interface_locked(
                             mutex_lab_id,
                             int(node_id),
                             int(iface_idx),
                             lab_path=normalized,
+                            expected_generation=(
+                                int(attach_generation) if attach_generation else None
+                            ),
                         )
                     except RuntimeMutexContention as exc:
                         raise LinkContentionError(exc) from exc

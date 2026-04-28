@@ -2284,6 +2284,7 @@ class NodeRuntimeService:
         interface_index: int,
         *,
         lab_path: str | None = None,
+        expected_generation: int | None = None,
     ) -> dict[str, Any]:
         """US-304 PUBLIC hot-remove NIC for a running QEMU node.
 
@@ -2298,6 +2299,15 @@ class NodeRuntimeService:
         contextualisation; the detach itself is fully driven by the
         in-process runtime registry (no lab.json read required).
 
+        ``expected_generation`` mirrors the US-204b freshness contract on
+        the docker detach path: when supplied, it is compared against the
+        runtime's per-interface ``current_attach_generation`` before any
+        QMP traffic. A stale rollback (older generation than the live
+        attachment) returns ``state='stale_noop'`` without issuing
+        ``device_del`` — preventing a stale delete/rollback from tearing
+        down a NEWER QEMU NIC that reuses the same ``dev{iface}`` /
+        ``net{iface}`` QMP IDs.
+
         Returns a result dict whose ``state`` field is one of:
           * ``"detached"`` — device gone from QMP within the bounded
             poll window; ``netdev_del`` + ``tap_del`` were issued.
@@ -2307,6 +2317,8 @@ class NodeRuntimeService:
             side still holds the device.
           * ``"absent"`` — no runtime record / no matching attachment
             (idempotent double-delete).
+          * ``"stale_noop"`` — ``expected_generation`` did not match the
+            current runtime generation; nothing was changed.
         """
         from app.services.runtime_mutex import runtime_mutex
 
@@ -2316,6 +2328,7 @@ class NodeRuntimeService:
                 node_id,
                 interface_index,
                 lab_path=lab_path,
+                expected_generation=expected_generation,
             )
 
     def _detach_qemu_interface_locked(
@@ -2325,6 +2338,7 @@ class NodeRuntimeService:
         interface_index: int,
         *,
         lab_path: str | None = None,
+        expected_generation: int | None = None,
     ) -> dict[str, Any]:
         """US-304 PRIVATE hot-remove NIC. Mutex MUST be held.
 
@@ -2396,6 +2410,34 @@ class NodeRuntimeService:
                 break
         if target is None:
             return {"state": "absent", "reason": "no attachment record"}
+
+        # US-204b generation-token check (mirrors
+        # :meth:`_detach_docker_interface_locked`). Use the interface's
+        # ``current_attach_generation`` (the freshness oracle) — NOT the
+        # attachment's own ``attach_generation`` — so a fresh re-attach
+        # (which bumped ``current_attach_generation`` past the caller's
+        # ``expected_generation``) correctly invalidates a stale rollback.
+        # Without this guard, a stale delete/rollback could tear down a
+        # NEWER QEMU NIC because QMP IDs reuse ``dev{iface}`` /
+        # ``net{iface}`` deterministically.
+        current_gen = self._interface_attach_generation(
+            runtime, int(interface_index)
+        )
+        if expected_generation is not None and int(expected_generation) != int(current_gen):
+            _logger.info(
+                "stale qemu detach for gen %s (current %s), ignoring "
+                "(lab=%s node=%s iface=%s)",
+                expected_generation,
+                current_gen,
+                lab_id,
+                node_id,
+                interface_index,
+            )
+            return {
+                "state": "stale_noop",
+                "expected_generation": int(expected_generation),
+                "current_attach_generation": int(current_gen),
+            }
 
         socket_path = runtime.get("qmp_socket") or ""
         if not socket_path:

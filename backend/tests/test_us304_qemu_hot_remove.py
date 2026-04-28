@@ -1094,3 +1094,168 @@ def test_us304_locked_helper_asserts_mutex_held(
 
     with pytest.raises(AssertionError, match="mutex held"):
         svc._detach_qemu_interface_locked(lab_id, 1, 2)
+
+
+# ---------------------------------------------------------------------------
+# Codex hotfix HIGH-1 — stale generation does NOT detach the QEMU NIC
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_us304_stale_generation_does_not_detach_qemu_nic(
+    lab_settings, monkeypatch, _instance_id
+):
+    """When the link's ``attach_generation`` is older than the runtime's
+    ``current_attach_generation``, the QEMU detach path MUST return
+    ``state='stale_noop'`` and NOT issue ``device_del`` / ``netdev_del`` /
+    ``tap_del`` — mirroring the docker freshness contract from US-205.
+
+    This is the regression for codex hotfix HIGH-1: QMP IDs reuse
+    ``dev{iface}`` / ``net{iface}`` deterministically, so without the
+    generation check a stale rollback would tear down a NEWER QEMU NIC
+    that is still live on the same iface.
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+
+    lab_id = "lab304stalegen"
+    stale_gen = 1
+    current_gen = 2
+
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+        # Link carries the OLD generation (stale_gen=1).
+        links=[_link("lnk_001", 1, 2, 5, attach_generation=stale_gen)],
+    )
+
+    svc = NodeRuntimeService()
+    runtime = _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+    # Bump the runtime generation to current_gen so the link's stamped
+    # value is older than the live attachment.
+    runtime["interface_runtime"] = {
+        "2": {"current_attach_generation": current_gen}
+    }
+    runtime["interface_attachments"][0]["attach_generation"] = current_gen
+    svc._persist_runtime(runtime)
+
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["device_del"] = {"return": {}}
+    fake_qmp.responses["query-pci"] = _query_pci_response_with_device(None)
+    fake_qmp.responses["netdev_del"] = {"return": {}}
+    monkeypatch.setattr(
+        "app.services.node_runtime_service._default_qmp_client", fake_qmp
+    )
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda _s: None
+    )
+
+    link_service = LinkService()
+    await link_service.delete_link(lab_name, "lnk_001")
+
+    # The JSON link IS removed (we committed the delete) — same contract
+    # as US-205 stale path.
+    saved = json.loads(
+        (lab_settings.LABS_DIR / f"{lab_id}.json").read_text()
+    )
+    assert saved["links"] == []
+
+    # No QMP traffic at all — stale check short-circuits BEFORE device_del.
+    qmp_cmds = [c[1] for c in fake_qmp.calls]
+    assert "device_del" not in qmp_cmds, (
+        f"stale-gen detach must not issue device_del; cmds={qmp_cmds!r}"
+    )
+    assert "netdev_del" not in qmp_cmds, (
+        f"stale-gen detach must not issue netdev_del; cmds={qmp_cmds!r}"
+    )
+
+    # No host-side TAP cleanup either.
+    assert calls["tap_del"] == [], (
+        f"stale-gen detach must not call tap_del; got {calls['tap_del']!r}"
+    )
+    assert calls["link_set_nomaster"] == [], (
+        f"stale-gen detach must not call link_set_nomaster; "
+        f"got {calls['link_set_nomaster']!r}"
+    )
+
+    # The newer attachment row is still in the runtime record.
+    updated_rt = svc._runtime_record(lab_id, 1, include_stopped=True)
+    assert updated_rt is not None
+    matching = [
+        a for a in (updated_rt.get("interface_attachments") or [])
+        if int(a.get("interface_index", -1)) == 2
+    ]
+    assert len(matching) == 1, (
+        f"stale-gen detach must not drop the newer attachment; "
+        f"interface_attachments={updated_rt.get('interface_attachments')!r}"
+    )
+    assert matching[0]["attach_generation"] == current_gen
+
+
+def test_us304_stale_generation_locked_helper_returns_stale_noop(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Direct call into ``_detach_qemu_interface_locked`` with an
+    ``expected_generation`` older than the runtime's current generation
+    must short-circuit and return ``state='stale_noop'`` without
+    touching QMP, host_net, or runtime state.
+
+    Companion regression for HIGH-1 that exercises the locked helper
+    contract independently of ``link_service.delete_link``.
+    """
+    lab_id = "lab304stalelck"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    runtime = _seed_attached_qemu(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        interface_index=2,
+        network_id=5,
+        monkeypatch=monkeypatch,
+    )
+    runtime["interface_runtime"] = {
+        "2": {"current_attach_generation": 5}
+    }
+    svc._persist_runtime(runtime)
+
+    fake_qmp = _FakeQmp()
+    svc._qmp_client = fake_qmp
+    calls = _patch_host_net(monkeypatch)
+
+    # Call the public entrypoint with stale gen.
+    result = svc.detach_qemu_interface(
+        lab_id, 1, 2, expected_generation=1
+    )
+
+    assert result["state"] == "stale_noop"
+    assert result["expected_generation"] == 1
+    assert result["current_attach_generation"] == 5
+
+    # No QMP, no host_net, no runtime mutation.
+    assert fake_qmp.calls == []
+    assert calls["tap_del"] == []
+    assert calls["link_set_nomaster"] == []
+
+    updated_rt = svc._runtime_record(lab_id, 1, include_stopped=True)
+    assert updated_rt is not None
+    assert len(updated_rt.get("interface_attachments") or []) == 1
