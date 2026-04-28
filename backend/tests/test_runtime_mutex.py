@@ -640,10 +640,12 @@ def test_us204b_detach_with_matching_generation_proceeds(
     assert result["state"] == "detached"
     assert result["host_end"] == expected_host_end
 
-    # Kernel-side: try_link_del was called with the host_end name.
+    # Kernel-side: link_del was called with the host_end name (Codex
+    # critic v2 HIGH #2 — hot-detach now uses the raising variant so
+    # non-EINVAL helper failures propagate to the caller).
     deleted_names = {
         entry["name"] for entry in calls["link_del"]
-        if entry["fn"] == "try_link_del"
+        if entry["fn"] == "link_del"
     }
     assert expected_host_end in deleted_names
 
