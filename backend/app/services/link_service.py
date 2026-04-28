@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from app.config import get_settings
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
+from app.services.link_utils import _endpoint_key, _link_pair_key  # noqa: F401 — re-exported
 from app.services.ws_hub import ws_hub
 
 
@@ -29,20 +30,6 @@ class DuplicateLinkError(Exception):
     def __init__(self, existing_link: dict) -> None:
         super().__init__("link already exists")
         self.existing_link = existing_link
-
-
-def _endpoint_key(ep: dict) -> tuple:
-    """Return a hashable key for a normalised endpoint dict."""
-    if "network_id" in ep:
-        return ("network", int(ep["network_id"]))
-    return ("node", int(ep["node_id"]), int(ep.get("interface_index", 0)))
-
-
-def _link_pair_key(ep_a: dict, ep_b: dict) -> tuple:
-    """Return a canonical (order-independent) key for a {from, to} pair."""
-    ka = _endpoint_key(ep_a)
-    kb = _endpoint_key(ep_b)
-    return (min(ka, kb), max(ka, kb))
 
 
 def _refcount(lab_data: dict, network_id: int) -> int:
