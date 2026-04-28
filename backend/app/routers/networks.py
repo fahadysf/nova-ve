@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 from app.dependencies import get_current_user
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.user import UserRead
+from app.services.host_net import HostNetBridgeOwnershipError
 from app.services.lab_service import LEGACY_SCHEMA_ERROR
 from app.services.network_service import NetworkServiceError, network_service
 
@@ -86,6 +87,15 @@ async def create_network(
 
     try:
         payload = await network_service.create_network(lab_path, request.model_dump())
+    except HostNetBridgeOwnershipError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": 409,
+                "status": "fail",
+                "message": str(exc),
+            },
+        )
     except NetworkServiceError as exc:
         body: Dict[str, Any] = {
             "code": exc.code,
