@@ -24,7 +24,10 @@ path).  The migration sequence for each such network is:
   2. Capture ``docker network inspect`` JSON for rollback (fail-closed: abort
      if inspect fails or JSON is unparseable).
   3. ``docker network rm`` the old Docker network.
-  4. ``host_net.bridge_add`` the new ``nove…n…`` bridge.
+  4. If a Linux bridge with the canonical ``nove…n…`` name already exists,
+     verify its ownership fingerprint matches the expected ``lab_id`` and
+     ``network_id``. Unfingerprinted or mismatched bridges abort the lab
+     migration fail-closed.
   5. Write back ``runtime.bridge_name`` to lab.json (atomic).
 
 On per-lab failure the in-memory journal is used to roll back host-side
@@ -259,11 +262,16 @@ def _migrate_network(
                         )
                     journal.docker_net_removed = True
 
-    if not dry_run:
-        # Step 4: Provision the new Linux bridge (idempotent).
-        if not host_net.bridge_exists(bridge):
-            host_net.bridge_add(bridge)
-            journal.bridge_added = True
+    if not dry_run and host_net.bridge_exists(bridge):
+        status = host_net.bridge_fingerprint_check(bridge, lab_id, network_id)
+        if status != "match":
+            actual = host_net.bridge_fingerprint_read(bridge)
+            actual_desc = "absent" if actual is None else json.dumps(actual, sort_keys=True)
+            raise RuntimeError(
+                "bridge ownership check failed for "
+                f"{bridge}: expected lab_id={lab_id!r}, network_id={network_id}; "
+                f"actual fingerprint={actual_desc}"
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -13,9 +13,9 @@ Asserts the contract specified in
     names (collision-resistant cross-host).
   * The bridge name is persisted on the network record under
     ``runtime.bridge_name`` (US-401 schema field, hoisted by US-202).
-  * ``create_network`` is idempotent: when a bridge with the right name
-    already exists (``bridge_exists`` returns True), ``bridge_add`` is
-    NOT invoked.
+  * ``create_network`` is idempotent only when a pre-existing bridge has
+    a matching ownership fingerprint; otherwise the typed ownership
+    exception is raised fail-closed.
   * On ``bridge_add`` failure, the JSON write is rolled back (no leaked
     network record) and a typed ``NetworkServiceError`` with status 409
     is raised.
@@ -140,6 +140,7 @@ async def test_create_network_provisions_bridge(
     assert helper_mocks["bridge_exists"] == [expected_bridge]
     # runtime.bridge_name persisted on the response payload.
     assert payload["runtime"]["bridge_name"] == expected_bridge
+    assert host_net.bridge_fingerprint_check(expected_bridge, "lab-uuid-aaa", 1) == "match"
     # And on disk.
     saved = json.loads((labs_dir / lab_name).read_text())
     assert saved["networks"]["1"]["runtime"]["bridge_name"] == expected_bridge
@@ -198,6 +199,8 @@ async def test_create_network_idempotent_when_bridge_exists(
 ):
     lab_name = _seed_lab(labs_dir, lab_id="idem-lab")
     add_calls: list[str] = []
+    bridge = host_net.bridge_name("idem-lab", 1)
+    host_net.bridge_fingerprint_write(bridge, "idem-lab", 1)
     monkeypatch.setattr(host_net, "bridge_exists", lambda n: True)
     monkeypatch.setattr(
         host_net, "bridge_add", lambda n: add_calls.append(n)
@@ -210,7 +213,29 @@ async def test_create_network_idempotent_when_bridge_exists(
     assert add_calls == []
     # The runtime.bridge_name is still stamped — caller must be able to
     # tear down the bridge later.
-    assert payload["runtime"]["bridge_name"] == host_net.bridge_name("idem-lab", 1)
+    assert payload["runtime"]["bridge_name"] == bridge
+
+
+@pytest.mark.asyncio
+async def test_create_network_raises_on_bridge_ownership_mismatch(
+    instance_id, settings, monkeypatch, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="mismatch-lab")
+    bridge = host_net.bridge_name("mismatch-lab", 1)
+    host_net.bridge_fingerprint_write(bridge, "other-lab", 1)
+
+    monkeypatch.setattr(host_net, "bridge_exists", lambda n: True)
+    monkeypatch.setattr(host_net, "bridge_add", lambda n: None)
+    monkeypatch.setattr(host_net, "bridge_del", lambda n: None)
+
+    with pytest.raises(host_net.HostNetBridgeOwnershipError) as excinfo:
+        await NetworkService().create_network(lab_name, {"name": "lan"})
+
+    assert bridge in str(excinfo.value)
+    assert "mismatch-lab" in str(excinfo.value)
+    assert "other-lab" in str(excinfo.value)
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"] == {}
 
 
 # ---------------------------------------------------------------------------
