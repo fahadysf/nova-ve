@@ -289,42 +289,95 @@ describe('labWs.createLabWsStores — linkReconciliation (US-403 / US-404)', () 
     expect(recon['link:lnk_dup'].reason).toBe('second');
   });
 
-  it('LOW-4 / MEDIUM-3 stale repopulation: event received after lab_topology reset is discarded', () => {
-    // Simulate: discovered_link arrives, topology snapshot clears, then another
-    // discovered_link from the old discovery pass arrives.  The epoch guard
-    // should keep the store empty.
-    //
-    // NOTE: In production JS these are all synchronous events — the "stale"
-    // scenario occurs when a new snapshot arrives between two events emitted
-    // by the same discovery batch.  We simulate it by interleaving a
-    // lab_topology between two discovered_link emissions.
+  it('MEDIUM-3 / gen-token: discovered_link with gen <= topology generation is rejected', () => {
+    // Producer-side generation gate: lab_topology sets threshold to gen=5.
+    // Events with generation <= 5 are stale and must be dropped.
     const client = makeFakeClient();
     const stores = createLabWsStores(client);
 
+    // lab_topology with generation=5 sets the threshold.
+    client.emit('lab_topology', { type: 'lab_topology', seq: 10, generation: 5, payload: {} } as unknown as import('$lib/services/wsClient').WsMessage);
+    expect(get(stores.linkReconciliation)).toEqual({});
+
+    // Stale event from cycle 4 → rejected (gen 4 <= threshold 5).
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: { network_id: 1, bridge_name: 'br0', iface: 'eth0', peer_node_id: 1, generation: 4 },
+    });
+    expect(get(stores.linkReconciliation)).toEqual({});
+
+    // Same-cycle event from cycle 5 → also rejected (gen 5 <= threshold 5).
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: { network_id: 1, bridge_name: 'br0', iface: 'eth1', peer_node_id: 1, generation: 5 },
+    });
+    expect(get(stores.linkReconciliation)).toEqual({});
+
+    // Next-cycle event from cycle 6 → accepted (gen 6 > threshold 5).
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: { network_id: 2, bridge_name: 'br2', iface: 'eth2', peer_node_id: 2, generation: 6 },
+    });
+    expect(get(stores.linkReconciliation)).toHaveProperty('iface:eth2');
+    expect(Object.keys(get(stores.linkReconciliation))).toHaveLength(1);
+  });
+
+  it('MEDIUM-3 / gen-token: link_divergent with gen <= topology generation is rejected', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    // lab_topology with generation=3 sets the threshold.
+    client.emit('lab_topology', { type: 'lab_topology', seq: 5, generation: 3, payload: {} } as unknown as import('$lib/services/wsClient').WsMessage);
+
+    // Stale divergent event (gen 2 <= 3) → rejected.
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_stale', last_checked: '2026-04-28T00:00:00Z', generation: 2 },
+    });
+    expect(get(stores.linkReconciliation)).toEqual({});
+
+    // Same-cycle divergent event (gen 3 <= 3) → also rejected.
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_same', last_checked: '2026-04-28T00:00:00Z', generation: 3 },
+    });
+    expect(get(stores.linkReconciliation)).toEqual({});
+
+    // Next-cycle divergent event (gen 4 > 3) → accepted.
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_fresh', last_checked: '2026-04-28T01:00:00Z', generation: 4 },
+    });
+    expect(get(stores.linkReconciliation)).toHaveProperty('link:lnk_fresh');
+  });
+
+  it('MEDIUM-3 / gen-token backward-compat: discovered_link without generation field is accepted even after lab_topology', () => {
+    // When the backend is older and omits the generation field entirely,
+    // the frontend must accept the event (no gating — degrade gracefully).
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('lab_topology', { type: 'lab_topology', seq: 1, generation: 10, payload: {} } as unknown as import('$lib/services/wsClient').WsMessage);
+
+    // No generation field → passes through regardless of lastTopologyGeneration.
     client.emit('discovered_link', {
       type: 'discovered_link',
       payload: { network_id: 1, bridge_name: 'br0', iface: 'nve12abd1i0h', peer_node_id: 1 },
     });
-    expect(Object.keys(get(stores.linkReconciliation))).toHaveLength(1);
+    expect(get(stores.linkReconciliation)).toHaveProperty('iface:nve12abd1i0h');
+  });
 
-    // Topology snapshot → bumps epoch, clears store.
-    client.emit('lab_topology', { type: 'lab_topology', seq: 10, payload: {} });
-    expect(get(stores.linkReconciliation)).toEqual({});
+  it('MEDIUM-3 / gen-token backward-compat: link_divergent without generation field is accepted even after lab_topology', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
 
-    // A second discovered_link from the same old batch arrives post-reset.
-    // Because the epoch was already captured before the handler runs and
-    // lab_topology bumped it synchronously, this write is NOT stale in the
-    // synchronous test model — the epoch check is designed to guard against
-    // async delays, so here the new event DOES write (it captures the new epoch).
-    // This test verifies the clear itself was durable: store was empty between
-    // lab_topology and the next genuine event.
-    client.emit('discovered_link', {
-      type: 'discovered_link',
-      payload: { network_id: 2, bridge_name: 'br2', iface: 'nve12abd2i0h', peer_node_id: 2 },
+    client.emit('lab_topology', { type: 'lab_topology', seq: 1, generation: 10, payload: {} } as unknown as import('$lib/services/wsClient').WsMessage);
+
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_legacy', last_checked: '2026-04-28T00:00:00Z' },
     });
-    // The new event is in the new epoch — it should be accepted.
-    expect(Object.keys(get(stores.linkReconciliation))).toHaveLength(1);
-    expect(get(stores.linkReconciliation)['iface:nve12abd2i0h']).toBeDefined();
+    expect(get(stores.linkReconciliation)).toHaveProperty('link:lnk_legacy');
   });
 
   it('LOW-4 / HIGH-1 promote-clears-overlay: deleteReconciliation removes only the targeted key', () => {

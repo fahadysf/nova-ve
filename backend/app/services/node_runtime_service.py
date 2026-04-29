@@ -165,6 +165,12 @@ class NodeRuntimeService:
     # Maps (lab_id, node_id) -> monotonic timestamp of last deliberate start/stop.
     # Heartbeat skips reconciliation for entries younger than _TRANSITION_SUPPRESS_S.
     _transition_timestamps: dict[tuple[str, int], float] = {}
+    # Per-lab discovery generation counter (US-403 MEDIUM-3 gen-token fix).
+    # Incremented at the start of each _discover_lab call so every emitted
+    # discovered_link / link_divergent event carries the generation that produced
+    # it.  lab_topology snapshots include the current value so the frontend can
+    # reject events from older generations (gen <= topology_generation is stale).
+    _discovery_generation: dict[str, int] = {}
 
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -186,6 +192,17 @@ class NodeRuntimeService:
             cls._registry.clear()
             cls._loaded = False
         cls._transition_timestamps.clear()
+        cls._discovery_generation.clear()
+
+    @classmethod
+    def get_discovery_generation(cls, lab_id: str) -> int:
+        """Return the current discovery generation for *lab_id*.
+
+        Used by the WS reconnect handler (``ws.py``) to include the generation
+        in ``lab_topology`` snapshots so the frontend can reject
+        ``discovered_link`` / ``link_divergent`` events from older cycles.
+        """
+        return cls._discovery_generation.get(lab_id, 0)
 
     @classmethod
     def _record_transition(cls, lab_id: str, node_id: int) -> None:
@@ -858,7 +875,17 @@ class NodeRuntimeService:
         hot-plug from US-204b) are NOT flagged.  We import
         ``transition_lease`` lazily so this module remains importable
         before US-204b lands; missing module is treated as "no leases".
+
+        Generation token (US-403 MEDIUM-3): increment the per-lab counter at
+        the very start of every call.  Every event emitted within this call
+        carries the same ``generation`` value.  The frontend rejects events
+        whose ``generation`` is <= the generation recorded in the last
+        ``lab_topology`` snapshot — this is the producer-side guarantee that
+        stale events from a previous cycle are never silently accepted.
         """
+        gen = cls._discovery_generation.get(lab_id, 0) + 1
+        cls._discovery_generation[lab_id] = gen
+
         networks = lab_data.get("networks") or {}
         if not isinstance(networks, dict) or not networks:
             return
@@ -933,6 +960,7 @@ class NodeRuntimeService:
                     "bridge_name": bridge,
                     "iface": iface,
                     "peer_node_id": peer_node_id,
+                    "generation": gen,
                 }
                 try:
                     await ws_hub.publish(lab_id, "discovered_link", payload)
@@ -951,6 +979,7 @@ class NodeRuntimeService:
             kernel_members=kernel_members,
             is_leased=is_leased,
             ws_hub=ws_hub,
+            generation=gen,
         )
 
     @classmethod
@@ -962,6 +991,7 @@ class NodeRuntimeService:
         kernel_members: set[str],
         is_leased: Callable[..., bool] | None,
         ws_hub: Any,
+        generation: int = 0,
     ) -> None:
         """For each entry in ``links[]`` whose declared veth/TAP host-side
         name is missing from ``kernel_members``, publish a
@@ -1030,6 +1060,7 @@ class NodeRuntimeService:
                 "lab_id": lab_id,
                 "reason": "declared in lab.json but no matching veth/TAP found in kernel",
                 "last_checked": last_checked,
+                "generation": generation,
             }
             try:
                 await ws_hub.publish(lab_id, "link_divergent", payload)

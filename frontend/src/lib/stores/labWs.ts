@@ -75,6 +75,7 @@ interface DiscoveredLinkPayload {
   bridge_name: string;
   iface: string;
   peer_node_id?: number | null;
+  generation?: number;
 }
 
 interface LinkDivergentPayload {
@@ -82,6 +83,7 @@ interface LinkDivergentPayload {
   lab_id?: string;
   reason?: string;
   last_checked: string;
+  generation?: number;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -100,8 +102,28 @@ export function createLabWsStores(client: WsClient): LabWsStores {
    * writes, the event is treated as stale and discarded.  This prevents a
    * ``discovered_link`` or ``link_divergent`` in-flight from the previous
    * discovery pass from repopulating the store after a reset.
+   *
+   * Kept as defense-in-depth for synchronous handler interleaving — the
+   * producer-side ``lastTopologyGeneration`` gate below is the load-bearing
+   * piece for the real async race.
    */
   let topologyEpoch = 0;
+
+  /**
+   * MEDIUM-3 (producer-side gen-token fix): generation recorded from the last
+   * ``lab_topology`` snapshot.  Events with ``generation <= lastTopologyGeneration``
+   * predate the snapshot and are rejected.
+   *
+   * Sentinel ``-1``: no snapshot seen yet → accept all events regardless of
+   * their generation field.  Also used when the backend omits the field
+   * (older deployment) so the ``??`` fallback to ``-1`` restores the
+   * pre-fix behavior transparently.
+   *
+   * ``<=`` semantics are intentional: events from the SAME cycle as the
+   * ``lab_topology`` (same generation value) are also stale — they represent
+   * pre-snapshot state and will be re-emitted on the next cycle.
+   */
+  let lastTopologyGeneration: number = -1;
 
   const connected = readable<boolean>(client.isOpen, (set) => {
     const sync = () => set(client.isOpen);
@@ -155,7 +177,7 @@ export function createLabWsStores(client: WsClient): LabWsStores {
 
   // US-403: kernel-only iface not in links[] → amber dashed overlay edge.
   // MEDIUM-2: parse peer_interface_index from the iface name on ingestion.
-  // MEDIUM-3: capture epoch to discard stale events from previous discovery pass.
+  // MEDIUM-3: producer-side gen-token gate + epoch defense-in-depth.
   client.on('discovered_link', (msg: WsMessage) => {
     const myEpoch = topologyEpoch;
     if (!isObject(msg.payload)) return;
@@ -163,6 +185,11 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     if (typeof payload.iface !== 'string' || payload.iface.length === 0) return;
     if (typeof payload.network_id !== 'number') return;
     if (typeof payload.bridge_name !== 'string') return;
+    // Producer-side generation gate: reject events from cycles that predate
+    // the last lab_topology snapshot.  ``?? -1`` makes missing generation
+    // (legacy backend) unconditionally pass through.
+    const eventGen = payload.generation;
+    if (typeof eventGen === 'number' && eventGen <= lastTopologyGeneration) return;
     if (topologyEpoch !== myEpoch) return;
     const key = `iface:${payload.iface}`;
     const next: LinkReconciliation = {
@@ -179,13 +206,16 @@ export function createLabWsStores(client: WsClient): LabWsStores {
   });
 
   // US-404: declared link with no matching kernel veth/TAP → red dashed overlay.
-  // MEDIUM-3: same epoch guard.
+  // MEDIUM-3: producer-side gen-token gate + epoch defense-in-depth.
   client.on('link_divergent', (msg: WsMessage) => {
     const myEpoch = topologyEpoch;
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<LinkDivergentPayload>;
     if (typeof payload.link_id !== 'string' || payload.link_id.length === 0) return;
     if (typeof payload.last_checked !== 'string') return;
+    // Producer-side generation gate — same semantics as discovered_link handler.
+    const eventGen = payload.generation;
+    if (typeof eventGen === 'number' && eventGen <= lastTopologyGeneration) return;
     if (topologyEpoch !== myEpoch) return;
     const key = `link:${payload.link_id}`;
     const next: LinkReconciliation = {
@@ -202,8 +232,18 @@ export function createLabWsStores(client: WsClient): LabWsStores {
   // MEDIUM-3: bump the epoch BEFORE clearing the store so any in-flight
   // discovered_link / link_divergent handlers that captured the old epoch
   // will discard their writes.
-  client.on('lab_topology', () => {
+  // MEDIUM-3 (gen-token): capture the producer-side generation from the
+  // snapshot.  Subsequent events with generation <= this value are stale
+  // (they were emitted by a discovery cycle that ran BEFORE the snapshot)
+  // and are silently dropped.  ``?? -1`` keeps backward-compat when the
+  // backend omits the field — falling back to the sentinel means no gating.
+  client.on('lab_topology', (msg: WsMessage) => {
     topologyEpoch += 1;
+    // The backend includes ``generation`` as a top-level field on the WS
+    // message (alongside ``seq``, ``type``, ``rev``, ``payload``).  Cast
+    // through unknown to read it without widening WsMessage for all callers.
+    const raw = msg as unknown as Record<string, unknown>;
+    lastTopologyGeneration = typeof raw['generation'] === 'number' ? (raw['generation'] as number) : -1;
     liveMacs.set({});
     linkStates.set({});
     nodeStates.set({});
