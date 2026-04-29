@@ -68,6 +68,10 @@ vi.mock('$lib/services/wsClient', () => ({
 vi.mock('$lib/stores/labWs', () => ({
   createLabWsStores: () => ({
     liveMacs: writable({}),
+    linkStates: writable({}),
+    nodeStates: writable({}),
+    divergentLinks: writable({}),
+    connected: writable(false),
   }),
 }));
 

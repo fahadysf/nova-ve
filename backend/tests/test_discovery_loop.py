@@ -1,15 +1,20 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for US-402 — ``NodeRuntimeService._discovery_loop``.
+"""Tests for US-402 / US-404 — ``NodeRuntimeService._discovery_loop``.
 
 These tests cover:
 
 * Kernel-side bridge member with no matching ``links[]`` entry triggers
-  a ``discovered_link`` WS event with the expected payload shape.
-* Members corresponding to declared links are not re-flagged.
-* Hot-plug-in-flight links recorded in ``transition_lease`` are skipped.
+  a ``discovered_link`` WS event with the expected payload shape (US-402).
+* Members corresponding to declared links are not re-flagged (US-402).
+* Hot-plug-in-flight links recorded in ``transition_lease`` are skipped
+  (US-402 + US-404).
 * ``_discovery_loop`` re-reads ``get_settings()`` per iteration so live
-  cadence edits land within one cycle.
+  cadence edits land within one cycle (US-402).
+* US-404: declared links whose veth/TAP is missing from the kernel emit
+  a ``link_divergent`` WS event with ``link_id``, ``lab_id``, ``reason``
+  and ISO-8601 ``last_checked`` timestamp; declared links that ARE present
+  in the kernel are not flagged; leased divergent links are skipped.
 """
 
 from __future__ import annotations
@@ -294,3 +299,175 @@ async def test_discovery_loop_clamps_below_minimum(monkeypatch):
         await NodeRuntimeService._discovery_loop()
 
     assert captured == [5]
+
+
+# ---------------------------------------------------------------------------
+# US-404 — Divergent link tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_divergent_link_emits_link_divergent(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """A link declared in ``links[]`` whose veth/TAP host-side name is NOT
+    present on any bridge for the lab MUST trigger a ``link_divergent`` WS
+    event whose payload includes ``link_id``, ``lab_id``, ``reason`` and an
+    ISO-8601 ``last_checked`` timestamp."""
+    lab_id = "lab-divergent-1"
+    declared_link = {
+        "id": "lnk_001",
+        "from": {"node_id": 1, "interface_index": 0},
+        "to": {"network_id": 1},
+    }
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
+
+    bridge = host_net.bridge_name(lab_id, 1)
+    # Kernel reports an empty bridge — declared link is divergent.
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_bridge_members_sync",
+        staticmethod(lambda b: [] if b == bridge else []),
+    )
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+
+    divergent = [e for e in hub.events if e[1] == "link_divergent"]
+    assert len(divergent) == 1, hub.events
+    payload = divergent[0][2]
+    assert payload["link_id"] == "lnk_001"
+    assert payload["lab_id"] == lab_id
+    assert isinstance(payload["reason"], str) and payload["reason"]
+    assert "last_checked" in payload
+    # ISO-8601 round-trip — bare smoke check.
+    from datetime import datetime
+    parsed = datetime.fromisoformat(payload["last_checked"])
+    assert parsed.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_present_declared_link_is_not_divergent(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """When the declared link's veth IS present on the bridge, no
+    ``link_divergent`` event is emitted."""
+    lab_id = "lab-divergent-2"
+    declared_link = {
+        "id": "lnk_present",
+        "from": {"node_id": 1, "interface_index": 0},
+        "to": {"network_id": 1},
+    }
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
+
+    bridge = host_net.bridge_name(lab_id, 1)
+    veth = host_net.veth_host_name(lab_id, 1, 0)
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_bridge_members_sync",
+        staticmethod(lambda b: [veth] if b == bridge else []),
+    )
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert [e for e in hub.events if e[1] == "link_divergent"] == []
+
+
+@pytest.mark.asyncio
+async def test_present_declared_link_via_tap_is_not_divergent(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """A QEMU-style TAP whose name matches the declared link is also
+    considered present (not divergent)."""
+    lab_id = "lab-divergent-3"
+    declared_link = {
+        "id": "lnk_tap",
+        "from": {"node_id": 2, "interface_index": 0},
+        "to": {"network_id": 1},
+    }
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
+
+    bridge = host_net.bridge_name(lab_id, 1)
+    tap = host_net.tap_name(lab_id, 2, 0)
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_bridge_members_sync",
+        staticmethod(lambda b: [tap] if b == bridge else []),
+    )
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert [e for e in hub.events if e[1] == "link_divergent"] == []
+
+
+@pytest.mark.asyncio
+async def test_leased_divergent_link_is_skipped(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """A divergent link held by ``transition_lease`` (in-flight hot-plug
+    from US-204b) MUST NOT emit a ``link_divergent`` event — in-flight
+    hot-plug is not a divergence."""
+    lab_id = "lab-divergent-4"
+    declared_link = {
+        "id": "lnk_leased",
+        "from": {"node_id": 1, "interface_index": 0},
+        "to": {"network_id": 1},
+    }
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
+
+    bridge = host_net.bridge_name(lab_id, 1)
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_bridge_members_sync",
+        staticmethod(lambda b: [] if b == bridge else []),
+    )
+    _patch_settings(monkeypatch, discovery_settings)
+
+    # Lease registered under the link_id — divergent flagging must back off.
+    fake_lease = types.ModuleType("app.services.transition_lease")
+    fake_lease.is_leased = lambda *, lab_id, link_id: link_id == "lnk_leased"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.services.transition_lease", fake_lease)
+
+    hub = _patch_ws_hub(monkeypatch)
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert [e for e in hub.events if e[1] == "link_divergent"] == []
+
+
+@pytest.mark.asyncio
+async def test_leased_divergent_link_via_iface_key_is_skipped(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """A lease registered under the iface name (rather than the link_id)
+    must also suppress ``link_divergent`` — forward-compatible with the
+    iface-keyed lease scheme used by ``discovered_link``."""
+    lab_id = "lab-divergent-5"
+    declared_link = {
+        "id": "lnk_iface_leased",
+        "from": {"node_id": 3, "interface_index": 0},
+        "to": {"network_id": 1},
+    }
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
+
+    bridge = host_net.bridge_name(lab_id, 1)
+    veth = host_net.veth_host_name(lab_id, 3, 0)
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_bridge_members_sync",
+        staticmethod(lambda b: [] if b == bridge else []),
+    )
+    _patch_settings(monkeypatch, discovery_settings)
+
+    fake_lease = types.ModuleType("app.services.transition_lease")
+    fake_lease.is_leased = lambda *, lab_id, link_id: link_id == veth  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.services.transition_lease", fake_lease)
+
+    hub = _patch_ws_hub(monkeypatch)
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert [e for e in hub.events if e[1] == "link_divergent"] == []
