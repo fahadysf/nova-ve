@@ -165,6 +165,40 @@ async def test_create_network_bridge_name_uses_helper_format(
 
 
 # ---------------------------------------------------------------------------
+# US-401 — runtime.{driver, created_at} reconciliation metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_network_stamps_runtime_driver_and_created_at(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """US-401: ``create_network`` stamps ``runtime.driver`` and
+    ``runtime.created_at`` so the reconciliation loop (US-402) and the
+    backfill migration (US-202b) have a target to verify against."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    lab_name = _seed_lab(labs_dir, lab_id="lab-runtime-meta")
+
+    payload = await NetworkService().create_network(lab_name, {"name": "lan"})
+
+    assert payload["runtime"]["driver"] == "linux_bridge"
+    created_at = payload["runtime"]["created_at"]
+    assert isinstance(created_at, str) and created_at, "created_at must be a non-empty ISO string"
+    parsed = _dt.fromisoformat(created_at)
+    assert parsed.tzinfo is not None, "created_at must be timezone-aware"
+    # Sanity: must not be in the past beyond a reasonable bound.
+    delta = (_dt.now(_tz.utc) - parsed).total_seconds()
+    assert -5.0 < delta < 60.0, f"created_at {created_at!r} not close to now"
+
+    # Round-trip: lab.json holds exactly what the API returned.
+    saved = json.loads((labs_dir / lab_name).read_text())
+    saved_runtime = saved["networks"]["1"]["runtime"]
+    assert saved_runtime["driver"] == "linux_bridge"
+    assert saved_runtime["created_at"] == created_at
+
+
+# ---------------------------------------------------------------------------
 # Cross-host collision resistance
 # ---------------------------------------------------------------------------
 
