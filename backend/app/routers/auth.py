@@ -43,7 +43,7 @@ async def login(
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
         value=token,
-        path="/api/",
+        path="/",
         httponly=True,
         secure=settings.COOKIE_SECURE,
         samesite=settings.COOKIE_SAMESITE,
@@ -52,7 +52,7 @@ async def login(
     response.set_cookie(
         key=settings.SESSION_USER_COOKIE,
         value=user.username,
-        path="/api/",
+        path="/",
         httponly=True,
         secure=settings.COOKIE_SECURE,
         samesite=settings.COOKIE_SAMESITE,
@@ -164,8 +164,8 @@ async def _logout(
         if user_model:
             await auth_service.destroy_session(user_model)
 
-    response.delete_cookie(key=settings.SESSION_COOKIE_NAME, path="/api/")
-    response.delete_cookie(key=settings.SESSION_USER_COOKIE, path="/api/")
+    response.delete_cookie(key=settings.SESSION_COOKIE_NAME, path="/")
+    response.delete_cookie(key=settings.SESSION_USER_COOKIE, path="/")
     return {
         "code": 200,
         "status": "success",

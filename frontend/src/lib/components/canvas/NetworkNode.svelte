@@ -28,8 +28,20 @@
   data-testid="network-node"
   data-network-id={networkId}
 >
+  <!--
+    Each side needs both a source and a target handle with the same id so
+    SvelteFlow accepts edges in either direction (links use
+    sourceHandle=iface-N → targetHandle=network:N:side, so the network side
+    must expose a target handle, not just a source).
+  -->
   <Handle
     type="source"
+    position={Position.Top}
+    id={`network:${networkId}:top`}
+    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+  />
+  <Handle
+    type="target"
     position={Position.Top}
     id={`network:${networkId}:top`}
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
@@ -41,13 +53,31 @@
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
   <Handle
+    type="target"
+    position={Position.Right}
+    id={`network:${networkId}:right`}
+    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+  />
+  <Handle
     type="source"
     position={Position.Bottom}
     id={`network:${networkId}:bottom`}
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
   <Handle
+    type="target"
+    position={Position.Bottom}
+    id={`network:${networkId}:bottom`}
+    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+  />
+  <Handle
     type="source"
+    position={Position.Left}
+    id={`network:${networkId}:left`}
+    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+  />
+  <Handle
+    type="target"
     position={Position.Left}
     id={`network:${networkId}:left`}
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
