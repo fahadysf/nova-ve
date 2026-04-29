@@ -29,6 +29,7 @@
 import { readable, writable, type Readable } from 'svelte/store';
 
 import type { WsClient, WsMessage } from '$lib/services/wsClient';
+import { parseIfaceInterfaceIndex } from '$lib/services/canvasEdges';
 import type { LinkReconciliation, LiveMacState } from '$lib/types';
 
 export type { LinkReconciliation };
@@ -144,6 +145,9 @@ export function createLabWsStores(client: WsClient): LabWsStores {
   });
 
   // US-403: kernel-only iface not in links[] → amber dashed overlay edge.
+  // MEDIUM-2 fix: parse peer_interface_index from the iface name here so
+  // the canvas gets the correct iface-{N} sourceHandle even though the
+  // backend does not send interface_index in the discovered_link payload.
   client.on('discovered_link', (msg: WsMessage) => {
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<DiscoveredLinkPayload>;
@@ -158,6 +162,8 @@ export function createLabWsStores(client: WsClient): LabWsStores {
       network_id: payload.network_id,
       bridge_name: payload.bridge_name,
       peer_node_id: typeof payload.peer_node_id === 'number' ? payload.peer_node_id : null,
+      // Derived from the iface name; null when the name scheme is unrecognised.
+      peer_interface_index: parseIfaceInterfaceIndex(payload.iface),
     };
     linkReconciliation.update((current) => ({ ...current, [key]: next }));
   });
