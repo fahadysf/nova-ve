@@ -4,6 +4,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.main import app
+from app.database import get_db
 from app.dependencies import get_current_user
 
 
@@ -255,3 +256,91 @@ cpulimit: 1
         assert batch_payload["data"]["nodes"][0]["name"] == "docker-node-1"
 
     app.dependency_overrides.clear()
+
+
+async def _stub_db():
+    yield None
+
+
+def _orphan_lab_overrides(role: str) -> None:
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        username="user1" if role != "admin" else "admin",
+        role=role,
+        html5=True,
+        folder="/",
+    )
+    app.dependency_overrides[get_db] = _stub_db
+
+
+@pytest.mark.asyncio
+async def test_delete_lab_orphan_admin_unlinks_file(monkeypatch, patched_route_settings):
+    async def _no_db_row(self, filename):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.lab_service.LabService.get_lab_by_filename", _no_db_row
+    )
+
+    orphan = patched_route_settings.LABS_DIR / "orphan.json"
+    orphan.write_text('{"schema": 2, "id": "orphan"}')
+
+    _orphan_lab_overrides("admin")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.delete("/api/labs/_/orphan.json")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code"] == 200
+    assert payload["status"] == "success"
+    assert not orphan.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_lab_orphan_non_admin_denied(monkeypatch, patched_route_settings):
+    async def _no_db_row(self, filename):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.lab_service.LabService.get_lab_by_filename", _no_db_row
+    )
+
+    orphan = patched_route_settings.LABS_DIR / "orphan.json"
+    orphan.write_text('{"schema": 2, "id": "orphan"}')
+
+    _orphan_lab_overrides("user")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.delete("/api/labs/_/orphan.json")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code"] == 403
+    assert payload["status"] == "fail"
+    assert orphan.exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_lab_missing_returns_404(monkeypatch, patched_route_settings):
+    async def _no_db_row(self, filename):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.lab_service.LabService.get_lab_by_filename", _no_db_row
+    )
+
+    _orphan_lab_overrides("admin")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.delete("/api/labs/_/does-not-exist.json")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code"] == 404
+    assert payload["status"] == "fail"
