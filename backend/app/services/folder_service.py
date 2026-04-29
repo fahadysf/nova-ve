@@ -90,7 +90,7 @@ class FolderService:
                         "lock": False,
                         "shared": 0,
                     })
-                elif entry.is_file() and entry.suffix == ".json":
+                elif entry.is_file() and entry.suffix == ".json" and not entry.name.endswith(".v1.bak.json"):
                     st = entry.stat()
                     rel = _relative_folder_path(entry)
                     labs.append({

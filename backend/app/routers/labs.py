@@ -18,7 +18,7 @@ from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
-from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _normalize_relative_lab_path
+from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateError, TemplateService, _icon_filename_for, render_interface_name
 from app.services.ws_hub import ws_hub
@@ -1793,23 +1793,44 @@ async def delete_lab(
         }
     lab = await lab_service.get_lab_by_filename(scoped_path)
 
-    if not lab:
+    if lab:
+        if lab.owner != current_user.username and current_user.role != "admin":
+            return {
+                "code": 403,
+                "status": "fail",
+                "message": "Access denied.",
+            }
+        await lab_service.delete_lab(lab)
         return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
+            "code": 200,
+            "status": "success",
+            "message": "Lab has been deleted (60023).",
         }
 
-    if lab.owner != current_user.username and current_user.role != "admin":
+    # Filesystem orphan: lab.json exists in LABS_DIR but no DB row (e.g. left
+    # behind by a partial delete or imported via a non-API path). Admins may
+    # clean these up; non-admins fall back to the existing 404 response.
+    try:
+        filepath = _lab_file_path(scoped_path)
+    except ValueError:
+        filepath = None
+
+    if filepath is not None and filepath.is_file():
+        if current_user.role != "admin":
+            return {
+                "code": 403,
+                "status": "fail",
+                "message": "Access denied.",
+            }
+        filepath.unlink()
         return {
-            "code": 403,
-            "status": "fail",
-            "message": "Access denied.",
+            "code": 200,
+            "status": "success",
+            "message": "Lab has been deleted (60023).",
         }
 
-    await lab_service.delete_lab(lab)
     return {
-        "code": 200,
-        "status": "success",
-        "message": "Lab has been deleted (60023).",
+        "code": 404,
+        "status": "fail",
+        "message": "Lab does not exist (60038).",
     }
