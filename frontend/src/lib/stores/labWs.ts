@@ -93,6 +93,15 @@ export function createLabWsStores(client: WsClient): LabWsStores {
   const linkStates = writable<Record<number, string>>({});
   const nodeStates = writable<Record<number, string>>({});
   const linkReconciliation = writable<Record<string, LinkReconciliation>>({});
+  /**
+   * MEDIUM-3: epoch counter incremented on every ``lab_topology`` snapshot.
+   * Each reconciliation event handler captures the epoch at the start of the
+   * call; if it has been bumped by a ``lab_topology`` before the handler
+   * writes, the event is treated as stale and discarded.  This prevents a
+   * ``discovered_link`` or ``link_divergent`` in-flight from the previous
+   * discovery pass from repopulating the store after a reset.
+   */
+  let topologyEpoch = 0;
 
   const connected = readable<boolean>(client.isOpen, (set) => {
     const sync = () => set(client.isOpen);
@@ -145,15 +154,16 @@ export function createLabWsStores(client: WsClient): LabWsStores {
   });
 
   // US-403: kernel-only iface not in links[] → amber dashed overlay edge.
-  // MEDIUM-2 fix: parse peer_interface_index from the iface name here so
-  // the canvas gets the correct iface-{N} sourceHandle even though the
-  // backend does not send interface_index in the discovered_link payload.
+  // MEDIUM-2: parse peer_interface_index from the iface name on ingestion.
+  // MEDIUM-3: capture epoch to discard stale events from previous discovery pass.
   client.on('discovered_link', (msg: WsMessage) => {
+    const myEpoch = topologyEpoch;
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<DiscoveredLinkPayload>;
     if (typeof payload.iface !== 'string' || payload.iface.length === 0) return;
     if (typeof payload.network_id !== 'number') return;
     if (typeof payload.bridge_name !== 'string') return;
+    if (topologyEpoch !== myEpoch) return;
     const key = `iface:${payload.iface}`;
     const next: LinkReconciliation = {
       kind: 'discovered',
@@ -169,11 +179,14 @@ export function createLabWsStores(client: WsClient): LabWsStores {
   });
 
   // US-404: declared link with no matching kernel veth/TAP → red dashed overlay.
+  // MEDIUM-3: same epoch guard.
   client.on('link_divergent', (msg: WsMessage) => {
+    const myEpoch = topologyEpoch;
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<LinkDivergentPayload>;
     if (typeof payload.link_id !== 'string' || payload.link_id.length === 0) return;
     if (typeof payload.last_checked !== 'string') return;
+    if (topologyEpoch !== myEpoch) return;
     const key = `link:${payload.link_id}`;
     const next: LinkReconciliation = {
       kind: 'divergent',
@@ -185,10 +198,12 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     linkReconciliation.update((current) => ({ ...current, [key]: next }));
   });
 
-  // A fresh lab_topology snapshot resets the world — the backend will
-  // republish reconciliation events on the next discovery cycle if
-  // divergences persist.
+  // A fresh lab_topology snapshot resets the world.
+  // MEDIUM-3: bump the epoch BEFORE clearing the store so any in-flight
+  // discovered_link / link_divergent handlers that captured the old epoch
+  // will discard their writes.
   client.on('lab_topology', () => {
+    topologyEpoch += 1;
     liveMacs.set({});
     linkStates.set({});
     nodeStates.set({});
