@@ -2,40 +2,43 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * labWs — US-073 / US-404. Svelte stores derived from a {@link WsClient},
- * tracking granular live state surfaced via WS events:
+ * labWs — US-073 / US-403 / US-404. Svelte stores derived from a
+ * {@link WsClient}, tracking granular live state surfaced via WS events:
  *
- *  - ``liveMacs``        keyed by ``${nodeId}:${interfaceIndex}`` from
- *                         ``interface_live_mac`` events.
- *  - ``linkStates``      keyed by ``link_id`` (numeric) from ``link_state``
- *                         events.
- *  - ``nodeStates``      keyed by ``node_id`` (numeric) from ``node_state``
- *                         events.
- *  - ``divergentLinks``  keyed by ``link_id`` (string) from US-404
- *                         ``link_divergent`` events; values capture the
- *                         ``last_checked`` timestamp + ``reason`` so the
- *                         canvas can surface a tooltip on hover.
- *  - ``connected``       reflects ``client.isOpen``; updated on every event.
+ *  - ``liveMacs``           keyed by ``${nodeId}:${interfaceIndex}`` from
+ *                            ``interface_live_mac`` events.
+ *  - ``linkStates``         keyed by ``link_id`` (numeric) from ``link_state``
+ *                            events.
+ *  - ``nodeStates``         keyed by ``node_id`` (numeric) from ``node_state``
+ *                            events.
+ *  - ``linkReconciliation`` unified overlay store (US-403 + US-404): keyed by
+ *                            ``'iface:<iface>'`` for ``discovered_link`` events
+ *                            and ``'link:<link_id>'`` for ``link_divergent``
+ *                            events.  Both map into {@link LinkReconciliation}
+ *                            records and drive the canvas amber/red overlays.
+ *  - ``connected``          reflects ``client.isOpen``; updated on every event.
  *
- * On ``lab_topology`` snapshots all derived stores are cleared — the
- * snapshot resets the world; subsequent granular events repopulate.
+ * On ``lab_topology`` snapshots ALL derived stores are cleared — the snapshot
+ * resets the world; subsequent granular events repopulate.
+ *
+ * The full backend unification to a single ``link_reconciliation`` event is
+ * deferred (see codex comment on #106); this store is the frontend seam that
+ * absorbs both event types without exposing the split to consumers.
  */
 
 import { readable, writable, type Readable } from 'svelte/store';
 
 import type { WsClient, WsMessage } from '$lib/services/wsClient';
-import type { LiveMacState } from '$lib/types';
+import type { LinkReconciliation, LiveMacState } from '$lib/types';
 
-export interface DivergentLinkState {
-  last_checked: string;
-  reason: string;
-}
+export type { LinkReconciliation };
 
 export type LabWsStores = {
   liveMacs: Readable<Record<string, LiveMacState>>;
   linkStates: Readable<Record<number, string>>;
   nodeStates: Readable<Record<number, string>>;
-  divergentLinks: Readable<Record<string, DivergentLinkState>>;
+  /** Unified reconciliation overlay: discovered (amber) + divergent (red). */
+  linkReconciliation: Readable<Record<string, LinkReconciliation>>;
   connected: Readable<boolean>;
 };
 
@@ -58,10 +61,18 @@ interface NodeStatePayload {
   state: string;
 }
 
+interface DiscoveredLinkPayload {
+  lab_id?: string;
+  network_id: number;
+  bridge_name: string;
+  iface: string;
+  peer_node_id?: number | null;
+}
+
 interface LinkDivergentPayload {
   link_id: string;
-  lab_id: string;
-  reason: string;
+  lab_id?: string;
+  reason?: string;
   last_checked: string;
 }
 
@@ -73,7 +84,7 @@ export function createLabWsStores(client: WsClient): LabWsStores {
   const liveMacs = writable<Record<string, LiveMacState>>({});
   const linkStates = writable<Record<number, string>>({});
   const nodeStates = writable<Record<number, string>>({});
-  const divergentLinks = writable<Record<string, DivergentLinkState>>({});
+  const linkReconciliation = writable<Record<string, LinkReconciliation>>({});
 
   const connected = readable<boolean>(client.isOpen, (set) => {
     const sync = () => set(client.isOpen);
@@ -109,40 +120,73 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<LinkStatePayload>;
     if (typeof payload.link_id !== 'number' || typeof payload.state !== 'string') return;
-    linkStates.update((current) => ({ ...current, [payload.link_id as number]: payload.state as string }));
+    linkStates.update((current) => ({
+      ...current,
+      [payload.link_id as number]: payload.state as string,
+    }));
   });
 
   client.on('node_state', (msg: WsMessage) => {
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<NodeStatePayload>;
     if (typeof payload.node_id !== 'number' || typeof payload.state !== 'string') return;
-    nodeStates.update((current) => ({ ...current, [payload.node_id as number]: payload.state as string }));
+    nodeStates.update((current) => ({
+      ...current,
+      [payload.node_id as number]: payload.state as string,
+    }));
   });
 
+  // US-403: kernel-only iface not in links[] → amber dashed overlay edge.
+  client.on('discovered_link', (msg: WsMessage) => {
+    if (!isObject(msg.payload)) return;
+    const payload = msg.payload as Partial<DiscoveredLinkPayload>;
+    if (typeof payload.iface !== 'string' || payload.iface.length === 0) return;
+    if (typeof payload.network_id !== 'number') return;
+    if (typeof payload.bridge_name !== 'string') return;
+    const key = `iface:${payload.iface}`;
+    const next: LinkReconciliation = {
+      kind: 'discovered',
+      key,
+      iface: payload.iface,
+      network_id: payload.network_id,
+      bridge_name: payload.bridge_name,
+      peer_node_id: typeof payload.peer_node_id === 'number' ? payload.peer_node_id : null,
+    };
+    linkReconciliation.update((current) => ({ ...current, [key]: next }));
+  });
+
+  // US-404: declared link with no matching kernel veth/TAP → red dashed overlay.
   client.on('link_divergent', (msg: WsMessage) => {
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<LinkDivergentPayload>;
     if (typeof payload.link_id !== 'string' || payload.link_id.length === 0) return;
     if (typeof payload.last_checked !== 'string') return;
-    const next: DivergentLinkState = {
+    const key = `link:${payload.link_id}`;
+    const next: LinkReconciliation = {
+      kind: 'divergent',
+      key,
+      link_id: payload.link_id,
       last_checked: payload.last_checked,
       reason: typeof payload.reason === 'string' ? payload.reason : '',
     };
-    divergentLinks.update((current) => ({ ...current, [payload.link_id as string]: next }));
+    linkReconciliation.update((current) => ({ ...current, [key]: next }));
   });
 
+  // A fresh lab_topology snapshot resets the world — the backend will
+  // republish reconciliation events on the next discovery cycle if
+  // divergences persist.
   client.on('lab_topology', () => {
     liveMacs.set({});
     linkStates.set({});
     nodeStates.set({});
-    divergentLinks.set({});
+    linkReconciliation.set({});
   });
 
   return {
     liveMacs: { subscribe: liveMacs.subscribe },
     linkStates: { subscribe: linkStates.subscribe },
     nodeStates: { subscribe: nodeStates.subscribe },
-    divergentLinks: { subscribe: divergentLinks.subscribe },
+    linkReconciliation: { subscribe: linkReconciliation.subscribe },
     connected,
   };
 }

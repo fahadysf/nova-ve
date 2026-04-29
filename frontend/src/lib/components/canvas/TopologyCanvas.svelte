@@ -43,11 +43,7 @@
   import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { createLabWsStores, type LabWsStores } from '$lib/stores/labWs';
-  import {
-    deriveEdges,
-    parseIfaceInterfaceIndex,
-    type DiscoveredLink,
-  } from '$lib/services/canvasEdges';
+  import { deriveEdges, parseIfaceInterfaceIndex, type DiscoveredLink } from '$lib/services/canvasEdges';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -58,6 +54,7 @@
     LabDefaults,
     LabViewport,
     Link,
+    LinkReconciliation,
     LinkStyle,
     LiveMacState,
     NetworkData,
@@ -231,13 +228,6 @@
   let localTopology: TopologyLink[] = [];
   let localLinks: Link[] = [];
   let localDefaults: LabDefaults = { link_style: 'orthogonal' };
-  /**
-   * US-403: kernel-only ("discovered") links surfaced by the backend
-   * ``_discovery_loop`` via ``discovered_link`` WS events. Keyed by the
-   * kernel iface name (``nve...``). These render as dashed amber overlay
-   * edges and can be right-clicked to promote into the real ``links[]``.
-   */
-  const discoveredLinksStore = writable<Record<string, DiscoveredLink>>({});
   let lastNodesRef = nodes;
   let lastNetworksRef = networks;
   let lastTopologyRef = topology;
@@ -496,32 +486,40 @@
   }
 
   function buildFlowEdges(): Edge[] {
-    // US-404: enrich each Link with the latest ``link_divergent`` state
-    // captured by the WS store so canvasEdges can render the red overlay
-    // + warning glyph.  When the store is unavailable (SSR, pre-mount)
-    // links pass through unchanged.
-    const divergentSnapshot = labWsStores ? get(labWsStores.divergentLinks) : {};
-    const enrichedLinks =
-      Object.keys(divergentSnapshot).length === 0
-        ? localLinks
-        : localLinks.map((link) => {
-            const state = divergentSnapshot[link.id];
-            if (!state) return link;
-            return {
-              ...link,
-              divergent: true,
-              last_checked: state.last_checked,
-            };
-          });
-    // US-403: pass discovered (kernel-only) overlay links as 3rd arg.
-    const discoveredList = Object.values(get(discoveredLinksStore));
-    return deriveEdges(enrichedLinks, localDefaults, discoveredList);
+    // Partition the unified reconciliation store into the two visual overlays.
+    // When labWsStores is not yet mounted (SSR / pre-mount) both maps are empty
+    // and links render with their default styling.
+    const recon = labWsStores ? get(labWsStores.linkReconciliation) : {};
+    const entries = Object.values(recon);
+
+    // US-404: declared links with no kernel veth/TAP → keyed by link_id.
+    const divergentByLinkId: Record<string, LinkReconciliation> = {};
+    // US-403: kernel-only ifaces not in links[] → DiscoveredLink list for 3rd arg.
+    const discoveredList: DiscoveredLink[] = [];
+
+    for (const entry of entries) {
+      if (entry.kind === 'divergent' && entry.link_id) {
+        divergentByLinkId[entry.link_id] = entry;
+      } else if (
+        entry.kind === 'discovered' &&
+        entry.iface &&
+        typeof entry.network_id === 'number' &&
+        typeof entry.bridge_name === 'string'
+      ) {
+        discoveredList.push({
+          iface: entry.iface,
+          bridge_name: entry.bridge_name,
+          network_id: entry.network_id,
+          peer_node_id: entry.peer_node_id ?? null,
+          peer_interface_index: entry.peer_interface_index ?? null,
+        });
+      }
+    }
+
+    return deriveEdges(localLinks, localDefaults, discoveredList, divergentByLinkId);
   }
 
   $: {
-    // Reading $discoveredLinksStore here makes publishFlowState reactive to
-    // ``discovered_link`` WS events (US-403).
-    void $discoveredLinksStore;
     publishFlowState();
   }
 
@@ -747,28 +745,35 @@
   async function promoteDiscoveredLink(edgeId: string) {
     if (!isDiscoveredEdgeId(edgeId)) return;
     const iface = edgeId.slice('discovered:'.length);
-    const discovered = get(discoveredLinksStore)[iface];
-    if (!discovered) return;
-    if (typeof discovered.peer_node_id !== 'number') {
+    const recon = labWsStores ? get(labWsStores.linkReconciliation) : {};
+    const entry = recon[`iface:${iface}`];
+    if (!entry || entry.kind !== 'discovered') return;
+
+    if (typeof entry.peer_node_id !== 'number') {
       toastStore.push(
         'Cannot promote discovered link: peer node could not be decoded from iface name.',
         'error',
       );
       return;
     }
-    if (typeof discovered.peer_interface_index !== 'number') {
+    const ifaceIndex = entry.peer_interface_index ?? parseIfaceInterfaceIndex(iface);
+    if (typeof ifaceIndex !== 'number') {
       toastStore.push(
         'Cannot promote discovered link: interface index could not be decoded from iface name.',
         'error',
       );
       return;
     }
+    if (typeof entry.network_id !== 'number') {
+      toastStore.push(
+        'Cannot promote discovered link: network_id is missing from reconciliation entry.',
+        'error',
+      );
+      return;
+    }
 
-    const fromEndpoint = {
-      node_id: discovered.peer_node_id,
-      interface_index: discovered.peer_interface_index,
-    };
-    const toEndpoint = { network_id: discovered.network_id };
+    const fromEndpoint = { node_id: entry.peer_node_id, interface_index: ifaceIndex };
+    const toEndpoint = { network_id: entry.network_id };
 
     try {
       const response = await apiRequest<Link>(`/labs/${labId}/links`, {
@@ -780,14 +785,9 @@
       if (serverLink && serverLink.id) {
         localLinks = [...localLinks, serverLink];
       }
-      // Optimistically clear the overlay; the next discovery cycle would
-      // also clear it once the iface matches a declared link.
-      discoveredLinksStore.update((current) => {
-        if (!(iface in current)) return current;
-        const next = { ...current };
-        delete next[iface];
-        return next;
-      });
+      // The discovered overlay clears on the next discovery cycle once the
+      // iface matches the newly declared link.  publishFlowState() redraws
+      // the edge immediately using the now-present localLinks entry.
       publishFlowState();
       dispatchCanvasChange('topology', {
         nodes: deepClone(localNodes),
@@ -1179,7 +1179,8 @@
   // ── lifecycle: WS hub flush hook & cleanup ───────────────────────────────
   let wsClient: WsClient | null = null;
   let labWsStores: LabWsStores | null = null;
-  let divergentLinksUnsub: (() => void) | null = null;
+  /** Unsubscribe handle for the unified linkReconciliation store (US-403/404). */
+  let reconUnsub: (() => void) | null = null;
 
   onMount(() => {
     if (typeof window !== 'undefined') {
@@ -1194,44 +1195,16 @@
       labWsStores = createLabWsStores(client);
       client.on('lab_topology', (_msg: WsMessage) => {
         void layoutDebouncer.flush();
-        // A fresh topology snapshot supersedes the discovery overlay; the
-        // backend will republish ``discovered_link`` events on the next
-        // discovery cycle if the divergence persists.
-        discoveredLinksStore.set({});
+        // lab_topology resets the reconciliation store (done inside labWs);
+        // republish edges so overlays clear from the canvas immediately.
+        publishFlowState();
       });
-      client.on('discovered_link', (msg: WsMessage) => {
-        if (!msg.payload || typeof msg.payload !== 'object') return;
-        const payload = msg.payload as {
-          lab_id?: string;
-          network_id?: number;
-          bridge_name?: string;
-          iface?: string;
-          peer_node_id?: number | null;
-        };
-        if (typeof payload.iface !== 'string' || payload.iface.length === 0) return;
-        if (typeof payload.network_id !== 'number') return;
-        if (typeof payload.bridge_name !== 'string') return;
-        const ifaceIndex = parseIfaceInterfaceIndex(payload.iface);
-        const next: DiscoveredLink = {
-          iface: payload.iface,
-          bridge_name: payload.bridge_name,
-          network_id: payload.network_id,
-          peer_node_id:
-            typeof payload.peer_node_id === 'number' ? payload.peer_node_id : null,
-          peer_interface_index: ifaceIndex,
-        };
-        discoveredLinksStore.update((current) => ({
-          ...current,
-          [next.iface]: next,
-        }));
-      });
-      // US-404: re-publish edges whenever a ``link_divergent`` event lands
-      // so the canvas repaints the affected edge with the red overlay +
-      // warning glyph.  Skip the priming first emission (Svelte stores fire
-      // synchronously on subscribe) since publishFlowState already runs via
-      // the reactive $: block above.
+      // Subscribe to the unified reconciliation store so the canvas repaints
+      // whenever a discovered_link or link_divergent WS event lands.
+      // Skip the synchronous first emission (store fires on subscribe before
+      // any WS events have arrived; publishFlowState already ran via $:).
       let primed = false;
-      divergentLinksUnsub = labWsStores.divergentLinks.subscribe(() => {
+      reconUnsub = labWsStores.linkReconciliation.subscribe(() => {
         if (!primed) {
           primed = true;
           return;
@@ -1251,9 +1224,9 @@
         window.removeEventListener('keydown', handleWindowKeyDown);
       }
       void layoutDebouncer.flush();
-      if (divergentLinksUnsub) {
-        divergentLinksUnsub();
-        divergentLinksUnsub = null;
+      if (reconUnsub) {
+        reconUnsub();
+        reconUnsub = null;
       }
       if (wsClient) {
         wsClient.close();

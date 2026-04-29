@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Edge } from '@xyflow/svelte';
-import type { Link, LinkStyle } from '$lib/types';
+import type { Link, LinkReconciliation, LinkStyle } from '$lib/types';
 
 export interface DeriveEdgesDefaults {
   link_style?: LinkStyle;
@@ -13,6 +13,9 @@ export interface DeriveEdgesDefaults {
  * ``_discovery_loop`` and surfaced via the ``discovered_link`` WS event.
  * Carries enough context to render a dashed-amber overlay edge and, on
  * promotion, POST a real link to ``/labs/{labId}/links``.
+ *
+ * This is the shape passed as the 3rd arg to ``deriveEdges``; it is derived
+ * from the ``linkReconciliation`` store entries with ``kind === 'discovered'``.
  */
 export interface DiscoveredLink {
   /** Stable key — the kernel iface name (``nve{hash}d{node}i{iface}[h|p]``). */
@@ -59,10 +62,24 @@ export function pickNetworkSide(
   return `network:${networkId}:right`;
 }
 
+/**
+ * Derive SvelteFlow edges from:
+ *  1. ``links``           — declared links from ``lab.json`` (source of truth).
+ *  2. ``discoveredLinks`` — kernel-only ifaces not in ``links[]`` (US-403);
+ *                           rendered as dashed amber overlay edges.
+ *  3. ``divergentByLinkId`` — map of link_id → {@link LinkReconciliation} for
+ *                           links declared in ``links[]`` but absent in the
+ *                           kernel (US-404); rendered as red dashed overlay.
+ *
+ * The divergent and discovered branches are visually distinct and independent.
+ * Overlay state is observation-only runtime data — it is never attached to the
+ * ``Link`` type itself (see ``LinkReconciliation`` in types/index.ts).
+ */
 export function deriveEdges(
   links: Link[] | null | undefined,
   defaults: DeriveEdgesDefaults | null | undefined = null,
-  discoveredLinks: DiscoveredLink[] | null | undefined = null
+  discoveredLinks: DiscoveredLink[] | null | undefined = null,
+  divergentByLinkId: Record<string, LinkReconciliation> | null | undefined = null
 ): Edge[] {
   const hasLinks = !!(links && links.length > 0);
   const hasDiscovered = !!(discoveredLinks && discoveredLinks.length > 0);
@@ -109,18 +126,15 @@ export function deriveEdges(
     const strokeWidth = Number.isFinite(widthValue) && widthValue > 0 ? widthValue : 1;
     const strokeColor = link.color && link.color.length > 0 ? link.color : '#9ca3af';
 
-    // US-404: declared-but-not-discovered overlay (red dashed, glyph at midpoint).
-    // US-403: discovered-but-not-declared overlay (amber dashed).
-    // ``divergent`` takes precedence over ``discovered`` when both are set —
-    // a link cannot simultaneously be missing AND extra in the kernel.
-    let edgeStyle = `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px;`;
-    if (link.divergent === true) {
-      edgeStyle = 'stroke: #f87171; stroke-dasharray: 2 2; opacity: 0.7;';
-    } else if (link.discovered === true) {
-      edgeStyle = 'stroke: #fbbf24; stroke-dasharray: 6 4;';
-    }
+    // US-404: divergent overlay — declared but kernel has no matching veth/TAP.
+    // Decoration comes from the divergentByLinkId param (never from Link itself).
+    const divEntry = divergentByLinkId?.[link.id] ?? null;
+    const isDivergent = divEntry !== null;
+    const edgeStyle = isDivergent
+      ? 'stroke: #f87171; stroke-dasharray: 2 2; opacity: 0.7;'
+      : `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px;`;
 
-    const edge: Edge = {
+    edges.push({
       id: `link:${link.id}`,
       source: `node${fromNodeId}`,
       target,
@@ -137,20 +151,15 @@ export function deriveEdges(
         label: link.label ?? '',
         color: link.color ?? '',
         width: link.width ?? '1',
-        discovered: link.discovered === true,
-        divergent: link.divergent === true,
-        last_checked: link.last_checked ?? null,
+        divergent: isDivergent,
+        last_checked: divEntry?.last_checked ?? null,
       },
-    };
-
-    edges.push(edge);
+    });
   }
 
   // US-403: discovered (kernel-only) overlay edges. Rendered with a dashed
   // amber stroke. Right-click → "Promote to declared link" lifts these into
-  // real ``links[]`` entries via POST /labs/{id}/links. Branch is additive:
-  // unrelated styling logic must stay untouched (US-404 adds a parallel
-  // ``divergent`` branch with a red dashed overlay).
+  // real ``links[]`` entries via POST /labs/{id}/links.
   if (hasDiscovered) for (const discovered of discoveredLinks!) {
     if (!discovered || !discovered.iface) continue;
     if (typeof discovered.peer_node_id !== 'number') continue;

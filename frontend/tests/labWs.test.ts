@@ -132,5 +132,125 @@ describe('labWs.createLabWsStores', () => {
     expect(get(stores.nodeStates)).toEqual({});
     expect(get(stores.linkStates)).toEqual({});
     expect(get(stores.liveMacs)).toEqual({});
+    expect(get(stores.linkReconciliation)).toEqual({});
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// US-403 / US-404 — unified linkReconciliation store.
+// Verifies that both WS event types write into the same store and that the
+// invariant boundary (lab_topology clears everything) holds.
+// ──────────────────────────────────────────────────────────────────────────
+
+describe('labWs.createLabWsStores — linkReconciliation (US-403 / US-404)', () => {
+  it('discovered_link event → entry with kind=discovered, key=iface:{x}', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: {
+        lab_id: 'lab1',
+        network_id: 5,
+        bridge_name: 'noveXn5',
+        iface: 'nve12abd7i2h',
+        peer_node_id: 7,
+      },
+    });
+
+    const recon = get(stores.linkReconciliation);
+    const entry = recon['iface:nve12abd7i2h'];
+    expect(entry).toBeDefined();
+    expect(entry.kind).toBe('discovered');
+    expect(entry.key).toBe('iface:nve12abd7i2h');
+    expect(entry.iface).toBe('nve12abd7i2h');
+    expect(entry.network_id).toBe(5);
+    expect(entry.bridge_name).toBe('noveXn5');
+    expect(entry.peer_node_id).toBe(7);
+  });
+
+  it('link_divergent event → entry with kind=divergent, key=link:{x}', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: {
+        link_id: 'lnk_abc',
+        lab_id: 'lab1',
+        reason: 'no veth found',
+        last_checked: '2026-04-28T12:34:56+00:00',
+      },
+    });
+
+    const recon = get(stores.linkReconciliation);
+    const entry = recon['link:lnk_abc'];
+    expect(entry).toBeDefined();
+    expect(entry.kind).toBe('divergent');
+    expect(entry.key).toBe('link:lnk_abc');
+    expect(entry.link_id).toBe('lnk_abc');
+    expect(entry.last_checked).toBe('2026-04-28T12:34:56+00:00');
+    expect(entry.reason).toBe('no veth found');
+  });
+
+  it('both event types coexist in the same store keyed distinctly', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: { network_id: 1, bridge_name: 'br0', iface: 'nve1i0h', peer_node_id: 1 },
+    });
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_x', last_checked: '2026-04-28T00:00:00Z' },
+    });
+
+    const recon = get(stores.linkReconciliation);
+    expect(Object.keys(recon)).toHaveLength(2);
+    expect(recon['iface:nve1i0h'].kind).toBe('discovered');
+    expect(recon['link:lnk_x'].kind).toBe('divergent');
+  });
+
+  it('lab_topology snapshot clears the unified reconciliation store', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: { network_id: 1, bridge_name: 'br0', iface: 'nve1i0h', peer_node_id: 1 },
+    });
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_y', last_checked: '2026-04-28T00:00:00Z' },
+    });
+    expect(Object.keys(get(stores.linkReconciliation))).toHaveLength(2);
+
+    client.emit('lab_topology', { type: 'lab_topology', seq: 42, payload: {} });
+    expect(get(stores.linkReconciliation)).toEqual({});
+  });
+
+  it('drops malformed discovered_link payloads (missing iface)', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: { network_id: 1, bridge_name: 'br0' }, // no iface
+    });
+
+    expect(get(stores.linkReconciliation)).toEqual({});
+  });
+
+  it('drops malformed link_divergent payloads (missing last_checked)', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_z' }, // no last_checked
+    });
+
+    expect(get(stores.linkReconciliation)).toEqual({});
   });
 });
