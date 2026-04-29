@@ -170,6 +170,7 @@
   }
 
   function resolveNetworkPeerLabel(networkId: number): string | null {
+    const peers: string[] = [];
     for (const link of localLinks) {
       const fromMatches = link.from?.network_id === networkId;
       const toMatches = link.to?.network_id === networkId;
@@ -178,20 +179,20 @@
       if (!other) continue;
       if (typeof other.node_id === 'number') {
         const peerNode = localNodes[String(other.node_id)];
-        if (!peerNode) return `node ${other.node_id}`;
+        const nodeLabel = peerNode?.name ?? `node ${other.node_id}`;
         const peerIface =
-          typeof other.interface_index === 'number'
+          peerNode && typeof other.interface_index === 'number'
             ? peerNode.interfaces[other.interface_index]
             : undefined;
-        if (peerIface) return `${peerNode.name} · ${peerIface.name}`;
-        return peerNode.name;
-      }
-      if (typeof other.network_id === 'number') {
+        peers.push(peerIface ? `${nodeLabel} · ${peerIface.name}` : nodeLabel);
+      } else if (typeof other.network_id === 'number') {
         const network = localNetworks[String(other.network_id)];
-        return network?.name ?? `network ${other.network_id}`;
+        peers.push(network?.name ?? `network ${other.network_id}`);
       }
     }
-    return null;
+    if (peers.length === 0) return null;
+    if (peers.length === 1) return peers[0];
+    return `${peers.length} peers: ${peers.join(', ')}`;
   }
 
   function getLiveMacFor(nodeId: number, interfaceIndex: number): LiveMacState | null {
@@ -427,6 +428,7 @@
     lastLinksRef = links;
     lastDefaultsRef = defaults;
     syncLocalState();
+    publishFlowState();
   }
 
   $: if (
