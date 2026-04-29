@@ -846,7 +846,13 @@ class NodeRuntimeService:
     async def _discover_lab(
         cls, lab_id: str, lab_data: dict[str, Any], ws_hub: Any
     ) -> None:
-        """Scan bridges for one lab and publish ``discovered_link`` events.
+        """Scan bridges for one lab and publish ``discovered_link`` /
+        ``link_divergent`` WS events.
+
+        - ``discovered_link``: kernel-side bridge member with no matching
+          ``links[]`` entry (US-402).
+        - ``link_divergent``: ``links[]`` entry whose declared veth/TAP is
+          NOT present on any of this lab's bridges (US-404).
 
         Lease respect: links currently in a transition lease (in-flight
         hot-plug from US-204b) are NOT flagged.  We import
@@ -870,6 +876,12 @@ class NodeRuntimeService:
             is_leased = getattr(transition_lease, "is_leased", None)
         except Exception:
             is_leased = None
+
+        # Aggregate kernel-side bridge members across this lab so the
+        # divergent-link check (US-404) below can answer "does the kernel
+        # have any veth/TAP for this declared link?" without a second
+        # bridge-scan pass.
+        kernel_members: set[str] = set()
 
         for network_id_raw, network in networks.items():
             if not isinstance(network, dict):
@@ -897,6 +909,8 @@ class NodeRuntimeService:
                     "discovery: bridge_link failed bridge=%s", bridge
                 )
                 continue
+
+            kernel_members.update(members)
 
             for iface in members:
                 if iface in declared:
@@ -927,6 +941,103 @@ class NodeRuntimeService:
                         "discovery: ws publish failed lab=%s iface=%s",
                         lab_id, iface,
                     )
+
+        # ------------------------------------------------------------------
+        # US-404 — Divergent links (declared in lab.json but kernel says no)
+        # ------------------------------------------------------------------
+        await cls._publish_divergent_links(
+            lab_id=lab_id,
+            lab_data=lab_data,
+            kernel_members=kernel_members,
+            is_leased=is_leased,
+            ws_hub=ws_hub,
+        )
+
+    @classmethod
+    async def _publish_divergent_links(
+        cls,
+        *,
+        lab_id: str,
+        lab_data: dict[str, Any],
+        kernel_members: set[str],
+        is_leased: Callable[..., bool] | None,
+        ws_hub: Any,
+    ) -> None:
+        """For each entry in ``links[]`` whose declared veth/TAP host-side
+        name is missing from ``kernel_members``, publish a
+        ``link_divergent`` WS event with payload ``{link_id, lab_id, reason,
+        last_checked}``.
+
+        Lease respect: a link currently held by ``transition_lease.is_leased``
+        is in the middle of a hot-plug operation and MUST NOT be flagged
+        divergent.
+        """
+        links = lab_data.get("links") or []
+        if not isinstance(links, list) or not links:
+            return
+
+        from datetime import datetime, timezone
+
+        last_checked = datetime.now(timezone.utc).isoformat()
+
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            link_id = link.get("id")
+            if not isinstance(link_id, str) or not link_id:
+                continue
+            src = link.get("from") or {}
+            if not isinstance(src, dict):
+                continue
+            node_id_raw = src.get("node_id")
+            iface_idx_raw = src.get("interface_index")
+            if node_id_raw is None or iface_idx_raw is None:
+                continue
+            try:
+                node_id = int(node_id_raw)
+                iface_idx = int(iface_idx_raw)
+            except (TypeError, ValueError):
+                continue
+
+            try:
+                veth_iface = host_net.veth_host_name(lab_id, node_id, iface_idx)
+                tap_iface = host_net.tap_name(lab_id, node_id, iface_idx)
+            except Exception:
+                continue
+
+            # If either the veth host-end OR the TAP exists on any bridge
+            # this lab owns, the kernel state is consistent — not divergent.
+            if veth_iface in kernel_members or tap_iface in kernel_members:
+                continue
+
+            # Lease respect — skip if a hot-plug is currently in flight for
+            # this link.  We probe by both the link_id and the iface names
+            # so leases registered under either key are honored.
+            if is_leased is not None:
+                leased = False
+                for lease_key in (link_id, veth_iface, tap_iface):
+                    try:
+                        if is_leased(lab_id=lab_id, link_id=lease_key):
+                            leased = True
+                            break
+                    except Exception:
+                        continue
+                if leased:
+                    continue
+
+            payload = {
+                "link_id": link_id,
+                "lab_id": lab_id,
+                "reason": "declared in lab.json but no matching veth/TAP found in kernel",
+                "last_checked": last_checked,
+            }
+            try:
+                await ws_hub.publish(lab_id, "link_divergent", payload)
+            except Exception:
+                _discovery_logger.exception(
+                    "discovery: ws publish failed lab=%s link_id=%s",
+                    lab_id, link_id,
+                )
 
     @staticmethod
     def _declared_iface_set(lab_id: str, lab_data: dict[str, Any]) -> set[str]:

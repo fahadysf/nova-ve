@@ -127,6 +127,19 @@ export interface Link {
   color?: string;
   width?: string;
   metrics?: LinkMetrics;
+  /**
+   * US-403: kernel reports a veth/TAP for this link but it is not (yet)
+   * declared in ``links[]``.  Rendered with an amber dashed overlay.
+   */
+  discovered?: boolean;
+  /**
+   * US-404: declared in ``links[]`` but the kernel has no matching
+   * veth/TAP.  Rendered with a red dashed overlay + warning glyph at the
+   * edge midpoint.  Tooltip surfaces the ``last_checked`` timestamp.
+   */
+  divergent?: boolean;
+  /** US-404: ISO-8601 timestamp from the latest ``link_divergent`` event. */
+  last_checked?: string;
 }
 
 export interface Network {
