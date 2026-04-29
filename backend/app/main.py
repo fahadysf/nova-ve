@@ -78,6 +78,10 @@ async def startup():
 
     from app.services.node_runtime_service import NodeRuntimeService
     NodeRuntimeService.start_heartbeat()
+    # US-402: periodic kernel-side bridge discovery.  Reads cadence from
+    # settings on every iteration so live ``NOVA_VE_DISCOVERY_CADENCE_SECONDS``
+    # changes land within one cycle once ``get_settings`` cache is cleared.
+    NodeRuntimeService.start_discovery()
 
     # US-206: backend-startup orphan sweep.  Scan the host for nove*/nve* kernel
     # objects that belong to labs no longer on disk (or that survived a crash).

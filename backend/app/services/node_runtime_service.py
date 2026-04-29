@@ -49,6 +49,7 @@ _HEARTBEAT_INTERVAL_S: float = 5.0
 _TRANSITION_SUPPRESS_S: float = 30.0
 
 _logger = logging.getLogger("nova-ve.heartbeat")
+_discovery_logger = logging.getLogger("nova-ve.discovery")
 
 
 def _node_extras(node: dict[str, Any]) -> dict[str, Any]:
@@ -778,6 +779,236 @@ class NodeRuntimeService:
                 _logger.exception(
                     "heartbeat: ws publish failed for lab=%s node=%s", lab_id, node_id
                 )
+
+    # ------------------------------------------------------------------
+    # US-402 — Discovery cadence
+    # ------------------------------------------------------------------
+    @classmethod
+    def start_discovery(cls) -> None:
+        """Schedule ``_discovery_loop`` as a background asyncio task.
+
+        Mirrors :meth:`start_heartbeat` — safe to call from app startup.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(cls._discovery_loop())
+
+    @classmethod
+    async def _discovery_loop(cls) -> None:
+        """Periodic discovery: walks kernel-side bridge state and emits
+        ``discovered_link`` WS events for any bridge member that has no
+        matching entry in ``links[]``.
+
+        Cadence is read from ``get_settings().DISCOVERY_CADENCE_SECONDS``
+        on every iteration so live config edits land within one cycle
+        (operators clear the ``get_settings`` lru_cache via reload).
+        """
+        while True:
+            cadence = max(5, int(get_settings().DISCOVERY_CADENCE_SECONDS))
+            await asyncio.sleep(cadence)
+            try:
+                await cls._run_discovery_cycle()
+            except Exception:
+                _discovery_logger.exception("discovery cycle error")
+
+    @classmethod
+    async def _run_discovery_cycle(cls) -> None:
+        """Single discovery cycle: scan every lab.json's network bridges,
+        compare against ``links[]``, and publish ``discovered_link`` events
+        for kernel-side members with no declared link.
+        """
+        from app.services.lab_service import LabService  # avoid cycles
+        from app.services.ws_hub import ws_hub
+
+        settings = get_settings()
+        labs_dir = settings.LABS_DIR
+        if not labs_dir.exists():
+            return
+
+        for lab_file in labs_dir.rglob("*.json"):
+            try:
+                data = json.loads(lab_file.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            lab_id = str(data.get("id", "")).strip()
+            if not lab_id:
+                continue
+            try:
+                await cls._discover_lab(lab_id, data, ws_hub)
+            except Exception:
+                _discovery_logger.exception(
+                    "discovery: failed lab=%s", lab_id
+                )
+
+    @classmethod
+    async def _discover_lab(
+        cls, lab_id: str, lab_data: dict[str, Any], ws_hub: Any
+    ) -> None:
+        """Scan bridges for one lab and publish ``discovered_link`` events.
+
+        Lease respect: links currently in a transition lease (in-flight
+        hot-plug from US-204b) are NOT flagged.  We import
+        ``transition_lease`` lazily so this module remains importable
+        before US-204b lands; missing module is treated as "no leases".
+        """
+        networks = lab_data.get("networks") or {}
+        if not isinstance(networks, dict) or not networks:
+            return
+
+        # Build the set of "declared" host-side ifaces per (network, iface).
+        # An entry in links[] like {from: {node_id, interface_index},
+        # to: {network_id}} corresponds to either a veth host-end or a TAP
+        # — both share the prefix nve{hash}d{node_id}i{iface}.
+        declared = cls._declared_iface_set(lab_id, lab_data)
+
+        # Optional lease check (US-204b).  When the module isn't present
+        # we degrade to "no leases" rather than failing the cycle.
+        try:
+            from app.services import transition_lease  # type: ignore
+            is_leased = getattr(transition_lease, "is_leased", None)
+        except Exception:
+            is_leased = None
+
+        for network_id_raw, network in networks.items():
+            if not isinstance(network, dict):
+                continue
+            try:
+                network_id = int(network_id_raw)
+            except (TypeError, ValueError):
+                continue
+
+            runtime = network.get("runtime") or {}
+            bridge = runtime.get("bridge_name") if isinstance(runtime, dict) else None
+            if not bridge:
+                # US-401 may not have populated this yet — derive on the fly.
+                try:
+                    bridge = host_net.bridge_name(lab_id, network_id)
+                except Exception:
+                    continue
+
+            try:
+                members = await asyncio.get_running_loop().run_in_executor(
+                    None, cls._bridge_members_sync, bridge
+                )
+            except Exception:
+                _discovery_logger.exception(
+                    "discovery: bridge_link failed bridge=%s", bridge
+                )
+                continue
+
+            for iface in members:
+                if iface in declared:
+                    continue
+                # Decode the peer node from the iface name when possible so
+                # the frontend can render a hint.  Failures degrade to None.
+                peer_node_id = cls._parse_iface_node_id(iface)
+                # Lease check — skip if a hot-plug for this (lab, link) is
+                # in flight.  We don't always have a link_id here; pass the
+                # iface name as the lease key for forward-compatibility.
+                if is_leased is not None:
+                    try:
+                        if is_leased(lab_id=lab_id, link_id=iface):
+                            continue
+                    except Exception:
+                        pass
+                payload = {
+                    "lab_id": lab_id,
+                    "network_id": network_id,
+                    "bridge_name": bridge,
+                    "iface": iface,
+                    "peer_node_id": peer_node_id,
+                }
+                try:
+                    await ws_hub.publish(lab_id, "discovered_link", payload)
+                except Exception:
+                    _discovery_logger.exception(
+                        "discovery: ws publish failed lab=%s iface=%s",
+                        lab_id, iface,
+                    )
+
+    @staticmethod
+    def _declared_iface_set(lab_id: str, lab_data: dict[str, Any]) -> set[str]:
+        """Return the set of host-side iface names that ARE declared in
+        ``links[]`` — the discovery loop ignores these.
+
+        Each link from a node to a network corresponds to either
+        ``veth_host_name`` (docker) or ``tap_name`` (qemu); both share
+        the same prefix so we record both candidates and let the diff
+        match either form.
+        """
+        declared: set[str] = set()
+        nodes = lab_data.get("nodes") or {}
+        for link in lab_data.get("links") or []:
+            if not isinstance(link, dict):
+                continue
+            src = link.get("from") or {}
+            if not isinstance(src, dict):
+                continue
+            node_id_raw = src.get("node_id")
+            iface_idx_raw = src.get("interface_index")
+            if node_id_raw is None or iface_idx_raw is None:
+                continue
+            try:
+                node_id = int(node_id_raw)
+                iface_idx = int(iface_idx_raw)
+            except (TypeError, ValueError):
+                continue
+            try:
+                declared.add(host_net.veth_host_name(lab_id, node_id, iface_idx))
+                declared.add(host_net.tap_name(lab_id, node_id, iface_idx))
+            except Exception:
+                continue
+        # Guard against unused-arg warnings when ``nodes`` is empty.
+        _ = nodes
+        return declared
+
+    @staticmethod
+    def _bridge_members_sync(bridge: str) -> list[str]:
+        """Run ``bridge link show master <bridge>`` and return member names.
+
+        Returns ``[]`` on any failure so the discovery cycle never blocks.
+        Lines look like ``3: nve12abd1i0h@if4: <BROADCAST,...> master noveXn1``.
+        """
+        bridge_bin = shutil.which("bridge") or "/usr/sbin/bridge"
+        try:
+            proc = subprocess.run(
+                [bridge_bin, "link", "show", "master", bridge],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return []
+        if proc.returncode != 0:
+            return []
+        names: list[str] = []
+        for line in proc.stdout.splitlines():
+            parts = line.split(":", 2)
+            if len(parts) < 2:
+                continue
+            raw = parts[1].strip().split("@")[0]
+            if raw:
+                names.append(raw)
+        return names
+
+    @staticmethod
+    def _parse_iface_node_id(iface: str) -> int | None:
+        """Decode the ``node_id`` from an ``nve<hash>d<node>i<iface>...`` name.
+
+        Returns ``None`` for any name that doesn't match the nova-ve scheme
+        (e.g. an unrelated kernel-side interface attached to the bridge).
+        """
+        # Format: nve{4hex}d{node}i{iface}[h|p]
+        if not iface.startswith("nve") or "d" not in iface or "i" not in iface:
+            return None
+        try:
+            after_d = iface.split("d", 1)[1]
+            node_part = after_d.split("i", 1)[0]
+            return int(node_part)
+        except (ValueError, IndexError):
+            return None
 
     @staticmethod
     def _check_alive_sync(runtime: dict[str, Any], kind: str, settings: Any) -> bool:

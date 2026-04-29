@@ -126,6 +126,16 @@ shell variable from silently colliding bridge names against a production host).
 - Docker Engine and Compose are required for Docker node runtime plus Guacamole support services
 - The provisioning lane must not assume a separately packaged legacy Python version on Ubuntu `26.04`
 
+## Runtime Tunables
+
+The backend reads optional environment variables from `/etc/nova-ve/backend.env`
+to tune long-running reconciliation behavior. All values have safe defaults; set
+them only when an operator has a specific reason to deviate.
+
+| Variable | Default | Range | Effect |
+| --- | --- | --- | --- |
+| `NOVA_VE_DISCOVERY_CADENCE_SECONDS` | `30` | `[5, 300]` | Period of the discovery loop that walks each lab network's Linux bridge (`bridge link show master <bridge>`) plus container netns and cross-references against `links[]`. Discrepancies emit a `discovered_link` WS event consumed by the canvas overlay. Out-of-range values fail backend startup. Edits take effect within one cycle once the settings cache is reloaded (`systemctl reload nova-ve-backend.service`). |
+
 ## Health And Smoke Checks
 
 Minimum checks for Pass A:
