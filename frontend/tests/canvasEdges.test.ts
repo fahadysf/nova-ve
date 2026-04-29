@@ -129,6 +129,96 @@ describe('canvasEdges.deriveEdges', () => {
   });
 });
 
+describe('canvasEdges.deriveEdges — overlay branches (US-403 / US-404)', () => {
+  const DIVERGENT_LINK: Link = {
+    id: 'lnk_divergent',
+    from: { node_id: 1, interface_index: 0 },
+    to: { network_id: 1 },
+    style_override: null,
+    label: '',
+    color: '',
+    width: '1',
+    divergent: true,
+    last_checked: '2026-04-28T12:34:56+00:00',
+  };
+
+  const DISCOVERED_LINK: Link = {
+    id: 'lnk_discovered',
+    from: { node_id: 2, interface_index: 0 },
+    to: { network_id: 1 },
+    style_override: null,
+    label: '',
+    color: '',
+    width: '1',
+    discovered: true,
+  };
+
+  it('renders divergent: true with the red dashed overlay', () => {
+    const edges = deriveEdges([DIVERGENT_LINK], { link_style: 'orthogonal' });
+    expect(edges).toHaveLength(1);
+    const edge = edges[0];
+    expect(edge.style).toContain('stroke: #f87171');
+    expect(edge.style).toContain('stroke-dasharray: 2 2');
+    expect(edge.style).toContain('opacity: 0.7');
+    const data = edge.data as { divergent?: boolean; last_checked?: string | null };
+    expect(data.divergent).toBe(true);
+    expect(data.last_checked).toBe('2026-04-28T12:34:56+00:00');
+  });
+
+  it('renders discovered: true with the amber dashed overlay (US-403 contract)', () => {
+    const edges = deriveEdges([DISCOVERED_LINK], { link_style: 'orthogonal' });
+    expect(edges).toHaveLength(1);
+    const edge = edges[0];
+    expect(edge.style).toContain('stroke: #fbbf24');
+    expect(edge.style).toContain('stroke-dasharray: 6 4');
+    const data = edge.data as { discovered?: boolean; divergent?: boolean };
+    expect(data.discovered).toBe(true);
+    expect(data.divergent).toBe(false);
+  });
+
+  it('renders divergent and discovered with visually distinct strokes', () => {
+    const edges = deriveEdges(
+      [DIVERGENT_LINK, DISCOVERED_LINK],
+      { link_style: 'orthogonal' }
+    );
+    expect(edges).toHaveLength(2);
+    expect(edges[0].style).not.toEqual(edges[1].style);
+    // Divergent uses red (#f87171); discovered uses amber (#fbbf24).
+    expect(edges[0].style).toContain('#f87171');
+    expect(edges[1].style).toContain('#fbbf24');
+    // Dasharray patterns are distinct so the two states are visually
+    // discriminable even on greyscale displays.
+    expect(edges[0].style).toContain('stroke-dasharray: 2 2');
+    expect(edges[1].style).toContain('stroke-dasharray: 6 4');
+  });
+
+  it('divergent precedence: divergent + discovered both true → divergent wins', () => {
+    const link: Link = {
+      ...DIVERGENT_LINK,
+      id: 'lnk_both',
+      discovered: true,
+      divergent: true,
+    };
+    const edges = deriveEdges([link], { link_style: 'orthogonal' });
+    expect(edges[0].style).toContain('#f87171');
+    expect(edges[0].style).not.toContain('#fbbf24');
+  });
+
+  it('plain links (no divergent / no discovered) keep the default stroke', () => {
+    const edges = deriveEdges(ALPINE_DEMO_LINKS, { link_style: 'orthogonal' });
+    for (const edge of edges) {
+      expect(edge.style).toContain('stroke: #9ca3af');
+      expect(edge.style).not.toContain('stroke-dasharray');
+    }
+  });
+
+  it('threads last_checked through edge.data so the LinkEdge tooltip can read it', () => {
+    const edges = deriveEdges([DIVERGENT_LINK], { link_style: 'orthogonal' });
+    const data = edges[0].data as { last_checked?: string | null };
+    expect(data.last_checked).toBe('2026-04-28T12:34:56+00:00');
+  });
+});
+
 describe('canvasEdges.pickNetworkSide', () => {
   it('returns right when no positions are provided', () => {
     expect(pickNetworkSide(1)).toBe('network:1:right');

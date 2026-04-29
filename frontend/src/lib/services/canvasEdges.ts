@@ -87,6 +87,17 @@ export function deriveEdges(
     const strokeWidth = Number.isFinite(widthValue) && widthValue > 0 ? widthValue : 1;
     const strokeColor = link.color && link.color.length > 0 ? link.color : '#9ca3af';
 
+    // US-404: declared-but-not-discovered overlay (red dashed, glyph at midpoint).
+    // US-403: discovered-but-not-declared overlay (amber dashed).
+    // ``divergent`` takes precedence over ``discovered`` when both are set —
+    // a link cannot simultaneously be missing AND extra in the kernel.
+    let edgeStyle = `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px;`;
+    if (link.divergent === true) {
+      edgeStyle = 'stroke: #f87171; stroke-dasharray: 2 2; opacity: 0.7;';
+    } else if (link.discovered === true) {
+      edgeStyle = 'stroke: #fbbf24; stroke-dasharray: 6 4;';
+    }
+
     const edge: Edge = {
       id: `link:${link.id}`,
       source: `node${fromNodeId}`,
@@ -96,7 +107,7 @@ export function deriveEdges(
       type: 'link',
       animated: false,
       label: link.label && link.label.length > 0 ? link.label : undefined,
-      style: `stroke: ${strokeColor}; stroke-width: ${strokeWidth}px;`,
+      style: edgeStyle,
       labelStyle: 'fill: #d1d5db; font-size: 10px; font-family: var(--font-mono);',
       data: {
         style_override: link.style_override ?? null,
@@ -104,6 +115,9 @@ export function deriveEdges(
         label: link.label ?? '',
         color: link.color ?? '',
         width: link.width ?? '1',
+        discovered: link.discovered === true,
+        divergent: link.divergent === true,
+        last_checked: link.last_checked ?? null,
       },
     };
 

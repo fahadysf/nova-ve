@@ -30,6 +30,9 @@
     style_override?: LinkStyle | null;
     default_style?: LinkStyle;
     obstacles?: Obstacle[];
+    discovered?: boolean;
+    divergent?: boolean;
+    last_checked?: string | null;
   } | undefined = undefined;
 
   let result: RouteResult | null = null;
@@ -98,6 +101,10 @@
   $: dAttr = result?.d ?? `M ${from.x},${from.y} L ${to.x},${to.y}`;
   $: midX = (from.x + to.x) / 2;
   $: midY = (from.y + to.y) / 2;
+  $: isDivergent = data?.divergent === true;
+  $: divergentTooltip = isDivergent
+    ? `Declared in lab.json but not present in kernel. Last checked ${data?.last_checked ?? 'unknown'}.`
+    : '';
 </script>
 
 <path
@@ -120,5 +127,20 @@
     class="svelte-flow__edge-label"
   >
     {label}
+  </text>
+{/if}
+
+{#if isDivergent}
+  <text
+    class="svelte-flow__edge-divergent-glyph"
+    data-testid="divergent-glyph"
+    x={midX}
+    y={midY}
+    text-anchor="middle"
+    dominant-baseline="middle"
+    style="fill: #f87171; font-size: 14px; font-weight: bold; pointer-events: all;"
+  >
+    {'⚠'}
+    <title>{divergentTooltip}</title>
   </text>
 {/if}

@@ -485,7 +485,24 @@
   }
 
   function buildFlowEdges(): Edge[] {
-    return deriveEdges(localLinks, localDefaults);
+    // US-404: enrich each Link with the latest ``link_divergent`` state
+    // captured by the WS store so canvasEdges can render the red overlay
+    // + warning glyph.  When the store is unavailable (SSR, pre-mount)
+    // links pass through unchanged.
+    const divergentSnapshot = labWsStores ? get(labWsStores.divergentLinks) : {};
+    const enrichedLinks =
+      Object.keys(divergentSnapshot).length === 0
+        ? localLinks
+        : localLinks.map((link) => {
+            const state = divergentSnapshot[link.id];
+            if (!state) return link;
+            return {
+              ...link,
+              divergent: true,
+              last_checked: state.last_checked,
+            };
+          });
+    return deriveEdges(enrichedLinks, localDefaults);
   }
 
   $: {
@@ -1074,6 +1091,7 @@
   // ── lifecycle: WS hub flush hook & cleanup ───────────────────────────────
   let wsClient: WsClient | null = null;
   let labWsStores: LabWsStores | null = null;
+  let divergentLinksUnsub: (() => void) | null = null;
 
   onMount(() => {
     if (typeof window !== 'undefined') {
@@ -1089,6 +1107,19 @@
       client.on('lab_topology', (_msg: WsMessage) => {
         void layoutDebouncer.flush();
       });
+      // US-404: re-publish edges whenever a ``link_divergent`` event lands
+      // so the canvas repaints the affected edge with the red overlay +
+      // warning glyph.  Skip the priming first emission (Svelte stores fire
+      // synchronously on subscribe) since publishFlowState already runs via
+      // the reactive $: block above.
+      let primed = false;
+      divergentLinksUnsub = labWsStores.divergentLinks.subscribe(() => {
+        if (!primed) {
+          primed = true;
+          return;
+        }
+        publishFlowState();
+      });
       if (import.meta.env.DEV) {
         (window as unknown as { __novaWsClient?: WsClient }).__novaWsClient = client;
       }
@@ -1102,6 +1133,10 @@
         window.removeEventListener('keydown', handleWindowKeyDown);
       }
       void layoutDebouncer.flush();
+      if (divergentLinksUnsub) {
+        divergentLinksUnsub();
+        divergentLinksUnsub = null;
+      }
       if (wsClient) {
         wsClient.close();
         if (typeof window !== 'undefined' && import.meta.env.DEV) {
