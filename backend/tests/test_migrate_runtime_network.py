@@ -560,7 +560,9 @@ def test_migrate_continues_on_no_such_network_inspect_error(
     assert backfilled == 1
     assert nodes_stamped == 0
     assert saved["networks"]["1"]["runtime"]["bridge_name"] == expected
-    assert bridge_add_calls == [expected]
+    # Migration only stamps runtime.bridge_name in lab.json; bridge creation
+    # happens at lab boot via NodeRuntimeService, not in this migration.
+    assert bridge_add_calls == []
 
 
 # ---------------------------------------------------------------------------
