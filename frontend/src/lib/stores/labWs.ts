@@ -39,6 +39,13 @@ export type LabWsStores = {
   nodeStates: Readable<Record<number, string>>;
   /** Unified reconciliation overlay: discovered (amber) + divergent (red). */
   linkReconciliation: Readable<Record<string, LinkReconciliation>>;
+  /**
+   * Remove a single entry from the reconciliation store by key.
+   * Used by TopologyCanvas after a successful "Promote to declared link" POST
+   * so the amber discovered overlay clears immediately rather than waiting for
+   * the next discovery cycle (HIGH-1 fix).
+   */
+  deleteReconciliation: (key: string) => void;
   connected: Readable<boolean>;
 };
 
@@ -187,6 +194,14 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     linkStates: { subscribe: linkStates.subscribe },
     nodeStates: { subscribe: nodeStates.subscribe },
     linkReconciliation: { subscribe: linkReconciliation.subscribe },
+    deleteReconciliation(key: string) {
+      linkReconciliation.update((current) => {
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    },
     connected,
   };
 }

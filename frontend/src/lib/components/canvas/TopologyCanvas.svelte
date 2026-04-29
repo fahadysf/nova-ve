@@ -785,9 +785,12 @@
       if (serverLink && serverLink.id) {
         localLinks = [...localLinks, serverLink];
       }
-      // The discovered overlay clears on the next discovery cycle once the
-      // iface matches the newly declared link.  publishFlowState() redraws
-      // the edge immediately using the now-present localLinks entry.
+      // Optimistically remove the discovered overlay immediately (HIGH-1).
+      // The next discovery cycle would also clear it, but removing it now
+      // avoids a duplicate amber+gray edge flash while the cycle completes.
+      if (labWsStores) {
+        labWsStores.deleteReconciliation(`iface:${iface}`);
+      }
       publishFlowState();
       dispatchCanvasChange('topology', {
         nodes: deepClone(localNodes),
