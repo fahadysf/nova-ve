@@ -10,11 +10,13 @@ path). Without this proxy the ``docker run -p`` flag does nothing because
 Docker only spawns its userland ``docker-proxy`` for containers with at least
 one Docker-managed network.
 
-Listens on ``127.0.0.1:LISTEN_PORT`` in the default netns. For each accepted
-connection it forks a worker, joins the container's netns via setns(2), opens
-a TCP connection to ``127.0.0.1:TARGET_PORT`` inside that namespace, and
-splices bytes both ways with select(2). The worker exits when either side
-closes; the parent keeps accepting.
+Listens on ``0.0.0.0:LISTEN_PORT`` in the default netns — same wildcard bind
+the stock ``docker-proxy`` uses so guacd (running in its own compose
+container) can reach the listener via ``host.docker.internal``. For each
+accepted connection it forks a worker, joins the container's netns via
+setns(2), opens a TCP connection to ``127.0.0.1:TARGET_PORT`` inside that
+namespace, and splices bytes both ways with select(2). The worker exits when
+either side closes; the parent keeps accepting.
 
 Invocation (root):
     nova-ve-console-proxy.py <node_pid> <listen_port> <target_port>
@@ -115,7 +117,9 @@ def main() -> int:
 
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("127.0.0.1", listen_port))
+    # Bind 0.0.0.0 so guacd (in its own compose container) can reach this
+    # listener via host.docker.internal — matches stock docker-proxy.
+    listener.bind(("0.0.0.0", listen_port))
     listener.listen(64)
 
     # Reap zombie workers.
