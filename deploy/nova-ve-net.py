@@ -82,6 +82,14 @@ RE_NETNS_IFACE = re.compile(r"^eth[0-9]{1,2}$")
 # Pid: 1-7 digits.  Additional runtime checks reject pid<10 and pid==1.
 RE_PID = re.compile(r"^[0-9]{1,7}$")
 
+# TCP port (numeric, 1-65535).
+RE_PORT = re.compile(r"^[0-9]{1,5}$")
+
+# Path to the bundled console TCP forwarder.  Test override via env var.
+CONSOLE_PROXY_BIN = os.environ.get(
+    "NOVA_VE_CONSOLE_PROXY_BIN", "/opt/nova-ve/bin/nova-ve-console-proxy.py"
+)
+
 
 # Sentinel returned by validate_pid for pids in the kernel/init reserved
 # range or non-matching the registry.
@@ -398,6 +406,134 @@ def cmd_read_iface_mac(args: argparse.Namespace) -> int:
     return _nsenter_cat_address(pid, iface)
 
 
+def _validate_port(value: str, *, label: str) -> int:
+    """Reject anything that isn't a 1-5 digit base-10 TCP port."""
+    if not RE_PORT.fullmatch(value):
+        raise _ValidationError(f"{label} must match {RE_PORT.pattern}")
+    port = int(value)
+    if not (1 <= port <= 65535):
+        raise _ValidationError(f"{label} out of range: {port}")
+    return port
+
+
+def cmd_console_proxy_start(args: argparse.Namespace) -> int:
+    """Spawn the console TCP forwarder for a manual-veth Docker container.
+
+    Authorizes the target pid against the runtime registry, then double-forks
+    the proxy script with ``setsid`` so it survives the helper exiting.
+    Prints the daemonized PID to stdout (caller persists it for later kill).
+    """
+    target_pid = authorize_pid(args.pid)
+    listen_port = _validate_port(args.listen_port, label="listen_port")
+    target_port = _validate_port(args.target_port, label="target_port")
+    if listen_port < 1024:
+        raise _ValidationError(
+            "listen_port must be a non-privileged port (>=1024)"
+        )
+
+    if not os.access(CONSOLE_PROXY_BIN, os.X_OK):
+        print(
+            f"console proxy binary missing or not executable: {CONSOLE_PROXY_BIN}",
+            file=sys.stderr,
+        )
+        return 1
+
+    pipe_r, pipe_w = os.pipe()
+
+    # Detach via double-fork + setsid so the proxy survives the helper exit
+    # and is reparented to PID 1 (no zombie / no stdio held open).
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(pipe_r)
+            os.setsid()
+            second = os.fork()
+            if second == 0:
+                # Grandchild: replace with the proxy.
+                os.close(pipe_w)
+                devnull = os.open(os.devnull, os.O_RDWR)
+                os.dup2(devnull, 0)
+                os.dup2(devnull, 1)
+                os.dup2(devnull, 2)
+                if devnull > 2:
+                    os.close(devnull)
+                os.execv(
+                    CONSOLE_PROXY_BIN,
+                    [
+                        CONSOLE_PROXY_BIN,
+                        str(target_pid),
+                        str(listen_port),
+                        str(target_port),
+                    ],
+                )
+            else:
+                os.write(pipe_w, f"{second}\n".encode("ascii"))
+                os._exit(0)
+        except Exception as exc:
+            try:
+                os.write(pipe_w, f"err:{exc}\n".encode("ascii"))
+            except OSError:
+                pass
+            os._exit(1)
+    # Parent: read the grandchild PID, reap the first child, then return.
+    os.close(pipe_w)
+    with os.fdopen(pipe_r, "r") as r:
+        line = r.readline().strip()
+    os.waitpid(pid, 0)
+    if line.startswith("err:") or not line.isdigit():
+        print(f"console proxy spawn failed: {line}", file=sys.stderr)
+        return 1
+    print(line)
+    return 0
+
+
+def cmd_console_proxy_stop(args: argparse.Namespace) -> int:
+    """Terminate a previously-spawned console proxy by PID.
+
+    Validates the PID shape, confirms ``/proc/<pid>/comm`` looks like a
+    Python interpreter running the bundled proxy script (so we never SIGTERM
+    an unrelated process if the registry is stale), then sends SIGTERM
+    followed by SIGKILL on a short grace period.
+    """
+    if not RE_PID.fullmatch(args.pid):
+        raise _ValidationError("pid argument failed validation")
+    pid = int(args.pid)
+    if pid <= 1:
+        raise _ValidationError("pid out of range")
+
+    cmdline_path = PROC_ROOT / str(pid) / "cmdline"
+    try:
+        cmdline = cmdline_path.read_bytes().split(b"\x00")
+    except FileNotFoundError:
+        return 0  # already gone — idempotent
+    except PermissionError:
+        cmdline = []
+    if not any(b"nova-ve-console-proxy" in arg for arg in cmdline):
+        # Refuse to kill an unrelated process (PID recycled or stale registry).
+        print(
+            f"pid {pid} does not look like nova-ve-console-proxy; refusing to kill",
+            file=sys.stderr,
+        )
+        return 1
+
+    import time
+    try:
+        os.kill(pid, 15)
+    except ProcessLookupError:
+        return 0
+    for _ in range(20):
+        time.sleep(0.05)
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return 0
+    try:
+        os.kill(pid, 9)
+    except ProcessLookupError:
+        pass
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
@@ -417,6 +553,8 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "addr-add-in-netns": cmd_addr_add_in_netns,
     "addr-up-in-netns": cmd_addr_up_in_netns,
     "read-iface-mac": cmd_read_iface_mac,
+    "console-proxy-start": cmd_console_proxy_start,
+    "console-proxy-stop": cmd_console_proxy_stop,
 }
 
 
@@ -489,6 +627,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("pid")
     p.add_argument("iface")
+
+    p = sub.add_parser(
+        "console-proxy-start",
+        help=(
+            "spawn nova-ve-console-proxy.py to forward 127.0.0.1:<listen_port> "
+            "into the netns of <pid> at 127.0.0.1:<target_port>; prints the "
+            "spawned proxy PID"
+        ),
+    )
+    p.add_argument("pid")
+    p.add_argument("listen_port")
+    p.add_argument("target_port")
+
+    p = sub.add_parser(
+        "console-proxy-stop",
+        help="kill a previously-spawned console proxy by pid (idempotent)",
+    )
+    p.add_argument("pid")
 
     return parser
 
