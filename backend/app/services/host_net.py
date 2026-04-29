@@ -434,6 +434,37 @@ def link_netns(iface: str, pid: int) -> None:
     _invoke_helper("link-netns", iface, str(int(pid)))
 
 
+def console_proxy_start(node_pid: int, listen_port: int, target_port: int) -> int:
+    """Spawn the console TCP forwarder for a manual-veth Docker container.
+
+    Returns the daemonized proxy pid so the caller can persist it on the
+    runtime record and tear it down later via :func:`console_proxy_stop`.
+    Required because ``docker run --network=none -p`` does not bring up the
+    Docker userland proxy — there's no container IP to forward to — so the
+    advertised host port is unreachable until we splice in via setns.
+    """
+    proc = _invoke_helper(
+        "console-proxy-start",
+        str(int(node_pid)),
+        str(int(listen_port)),
+        str(int(target_port)),
+    )
+    text = (proc.stdout or "").strip()
+    if not text.isdigit():
+        raise HostNetError(
+            f"console-proxy-start did not return a pid: stdout={text!r} "
+            f"stderr={(proc.stderr or '').strip()!r}",
+            returncode=proc.returncode,
+            stderr=proc.stderr or "",
+        )
+    return int(text)
+
+
+def console_proxy_stop(proxy_pid: int) -> None:
+    """Terminate a previously-spawned console proxy. Idempotent."""
+    _invoke_helper("console-proxy-stop", str(int(proxy_pid)))
+
+
 def link_up(iface: str) -> None:
     """Bring ``iface`` up on the host (``ip link set <iface> up``)."""
     _invoke_helper("link-up", iface)
