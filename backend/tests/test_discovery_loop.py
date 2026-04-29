@@ -168,6 +168,7 @@ async def test_unknown_bridge_member_triggers_discovered_link(
     assert payload["bridge_name"] == bridge
     assert payload["iface"] == rogue_iface
     assert payload["peer_node_id"] == 2
+    assert isinstance(payload["generation"], int) and payload["generation"] >= 1
 
 
 @pytest.mark.asyncio
@@ -345,6 +346,7 @@ async def test_divergent_link_emits_link_divergent(
     from datetime import datetime
     parsed = datetime.fromisoformat(payload["last_checked"])
     assert parsed.tzinfo is not None
+    assert isinstance(payload["generation"], int) and payload["generation"] >= 1
 
 
 @pytest.mark.asyncio
@@ -471,3 +473,51 @@ async def test_leased_divergent_link_via_iface_key_is_skipped(
     await NodeRuntimeService._run_discovery_cycle()
 
     assert [e for e in hub.events if e[1] == "link_divergent"] == []
+
+
+# ---------------------------------------------------------------------------
+# US-403 MEDIUM-3 — producer-side generation token
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discovery_generation_strictly_increasing(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """Two consecutive ``_discover_lab`` calls must emit events with strictly
+    increasing ``generation`` values.
+
+    This is the producer-side guarantee: the frontend can safely reject any
+    ``discovered_link`` / ``link_divergent`` event whose ``generation`` is <=
+    the ``generation`` recorded in the last ``lab_topology`` snapshot.
+    """
+    lab_id = "lab-gen-token-1"
+    # No declared links so each cycle emits a discovered_link for the rogue iface.
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [])
+
+    bridge = host_net.bridge_name(lab_id, 1)
+    rogue_iface = host_net.veth_host_name(lab_id, 99, 0)
+
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_bridge_members_sync",
+        staticmethod(lambda b: [rogue_iface] if b == bridge else []),
+    )
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    # First cycle.
+    await NodeRuntimeService._run_discovery_cycle()
+    # Second cycle.
+    await NodeRuntimeService._run_discovery_cycle()
+
+    discovered = [e for e in hub.events if e[1] == "discovered_link"]
+    assert len(discovered) == 2, hub.events
+
+    gen_first = discovered[0][2]["generation"]
+    gen_second = discovered[1][2]["generation"]
+    assert isinstance(gen_first, int)
+    assert isinstance(gen_second, int)
+    assert gen_first < gen_second, (
+        f"Expected strictly increasing generations; got {gen_first} then {gen_second}"
+    )

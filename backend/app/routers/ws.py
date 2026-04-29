@@ -6,6 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.database import get_db
 from app.services.ws_hub import ws_hub
 from app.services.lab_service import LabService
+from app.services.node_runtime_service import NodeRuntimeService
 
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
@@ -45,6 +46,7 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
                 "seq": ws_hub.head_seq(lab),
                 "type": "lab_topology",
                 "rev": str(data.get("id", "")),
+                "generation": NodeRuntimeService.get_discovery_generation(lab),
                 "payload": data,
             })
         except Exception:

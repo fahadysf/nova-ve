@@ -70,7 +70,7 @@ vi.mock('$lib/stores/labWs', () => ({
     liveMacs: writable({}),
     linkStates: writable({}),
     nodeStates: writable({}),
-    divergentLinks: writable({}),
+    linkReconciliation: writable({}),
     connected: writable(false),
   }),
 }));
