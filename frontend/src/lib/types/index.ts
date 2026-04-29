@@ -127,19 +127,35 @@ export interface Link {
   color?: string;
   width?: string;
   metrics?: LinkMetrics;
-  /**
-   * US-403: kernel reports a veth/TAP for this link but it is not (yet)
-   * declared in ``links[]``.  Rendered with an amber dashed overlay.
-   */
-  discovered?: boolean;
-  /**
-   * US-404: declared in ``links[]`` but the kernel has no matching
-   * veth/TAP.  Rendered with a red dashed overlay + warning glyph at the
-   * edge midpoint.  Tooltip surfaces the ``last_checked`` timestamp.
-   */
-  divergent?: boolean;
-  /** US-404: ISO-8601 timestamp from the latest ``link_divergent`` event. */
+}
+
+/**
+ * Reconciliation state for a single link or discovered iface, surfaced by the
+ * backend discovery loop (US-402) and consumed as a unified visual overlay on
+ * the canvas (US-403/US-404).  This is observation-only runtime state — it is
+ * never persisted to ``links[]`` or ``lab.json``.
+ *
+ * Key scheme:
+ *  - ``'iface:<iface>'``   for kind === 'discovered' (kernel-only iface)
+ *  - ``'link:<link_id>'``  for kind === 'divergent'  (declared, no kernel veth/TAP)
+ */
+export type LinkReconciliationKind = 'discovered' | 'divergent';
+
+export interface LinkReconciliation {
+  kind: LinkReconciliationKind;
+  /** Stable map key. */
+  key: string;
+  /** Present when kind === 'divergent'. */
+  link_id?: string;
+  /** Present when kind === 'discovered'. */
+  iface?: string;
+  network_id?: number;
+  bridge_name?: string;
+  peer_node_id?: number | null;
+  peer_interface_index?: number | null;
+  /** ISO 8601 from backend ``link_divergent`` event. */
   last_checked?: string;
+  reason?: string;
 }
 
 export interface Network {
