@@ -1844,6 +1844,27 @@ class NodeRuntimeService:
                 pass
             raise
 
+        # ----- Step 7: console TCP forwarder -------------------------------
+        # docker run --network=none never spawns docker-proxy, so the
+        # advertised host port for the console (-p HOST:CONTAINER above) is
+        # unreachable.  Splice the host port into the container's netns via
+        # the privileged helper.  Best-effort: a missing/failed proxy still
+        # leaves the container usable for non-console operations.
+        console_proxy_pid: int | None = None
+        try:
+            console_proxy_pid = host_net.console_proxy_start(
+                node_pid=pid,
+                listen_port=int(console_port),
+                target_port=int(self._container_console_port(console_mode)),
+            )
+        except Exception as exc:
+            _logger.warning(
+                "console proxy failed to start for lab=%s node=%s: %s",
+                lab_id,
+                node_id,
+                exc,
+            )
+
         work_dir = self._work_dir(lab_id, node_id)
         work_dir.mkdir(parents=True, exist_ok=True)
         return {
@@ -1857,6 +1878,7 @@ class NodeRuntimeService:
             "container_id": result.stdout.strip(),
             "pid": pid,
             "pid_create_time": pid_create_time,
+            "console_proxy_pid": console_proxy_pid,
             "work_dir": str(work_dir),
             "stdout_log": str(work_dir / "stdout.log"),
             "stderr_log": str(work_dir / "stderr.log"),
@@ -3543,6 +3565,16 @@ class NodeRuntimeService:
         container_name = runtime.get("container_name")
         if not container_name:
             return
+
+        # Stop the console TCP forwarder before tearing down the container so
+        # in-flight client connections see a clean refused-after-stop instead
+        # of hanging until the proxy notices the netns is gone.
+        proxy_pid = runtime.get("console_proxy_pid")
+        if proxy_pid:
+            try:
+                host_net.console_proxy_stop(int(proxy_pid))
+            except Exception:
+                pass
 
         subprocess.run(
             [docker_binary, "--host", self.settings.DOCKER_HOST, "stop", "-t", "5", container_name],

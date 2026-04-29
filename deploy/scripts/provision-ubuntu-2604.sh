@@ -194,14 +194,19 @@ PY
 install_nova_ve_net_helper() {
   # US-201: install the privileged network helper at /opt/nova-ve/bin and
   # drop the sudoers fragment into /etc/sudoers.d after a visudo dry-run.
+  # Also install nova-ve-console-proxy.py: the helper's
+  # console-proxy-start verb execs it, so the path must be present.
   local helper_src="${REPO_ROOT}/deploy/nova-ve-net.py"
+  local proxy_src="${REPO_ROOT}/deploy/nova-ve-console-proxy.py"
   local sudoers_src="${REPO_ROOT}/deploy/nova-ve-sudoers"
   local helper_dst="/opt/nova-ve/bin/nova-ve-net.py"
+  local proxy_dst="/opt/nova-ve/bin/nova-ve-console-proxy.py"
   local sudoers_dst="/etc/sudoers.d/nova-ve"
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "+ install -d -o root -g root -m 0755 /opt/nova-ve/bin"
     echo "+ install -m 0755 -o root -g root ${helper_src} ${helper_dst}"
+    echo "+ install -m 0755 -o root -g root ${proxy_src} ${proxy_dst}"
     echo "+ visudo -cf ${sudoers_src}"
     echo "+ install -m 0440 -o root -g root ${sudoers_src} ${sudoers_dst}"
     return 0
@@ -209,6 +214,7 @@ install_nova_ve_net_helper() {
 
   install -d -o root -g root -m 0755 /opt/nova-ve /opt/nova-ve/bin
   install -m 0755 -o root -g root "${helper_src}" "${helper_dst}"
+  install -m 0755 -o root -g root "${proxy_src}" "${proxy_dst}"
   if ! visudo -cf "${sudoers_src}" >/dev/null; then
     echo "visudo rejected ${sudoers_src}; aborting deploy" >&2
     exit 1
