@@ -43,7 +43,11 @@
   import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { createLabWsStores, type LabWsStores } from '$lib/stores/labWs';
-  import { deriveEdges } from '$lib/services/canvasEdges';
+  import {
+    deriveEdges,
+    parseIfaceInterfaceIndex,
+    type DiscoveredLink,
+  } from '$lib/services/canvasEdges';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -227,6 +231,13 @@
   let localTopology: TopologyLink[] = [];
   let localLinks: Link[] = [];
   let localDefaults: LabDefaults = { link_style: 'orthogonal' };
+  /**
+   * US-403: kernel-only ("discovered") links surfaced by the backend
+   * ``_discovery_loop`` via ``discovered_link`` WS events. Keyed by the
+   * kernel iface name (``nve...``). These render as dashed amber overlay
+   * edges and can be right-clicked to promote into the real ``links[]``.
+   */
+  const discoveredLinksStore = writable<Record<string, DiscoveredLink>>({});
   let lastNodesRef = nodes;
   let lastNetworksRef = networks;
   let lastTopologyRef = topology;
@@ -502,10 +513,15 @@
               last_checked: state.last_checked,
             };
           });
-    return deriveEdges(enrichedLinks, localDefaults);
+    // US-403: pass discovered (kernel-only) overlay links as 3rd arg.
+    const discoveredList = Object.values(get(discoveredLinksStore));
+    return deriveEdges(enrichedLinks, localDefaults, discoveredList);
   }
 
   $: {
+    // Reading $discoveredLinksStore here makes publishFlowState reactive to
+    // ``discovered_link`` WS events (US-403).
+    void $discoveredLinksStore;
     publishFlowState();
   }
 
@@ -716,6 +732,78 @@
       return localLinks.findIndex((entry) => entry.id === linkId);
     }
     return buildFlowEdges().findIndex((edge) => edge.id === edgeId);
+  }
+
+  function isDiscoveredEdgeId(edgeId: string | null | undefined): boolean {
+    return typeof edgeId === 'string' && edgeId.startsWith('discovered:');
+  }
+
+  /**
+   * US-403 — promote a kernel-discovered link into ``links[]`` by POSTing a
+   * real link to ``/labs/{labId}/links``.  On success we drop the discovered
+   * overlay locally; the next discovery cycle would clear it anyway, but
+   * optimistic removal keeps the canvas snappy.
+   */
+  async function promoteDiscoveredLink(edgeId: string) {
+    if (!isDiscoveredEdgeId(edgeId)) return;
+    const iface = edgeId.slice('discovered:'.length);
+    const discovered = get(discoveredLinksStore)[iface];
+    if (!discovered) return;
+    if (typeof discovered.peer_node_id !== 'number') {
+      toastStore.push(
+        'Cannot promote discovered link: peer node could not be decoded from iface name.',
+        'error',
+      );
+      return;
+    }
+    if (typeof discovered.peer_interface_index !== 'number') {
+      toastStore.push(
+        'Cannot promote discovered link: interface index could not be decoded from iface name.',
+        'error',
+      );
+      return;
+    }
+
+    const fromEndpoint = {
+      node_id: discovered.peer_node_id,
+      interface_index: discovered.peer_interface_index,
+    };
+    const toEndpoint = { network_id: discovered.network_id };
+
+    try {
+      const response = await apiRequest<Link>(`/labs/${labId}/links`, {
+        method: 'POST',
+        body: { from: fromEndpoint, to: toEndpoint },
+        suppressToast: true,
+      });
+      const serverLink = response.data;
+      if (serverLink && serverLink.id) {
+        localLinks = [...localLinks, serverLink];
+      }
+      // Optimistically clear the overlay; the next discovery cycle would
+      // also clear it once the iface matches a declared link.
+      discoveredLinksStore.update((current) => {
+        if (!(iface in current)) return current;
+        const next = { ...current };
+        delete next[iface];
+        return next;
+      });
+      publishFlowState();
+      dispatchCanvasChange('topology', {
+        nodes: deepClone(localNodes),
+        networks: deepClone(localNetworks),
+        topology: deepClone(localTopology),
+      });
+      toastStore.push('Promoted discovered link to declared link.', 'info');
+    } catch (error) {
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : 'Failed to promote discovered link';
+      toastStore.push(message, 'error');
+    }
   }
 
   function deleteLink(edgeId: string) {
@@ -1106,6 +1194,36 @@
       labWsStores = createLabWsStores(client);
       client.on('lab_topology', (_msg: WsMessage) => {
         void layoutDebouncer.flush();
+        // A fresh topology snapshot supersedes the discovery overlay; the
+        // backend will republish ``discovered_link`` events on the next
+        // discovery cycle if the divergence persists.
+        discoveredLinksStore.set({});
+      });
+      client.on('discovered_link', (msg: WsMessage) => {
+        if (!msg.payload || typeof msg.payload !== 'object') return;
+        const payload = msg.payload as {
+          lab_id?: string;
+          network_id?: number;
+          bridge_name?: string;
+          iface?: string;
+          peer_node_id?: number | null;
+        };
+        if (typeof payload.iface !== 'string' || payload.iface.length === 0) return;
+        if (typeof payload.network_id !== 'number') return;
+        if (typeof payload.bridge_name !== 'string') return;
+        const ifaceIndex = parseIfaceInterfaceIndex(payload.iface);
+        const next: DiscoveredLink = {
+          iface: payload.iface,
+          bridge_name: payload.bridge_name,
+          network_id: payload.network_id,
+          peer_node_id:
+            typeof payload.peer_node_id === 'number' ? payload.peer_node_id : null,
+          peer_interface_index: ifaceIndex,
+        };
+        discoveredLinksStore.update((current) => ({
+          ...current,
+          [next.iface]: next,
+        }));
       });
       // US-404: re-publish edges whenever a ``link_divergent`` event lands
       // so the canvas repaints the affected edge with the red overlay +
@@ -1575,19 +1693,35 @@
           <span>Delete Network</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
       {:else}
-        <button
-          type="button"
-          class="menu-item text-red-200"
-          on:click|preventDefault|stopPropagation={() => {
-            if (menu?.targetId) {
-              deleteLink(menu.targetId);
-            }
-            selectedEdgeId = null;
-            closeMenu();
-          }}
-        >
-          <span>Delete Link</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
-        </button>
+        {#if menu && isDiscoveredEdgeId(menu.targetId)}
+          <button
+            type="button"
+            class="menu-item"
+            on:click|preventDefault|stopPropagation={() => {
+              if (menu?.targetId) {
+                void promoteDiscoveredLink(menu.targetId);
+              }
+              selectedEdgeId = null;
+              closeMenu();
+            }}
+          >
+            <span>Promote to declared link</span><Plus class="h-3.5 w-3.5 text-amber-300/80" />
+          </button>
+        {:else}
+          <button
+            type="button"
+            class="menu-item text-red-200"
+            on:click|preventDefault|stopPropagation={() => {
+              if (menu?.targetId) {
+                deleteLink(menu.targetId);
+              }
+              selectedEdgeId = null;
+              closeMenu();
+            }}
+          >
+            <span>Delete Link</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
+          </button>
+        {/if}
       {/if}
     </div>
   {/if}

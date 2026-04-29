@@ -2,7 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { deriveEdges, pickNetworkSide } from '$lib/services/canvasEdges';
+import {
+  deriveEdges,
+  parseIfaceInterfaceIndex,
+  pickNetworkSide,
+  type DiscoveredLink,
+} from '$lib/services/canvasEdges';
 import type { Link } from '$lib/types';
 
 const ALPINE_DEMO_LINKS: Link[] = [
@@ -251,5 +256,106 @@ describe('canvasEdges.pickNetworkSide', () => {
     const a = pickNetworkSide(7, { x: 100, y: 200 }, { x: 400, y: 50 });
     const b = pickNetworkSide(7, { x: 100, y: 200 }, { x: 400, y: 50 });
     expect(a).toBe(b);
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// US-403 — discovered (kernel-only) link overlay edges.
+//
+// NOTE: US-404 will append a parallel divergent-link fixture and the file
+// is shared between the two stories.  Keep the discovered-overlay describe
+// block self-contained so the next merge can append cleanly.
+// ──────────────────────────────────────────────────────────────────────────
+
+describe('canvasEdges.deriveEdges (discovered overlay)', () => {
+  const DISCOVERED: DiscoveredLink[] = [
+    {
+      iface: 'nve12abd7i2h',
+      bridge_name: 'noveXn5',
+      network_id: 5,
+      peer_node_id: 7,
+      peer_interface_index: 2,
+    },
+  ];
+
+  it('produces a discovered:{iface} edge with dashed amber styling', () => {
+    const edges = deriveEdges([], { link_style: 'orthogonal' }, DISCOVERED);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].id).toBe('discovered:nve12abd7i2h');
+    expect(edges[0].source).toBe('node7');
+    expect(edges[0].target).toBe('network5');
+    expect(edges[0].style).toBe('stroke: #fbbf24; stroke-dasharray: 6 4;');
+    const data = edges[0].data as { discovered?: boolean; discovered_iface?: string } | undefined;
+    expect(data?.discovered).toBe(true);
+    expect(data?.discovered_iface).toBe('nve12abd7i2h');
+  });
+
+  it('threads decoded interface_index into sourceHandle (iface-{N})', () => {
+    const edges = deriveEdges([], { link_style: 'orthogonal' }, DISCOVERED);
+    expect(edges[0].sourceHandle).toBe('iface-2');
+  });
+
+  it('falls back to the default sourceHandle when interface_index is unknown', () => {
+    const edges = deriveEdges(
+      [],
+      { link_style: 'orthogonal' },
+      [{ ...DISCOVERED[0], peer_interface_index: null }],
+    );
+    expect(edges[0].sourceHandle).toBe('default');
+  });
+
+  it('skips entries with no peer_node_id', () => {
+    const edges = deriveEdges(
+      [],
+      { link_style: 'orthogonal' },
+      [{ ...DISCOVERED[0], peer_node_id: null }],
+    );
+    expect(edges).toHaveLength(0);
+  });
+
+  it('renders alongside declared links without disturbing them', () => {
+    const declared: Link[] = [
+      {
+        id: 'lnk_001',
+        from: { node_id: 1, interface_index: 0 },
+        to: { network_id: 5 },
+        style_override: null,
+        label: '',
+        color: '',
+        width: '1',
+      },
+    ];
+    const edges = deriveEdges(declared, { link_style: 'orthogonal' }, DISCOVERED);
+    expect(edges).toHaveLength(2);
+    expect(edges[0].id).toBe('link:lnk_001');
+    expect(edges[0].style).toBe('stroke: #9ca3af; stroke-width: 1px;');
+    expect(edges[1].id).toBe('discovered:nve12abd7i2h');
+    expect(edges[1].style).toBe('stroke: #fbbf24; stroke-dasharray: 6 4;');
+  });
+
+  it('returns [] when both inputs are empty', () => {
+    expect(deriveEdges([], { link_style: 'orthogonal' }, [])).toEqual([]);
+    expect(deriveEdges(null, null, null)).toEqual([]);
+  });
+});
+
+describe('canvasEdges.parseIfaceInterfaceIndex', () => {
+  it('decodes the interface index from nve{hash}d{node}i{iface}h', () => {
+    expect(parseIfaceInterfaceIndex('nve12abd7i2h')).toBe(2);
+  });
+
+  it('decodes multi-digit interface indices', () => {
+    expect(parseIfaceInterfaceIndex('nve12abd7i12p')).toBe(12);
+  });
+
+  it('returns null for non-nova-ve iface names', () => {
+    expect(parseIfaceInterfaceIndex('eth0')).toBeNull();
+    expect(parseIfaceInterfaceIndex('veth9876')).toBeNull();
+    expect(parseIfaceInterfaceIndex('')).toBeNull();
+  });
+
+  it('returns null when the iface form is malformed', () => {
+    expect(parseIfaceInterfaceIndex('nve12abXX')).toBeNull();
+    expect(parseIfaceInterfaceIndex('nveXi3')).toBeNull();
   });
 });
