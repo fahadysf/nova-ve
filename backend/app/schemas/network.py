@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
@@ -36,13 +37,19 @@ class NetworkRuntime(BaseModel):
 
     Persisted under ``networks[i].runtime`` in lab.json. Owned by
     ``network_service`` (bridge name from US-202; IPAM free-list from
-    US-204c). The IPAM free-list is intentionally NOT a monotonic
+    US-204c; ``driver``/``created_at`` reconciliation metadata from
+    US-401). The IPAM free-list is intentionally NOT a monotonic
     counter — see plan §US-204c "IPAM data model (free-list, NOT a
     counter)" for why.
     """
 
     bridge_name: Optional[str] = None
+    # US-401: ``driver`` records which provisioning backend created the
+    # bridge (currently always ``"linux_bridge"``). ``created_at`` is the
+    # ISO-8601 UTC timestamp of provisioning. Both feed reconciliation in
+    # US-402.
     driver: Optional[str] = None
+    created_at: Optional[datetime] = None
     used_ips: List[str] = Field(default_factory=list)
     # First host offset usable for allocation (skips network address and
     # the conventional .1 gateway reservation). Operators may bump this
