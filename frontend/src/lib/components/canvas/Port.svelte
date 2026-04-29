@@ -281,8 +281,18 @@
   on:mouseleave={handleMouseLeave}
 >
   {#if insideFlow}
+    <!--
+      Pair source + target handles at the same id/position so peer-to-peer
+      links (where this iface is the target end) also resolve.
+    -->
     <Handle
       type="source"
+      position={xyPosition}
+      id={`iface-${interfaceIndex}`}
+      class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
+    />
+    <Handle
+      type="target"
       position={xyPosition}
       id={`iface-${interfaceIndex}`}
       class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
