@@ -327,7 +327,9 @@ class NetworkService:
             if dirty:
                 LabService.write_lab_json_static(normalized, data)
 
-            nic_link_state = _reconcile_qemu_nic_link_state(lab_id, data)
+        # QMP set_link calls are idempotent and read-only w.r.t. lab.json —
+        # run outside the lock to avoid holding it for O(nodes × NICs × 2s).
+        nic_link_state = _reconcile_qemu_nic_link_state(lab_id, data)
 
         return {
             "ensured": ensured,
