@@ -653,16 +653,41 @@ class LinkService:
                 (node_id, interface_index, network_id, bridge, kind)
             )
 
-        # Provision the implicit network's bridge exactly once before any
-        # attach call (Codex critic v4 new defect #3). Idempotent: pre-existing
-        # bridge is treated as a no-op.
-        provisioned_implicit_bridge: Optional[str] = None
+        # Provision missing host bridges before any attach call.
+        # 1. Implicit network's bridge (Codex critic v4 new defect #3) — created
+        #    exactly once per ``create_link`` call.
+        # 2. Self-heal for explicit networks: labs loaded from static JSON or
+        #    labs whose bridges were lost (host reboot, manual cleanup) never
+        #    went through ``create_network`` so their bridges are absent. Mirror
+        #    the implicit-bridge auto-provision so a link create succeeds
+        #    end-to-end. The lab-open ``ensure_lab_bridges`` reconciliation is
+        #    the primary path; this is the belt-and-suspenders for any lab
+        #    where reconciliation hasn't run yet (e.g. direct API call).
+        # Idempotent: pre-existing bridges are no-ops. We track every bridge
+        # *we* provisioned so a downstream attach failure rolls them back.
+        provisioned_bridges: List[str] = []
+        implicit_net_id_value: Optional[int] = None
         if resolved_implicit_bridge is not None:
-            net_id, bridge_name = resolved_implicit_bridge
-            if any(target[2] == net_id for target in attach_targets):
+            implicit_net_id_value, bridge_name = resolved_implicit_bridge
+            if any(target[2] == implicit_net_id_value for target in attach_targets):
                 if not host_net.bridge_exists(bridge_name):
                     host_net.bridge_add(bridge_name)
-                    provisioned_implicit_bridge = bridge_name
+                    provisioned_bridges.append(bridge_name)
+        seen_explicit_bridges: set = set()
+        for _node_id, _iface, network_id, bridge, _kind in attach_targets:
+            if network_id == implicit_net_id_value:
+                continue  # already handled above
+            if bridge in seen_explicit_bridges:
+                continue
+            seen_explicit_bridges.add(bridge)
+            if not host_net.bridge_exists(bridge):
+                host_net.bridge_add(bridge)
+                provisioned_bridges.append(bridge)
+                # Stamp ownership so future reconciliations recognise it as ours.
+                try:
+                    host_net.bridge_fingerprint_write(bridge, lab_id, network_id)
+                except host_net.HostNetError:
+                    pass
 
         # Attach each target. On the FIRST failure, sweep the bridges + every
         # already-attached interface so we leave no host-side leftover.
@@ -771,9 +796,9 @@ class LinkService:
                     ]
                     runtime["tap_names"] = tap_names
                     runtime_service._persist_runtime(runtime)
-            if provisioned_implicit_bridge is not None:
+            for bridge_name in provisioned_bridges:
                 try:
-                    host_net.bridge_del(provisioned_implicit_bridge)
+                    host_net.bridge_del(bridge_name)
                 except host_net.HostNetError:
                     pass
             raise

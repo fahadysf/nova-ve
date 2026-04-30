@@ -519,10 +519,11 @@ def tap_del(name: str) -> None:
 def link_del(name: str) -> None:
     """Delete a host-side link (TAP or veth host-end) via the helper.
 
-    The helper reuses the ``tap-del`` verb (``ip link del``) which works for
-    veth host-ends as well — deleting the host end auto-removes the peer.
+    Uses the helper's ``link-del`` verb whose validator accepts both TAP
+    and veth host-end names. Deleting the host end of a veth pair
+    auto-removes the peer.
     """
-    _invoke_helper("tap-del", name)
+    _invoke_helper("link-del", name)
 
 
 def try_link_del(name: str) -> None:

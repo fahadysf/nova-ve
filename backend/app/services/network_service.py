@@ -121,6 +121,97 @@ class NetworkService:
             out[str(net_id)] = _serialize_network(network, _refcount(data, net_id))
         return out
 
+    def ensure_lab_bridges(self, lab_path: str) -> dict:
+        """Idempotently provision the host bridge for every network in the lab.
+
+        Walks ``data["networks"]``, resolves each network's expected bridge
+        name (``runtime.bridge_name`` if stamped, else
+        ``host_net.bridge_name``), and creates the bridge on the host if
+        absent. Stamps the resolved name back onto the network record so
+        future resolves don't rely on the canonical-derive path.
+
+        Called on lab open to recover host state after a reboot or manual
+        bridge removal — labs restored from static JSON never went through
+        ``create_network`` so their bridges were never provisioned.
+
+        Returns ``{"ensured": [...], "created": [...], "skipped": [...]}``.
+        """
+        normalized = _normalize_relative_lab_path(lab_path)
+        labs_dir = get_settings().LABS_DIR
+
+        ensured: List[str] = []
+        created: List[str] = []
+        skipped: List[Dict[str, Any]] = []
+
+        with lab_lock(normalized, labs_dir):
+            data = LabService.read_lab_json_static(normalized)
+            lab_id = str(data.get("id") or normalized)
+            networks = data.get("networks") or {}
+            dirty = False
+            for key, network in networks.items():
+                if not isinstance(network, dict):
+                    skipped.append({"key": str(key), "reason": "non-dict network record"})
+                    continue
+                try:
+                    network_id = int(network.get("id", key))
+                except (TypeError, ValueError):
+                    skipped.append({"key": str(key), "reason": "non-integer id"})
+                    continue
+
+                runtime_record = network.get("runtime") or {}
+                bridge = runtime_record.get("bridge_name")
+                if not isinstance(bridge, str) or not bridge:
+                    bridge = host_net.bridge_name(lab_id, network_id)
+
+                try:
+                    if host_net.bridge_exists(bridge):
+                        status = host_net.bridge_fingerprint_check(
+                            bridge, lab_id, network_id
+                        )
+                        if status == "mismatch":
+                            skipped.append({
+                                "bridge": bridge,
+                                "network_id": network_id,
+                                "reason": _bridge_ownership_message(
+                                    bridge, lab_id, network_id
+                                ),
+                            })
+                            continue
+                        if status == "absent":
+                            try:
+                                host_net.bridge_fingerprint_write(
+                                    bridge, lab_id, network_id
+                                )
+                            except host_net.HostNetError:
+                                pass
+                        ensured.append(bridge)
+                    else:
+                        host_net.bridge_add(bridge)
+                        try:
+                            host_net.bridge_fingerprint_write(
+                                bridge, lab_id, network_id
+                            )
+                        except host_net.HostNetError:
+                            pass
+                        created.append(bridge)
+                except host_net.HostNetError as exc:
+                    skipped.append({
+                        "bridge": bridge,
+                        "network_id": network_id,
+                        "reason": str(exc),
+                    })
+                    continue
+
+                existing_runtime = network.setdefault("runtime", {})
+                if existing_runtime.get("bridge_name") != bridge:
+                    existing_runtime["bridge_name"] = bridge
+                    dirty = True
+
+            if dirty:
+                LabService.write_lab_json_static(normalized, data)
+
+        return {"ensured": ensured, "created": created, "skipped": skipped}
+
     async def create_network(self, lab_path: str, request: dict) -> dict:
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR

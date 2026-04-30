@@ -12,12 +12,14 @@ from fastapi.responses import JSONResponse
 
 from app.dependencies import get_current_user
 from app.schemas.user import UserRead
+from app.services import host_net
 from app.services.lab_service import LEGACY_SCHEMA_ERROR
 from app.services.link_service import (
     DuplicateLinkError,
     LinkContentionError,
     link_service,
 )
+from app.services.node_runtime_service import NodeRuntimeError
 
 
 router = APIRouter(prefix="/api/labs", tags=["links"])
@@ -141,6 +143,19 @@ async def create_link(
                 "message": str(exc),
             },
         )
+    except (NodeRuntimeError, host_net.HostNetError) as exc:
+        # Hot-attach refused or kernel-side bridge/veth/TAP work failed.
+        # Surface the real reason instead of a bare 500 so the canvas can
+        # show an actionable toast (e.g. ownership mismatch, bridge
+        # provisioning failure, runtime not in expected state).
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": 422,
+                "status": "fail",
+                "message": str(exc),
+            },
+        )
 
     response: Dict[str, Any] = {
         "code": 200 if replayed else 201,
@@ -180,6 +195,15 @@ async def delete_link(
                 "message": str(exc),
             },
         )
+    except (NodeRuntimeError, host_net.HostNetError) as exc:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": 422,
+                "status": "fail",
+                "message": str(exc),
+            },
+        )
 
     if not existed:
         return {
@@ -207,7 +231,17 @@ async def patch_link(
     if err is not None:
         return err
 
-    updated = await link_service.patch_link(lab_path, link_id, body)
+    try:
+        updated = await link_service.patch_link(lab_path, link_id, body)
+    except (NodeRuntimeError, host_net.HostNetError) as exc:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "code": 422,
+                "status": "fail",
+                "message": str(exc),
+            },
+        )
     if updated is None:
         return JSONResponse(
             status_code=404,

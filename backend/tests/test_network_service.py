@@ -592,3 +592,134 @@ async def test_allocate_ip_skips_externally_reserved_addresses(
 
     # First free is .4 — .2 and .3 were both reserved.
     assert chosen == "10.99.4.4"
+
+
+# ---------------------------------------------------------------------------
+# ensure_lab_bridges — lab-load reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _seed_lab_with_networks(
+    labs_dir: Path, lab_id: str, networks: dict, *, name: str = "lab.json"
+) -> str:
+    (labs_dir / name).write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "id": lab_id,
+                "meta": {"name": name},
+                "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+                "nodes": {},
+                "networks": networks,
+                "links": [],
+                "defaults": {"link_style": "orthogonal"},
+            }
+        )
+    )
+    return name
+
+
+def test_ensure_lab_bridges_provisions_missing_bridge(
+    instance_id, settings, helper_mocks, labs_dir
+):
+    """Network in lab.json with no host bridge → bridge_add runs and
+    runtime.bridge_name is stamped on the network record."""
+    lab_id = "ensure-lab-1"
+    expected_bridge = host_net.bridge_name(lab_id, 1)
+    lab_name = _seed_lab_with_networks(
+        labs_dir,
+        lab_id,
+        {"1": {"id": 1, "name": "lan", "type": "linux_bridge"}},
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert summary["created"] == [expected_bridge]
+    assert summary["ensured"] == []
+    assert summary["skipped"] == []
+    assert helper_mocks["bridge_add"] == [expected_bridge]
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["bridge_name"] == expected_bridge
+
+
+def test_ensure_lab_bridges_idempotent_when_bridge_already_exists(
+    instance_id, settings, monkeypatch, labs_dir
+):
+    """Existing bridge with matching fingerprint → no bridge_add, classified
+    under 'ensured'. Verifies the lab-open call is safe to fire on every
+    page load without thrashing host state."""
+    lab_id = "ensure-lab-2"
+    bridge = host_net.bridge_name(lab_id, 1)
+    host_net.bridge_fingerprint_write(bridge, lab_id, 1)
+
+    add_calls: list[str] = []
+    monkeypatch.setattr(host_net, "bridge_exists", lambda n: True)
+    monkeypatch.setattr(host_net, "bridge_add", lambda n: add_calls.append(n))
+    monkeypatch.setattr(host_net, "bridge_del", lambda n: None)
+
+    lab_name = _seed_lab_with_networks(
+        labs_dir,
+        lab_id,
+        {"1": {"id": 1, "name": "lan", "runtime": {"bridge_name": bridge}}},
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert summary["ensured"] == [bridge]
+    assert summary["created"] == []
+    assert add_calls == []
+
+
+def test_ensure_lab_bridges_skips_on_ownership_mismatch(
+    instance_id, settings, monkeypatch, labs_dir
+):
+    """Existing bridge whose fingerprint maps to a different lab/network →
+    refuse to claim it; report the mismatch in 'skipped'."""
+    lab_id = "ensure-lab-3"
+    bridge = host_net.bridge_name(lab_id, 1)
+    host_net.bridge_fingerprint_write(bridge, "other-lab", 99)
+
+    add_calls: list[str] = []
+    monkeypatch.setattr(host_net, "bridge_exists", lambda n: True)
+    monkeypatch.setattr(host_net, "bridge_add", lambda n: add_calls.append(n))
+
+    lab_name = _seed_lab_with_networks(
+        labs_dir,
+        lab_id,
+        {"1": {"id": 1, "name": "lan"}},
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert summary["created"] == []
+    assert summary["ensured"] == []
+    assert len(summary["skipped"]) == 1
+    skipped = summary["skipped"][0]
+    assert skipped["bridge"] == bridge
+    assert "ownership" in skipped["reason"].lower()
+    assert add_calls == []
+
+
+def test_ensure_lab_bridges_walks_multiple_networks(
+    instance_id, settings, helper_mocks, labs_dir
+):
+    """Multiple networks → each gets its bridge provisioned and stamped."""
+    lab_id = "ensure-lab-4"
+    bridge_a = host_net.bridge_name(lab_id, 1)
+    bridge_b = host_net.bridge_name(lab_id, 2)
+    lab_name = _seed_lab_with_networks(
+        labs_dir,
+        lab_id,
+        {
+            "1": {"id": 1, "name": "lan-a"},
+            "2": {"id": 2, "name": "lan-b"},
+        },
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert sorted(summary["created"]) == sorted([bridge_a, bridge_b])
+    assert sorted(helper_mocks["bridge_add"]) == sorted([bridge_a, bridge_b])
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["bridge_name"] == bridge_a
+    assert saved["networks"]["2"]["runtime"]["bridge_name"] == bridge_b
