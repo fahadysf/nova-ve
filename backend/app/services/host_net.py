@@ -465,6 +465,15 @@ def console_proxy_stop(proxy_pid: int) -> None:
     _invoke_helper("console-proxy-stop", str(int(proxy_pid)))
 
 
+def console_proxy_alive(proxy_pid: int) -> bool:
+    """Return True if ``proxy_pid`` still refers to a running console proxy."""
+    try:
+        cmdline = (Path("/proc") / str(int(proxy_pid)) / "cmdline").read_bytes().split(b"\x00")
+        return any(b"nova-ve-console-proxy" in arg for arg in cmdline)
+    except OSError:
+        return False
+
+
 def link_up(iface: str) -> None:
     """Bring ``iface`` up on the host (``ip link set <iface> up``)."""
     _invoke_helper("link-up", iface)

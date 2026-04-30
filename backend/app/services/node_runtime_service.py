@@ -640,6 +640,9 @@ class NodeRuntimeService:
         if not runtime:
             raise NodeRuntimeError(f"Node is not running: {node_id}")
 
+        if runtime.get("kind") == "docker":
+            runtime = self._ensure_console_proxy(lab_id, node_id, runtime)
+
         return {
             "lab_id": lab_id,
             "node_id": node_id,
@@ -649,6 +652,74 @@ class NodeRuntimeService:
             "port": int(runtime.get("console_port", 0)),
             "url": self._console_url(runtime),
         }
+
+    def _ensure_console_proxy(
+        self, lab_id: str, node_id: int, runtime: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Re-spawn a dead console proxy for a running Docker node.
+
+        Checks liveness via /proc. If the container is still up but the proxy
+        died, stops the stale entry, re-spawns, and persists the new PID.
+        Returns the (possibly updated) runtime dict.
+        """
+        proxy_pid = runtime.get("console_proxy_pid")
+        if proxy_pid and host_net.console_proxy_alive(int(proxy_pid)):
+            return runtime
+
+        container_pid = runtime.get("pid")
+        if not container_pid:
+            return runtime
+
+        # Verify the container itself is still alive before attempting respawn.
+        if not Path(f"/proc/{container_pid}/ns/net").exists():
+            return runtime
+
+        _logger.info(
+            "console proxy dead or missing for lab=%s node=%s (old_pid=%s); respawning",
+            lab_id,
+            node_id,
+            proxy_pid,
+        )
+
+        if proxy_pid:
+            try:
+                host_net.console_proxy_stop(int(proxy_pid))
+            except Exception:
+                pass
+
+        console_mode = runtime.get("console", "telnet")
+        listen_port = int(runtime.get("console_port", 0))
+        if not listen_port:
+            return runtime
+
+        try:
+            new_pid = host_net.console_proxy_start(
+                node_pid=int(container_pid),
+                listen_port=listen_port,
+                target_port=self._container_console_port(console_mode),
+            )
+        except Exception as exc:
+            _logger.warning(
+                "console proxy respawn failed for lab=%s node=%s: %s",
+                lab_id,
+                node_id,
+                exc,
+            )
+            return runtime
+
+        runtime = dict(runtime)
+        runtime["console_proxy_pid"] = new_pid
+        key = self._key(lab_id, node_id)
+        with self._lock:
+            self._registry[key] = runtime
+        self._persist_runtime(runtime)
+        _logger.info(
+            "console proxy respawned for lab=%s node=%s new_pid=%s",
+            lab_id,
+            node_id,
+            new_pid,
+        )
+        return runtime
 
     def stream_logs(self, lab_id: str, node_id: int, tail: int = 200) -> Iterator[str]:
         runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
