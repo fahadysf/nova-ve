@@ -1850,6 +1850,8 @@ class NodeRuntimeService:
             self._docker_network_alias(node),
             "--network",
             "none",
+            "--cap-add",
+            "NET_ADMIN",
             "-p",
             f"{console_port}:{self._container_console_port(console_mode)}",
         ]
