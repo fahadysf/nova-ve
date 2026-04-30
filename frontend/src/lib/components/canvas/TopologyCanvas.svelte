@@ -852,6 +852,26 @@
     });
   }
 
+  function setLinkStyle(edgeId: string, style: LinkStyle | null) {
+    const index = getEdgeIndex(edgeId);
+    if (index < 0) return;
+    localLinks = localLinks.map((link, i) =>
+      i === index ? { ...link, style_override: style } : link
+    );
+    if (index < localTopology.length) {
+      localTopology = localTopology.map((tl, i) =>
+        i === index ? { ...tl, style_override: style } : tl
+      );
+    }
+    publishFlowState();
+    scheduleSave();
+    dispatchCanvasChange('topology', {
+      nodes: deepClone(localNodes),
+      networks: deepClone(localNetworks),
+      topology: deepClone(localTopology),
+    });
+  }
+
   async function handleNodeAction(action: 'start' | 'stop' | 'wipe' | 'delete' | 'console', targetId: string) {
     closeMenu();
     const decoded = decodeId(targetId);
@@ -1686,6 +1706,20 @@
             <span>Promote to declared link</span><Plus class="h-3.5 w-3.5 text-amber-300/80" />
           </button>
         {:else}
+          <div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-widest text-gray-500">Line style</div>
+          {#each ([['straight', 'Straight'], ['bezier', 'Curved'], ['orthogonal', 'Orthogonal']] as const) as [styleVal, styleLabel]}
+            <button
+              type="button"
+              class="menu-item"
+              on:click|preventDefault|stopPropagation={() => {
+                if (menu?.targetId) setLinkStyle(menu.targetId, styleVal);
+                closeMenu();
+              }}
+            >
+              <span>{styleLabel}</span>
+            </button>
+          {/each}
+          <div class="mx-2 my-1 border-t border-gray-700"></div>
           <button
             type="button"
             class="menu-item text-red-200"
