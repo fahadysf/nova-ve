@@ -694,6 +694,7 @@ class LinkService:
         # ``attached`` carries the kind so rollback can pick the matching
         # cleanup path (veth host-end for docker, TAP for qemu).
         attached: List[Tuple[int, int, str]] = []
+        bridges_to_raise: List[str] = []
         try:
             for node_id, interface_index, network_id, bridge, kind in attach_targets:
                 # US-204b: the per-(lab, node, iface) mutex is held by the
@@ -717,6 +718,8 @@ class LinkService:
                         bridge_name=bridge,
                     )
                 attached.append((node_id, interface_index, kind))
+                if bridge not in bridges_to_raise:
+                    bridges_to_raise.append(bridge)
 
                 # US-204b: stamp the link's ``runtime.attach_generation``
                 # under lab_lock — atomic with the lab.json write so the
@@ -731,6 +734,19 @@ class LinkService:
                     network_id=network_id,
                     attach_generation=attach_generation,
                 )
+
+                if kind == "qemu":
+                    # Best-effort: a hot-added QEMU NIC starts at link=on
+                    # by default, but if the boot-time NIC at this index
+                    # was created with ``link=off`` (the unconnected
+                    # branch in the boot path), set_link forces the
+                    # guest-visible carrier to match the lab JSON. QMP
+                    # errors here are non-fatal — the attach itself
+                    # already succeeded and the next reconcile will
+                    # correct any drift.
+                    runtime_service.set_qemu_nic_link(
+                        lab_id, node_id, interface_index, up=True
+                    )
         except (NodeRuntimeError, NodeRuntimeQMPTimeout, host_net.HostNetError):
             # US-303 codex iter1 HIGH-1: NodeRuntimeQMPTimeout is a
             # subclass of NodeRuntimeError so the listing is technically
@@ -802,6 +818,22 @@ class LinkService:
                 except host_net.HostNetError:
                     pass
             raise
+
+        # Force every bridge that just had a port attached to UP. Linux
+        # bridges with admin-down state hold their slave ports in
+        # ``state disabled`` so packets do not forward — even though the
+        # slaves themselves are up. Best-effort: failures here only mean
+        # we will try again on the next link create or reconcile pass.
+        for bridge_name in bridges_to_raise:
+            try:
+                host_net.link_up(bridge_name)
+            except host_net.HostNetError as exc:
+                _logger.warning(
+                    "create_link: link_up(%s) failed (%s); will retry "
+                    "on next attach or reconcile",
+                    bridge_name,
+                    exc,
+                )
 
         return bool(attached)
 
@@ -1081,6 +1113,16 @@ class LinkService:
                                 primary_error,
                             )
                 elif kind == "qemu":
+                    # Pin guest-visible carrier OFF before tearing the
+                    # device down. The hot-detach path will remove the
+                    # device entirely on the happy path, so this is
+                    # mostly belt-and-suspenders for the forced-fallback
+                    # branch (where ``netdev_del`` is skipped and the
+                    # device lingers until guest reboot). Best-effort.
+                    runtime_service.set_qemu_nic_link(
+                        mutex_lab_id, int(node_id), int(iface_idx), up=False
+                    )
+
                     # US-304: hot-detach via QMP. Mutex is held by the
                     # caller (delete_link) so we use the PRIVATE locked
                     # helper directly to avoid re-acquiring on the same

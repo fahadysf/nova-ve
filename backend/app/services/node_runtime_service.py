@@ -1386,6 +1386,7 @@ class NodeRuntimeService:
             raise
 
         # ----- Build per-NIC -netdev / -device argv ------------------------
+        unconnected_nic_indices: list[int] = []
         for index in range(ethernet_count):
             device_args = (
                 f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
@@ -1411,16 +1412,18 @@ class NodeRuntimeService:
                     device_args,
                 ]
             else:
-                # No network attached and no uplink request — give the NIC
-                # an isolated ``hubport`` netdev (each in its own private
-                # hub, hubid={index}) so it appears in the guest but never
-                # reaches host networking.
+                # No network attached and no uplink request. The carrier
+                # is forced off via QMP ``set_link`` AFTER spawn — e1000
+                # (and most other NIC models) reject ``link=`` as a
+                # device-line option, so the boot-time argv stays plain
+                # and the post-spawn step pins these to ``up=False``.
                 cmd += [
                     "-netdev",
                     f"hubport,id=net{index},hubid={index}",
                     "-device",
                     device_args,
                 ]
+                unconnected_nic_indices.append(index)
 
         if iso_path:
             cmd += ["-cdrom", str(iso_path), "-boot", "order=dc"]
@@ -1459,6 +1462,23 @@ class NodeRuntimeService:
             raise NodeRuntimeError(error or "QEMU exited immediately after start")
 
         process_info = psutil.Process(process.pid)
+
+        # Pin the carrier OFF on every unconnected NIC index. QMP may
+        # not be bound the very first ms after spawn, so we retry each
+        # call once on transport failure. Best-effort: if QMP still
+        # rejects, the next ``ensure_lab_bridges`` reconcile catches it.
+        if unconnected_nic_indices:
+            qmp_path = str(qmp_socket_path)
+            for unconnected_index in unconnected_nic_indices:
+                args = {"name": f"net{unconnected_index}", "up": False}
+                for attempt in range(2):
+                    try:
+                        self._qmp_command(qmp_path, "set_link", args)
+                        break
+                    except Exception:  # noqa: BLE001 — best-effort
+                        if attempt == 0:
+                            time.sleep(0.1)
+                        # else: give up, reconcile will retry.
 
         # US-201/US-203: register the PID into the runtime registry. On
         # registry failure we kill the QEMU process and sweep the TAPs to
@@ -3187,6 +3207,44 @@ class NodeRuntimeService:
             raise NodeRuntimeQMPTimeout(
                 f"QMP {command} transport error on {socket_path}: {exc}"
             ) from exc
+
+    def set_qemu_nic_link(
+        self, lab_id: str, node_id: int, interface_index: int, *, up: bool
+    ) -> tuple[bool, str | None]:
+        """Best-effort QMP ``set_link`` for ``net{interface_index}``.
+
+        Returns ``(ok, reason)``. ``ok`` is True only when QEMU returned a
+        successful (non-error) response. The QMP ``name`` is the **netdev
+        id** (``net{index}``) which exists on both boot-time and hot-added
+        NICs, so this works for hubport-backed and tap-backed NICs alike.
+
+        The runtime mutex is intentionally NOT acquired — set_link is
+        idempotent and a missed flip during a concurrent attach will be
+        corrected by the caller's own attach/detach path or the next
+        reconcile pass.
+        """
+        runtime = self._runtime_record(lab_id, node_id)
+        if runtime is None:
+            return False, "no runtime record"
+        if str(runtime.get("kind") or "") != "qemu":
+            return False, f"runtime kind={runtime.get('kind')!r}"
+        socket_path = runtime.get("qmp_socket") or ""
+        if not socket_path:
+            work_dir = runtime.get("work_dir")
+            socket_path = str(Path(work_dir) / "qmp.sock") if work_dir else ""
+        if not socket_path:
+            return False, "no qmp socket"
+        try:
+            response = self._qmp_command(
+                socket_path,
+                "set_link",
+                {"name": f"net{int(interface_index)}", "up": bool(up)},
+            )
+        except NodeRuntimeQMPTimeout as exc:
+            return False, f"qmp transport: {exc}"
+        if isinstance(response, dict) and isinstance(response.get("error"), dict):
+            return False, f"qmp error: {response['error']}"
+        return True, None
 
     def _find_free_pcie_slot(
         self,

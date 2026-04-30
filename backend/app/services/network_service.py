@@ -95,6 +95,95 @@ def _bridge_ownership_message(bridge: str, lab_id: str, network_id: int) -> str:
     )
 
 
+def _network_ids_with_links(lab_data: dict) -> set:
+    """Return the set of ``network_id`` values referenced by any link."""
+    ids: set = set()
+    for link in lab_data.get("links", []) or []:
+        for endpoint in (link.get("from"), link.get("to")):
+            if not isinstance(endpoint, dict):
+                continue
+            if "network_id" in endpoint:
+                try:
+                    ids.add(int(endpoint["network_id"]))
+                except (TypeError, ValueError):
+                    continue
+    return ids
+
+
+def _connected_iface_indices_by_node(lab_data: dict) -> Dict[int, set]:
+    """Return ``{node_id: set(interface_index)}`` for indices that appear in any link."""
+    out: Dict[int, set] = {}
+    for link in lab_data.get("links", []) or []:
+        for endpoint in (link.get("from"), link.get("to")):
+            if not isinstance(endpoint, dict):
+                continue
+            if "node_id" not in endpoint:
+                continue
+            try:
+                node_id = int(endpoint["node_id"])
+                iface = int(endpoint.get("interface_index", 0))
+            except (TypeError, ValueError):
+                continue
+            out.setdefault(node_id, set()).add(iface)
+    return out
+
+
+def _reconcile_qemu_nic_link_state(
+    lab_id: str, lab_data: dict
+) -> List[Dict[str, Any]]:
+    """Walk running QEMU nodes and force per-NIC carrier state via QMP set_link.
+
+    Returns one record per NIC index touched, shape ``{"node_id", "interface_index",
+    "up", "ok", "reason"?}``. Best-effort: any per-node failure is captured in the
+    return value and does not raise.
+    """
+    # Local import — node_runtime_service imports network_service at runtime
+    # (e.g. via ``LabService``), so a top-level import would cycle.
+    from app.services.node_runtime_service import NodeRuntimeService
+
+    out: List[Dict[str, Any]] = []
+    nodes = lab_data.get("nodes") or {}
+    if not nodes:
+        return out
+
+    connected = _connected_iface_indices_by_node(lab_data)
+    runtime_service = NodeRuntimeService()
+
+    for raw_id, node in nodes.items():
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("type") or "").lower() != "qemu":
+            continue
+        try:
+            node_id = int(node.get("id", raw_id))
+        except (TypeError, ValueError):
+            continue
+        ethernet = int(node.get("ethernet", 0) or 0)
+        if ethernet <= 0:
+            continue
+        runtime = runtime_service._runtime_record(lab_id, node_id)
+        if runtime is None:
+            continue
+
+        node_connected = connected.get(node_id, set())
+        for index in range(ethernet):
+            up = index in node_connected
+            ok, reason = runtime_service.set_qemu_nic_link(
+                lab_id, node_id, index, up=up
+            )
+            entry: Dict[str, Any] = {
+                "node_id": node_id,
+                "interface_index": index,
+                "up": up,
+                "ok": ok,
+            }
+            if not ok and reason:
+                entry["reason"] = reason
+            out.append(entry)
+
+    return out
+
+
 class NetworkService:
     def list_networks(self, lab_path: str, *, include_hidden: bool = False) -> Dict[str, dict]:
         """Return networks keyed by string id, mirroring legacy router shape.
@@ -134,7 +223,20 @@ class NetworkService:
         bridge removal — labs restored from static JSON never went through
         ``create_network`` so their bridges were never provisioned.
 
-        Returns ``{"ensured": [...], "created": [...], "skipped": [...]}``.
+        Bridges that have at least one link endpoint pointing at them are
+        forced ``UP`` after the existence/fingerprint check so a bridge
+        with active ports never sits in admin-down (slave ports go to
+        ``state disabled`` and forwarding stops, even though the slaves
+        themselves are up).
+
+        For every running QEMU node, the matching netdev's QMP link state
+        is set to ``on`` for connected NIC indices and ``off`` for
+        unconnected ones. This is independent of TAP-vs-hubport backing,
+        so it works on already-running VMs whose unconnected NICs were
+        booted before the ``link=off`` device-line fix landed.
+
+        Returns ``{"ensured": [...], "created": [...], "skipped": [...],
+        "raised": [...], "nic_link_state": [...]}``.
         """
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
@@ -142,11 +244,14 @@ class NetworkService:
         ensured: List[str] = []
         created: List[str] = []
         skipped: List[Dict[str, Any]] = []
+        raised: List[str] = []
+        nic_link_state: List[Dict[str, Any]] = []
 
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
             lab_id = str(data.get("id") or normalized)
             networks = data.get("networks") or {}
+            networks_with_links = _network_ids_with_links(data)
             dirty = False
             for key, network in networks.items():
                 if not isinstance(network, dict):
@@ -202,6 +307,18 @@ class NetworkService:
                     })
                     continue
 
+                if network_id in networks_with_links:
+                    try:
+                        host_net.link_up(bridge)
+                        raised.append(bridge)
+                    except host_net.HostNetError as exc:
+                        logger.warning(
+                            "ensure_lab_bridges: link_up(%s) failed (%s); "
+                            "bridge will stay admin-down until next reconcile",
+                            bridge,
+                            exc,
+                        )
+
                 existing_runtime = network.setdefault("runtime", {})
                 if existing_runtime.get("bridge_name") != bridge:
                     existing_runtime["bridge_name"] = bridge
@@ -210,7 +327,15 @@ class NetworkService:
             if dirty:
                 LabService.write_lab_json_static(normalized, data)
 
-        return {"ensured": ensured, "created": created, "skipped": skipped}
+            nic_link_state = _reconcile_qemu_nic_link_state(lab_id, data)
+
+        return {
+            "ensured": ensured,
+            "created": created,
+            "skipped": skipped,
+            "raised": raised,
+            "nic_link_state": nic_link_state,
+        }
 
     async def create_network(self, lab_path: str, request: dict) -> dict:
         normalized = _normalize_relative_lab_path(lab_path)

@@ -723,3 +723,263 @@ def test_ensure_lab_bridges_walks_multiple_networks(
     saved = json.loads((labs_dir / lab_name).read_text())
     assert saved["networks"]["1"]["runtime"]["bridge_name"] == bridge_a
     assert saved["networks"]["2"]["runtime"]["bridge_name"] == bridge_b
+
+
+# ---------------------------------------------------------------------------
+# ensure_lab_bridges — bridge auto-up when ports are connected
+# ---------------------------------------------------------------------------
+
+
+def _seed_lab_with_links(
+    labs_dir: Path,
+    lab_id: str,
+    *,
+    networks: dict,
+    links: list,
+    nodes: dict | None = None,
+    name: str = "lab.json",
+) -> str:
+    (labs_dir / name).write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "id": lab_id,
+                "meta": {"name": name},
+                "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+                "nodes": nodes or {},
+                "networks": networks,
+                "links": links,
+                "defaults": {"link_style": "orthogonal"},
+            }
+        )
+    )
+    return name
+
+
+def test_ensure_lab_bridges_raises_bridge_with_link(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """A bridge whose network has at least one link endpoint is forced UP
+    so its slave ports leave ``state disabled``."""
+    lab_id = "ensure-lab-up-1"
+    bridge = host_net.bridge_name(lab_id, 1)
+    link_up_calls: list[str] = []
+    monkeypatch.setattr(host_net, "link_up", lambda n: link_up_calls.append(n))
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        lab_id,
+        networks={"1": {"id": 1, "name": "lan"}},
+        links=[
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 7, "interface_index": 0},
+                "to": {"network_id": 1},
+            }
+        ],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert summary["created"] == [bridge]
+    assert summary["raised"] == [bridge]
+    assert link_up_calls == [bridge]
+
+
+def test_ensure_lab_bridges_leaves_unused_bridge_down(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """A network with no link → bridge is created but NOT brought up."""
+    lab_id = "ensure-lab-up-2"
+    bridge = host_net.bridge_name(lab_id, 1)
+    link_up_calls: list[str] = []
+    monkeypatch.setattr(host_net, "link_up", lambda n: link_up_calls.append(n))
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        lab_id,
+        networks={"1": {"id": 1, "name": "lan"}},
+        links=[],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert summary["created"] == [bridge]
+    assert summary["raised"] == []
+    assert link_up_calls == []
+
+
+def test_ensure_lab_bridges_swallows_link_up_failure(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """``link_up`` failure is logged, not raised, so reconcile keeps walking."""
+    lab_id = "ensure-lab-up-3"
+    bridge = host_net.bridge_name(lab_id, 1)
+
+    def boom(name: str) -> None:
+        raise host_net.HostNetEINVAL("fake")
+
+    monkeypatch.setattr(host_net, "link_up", boom)
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        lab_id,
+        networks={"1": {"id": 1, "name": "lan"}},
+        links=[
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 1},
+            }
+        ],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert summary["created"] == [bridge]
+    assert summary["raised"] == []  # link_up failed; bridge not raised
+
+
+# ---------------------------------------------------------------------------
+# ensure_lab_bridges — QEMU NIC link state reconciliation
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_lab_bridges_sets_qemu_nic_link_state_per_lab_links(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """Running QEMU node has set_link issued for every NIC index — UP for
+    indices that appear in lab.links, DOWN for the rest."""
+    from app.services import network_service as ns_mod
+
+    lab_id = "ensure-nic-link-1"
+    captured: list[tuple] = []
+
+    class FakeRuntimeService:
+        def _runtime_record(self, _lab_id, _node_id, *, include_stopped=False):
+            return {"kind": "qemu", "qmp_socket": "/tmp/qmp.sock"}
+
+        def set_qemu_nic_link(self, _lab_id, node_id, interface_index, *, up):
+            captured.append((node_id, interface_index, up))
+            return True, None
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.NodeRuntimeService", FakeRuntimeService
+    )
+
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        lab_id,
+        networks={"1": {"id": 1, "name": "lan"}},
+        nodes={
+            "3": {
+                "id": 3,
+                "name": "vyos-1",
+                "type": "qemu",
+                "ethernet": 4,
+                "interfaces": [
+                    {"name": "Gi1"},
+                    {"name": "Gi2"},
+                    {"name": "Gi3"},
+                    {"name": "Gi4"},
+                ],
+            }
+        },
+        # Only Gi3 (interface_index=2) is connected.
+        links=[
+            {
+                "id": "lnk_003",
+                "from": {"node_id": 3, "interface_index": 2},
+                "to": {"network_id": 1},
+            }
+        ],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert (3, 0, False) in captured
+    assert (3, 1, False) in captured
+    assert (3, 2, True) in captured
+    assert (3, 3, False) in captured
+    assert len(captured) == 4
+    nic_state = {(e["interface_index"], e["up"]) for e in summary["nic_link_state"]}
+    assert nic_state == {(0, False), (1, False), (2, True), (3, False)}
+
+
+def test_ensure_lab_bridges_skips_qemu_nic_link_state_when_node_stopped(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """A QEMU node with no runtime record (stopped) → no QMP set_link calls."""
+    from app.services import network_service as ns_mod
+
+    lab_id = "ensure-nic-link-2"
+    captured: list[tuple] = []
+
+    class FakeRuntimeService:
+        def _runtime_record(self, _lab_id, _node_id, *, include_stopped=False):
+            return None
+
+        def set_qemu_nic_link(self, _lab_id, node_id, interface_index, *, up):
+            captured.append((node_id, interface_index, up))
+            return True, None
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.NodeRuntimeService", FakeRuntimeService
+    )
+
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        lab_id,
+        networks={"1": {"id": 1, "name": "lan"}},
+        nodes={
+            "3": {
+                "id": 3,
+                "name": "vyos-1",
+                "type": "qemu",
+                "ethernet": 4,
+            }
+        },
+        links=[],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+    assert captured == []
+    assert summary["nic_link_state"] == []
+
+
+def test_ensure_lab_bridges_skips_non_qemu_nodes_for_set_link(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """Docker nodes use real veth pairs whose carrier already tracks
+    attach state — set_link must not be called on them."""
+    from app.services import network_service as ns_mod
+
+    lab_id = "ensure-nic-link-3"
+    captured: list[tuple] = []
+
+    class FakeRuntimeService:
+        def _runtime_record(self, _lab_id, _node_id, *, include_stopped=False):
+            return {"kind": "docker"}
+
+        def set_qemu_nic_link(self, _lab_id, node_id, interface_index, *, up):
+            captured.append((node_id, interface_index, up))
+            return True, None
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.NodeRuntimeService", FakeRuntimeService
+    )
+
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        lab_id,
+        networks={"1": {"id": 1, "name": "lan"}},
+        nodes={
+            "4": {
+                "id": 4,
+                "name": "docker-test-a",
+                "type": "docker",
+                "ethernet": 1,
+            }
+        },
+        links=[],
+    )
+
+    NetworkService().ensure_lab_bridges(lab_name)
+    assert captured == []

@@ -121,8 +121,16 @@ def validate_veth_name(value: str, *, label: str = "veth_name") -> str:
 
 
 def validate_iface_name(value: str, *, label: str = "iface_name") -> str:
-    """Accept any nova-ve-owned interface name (TAP or veth)."""
-    if RE_TAP_NAME.match(value) or RE_VETH_NAME.match(value):
+    """Accept any nova-ve-owned interface name (TAP, veth, or bridge).
+
+    Bridges are accepted so generic verbs like ``link-up`` / ``link-del``
+    can target a bridge without needing a bridge-specific verb.
+    """
+    if (
+        RE_TAP_NAME.match(value)
+        or RE_VETH_NAME.match(value)
+        or RE_BRIDGE_NAME.match(value)
+    ):
         return value
     raise _ValidationError(label)
 
