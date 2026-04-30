@@ -176,3 +176,28 @@ async def patch_network(
         "event": event_type,
         "network": payload,
     }
+
+
+@router.post("/{lab_path:path}/runtime/reconcile")
+async def reconcile_runtime(
+    lab_path: str,
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Idempotently ensure host bridges for every network in the lab.
+
+    Called by the canvas on lab open so labs restored from static JSON
+    or labs whose bridges were lost (host reboot, manual removal) find
+    their host state already provisioned by the time the user starts a
+    node or creates a link.
+    """
+    data, err = _read_lab_or_error(lab_path)
+    if err is not None:
+        return err
+
+    summary = network_service.ensure_lab_bridges(lab_path)
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Runtime reconciliation completed.",
+        "data": summary,
+    }

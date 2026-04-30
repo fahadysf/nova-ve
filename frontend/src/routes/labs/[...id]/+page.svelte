@@ -7,7 +7,7 @@
   import { goto } from '$app/navigation';
   import { ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, Monitor, RefreshCw } from 'lucide-svelte';
   import { authStore } from '$lib/stores/auth';
-  import { apiGetData, ApiError } from '$lib/api';
+  import { apiGetData, apiRequest, ApiError } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
@@ -256,6 +256,19 @@
     }
 
     try {
+      // Fire-and-forget host-state reconciliation — provisions any missing
+      // Linux bridges for this lab's networks. Restored labs and labs whose
+      // bridges were lost across a host reboot/manual cleanup find their
+      // host state already prepared by the time the user starts a node or
+      // creates a link.
+      apiRequest(`/labs/${labId}/runtime/reconcile`, {
+        method: 'POST',
+        suppressToast: true
+      }).catch(() => {
+        /* best-effort; surfacing the failure in a toast would be noisy
+           on every lab open and isn't actionable for the user. */
+      });
+
       const [meta, nodeData, networkData, topologyData, linksData] = await Promise.all([
         apiGetData<LabMeta>(`/labs/${labId}`),
         apiGetData<Record<string, NodeData>>(`/labs/${labId}/nodes`),

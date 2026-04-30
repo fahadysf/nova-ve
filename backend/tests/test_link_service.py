@@ -297,3 +297,296 @@ async def test_us204b_create_link_records_runtime_field_on_link(
     persisted = saved["links"][0]
     runtime_record = persisted.get("runtime") or {}
     assert int(runtime_record.get("attach_generation", 0)) == 0
+
+
+# ---------------------------------------------------------------------------
+# Bridge auto-up + per-NIC link state — link create/delete events
+# ---------------------------------------------------------------------------
+
+
+def _instance_id_fixture(monkeypatch, tmp_path):
+    """Seed a deterministic instance_id so host_net.bridge_name() works."""
+    instance_dir = tmp_path / "instance"
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    (instance_dir / "instance_id").write_text("test-link-state-instance")
+    monkeypatch.setenv("NOVA_VE_INSTANCE_DIR", str(instance_dir))
+
+
+def _patch_host_net_for_attach(monkeypatch):
+    """Stub host_net helpers so create_link can run without root."""
+    from app.services import host_net
+
+    calls: dict[str, list] = {
+        "bridge_exists": [],
+        "bridge_add": [],
+        "bridge_del": [],
+        "bridge_fingerprint_write": [],
+        "link_up": [],
+        "try_link_del": [],
+    }
+
+    monkeypatch.setattr(
+        host_net, "bridge_exists", lambda n: (calls["bridge_exists"].append(n) or True)
+    )
+    monkeypatch.setattr(
+        host_net, "bridge_add", lambda n: calls["bridge_add"].append(n)
+    )
+    monkeypatch.setattr(
+        host_net, "bridge_del", lambda n: calls["bridge_del"].append(n)
+    )
+    monkeypatch.setattr(
+        host_net,
+        "bridge_fingerprint_write",
+        lambda n, lab_id, net_id: calls["bridge_fingerprint_write"].append(
+            (n, lab_id, net_id)
+        ),
+    )
+    monkeypatch.setattr(host_net, "link_up", lambda n: calls["link_up"].append(n))
+    monkeypatch.setattr(
+        host_net, "try_link_del", lambda n: calls["try_link_del"].append(n)
+    )
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_create_link_brings_bridge_up_after_running_attach(
+    link_settings, monkeypatch, tmp_path,
+):
+    """A successful hot-attach to a running endpoint forces ``link_up``
+    on the destination bridge so a bridge with any port stays UP."""
+    from app.services import host_net, node_runtime_service
+
+    _instance_id_fixture(monkeypatch, tmp_path)
+    helper = _patch_host_net_for_attach(monkeypatch)
+
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": _node(1)},
+        networks={"5": _explicit_network(5, "lan")},
+    )
+
+    expected_bridge = host_net.bridge_name("lab", 5)
+    attach_calls: list[tuple] = []
+
+    def fake_runtime_record(_self, _lab_id, _node_id, *, include_stopped=False):
+        return {"kind": "docker", "lab_id": "lab", "node_id": 1}
+
+    def fake_attach_docker(
+        self, _lab_id, node_id, network_id, interface_index, *, bridge_name=None
+    ):
+        attach_calls.append((node_id, network_id, interface_index, bridge_name))
+        return {"interface_index": interface_index, "attach_generation": 1}
+
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_runtime_record",
+        fake_runtime_record,
+    )
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_attach_docker_interface_locked",
+        fake_attach_docker,
+    )
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    service = LinkService()
+    link_payload, _net, _replayed = await service.create_link(
+        lab_name,
+        {"node_id": 1, "interface_index": 0},
+        {"network_id": 5},
+    )
+
+    assert link_payload["id"]
+    assert attach_calls == [(1, 5, 0, expected_bridge)]
+    # The bridge gets brought up after the attach succeeds — only once
+    # even if there are multiple endpoints on the same bridge.
+    assert helper["link_up"] == [expected_bridge]
+
+
+@pytest.mark.asyncio
+async def test_create_link_no_bridge_up_when_no_endpoints_running(
+    link_settings, monkeypatch, tmp_path,
+):
+    """If no endpoint of the new link is on a running node, no
+    hot-attach work runs and link_up is NOT called — there is nothing
+    to wire up yet."""
+    _instance_id_fixture(monkeypatch, tmp_path)
+    helper = _patch_host_net_for_attach(monkeypatch)
+
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": _node(1)},
+        networks={"5": _explicit_network(5, "lan")},
+    )
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    service = LinkService()
+    await service.create_link(
+        lab_name,
+        {"node_id": 1, "interface_index": 0},
+        {"network_id": 5},
+    )
+
+    assert helper["link_up"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_link_calls_set_qemu_nic_link_up_for_running_qemu(
+    link_settings, monkeypatch, tmp_path,
+):
+    """After a successful QEMU hot-attach, ``set_qemu_nic_link`` is
+    called with ``up=True`` so the guest sees carrier on the new NIC."""
+    from app.services import node_runtime_service
+
+    _instance_id_fixture(monkeypatch, tmp_path)
+    _patch_host_net_for_attach(monkeypatch)
+
+    qemu_node = {
+        **_node(1),
+        "type": "qemu",
+        "ethernet": 4,
+    }
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": qemu_node},
+        networks={"5": _explicit_network(5, "lan")},
+    )
+
+    set_link_calls: list[tuple] = []
+
+    def fake_runtime_record(_self, _lab_id, _node_id, *, include_stopped=False):
+        return {"kind": "qemu", "lab_id": "lab", "node_id": 1}
+
+    def fake_attach_qemu(
+        self, _lab_id, node_id, network_id, interface_index, *, bridge_name=None
+    ):
+        return {"interface_index": interface_index, "attach_generation": 1}
+
+    def fake_set_qemu_nic_link(
+        self, lab_id, node_id, interface_index, *, up
+    ):
+        set_link_calls.append((node_id, interface_index, up))
+        return True, None
+
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_runtime_record",
+        fake_runtime_record,
+    )
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_attach_qemu_interface_locked",
+        fake_attach_qemu,
+    )
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "set_qemu_nic_link",
+        fake_set_qemu_nic_link,
+    )
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    service = LinkService()
+    await service.create_link(
+        lab_name,
+        {"node_id": 1, "interface_index": 2},
+        {"network_id": 5},
+    )
+
+    assert set_link_calls == [(1, 2, True)]
+
+
+@pytest.mark.asyncio
+async def test_delete_link_calls_set_qemu_nic_link_down_before_detach(
+    link_settings, monkeypatch, tmp_path,
+):
+    """``delete_link`` calls ``set_qemu_nic_link(up=False)`` before
+    handing off to the QMP hot-detach so the guest visibly drops
+    carrier on that interface."""
+    from app.services import node_runtime_service
+
+    _instance_id_fixture(monkeypatch, tmp_path)
+    _patch_host_net_for_attach(monkeypatch)
+
+    qemu_node = {**_node(1), "type": "qemu", "ethernet": 4}
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": qemu_node},
+        networks={"5": _explicit_network(5, "lan")},
+        links=[
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 2},
+                "to": {"network_id": 5},
+                "runtime": {"attach_generation": 1},
+            }
+        ],
+    )
+
+    set_link_calls: list[tuple] = []
+    detach_calls: list[tuple] = []
+    detach_order: list[str] = []
+
+    def fake_runtime_record(_self, _lab_id, _node_id, *, include_stopped=False):
+        return {"kind": "qemu", "lab_id": "lab", "node_id": 1}
+
+    def fake_set_qemu_nic_link(self, lab_id, node_id, interface_index, *, up):
+        set_link_calls.append((node_id, interface_index, up))
+        detach_order.append("set_link")
+        return True, None
+
+    def fake_detach_qemu(
+        self, _lab_id, node_id, interface_index, *, lab_path=None,
+        expected_generation=None,
+    ):
+        detach_calls.append((node_id, interface_index, expected_generation))
+        detach_order.append("detach")
+        return {"state": "detached"}
+
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_runtime_record",
+        fake_runtime_record,
+    )
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "set_qemu_nic_link",
+        fake_set_qemu_nic_link,
+    )
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_detach_qemu_interface_locked",
+        fake_detach_qemu,
+    )
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    service = LinkService()
+    # ``delete_link`` returns ``(False, ...)`` for "actually deleted" and
+    # ``(True, None)`` only for idempotent no-op on a missing link.
+    already_noop, _implicit = await service.delete_link(lab_name, "lnk_001")
+
+    assert already_noop is False
+    assert set_link_calls == [(1, 2, False)]
+    assert detach_calls == [(1, 2, 1)]
+    # set_link MUST run before detach — otherwise the device is gone
+    # and there is nothing to flip the carrier off on.
+    assert detach_order == ["set_link", "detach"]

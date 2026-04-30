@@ -60,8 +60,8 @@ def test_classify_helper_error_matches_contract(
             ("link-set-name-in-netns", "4242", "nvec0de1d2i3p", "eth3"),
         ),
         ("addr_up_in_netns", (4242, "eth3"), ("addr-up-in-netns", "4242", "eth3")),
-        ("link_del", ("nvec0de1d2i3h",), ("tap-del", "nvec0de1d2i3h")),
-        ("try_link_del", ("nvec0de1d2i3h",), ("tap-del", "nvec0de1d2i3h")),
+        ("link_del", ("nvec0de1d2i3h",), ("link-del", "nvec0de1d2i3h")),
+        ("try_link_del", ("nvec0de1d2i3h",), ("link-del", "nvec0de1d2i3h")),
     ],
 )
 def test_public_wrapper_verbs_shape_expected_helper_argv(

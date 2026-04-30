@@ -121,8 +121,16 @@ def validate_veth_name(value: str, *, label: str = "veth_name") -> str:
 
 
 def validate_iface_name(value: str, *, label: str = "iface_name") -> str:
-    """Accept any nova-ve-owned interface name (TAP or veth)."""
-    if RE_TAP_NAME.match(value) or RE_VETH_NAME.match(value):
+    """Accept any nova-ve-owned interface name (TAP, veth, or bridge).
+
+    Bridges are accepted so generic verbs like ``link-up`` / ``link-del``
+    can target a bridge without needing a bridge-specific verb.
+    """
+    if (
+        RE_TAP_NAME.match(value)
+        or RE_VETH_NAME.match(value)
+        or RE_BRIDGE_NAME.match(value)
+    ):
         return value
     raise _ValidationError(label)
 
@@ -345,6 +353,11 @@ def cmd_tap_del(args: argparse.Namespace) -> int:
     return _ip("link", "del", name)
 
 
+def cmd_link_del(args: argparse.Namespace) -> int:
+    name = validate_iface_name(args.name)
+    return _ip("link", "del", name)
+
+
 def cmd_veth_pair_add(args: argparse.Namespace) -> int:
     host = validate_veth_name(args.hostend, label="hostend")
     peer = validate_veth_name(args.peerend, label="peerend")
@@ -544,6 +557,7 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "bridge-del": cmd_bridge_del,
     "tap-add": cmd_tap_add,
     "tap-del": cmd_tap_del,
+    "link-del": cmd_link_del,
     "veth-pair-add": cmd_veth_pair_add,
     "link-master": cmd_link_master,
     "link-set-nomaster": cmd_link_set_nomaster,
@@ -578,6 +592,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name")
 
     p = sub.add_parser("tap-del", help="ip link del <name>")
+    p.add_argument("name")
+
+    p = sub.add_parser(
+        "link-del",
+        help="ip link del <name> — accepts both TAP and veth host-end names",
+    )
     p.add_argument("name")
 
     p = sub.add_parser("veth-pair-add", help="ip link add <h> type veth peer name <p>")
