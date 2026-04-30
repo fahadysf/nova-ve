@@ -640,6 +640,9 @@ class NodeRuntimeService:
         if not runtime:
             raise NodeRuntimeError(f"Node is not running: {node_id}")
 
+        if runtime.get("kind") == "docker":
+            runtime = self._ensure_console_proxy(lab_id, node_id, runtime)
+
         return {
             "lab_id": lab_id,
             "node_id": node_id,
@@ -649,6 +652,75 @@ class NodeRuntimeService:
             "port": int(runtime.get("console_port", 0)),
             "url": self._console_url(runtime),
         }
+
+    def _ensure_console_proxy(
+        self, lab_id: str, node_id: int, runtime: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Re-spawn a dead console proxy for a running Docker node.
+
+        Checks liveness via /proc. If the container is still up but the proxy
+        died, stops the stale entry, re-spawns, and persists the new PID.
+        Returns the (possibly updated) runtime dict.
+        """
+        proxy_pid = runtime.get("console_proxy_pid")
+        if proxy_pid and host_net.console_proxy_alive(int(proxy_pid)):
+            return runtime
+
+        container_pid = runtime.get("pid")
+        if not container_pid:
+            return runtime
+
+        # Verify the container is still alive. Check /proc/{pid} (the directory
+        # itself is always world-accessible); /proc/{pid}/ns/net requires root.
+        if not Path(f"/proc/{container_pid}").is_dir():
+            return runtime
+
+        _logger.info(
+            "console proxy dead or missing for lab=%s node=%s (old_pid=%s); respawning",
+            lab_id,
+            node_id,
+            proxy_pid,
+        )
+
+        if proxy_pid:
+            try:
+                host_net.console_proxy_stop(int(proxy_pid))
+            except Exception:
+                pass
+
+        console_mode = runtime.get("console", "telnet")
+        listen_port = int(runtime.get("console_port", 0))
+        if not listen_port:
+            return runtime
+
+        try:
+            new_pid = host_net.console_proxy_start(
+                node_pid=int(container_pid),
+                listen_port=listen_port,
+                target_port=self._container_console_port(console_mode),
+            )
+        except Exception as exc:
+            _logger.warning(
+                "console proxy respawn failed for lab=%s node=%s: %s",
+                lab_id,
+                node_id,
+                exc,
+            )
+            return runtime
+
+        runtime = dict(runtime)
+        runtime["console_proxy_pid"] = new_pid
+        key = self._key(lab_id, node_id)
+        with self._lock:
+            self._registry[key] = runtime
+        self._persist_runtime(runtime)
+        _logger.info(
+            "console proxy respawned for lab=%s node=%s new_pid=%s",
+            lab_id,
+            node_id,
+            new_pid,
+        )
+        return runtime
 
     def stream_logs(self, lab_id: str, node_id: int, tail: int = 200) -> Iterator[str]:
         runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
@@ -1375,8 +1447,9 @@ class NodeRuntimeService:
                 if index in attachment_by_index:
                     tap = host_net.tap_name(lab_id, node_id, index)
                     bridge = attachment_by_index[index]["bridge_name"]
-                    host_net.tap_add(tap)
-                    provisioned_taps.append(tap)
+                    if not host_net.tap_exists(tap):
+                        host_net.tap_add(tap)
+                        provisioned_taps.append(tap)
                     host_net.link_master(tap, bridge)
                     host_net.link_up(tap)
                     tap_names[index] = tap
@@ -1386,6 +1459,7 @@ class NodeRuntimeService:
             raise
 
         # ----- Build per-NIC -netdev / -device argv ------------------------
+        unconnected_nic_indices: list[int] = []
         for index in range(ethernet_count):
             device_args = (
                 f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
@@ -1411,16 +1485,18 @@ class NodeRuntimeService:
                     device_args,
                 ]
             else:
-                # No network attached and no uplink request — give the NIC
-                # an isolated ``hubport`` netdev (each in its own private
-                # hub, hubid={index}) so it appears in the guest but never
-                # reaches host networking.
+                # No network attached and no uplink request. The carrier
+                # is forced off via QMP ``set_link`` AFTER spawn — e1000
+                # (and most other NIC models) reject ``link=`` as a
+                # device-line option, so the boot-time argv stays plain
+                # and the post-spawn step pins these to ``up=False``.
                 cmd += [
                     "-netdev",
                     f"hubport,id=net{index},hubid={index}",
                     "-device",
                     device_args,
                 ]
+                unconnected_nic_indices.append(index)
 
         if iso_path:
             cmd += ["-cdrom", str(iso_path), "-boot", "order=dc"]
@@ -1459,6 +1535,23 @@ class NodeRuntimeService:
             raise NodeRuntimeError(error or "QEMU exited immediately after start")
 
         process_info = psutil.Process(process.pid)
+
+        # Pin the carrier OFF on every unconnected NIC index. QMP may
+        # not be bound the very first ms after spawn, so we retry each
+        # call once on transport failure. Best-effort: if QMP still
+        # rejects, the next ``ensure_lab_bridges`` reconcile catches it.
+        if unconnected_nic_indices:
+            qmp_path = str(qmp_socket_path)
+            for unconnected_index in unconnected_nic_indices:
+                args = {"name": f"net{unconnected_index}", "up": False}
+                for attempt in range(2):
+                    try:
+                        self._qmp_command(qmp_path, "set_link", args)
+                        break
+                    except Exception:  # noqa: BLE001 — best-effort
+                        if attempt == 0:
+                            time.sleep(0.1)
+                        # else: give up, reconcile will retry.
 
         # US-201/US-203: register the PID into the runtime registry. On
         # registry failure we kill the QEMU process and sweep the TAPs to
@@ -1757,6 +1850,8 @@ class NodeRuntimeService:
             self._docker_network_alias(node),
             "--network",
             "none",
+            "--cap-add",
+            "NET_ADMIN",
             "-p",
             f"{console_port}:{self._container_console_port(console_mode)}",
         ]
@@ -3187,6 +3282,44 @@ class NodeRuntimeService:
             raise NodeRuntimeQMPTimeout(
                 f"QMP {command} transport error on {socket_path}: {exc}"
             ) from exc
+
+    def set_qemu_nic_link(
+        self, lab_id: str, node_id: int, interface_index: int, *, up: bool
+    ) -> tuple[bool, str | None]:
+        """Best-effort QMP ``set_link`` for ``net{interface_index}``.
+
+        Returns ``(ok, reason)``. ``ok`` is True only when QEMU returned a
+        successful (non-error) response. The QMP ``name`` is the **netdev
+        id** (``net{index}``) which exists on both boot-time and hot-added
+        NICs, so this works for hubport-backed and tap-backed NICs alike.
+
+        The runtime mutex is intentionally NOT acquired — set_link is
+        idempotent and a missed flip during a concurrent attach will be
+        corrected by the caller's own attach/detach path or the next
+        reconcile pass.
+        """
+        runtime = self._runtime_record(lab_id, node_id)
+        if runtime is None:
+            return False, "no runtime record"
+        if str(runtime.get("kind") or "") != "qemu":
+            return False, f"runtime kind={runtime.get('kind')!r}"
+        socket_path = runtime.get("qmp_socket") or ""
+        if not socket_path:
+            work_dir = runtime.get("work_dir")
+            socket_path = str(Path(work_dir) / "qmp.sock") if work_dir else ""
+        if not socket_path:
+            return False, "no qmp socket"
+        try:
+            response = self._qmp_command(
+                socket_path,
+                "set_link",
+                {"name": f"net{int(interface_index)}", "up": bool(up)},
+            )
+        except NodeRuntimeQMPTimeout as exc:
+            return False, f"qmp transport: {exc}"
+        if isinstance(response, dict) and isinstance(response.get("error"), dict):
+            return False, f"qmp error: {response['error']}"
+        return True, None
 
     def _find_free_pcie_slot(
         self,

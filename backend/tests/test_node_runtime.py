@@ -2342,3 +2342,185 @@ def test_us302_qemu_stop_sweeps_tap_names(
     helper["try_link_del"].clear()
     service.stop_node(lab_data, 1)
     assert set(helper["try_link_del"]) == expected_taps
+
+
+# ---------------------------------------------------------------------------
+# Boot-time NIC link state: connected NICs default link=on, unconnected NICs
+# get link=off so the guest does not see phantom carrier on hubport-backed
+# devices.
+# ---------------------------------------------------------------------------
+
+
+def _qemu_link_state_lab() -> dict:
+    """4-NIC QEMU node with only ``Gi3`` (interface_index=2) linked."""
+    from app.services import host_net
+
+    lab_id = "lab-link-state"
+    bridge1 = host_net.bridge_name(lab_id, 1)
+    return {
+        "schema": 2,
+        "id": lab_id,
+        "meta": {"name": "link-state"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "vyos-1",
+                "type": "qemu",
+                "image": "router-image",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 1024,
+                "ethernet": 4,
+                "firstmac": "50:00:00:01:00:00",
+                "interfaces": [
+                    {"index": 0, "name": "Gi1"},
+                    {"index": 1, "name": "Gi2"},
+                    {"index": 2, "name": "Gi3"},
+                    {"index": 3, "name": "Gi4"},
+                ],
+            }
+        },
+        "networks": {
+            "1": {
+                "id": 1,
+                "name": "lan",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+                "runtime": {"bridge_name": bridge1},
+            }
+        },
+        "links": [
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 2},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            }
+        ],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+
+def _device_args_by_index(cmd: list[str]) -> dict[int, str]:
+    """Return ``{index: device_arg}`` for every ``-device <nic_model>,...``
+    that targets ``netdev=net{index}``."""
+    out: dict[int, str] = {}
+    for i, tok in enumerate(cmd):
+        if tok != "-device":
+            continue
+        arg = cmd[i + 1] if i + 1 < len(cmd) else ""
+        if "netdev=net" not in arg:
+            continue
+        for piece in arg.split(","):
+            if piece.startswith("netdev=net"):
+                try:
+                    idx = int(piece[len("netdev=net"):])
+                except ValueError:
+                    continue
+                out[idx] = arg
+                break
+    return out
+
+
+def _patch_qmp_capture(monkeypatch) -> list[tuple]:
+    """Patch ``NodeRuntimeService._qmp_command`` to capture set_link calls."""
+    captured: list[tuple] = []
+
+    def fake_qmp(self, socket_path, command, arguments=None):
+        captured.append((command, arguments))
+        return {"return": {}}
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.NodeRuntimeService._qmp_command",
+        fake_qmp,
+    )
+    return captured
+
+
+def test_qemu_unconnected_nics_get_set_link_off_after_spawn(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Connected NIC keeps the QEMU default (no link=); unconnected NICs
+    have ``set_link {up: False}`` issued via QMP right after spawn.
+    Boot-time argv must NOT carry ``link=off`` because e1000 (and most
+    NIC models) reject it as a device property."""
+    from app.services import host_net
+
+    lab_id = "lab-link-state"
+    bridge = host_net.bridge_name(lab_id, 1)
+    _us302_helper_mock(monkeypatch, present_bridges={bridge})
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+    set_link_calls = _patch_qmp_capture(monkeypatch)
+
+    NodeRuntimeService().start_node(_qemu_link_state_lab(), 1)
+    cmd = recorded_popen[0]["cmd"]
+    by_index = _device_args_by_index(cmd)
+
+    assert set(by_index.keys()) == {0, 1, 2, 3}
+    # No NIC carries ``link=`` on the device line — that property does
+    # not exist on e1000 and would crash QEMU at boot.
+    for idx, arg in by_index.items():
+        assert "link=" not in arg, f"unexpected link= on idx {idx}: {arg!r}"
+    # Sanity: connected NIC is tap-backed, others are hubport.
+    flat = " ".join(cmd)
+    assert "-netdev tap," in flat
+    assert "-netdev hubport," in flat
+
+    # Post-spawn set_link issued for the three unconnected indices only.
+    set_link_args = [
+        args for cmd_name, args in set_link_calls if cmd_name == "set_link"
+    ]
+    assert {a["name"] for a in set_link_args} == {"net0", "net1", "net3"}
+    assert all(a["up"] is False for a in set_link_args)
+
+
+def test_qemu_all_unconnected_nics_get_set_link_off_after_spawn(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Sample lab (no networks, no links) — both NICs unconnected →
+    set_link issued for net0 and net1 with ``up=False``."""
+    _us302_helper_mock(monkeypatch, present_bridges=set())
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+    set_link_calls = _patch_qmp_capture(monkeypatch)
+
+    lab_data = {
+        "schema": 2,
+        "id": "lab-empty",
+        "meta": {"name": "empty"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "router",
+                "type": "qemu",
+                "image": "router-image",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 512,
+                "ethernet": 2,
+                "firstmac": "50:00:00:01:00:00",
+            }
+        },
+        "networks": {},
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+    NodeRuntimeService().start_node(lab_data, 1)
+    by_index = _device_args_by_index(recorded_popen[0]["cmd"])
+    assert set(by_index.keys()) == {0, 1}
+    for idx, arg in by_index.items():
+        assert "link=" not in arg, f"unexpected link= on idx {idx}: {arg!r}"
+
+    set_link_args = [
+        args for cmd_name, args in set_link_calls if cmd_name == "set_link"
+    ]
+    assert {a["name"] for a in set_link_args} == {"net0", "net1"}
+    assert all(a["up"] is False for a in set_link_args)

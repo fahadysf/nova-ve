@@ -465,6 +465,15 @@ def console_proxy_stop(proxy_pid: int) -> None:
     _invoke_helper("console-proxy-stop", str(int(proxy_pid)))
 
 
+def console_proxy_alive(proxy_pid: int) -> bool:
+    """Return True if ``proxy_pid`` still refers to a running console proxy."""
+    try:
+        cmdline = (Path("/proc") / str(int(proxy_pid)) / "cmdline").read_bytes().split(b"\x00")
+        return any(b"nova-ve-console-proxy" in arg for arg in cmdline)
+    except OSError:
+        return False
+
+
 def link_up(iface: str) -> None:
     """Bring ``iface`` up on the host (``ip link set <iface> up``)."""
     _invoke_helper("link-up", iface)
@@ -497,12 +506,24 @@ def read_iface_mac(pid: int, iface: str) -> str:
     return (proc.stdout or "").strip()
 
 
+def tap_exists(name: str) -> bool:
+    """Return True if a Linux interface named ``name`` currently exists.
+
+    Uses the same unprivileged ``ip link show`` check as ``bridge_exists``.
+    """
+    try:
+        proc = _run([_ip_bin(), "link", "show", name])
+    except FileNotFoundError:
+        return False
+    return proc.returncode == 0
+
+
 def tap_add(name: str) -> None:
     """Create a Linux TAP device with ``name`` via the privileged helper.
 
     Used by the QEMU start path (US-302): one TAP per NIC, attached to the
     network's bridge before QEMU launches with ``-netdev tap,ifname=...``.
-    Raises :class:`HostNetEEXIST` if a link with ``name`` already exists.
+    Raises :class:`HostNetUnknown` if the kernel rejects the creation.
     """
     _invoke_helper("tap-add", name)
 
@@ -519,10 +540,11 @@ def tap_del(name: str) -> None:
 def link_del(name: str) -> None:
     """Delete a host-side link (TAP or veth host-end) via the helper.
 
-    The helper reuses the ``tap-del`` verb (``ip link del``) which works for
-    veth host-ends as well — deleting the host end auto-removes the peer.
+    Uses the helper's ``link-del`` verb whose validator accepts both TAP
+    and veth host-end names. Deleting the host end of a veth pair
+    auto-removes the peer.
     """
-    _invoke_helper("tap-del", name)
+    _invoke_helper("link-del", name)
 
 
 def try_link_del(name: str) -> None:
