@@ -670,8 +670,9 @@ class NodeRuntimeService:
         if not container_pid:
             return runtime
 
-        # Verify the container itself is still alive before attempting respawn.
-        if not Path(f"/proc/{container_pid}/ns/net").exists():
+        # Verify the container is still alive. Check /proc/{pid} (the directory
+        # itself is always world-accessible); /proc/{pid}/ns/net requires root.
+        if not Path(f"/proc/{container_pid}").is_dir():
             return runtime
 
         _logger.info(
