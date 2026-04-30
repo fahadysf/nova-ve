@@ -58,7 +58,8 @@ function normalizeBody(body: ApiRequestOptions['body'], headers: Headers): BodyI
 async function redirectToLogin() {
   authStore.clear();
   if (browser && window.location.pathname !== '/login') {
-    await goto('/login');
+    const next = encodeURIComponent(window.location.pathname + window.location.search);
+    await goto(`/login?next=${next}`);
   }
 }
 

@@ -1,23 +1,29 @@
 <script lang="ts">
   import { login, authStore } from '$lib/stores/auth';
   import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
 
   let username = '';
   let password = '';
   let error = '';
 
+  function getNextUrl(): string {
+    const next = $page.url.searchParams.get('next') ?? '';
+    return next.startsWith('/') && !next.startsWith('//') ? next : '/labs';
+  }
+
   async function handleLogin() {
     error = '';
     const result = await login(username, password);
     if (result.success) {
-      goto('/labs');
+      goto(getNextUrl());
     } else {
       error = result.message || 'Login failed';
     }
   }
 
   $: if ($authStore.authenticated) {
-    goto('/labs');
+    goto(getNextUrl());
   }
 </script>
 
