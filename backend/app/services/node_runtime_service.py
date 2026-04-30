@@ -1375,8 +1375,9 @@ class NodeRuntimeService:
                 if index in attachment_by_index:
                     tap = host_net.tap_name(lab_id, node_id, index)
                     bridge = attachment_by_index[index]["bridge_name"]
-                    host_net.tap_add(tap)
-                    provisioned_taps.append(tap)
+                    if not host_net.tap_exists(tap):
+                        host_net.tap_add(tap)
+                        provisioned_taps.append(tap)
                     host_net.link_master(tap, bridge)
                     host_net.link_up(tap)
                     tap_names[index] = tap
