@@ -196,7 +196,7 @@ def test_q35_default_preallocates_eight_root_ports(patched_settings, argv_captur
 
     assert runtime["machine"] == "q35"
     assert runtime["max_nics"] == 8
-    assert runtime["allocated_slots"] == list(range(8))
+    assert runtime["allocated_slots"] == []  # starts empty; populated on hot-add only
     assert runtime["hotplug_capable"] is True
 
 

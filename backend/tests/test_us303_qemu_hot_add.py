@@ -470,16 +470,16 @@ def test_us303_rejects_when_hotplug_capable_false(
 def test_us303_rejects_duplicate_interface_index(
     lab_settings, monkeypatch, _instance_id
 ):
-    """Re-attaching the same interface_index on an already-attached node
-    raises NodeRuntimeError (the QMP id collision would manifest as a
-    confusing kernel-side error otherwise).
+    """Re-attaching the same interface_index to the SAME network is idempotent
+    (returns the existing attachment, no QMP calls).  Re-attaching to a
+    DIFFERENT network raises NodeRuntimeError naming the current network.
     """
     lab_id = "labdup"
     _seed_lab(
         lab_settings.LABS_DIR,
         f"{lab_id}.json",
         nodes={"1": _qemu_node(1)},
-        networks={"5": _network(5)},
+        networks={"5": _network(5), "6": _network(6)},
     )
 
     svc = NodeRuntimeService()
@@ -496,8 +496,15 @@ def test_us303_rejects_duplicate_interface_index(
     fake_qmp = _FakeQmp()
     svc._qmp_client = fake_qmp
 
-    with pytest.raises(NodeRuntimeError, match="already attached"):
-        svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
+    # Same network — idempotent success, no QMP traffic.
+    result = svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=2)
+    assert result["interface_index"] == 2
+    assert result["network_id"] == 5
+    assert fake_qmp.calls == []
+
+    # Different network — should raise naming the currently-attached network.
+    with pytest.raises(NodeRuntimeError, match="already attached to network 5"):
+        svc.attach_qemu_interface(lab_id, 1, network_id=6, interface_index=2)
     assert fake_qmp.calls == []
 
 

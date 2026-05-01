@@ -436,17 +436,17 @@ def test_us204b_parallel_attach_same_iface_serializes(
     )
 
     # Release A. Now B's mutex acquire should unblock — but B will then
-    # discover the duplicate-iface check and surface NodeRuntimeError
-    # without doing any kernel work.
+    # discover the duplicate-iface check and return idempotent success
+    # (same network_id) without doing any further kernel work.
     hold.set()
     t_a.join(timeout=5.0)
     t_b.join(timeout=5.0)
 
-    # A succeeded, B was rejected by the duplicate-iface guard.
+    # A succeeded; B also succeeded idempotently (same-network re-attach).
     a_done = any(entry == "A:done" for entry in enter_order)
-    b_err = any(entry.startswith("B:err:") for entry in enter_order)
+    b_done = any(entry == "B:done" for entry in enter_order)
     assert a_done, f"thread A did not complete: {enter_order!r}"
-    assert b_err, f"thread B did not surface duplicate-iface error: {enter_order!r}"
+    assert b_done, f"thread B did not complete idempotently: {enter_order!r}"
 
     # The duplicate-iface check ran AFTER the mutex acquire, so exactly one
     # 6-step sequence happened.

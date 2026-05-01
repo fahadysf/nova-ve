@@ -1560,9 +1560,11 @@ class NodeRuntimeService:
             i for i in range(ethernet_count)
             if i not in tap_names and not self._interface_uplink(node_interfaces, i)
         ]
-        # US-301: track pre-allocated pcie-root-port slot indices for hot-plug
-        # book-keeping (used by attach_interface / detach_interface).
-        allocated_slots: list[int] = list(range(max_nics)) if machine == "q35" and max_nics > 0 else []
+        # US-301: in-flight slot reservations for hot-plug race-window only
+        # (between slot-pick and device_add visibility in query-pci).
+        # Boot-time occupancy is detected live via query-pci; pre-seeding
+        # this list would mark every slot occupied and block all hot-adds.
+        allocated_slots: list[int] = []
 
         extra_args = _extra_str(extras, "qemu_options")
         try:
@@ -2279,12 +2281,16 @@ class NodeRuntimeService:
         # Reject duplicate interface indices on the same node — the host_end
         # name only encodes (lab, node, iface), so re-attaching the same iface
         # would collide on ``ip link add``.
+        # Same-network re-attach is idempotent; different-network names blocker.
         existing_attachments = runtime.get("interface_attachments") or []
         for existing in existing_attachments:
             if int(existing.get("interface_index", -1)) == int(interface_index):
+                if int(existing.get("network_id", -1)) == int(network_id):
+                    return existing
                 raise NodeRuntimeError(
-                    f"interface_index={interface_index} already attached on "
-                    f"node {node_id}; detach before re-attaching."
+                    f"interface_index={interface_index} already attached to "
+                    f"network {existing.get('network_id')} on node {node_id}; "
+                    "detach that link before re-attaching."
                 )
 
         bridge = bridge_name or host_net.bridge_name(lab_id, int(network_id))
@@ -2643,12 +2649,17 @@ class NodeRuntimeService:
 
         # Reject duplicate interface indices on the same node — the QMP
         # ``id=net{interface_index}`` would collide with an existing one.
+        # Same-network re-attach is idempotent (stale runtime record after a
+        # failed hot-detach); different-network conflict names the blocker.
         existing_attachments = runtime.get("interface_attachments") or []
         for existing in existing_attachments:
             if int(existing.get("interface_index", -1)) == int(interface_index):
+                if int(existing.get("network_id", -1)) == int(network_id):
+                    return existing
                 raise NodeRuntimeError(
-                    f"interface_index={interface_index} already attached on "
-                    f"node {node_id}; detach before re-attaching."
+                    f"interface_index={interface_index} already attached to "
+                    f"network {existing.get('network_id')} on node {node_id}; "
+                    "detach that link before re-attaching."
                 )
 
         bridge = bridge_name or host_net.bridge_name(lab_id, int(network_id))
