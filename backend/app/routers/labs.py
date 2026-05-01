@@ -1004,6 +1004,26 @@ async def node_console(
     }
 
 
+@router.get("/{lab_path:path}/nodes/{node_id}/qemu-preview")
+async def node_qemu_preview(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
+        preview = NodeRuntimeService().qemu_command_preview(data, node_id)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
+    except FileNotFoundError:
+        return {"code": 404, "status": "fail", "message": "Lab does not exist."}
+    except NodeRuntimeError as exc:
+        return {"code": 400, "status": "fail", "message": str(exc)}
+
+    return {"code": 200, "status": "success", "message": "QEMU command preview.", "data": preview}
+
+
 @router.get("/{lab_path:path}/nodes/{node_id}/telnet")
 async def node_telnet(
     lab_path: str,

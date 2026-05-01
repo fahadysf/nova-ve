@@ -11,12 +11,14 @@
     NodeCatalogTemplate,
     NodeData,
   } from '$lib/types';
+  import { apiGetData } from '$lib/api';
 
   export let open = false;
   export let mode: 'create' | 'edit' = 'create';
   export let catalog: NodeCatalog | null = null;
   export let node: NodeData | null = null;
   export let submitting = false;
+  export let labPath = '';
 
   type NodeTypeKey = NodeData['type'];
   type ExtrasMap = Record<string, unknown>;
@@ -364,6 +366,49 @@
     lastSignature = signature;
     initializeForm();
   }
+
+  // ── QEMU computed command preview ────────────────────────────────────────
+  type PreviewToken = { token: string; source: 'default' | 'user' | 'actual' };
+  let previewTokens: PreviewToken[] = [];
+  let previewLoading = false;
+  let previewRunning = false;
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function schedulePreviewFetch() {
+    if (previewTimer) clearTimeout(previewTimer);
+    previewLoading = true;
+    previewTimer = setTimeout(doFetchPreview, 400);
+  }
+
+  async function doFetchPreview() {
+    if (!labPath || !node || mode !== 'edit' || selectedTemplate?.type !== 'qemu') {
+      previewLoading = false;
+      return;
+    }
+    try {
+      const data = await apiGetData<{ tokens: PreviewToken[]; running: boolean }>(
+        `/labs/${labPath}/nodes/${node.id}/qemu-preview`,
+        { suppressToast: true }
+      );
+      previewTokens = data.tokens;
+      previewRunning = data.running;
+    } catch {
+      previewTokens = [];
+    } finally {
+      previewLoading = false;
+    }
+  }
+
+  $: {
+    const _qo = extras.qemu_options;
+    const _bo = extras.boot_order;
+    if (mode === 'edit' && open && selectedTemplate?.type === 'qemu' && node) {
+      schedulePreviewFetch();
+    } else if (!open) {
+      previewTokens = [];
+      previewLoading = false;
+    }
+  }
 </script>
 
 {#if open}
@@ -703,6 +748,24 @@
                     {/if}
                   {/each}
                 </div>
+              </div>
+            {/if}
+
+            {#if selectedTemplate?.type === 'qemu' && mode === 'edit' && node}
+              <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
+                <div class="mb-2 flex items-center gap-2">
+                  <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Computed command</div>
+                  {#if previewRunning}
+                    <span class="rounded bg-emerald-500/20 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-emerald-400">live</span>
+                  {/if}
+                </div>
+                {#if previewLoading}
+                  <div class="text-[11px] text-slate-600">Loading…</div>
+                {:else if previewTokens.length > 0}
+                  <pre class="flex flex-wrap gap-x-1 gap-y-0.5 whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed">{#each previewTokens as tok}<span class={tok.source === 'actual' ? 'text-emerald-400' : tok.source === 'user' ? 'text-slate-200' : 'text-slate-500'}>{tok.token} </span>{/each}</pre>
+                {:else}
+                  <div class="text-[11px] text-slate-600">Start the node to see the live command, or save changes to preview.</div>
+                {/if}
               </div>
             {/if}
 
