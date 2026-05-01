@@ -1694,7 +1694,7 @@ class NodeRuntimeService:
 
         overlay_ph = "<work-dir>/overlay.qcow2"
         qmp_ph = "<work-dir>/qmp.sock"
-        console_port_ph = 5000
+        console_port_ph = 5900
 
         cmd: list[str] = [
             qemu_binary,
