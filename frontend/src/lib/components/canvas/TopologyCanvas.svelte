@@ -1805,6 +1805,7 @@
     catalog={nodeCatalog}
     node={nodeModalNode}
     submitting={nodeModalSubmitting}
+    labPath={labId}
     on:cancel={() => {
       nodeModalOpen = false;
       nodeModalNode = null;
