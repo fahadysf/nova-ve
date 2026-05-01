@@ -203,10 +203,13 @@ def _qemu_extras_schema() -> list[dict[str, Any]]:
         {
             "key": "boot_order",
             "label": "Boot order",
-            "type": "text",
+            "type": "select",
+            "options": [
+                {"value": "", "label": "Default (disk first when ISO attached)"},
+                {"value": "cd", "label": "Disk, then CD-ROM"},
+                {"value": "dc", "label": "CD-ROM, then disk"},
+            ],
             "default": "",
-            "placeholder": "cd",
-            "description": "QEMU boot order (c=disk, d=cdrom, n=PXE). Default when ISO attached: cd (disk-first).",
             "stoppedOnly": True,
             "runtime": True,
         },
