@@ -12,7 +12,11 @@ import pytest
 from app.routers import labs
 from app.services.guacamole_db_service import GuacamoleDatabaseService, _AUTH_TOKEN_CACHE
 from app.services.html5_service import Html5SessionService
-from app.services.node_runtime_service import NodeRuntimeService
+from app.services.node_runtime_service import (
+    NodeRuntimeService,
+    _merge_qemu_args,
+    _parse_qemu_tokens,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -2530,3 +2534,116 @@ def test_qemu_all_unconnected_nics_get_set_link_off_after_spawn(
     ]
     assert {a["name"] for a in set_link_args} == {"net0", "net1"}
     assert all(a["up"] is False for a in set_link_args)
+
+
+# ── Unit tests: _parse_qemu_tokens ────────────────────────────────────────────
+
+
+def test_parse_qemu_tokens_empty():
+    assert _parse_qemu_tokens([]) == []
+
+
+def test_parse_qemu_tokens_binary_only():
+    assert _parse_qemu_tokens(["qemu-system-x86_64"]) == [("qemu-system-x86_64", [])]
+
+
+def test_parse_qemu_tokens_valueless_flag():
+    assert _parse_qemu_tokens(["-nographic"]) == [("-nographic", [])]
+
+
+def test_parse_qemu_tokens_flag_with_one_value():
+    assert _parse_qemu_tokens(["-display", "none"]) == [("-display", ["none"])]
+
+
+def test_parse_qemu_tokens_flag_with_multi_value_tokens():
+    # Each token is already split; multiple non-flag tokens after a flag are all values.
+    result = _parse_qemu_tokens(["-machine", "type=q35", "-smp", "2"])
+    assert result == [("-machine", ["type=q35"]), ("-smp", ["2"])]
+
+
+def test_parse_qemu_tokens_duplicate_flag_preserved():
+    # Two -drive entries must appear as two separate groups in order.
+    tokens = ["-drive", "file=a.qcow2", "-drive", "file=b.iso"]
+    result = _parse_qemu_tokens(tokens)
+    assert result == [("-drive", ["file=a.qcow2"]), ("-drive", ["file=b.iso"])]
+
+
+def test_parse_qemu_tokens_binary_then_flags():
+    tokens = ["qemu-system-x86_64", "-display", "none", "-m", "1024"]
+    result = _parse_qemu_tokens(tokens)
+    assert result == [
+        ("qemu-system-x86_64", []),
+        ("-display", ["none"]),
+        ("-m", ["1024"]),
+    ]
+
+
+# ── Unit tests: _merge_qemu_args ──────────────────────────────────────────────
+
+
+def test_merge_qemu_args_empty_extra_is_passthrough():
+    base = ["qemu-system-x86_64", "-display", "none", "-m", "1024"]
+    # Empty string → identity return (same object).
+    assert _merge_qemu_args(base, "") is base
+    # Whitespace-only: shlex.split returns [] → no overrides, result equals base.
+    assert _merge_qemu_args(base, "   ") == base
+
+
+def test_merge_qemu_args_new_flag_appended():
+    base = ["qemu-system-x86_64", "-display", "none"]
+    result = _merge_qemu_args(base, "-snapshot")
+    assert result == ["qemu-system-x86_64", "-display", "none", "-snapshot"]
+
+
+def test_merge_qemu_args_single_flag_override():
+    base = ["qemu-system-x86_64", "-display", "none", "-m", "1024"]
+    result = _merge_qemu_args(base, "-display gtk")
+    # Exactly one -display; user's value replaces the default.
+    assert result.count("-display") == 1
+    assert result[result.index("-display") + 1] == "gtk"
+    # -display is moved to the end (after -m).
+    assert result.index("-display") > result.index("-m")
+
+
+def test_merge_qemu_args_multi_instance_flag_all_removed():
+    # Base has two -drive entries; user supplies one -drive → both base entries replaced.
+    base = [
+        "qemu-system-x86_64",
+        "-drive", "file=overlay.qcow2,if=virtio",
+        "-drive", "file=cdrom.iso,media=cdrom",
+        "-m", "1024",
+    ]
+    result = _merge_qemu_args(base, "-drive file=custom.img,if=ide")
+    assert result.count("-drive") == 1
+    assert result[result.index("-drive") + 1] == "file=custom.img,if=ide"
+
+
+def test_merge_qemu_args_valueless_flag_appended_without_touching_others():
+    # User adds a valueless flag (-snapshot); -display in base is untouched.
+    base = ["qemu-system-x86_64", "-display", "none"]
+    result = _merge_qemu_args(base, "-snapshot")
+    assert "-snapshot" in result
+    assert "-display" in result  # different flag — not removed
+    assert result[result.index("-display") + 1] == "none"
+
+
+def test_merge_qemu_args_valueless_flag_overrides_same_valueless_flag():
+    # User re-specifies a valueless flag already in base; it replaces the base copy.
+    base = ["qemu-system-x86_64", "-no-acpi", "-m", "1024"]
+    result = _merge_qemu_args(base, "-no-acpi")
+    assert result.count("-no-acpi") == 1
+
+
+def test_merge_qemu_args_multiple_overrides_in_one_extra_str():
+    base = ["qemu-system-x86_64", "-display", "none", "-boot", "order=cd"]
+    result = _merge_qemu_args(base, "-display sdl -boot order=n")
+    assert result.count("-display") == 1
+    assert result[result.index("-display") + 1] == "sdl"
+    assert result.count("-boot") == 1
+    assert result[result.index("-boot") + 1] == "order=n"
+
+
+def test_merge_qemu_args_malformed_extra_raises_value_error():
+    base = ["qemu-system-x86_64", "-display", "none"]
+    with pytest.raises(ValueError):
+        _merge_qemu_args(base, "-name 'unclosed")

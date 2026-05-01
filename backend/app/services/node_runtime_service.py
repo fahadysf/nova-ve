@@ -1397,6 +1397,86 @@ class NodeRuntimeService:
             return False
         return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
 
+    def _build_qemu_base_cmd(
+        self,
+        *,
+        node: dict[str, Any],
+        extras: dict[str, Any],
+        lab_id: str,
+        qemu_binary: str,
+        console_port: int,
+        overlay_path: str,
+        qmp_path: str,
+        tap_names: dict[int, str],
+        attachment_by_index: dict[int, dict[str, Any]],
+    ) -> list[str]:
+        """Assemble the base QEMU argv (before user extra-args merge).
+
+        Variable parts (binary, paths, ports, tap mapping) are supplied by
+        the caller; everything derivable from the node dict is computed here.
+        The caller must apply _merge_qemu_args on the returned list.
+        """
+        node_id = int(node["id"])
+        machine, max_nics, _ = self._resolve_qemu_machine(node)
+        accel = "kvm" if Path("/dev/kvm").exists() else "tcg"
+        console_mode = node.get("console", "telnet")
+        nic_model = _extra_str(extras, "qemu_nic") or "e1000"
+        first_mac = node.get("firstmac") or extras.get("firstmac")
+        ethernet_count = int(node.get("ethernet", 0))
+        node_interfaces = node.get("interfaces") or []
+        iso_path = self._resolve_qemu_iso(node)
+
+        cmd: list[str] = [
+            qemu_binary,
+            "-display", "none",
+            "-machine", f"type={machine},accel={accel}",
+            "-smp", str(node.get("cpu", 1)),
+            "-m", str(node.get("ram", 1024)),
+            "-name", str(node.get("name", f"node-{node_id}")),
+            "-uuid", str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node_id}"),
+            "-drive", f"file={overlay_path},if=virtio,cache=writeback,format=qcow2",
+        ]
+        cmd += ["-cpu", "host,vmx=off,svm=off"] if accel == "kvm" else ["-cpu", "max"]
+        if console_mode == "vnc":
+            cmd += ["-vnc", f":{console_port - 5900}"]
+        else:
+            cmd += ["-serial", f"telnet::{console_port},server,nowait"]
+        cmd += ["-qmp", f"unix:{qmp_path},server,nowait"]
+
+        if machine == "q35" and max_nics > 0:
+            for i in range(max_nics):
+                slot = i + 1
+                cmd += ["-device", f"pcie-root-port,id=rp{i},chassis={slot},slot={slot}"]
+
+        for index in range(ethernet_count):
+            device_args = (
+                f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
+            )
+            if machine == "q35" and index < max_nics:
+                device_args += f",bus=rp{index}"
+
+            if index in tap_names:
+                tap = tap_names[index]
+                cmd += [
+                    "-netdev", f"tap,id=net{index},ifname={tap},script=no,downscript=no",
+                    "-device", device_args,
+                ]
+            elif self._interface_uplink(node_interfaces, index):
+                cmd += ["-netdev", f"user,id=net{index}", "-device", device_args]
+            else:
+                cmd += [
+                    "-netdev", f"hubport,id=net{index},hubid={index}",
+                    "-device", device_args,
+                ]
+
+        boot_order = _extra_str(extras, "boot_order")
+        if iso_path:
+            cmd += ["-cdrom", str(iso_path)]
+        if boot_order or iso_path:
+            cmd += ["-boot", f"order={boot_order or 'cd'}"]
+
+        return cmd
+
     def _start_qemu_node(
         self, lab_data: dict[str, Any], node: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1436,55 +1516,11 @@ class NodeRuntimeService:
         console_port = self._allocate_console_port(console_mode)
         accel = "kvm" if Path("/dev/kvm").exists() else "tcg"
 
-        cmd = [
-            qemu_binary,
-            "-display",
-            "none",
-            "-machine",
-            f"type={machine},accel={accel}",
-            "-smp",
-            str(node.get("cpu", 1)),
-            "-m",
-            str(node.get("ram", 1024)),
-            "-name",
-            str(node.get("name", f"node-{node_id}")),
-            "-uuid",
-            str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node_id}"),
-            "-drive",
-            f"file={overlay_path},if=virtio,cache=writeback,format=qcow2",
-        ]
-
-        if accel == "kvm":
-            cmd += ["-cpu", "host,vmx=off,svm=off"]
-        else:
-            cmd += ["-cpu", "max"]
-
-        if console_mode == "vnc":
-            cmd += ["-vnc", f":{console_port - 5900}"]
-        else:
-            cmd += ["-serial", f"telnet::{console_port},server,nowait"]
-
         qmp_socket_path = work_dir / "qmp.sock"
-        cmd += ["-qmp", f"unix:{qmp_socket_path},server,nowait"]
 
-        # US-301: q35 pre-allocates pcie-root-port chassis for hot-plug.
-        # Slot 0 is reserved on q35 (root complex); first usable slot is 1.
-        allocated_slots: list[int] = []
-        if machine == "q35" and max_nics > 0:
-            for i in range(max_nics):
-                slot = i + 1
-                cmd += [
-                    "-device",
-                    f"pcie-root-port,id=rp{i},chassis={slot},slot={slot}",
-                ]
-                allocated_slots.append(i)
-
-        nic_model = _extra_str(extras, "qemu_nic") or "e1000"
-        first_mac = node.get("firstmac") or extras.get("firstmac")
         attachment_by_index: dict[int, dict[str, Any]] = {
             int(a["interface_index"]): a for a in attachments
         }
-        node_interfaces = node.get("interfaces") or []
         ethernet_count = int(node.get("ethernet", 0))
 
         # US-302: provision TAPs BEFORE spawning QEMU. Track every TAP we
@@ -1507,52 +1543,26 @@ class NodeRuntimeService:
                 host_net.try_link_del(tap)
             raise
 
-        # ----- Build per-NIC -netdev / -device argv ------------------------
-        unconnected_nic_indices: list[int] = []
-        for index in range(ethernet_count):
-            device_args = (
-                f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
-            )
-            if machine == "q35" and index < max_nics:
-                device_args += f",bus=rp{index}"
-
-            if index in tap_names:
-                tap = tap_names[index]
-                cmd += [
-                    "-netdev",
-                    f"tap,id=net{index},ifname={tap},script=no,downscript=no",
-                    "-device",
-                    device_args,
-                ]
-            elif self._interface_uplink(node_interfaces, index):
-                # SLIRP opt-in (extras.uplink: true) — gives the NIC NAT
-                # access to the host's outbound network without a bridge.
-                cmd += [
-                    "-netdev",
-                    f"user,id=net{index}",
-                    "-device",
-                    device_args,
-                ]
-            else:
-                # No network attached and no uplink request. The carrier
-                # is forced off via QMP ``set_link`` AFTER spawn — e1000
-                # (and most other NIC models) reject ``link=`` as a
-                # device-line option, so the boot-time argv stays plain
-                # and the post-spawn step pins these to ``up=False``.
-                cmd += [
-                    "-netdev",
-                    f"hubport,id=net{index},hubid={index}",
-                    "-device",
-                    device_args,
-                ]
-                unconnected_nic_indices.append(index)
-
-        boot_order = _extra_str(extras, "boot_order")
-        if iso_path:
-            cmd += ["-cdrom", str(iso_path)]
-        if boot_order or iso_path:
-            effective_order = boot_order or "cd"
-            cmd += ["-boot", f"order={effective_order}"]
+        cmd = self._build_qemu_base_cmd(
+            node=node,
+            extras=extras,
+            lab_id=lab_id,
+            qemu_binary=qemu_binary,
+            console_port=console_port,
+            overlay_path=str(overlay_path),
+            qmp_path=str(qmp_socket_path),
+            tap_names=tap_names,
+            attachment_by_index=attachment_by_index,
+        )
+        # Compute unconnected indices for post-spawn QMP set_link calls.
+        node_interfaces = node.get("interfaces") or []
+        unconnected_nic_indices = [
+            i for i in range(ethernet_count)
+            if i not in tap_names and not self._interface_uplink(node_interfaces, i)
+        ]
+        # US-301: track pre-allocated pcie-root-port slot indices for hot-plug
+        # book-keeping (used by attach_interface / detach_interface).
+        allocated_slots: list[int] = list(range(max_nics)) if machine == "q35" and max_nics > 0 else []
 
         extra_args = _extra_str(extras, "qemu_options")
         try:
@@ -1688,67 +1698,29 @@ class NodeRuntimeService:
         extras = _node_extras(node)
         architecture = _extra_str(extras, "architecture") or "x86_64"
         qemu_binary = self._resolve_qemu_binary(architecture) or f"qemu-system-{architecture}"
-        machine, max_nics, _ = self._resolve_qemu_machine(node)
-        accel = "kvm" if Path("/dev/kvm").exists() else "tcg"
-        console_mode = node.get("console", "telnet")
 
-        overlay_ph = "<work-dir>/overlay.qcow2"
-        qmp_ph = "<work-dir>/qmp.sock"
-        console_port_ph = 5900
-
-        cmd: list[str] = [
-            qemu_binary,
-            "-display", "none",
-            "-machine", f"type={machine},accel={accel}",
-            "-smp", str(node.get("cpu", 1)),
-            "-m", str(node.get("ram", 1024)),
-            "-name", str(node.get("name", f"node-{node_id}")),
-            "-uuid", str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node_id}"),
-            "-drive", f"file={overlay_ph},if=virtio,cache=writeback,format=qcow2",
-        ]
-        cmd += ["-cpu", "host,vmx=off,svm=off"] if accel == "kvm" else ["-cpu", "max"]
-        if console_mode == "vnc":
-            cmd += ["-vnc", f":{console_port_ph - 5900}"]
-        else:
-            cmd += ["-serial", f"telnet::{console_port_ph},server,nowait"]
-        cmd += ["-qmp", f"unix:{qmp_ph},server,nowait"]
-
-        if machine == "q35" and max_nics > 0:
-            for i in range(max_nics):
-                slot = i + 1
-                cmd += ["-device", f"pcie-root-port,id=rp{i},chassis={slot},slot={slot}"]
-
-        nic_model = _extra_str(extras, "qemu_nic") or "e1000"
-        first_mac = node.get("firstmac") or extras.get("firstmac")
         ethernet_count = int(node.get("ethernet", 0))
-        node_interfaces = node.get("interfaces") or []
         attachments = self._qemu_attachments(lab_data, node)
         attachment_by_index: dict[int, dict[str, Any]] = {
             int(a["interface_index"]): a for a in attachments
         }
-        for index in range(ethernet_count):
-            tap_name = host_net.tap_name(lab_id, node_id, index)
-            device_args = (
-                f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
-            )
-            if machine == "q35" and index < max_nics:
-                device_args += f",bus=rp{index}"
-            if index in attachment_by_index:
-                cmd += [
-                    "-netdev", f"tap,id=net{index},ifname={tap_name},script=no,downscript=no",
-                    "-device", device_args,
-                ]
-            elif self._interface_uplink(node_interfaces, index):
-                cmd += ["-netdev", f"user,id=net{index}", "-device", device_args]
-            else:
-                cmd += ["-netdev", f"hubport,id=net{index},hubid={index}", "-device", device_args]
+        tap_names = {
+            index: host_net.tap_name(lab_id, node_id, index)
+            for index in range(ethernet_count)
+            if index in attachment_by_index
+        }
 
-        boot_order_str = _extra_str(extras, "boot_order")
-        iso_path = self._resolve_qemu_iso(node)
-        if iso_path:
-            cmd += ["-cdrom", str(iso_path)]
-        if boot_order_str or iso_path:
-            cmd += ["-boot", f"order={boot_order_str or 'cd'}"]
+        cmd = self._build_qemu_base_cmd(
+            node=node,
+            extras=extras,
+            lab_id=lab_id,
+            qemu_binary=qemu_binary,
+            console_port=5900,           # placeholder: VNC display :0, serial ::5900
+            overlay_path="<work-dir>/overlay.qcow2",
+            qmp_path="<work-dir>/qmp.sock",
+            tap_names=tap_names,
+            attachment_by_index=attachment_by_index,
+        )
 
         extra_args = _extra_str(extras, "qemu_options")
         try:
