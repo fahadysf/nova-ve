@@ -422,12 +422,17 @@
     links !== lastLinksRef ||
     defaults !== lastDefaultsRef
   ) {
+    const _linksChanged = links !== lastLinksRef;
     lastNodesRef = nodes;
     lastNetworksRef = networks;
     lastTopologyRef = topology;
     lastLinksRef = links;
     lastDefaultsRef = defaults;
-    syncLocalState();
+    localNodes = deepClone(nodes);
+    localNetworks = deepClone(networks);
+    localTopology = deepClone(topology);
+    if (_linksChanged) localLinks = deepClone(links);
+    localDefaults = deepClone(defaults);
     publishFlowState();
   }
 
