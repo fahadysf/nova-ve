@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
   import type { ComponentType } from 'svelte';
   import { Container, Cpu, HardDrive, Network } from 'lucide-svelte';
   import type {
@@ -372,19 +372,19 @@
   let previewTokens: PreviewToken[] = [];
   let previewLoading = false;
   let previewRunning = false;
+  let previewError = false;
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
 
-  function schedulePreviewFetch() {
+  onDestroy(() => {
     if (previewTimer) clearTimeout(previewTimer);
-    previewLoading = true;
-    previewTimer = setTimeout(doFetchPreview, 400);
-  }
+  });
 
   async function doFetchPreview() {
     if (!labPath || !node || mode !== 'edit' || selectedTemplate?.type !== 'qemu') {
       previewLoading = false;
       return;
     }
+    previewError = false;
     try {
       const data = await apiGetData<{ tokens: PreviewToken[]; running: boolean }>(
         `/labs/${labPath}/nodes/${node.id}/qemu-preview`,
@@ -394,20 +394,21 @@
       previewRunning = data.running;
     } catch {
       previewTokens = [];
+      previewError = true;
     } finally {
       previewLoading = false;
     }
   }
 
-  $: {
-    const _qo = extras.qemu_options;
-    const _bo = extras.boot_order;
-    if (mode === 'edit' && open && selectedTemplate?.type === 'qemu' && node) {
-      schedulePreviewFetch();
-    } else if (!open) {
-      previewTokens = [];
-      previewLoading = false;
-    }
+  // Only fetch on modal open — preview reflects last-saved config, not in-flight edits.
+  $: if (open && mode === 'edit' && selectedTemplate?.type === 'qemu' && node) {
+    previewLoading = true;
+    if (previewTimer) clearTimeout(previewTimer);
+    previewTimer = setTimeout(doFetchPreview, 400);
+  } else if (!open) {
+    previewTokens = [];
+    previewLoading = false;
+    previewError = false;
   }
 </script>
 
@@ -761,10 +762,12 @@
                 </div>
                 {#if previewLoading}
                   <div class="text-[11px] text-slate-600">Loading…</div>
+                {:else if previewError}
+                  <div class="text-[11px] text-red-500/70">Preview unavailable.</div>
                 {:else if previewTokens.length > 0}
                   <pre class="flex flex-wrap gap-x-1 gap-y-0.5 whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed">{#each previewTokens as tok}<span class={tok.source === 'actual' ? 'text-emerald-400' : tok.source === 'user' ? 'text-slate-200' : 'text-slate-500'}>{tok.token} </span>{/each}</pre>
                 {:else}
-                  <div class="text-[11px] text-slate-600">Start the node to see the live command, or save changes to preview.</div>
+                  <div class="text-[11px] text-slate-600">Save changes first, then re-open to refresh preview.</div>
                 {/if}
               </div>
             {/if}
