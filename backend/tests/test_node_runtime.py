@@ -1997,6 +1997,7 @@ def _us302_helper_mock(
 
     calls: dict[str, list] = {
         "bridge_exists": [],
+        "tap_exists": [],
         "tap_add": [],
         "tap_del": [],
         "link_master": [],
@@ -2015,6 +2016,10 @@ def _us302_helper_mock(
     def fake_bridge_exists(name: str) -> bool:
         calls["bridge_exists"].append(name)
         return name in present_bridges
+
+    def fake_tap_exists(name: str) -> bool:
+        calls["tap_exists"].append(name)
+        return False  # normal case: TAP does not pre-exist
 
     def fake_tap_add(name: str) -> None:
         calls["tap_add"].append(name)
@@ -2035,6 +2040,7 @@ def _us302_helper_mock(
         calls["try_link_del"].append(name)
 
     monkeypatch.setattr(host_net, "bridge_exists", fake_bridge_exists)
+    monkeypatch.setattr(host_net, "tap_exists", fake_tap_exists)
     monkeypatch.setattr(host_net, "tap_add", fake_tap_add)
     monkeypatch.setattr(host_net, "tap_del", fake_tap_del)
     monkeypatch.setattr(host_net, "link_master", fake_link_master)

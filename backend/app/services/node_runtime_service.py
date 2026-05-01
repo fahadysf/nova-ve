@@ -62,6 +62,55 @@ def _extra_str(extras: dict[str, Any], key: str, default: str = "") -> str:
     return "" if value is None else str(value).strip()
 
 
+def _parse_qemu_tokens(tokens: list[str]) -> list[tuple[str, list[str]]]:
+    """Group a QEMU argv list into [(flag, [value_tokens...]), ...].
+
+    Tokens starting with '-' are flags; following non-flag tokens are their
+    values. Multiple occurrences of the same flag are kept as separate entries.
+    Leading non-flag tokens (e.g. the binary path) are represented as (token, []).
+    """
+    groups: list[tuple[str, list[str]]] = []
+    current_flag: str | None = None
+    current_vals: list[str] = []
+    for tok in tokens:
+        if tok.startswith("-"):
+            if current_flag is not None:
+                groups.append((current_flag, current_vals))
+            current_flag = tok
+            current_vals = []
+        else:
+            if current_flag is None:
+                groups.append((tok, []))
+            else:
+                current_vals.append(tok)
+    if current_flag is not None:
+        groups.append((current_flag, current_vals))
+    return groups
+
+
+def _merge_qemu_args(base_cmd: list[str], extra_str: str) -> list[str]:
+    """Merge user extra_str into base_cmd with flag-level override semantics.
+
+    If the user supplies any instance of flag F, ALL default instances of F
+    are removed and replaced by the user's instance(s). Flags not present in
+    extra_str pass through unchanged.
+    """
+    if not extra_str:
+        return base_cmd
+    extra_tokens = shlex.split(extra_str)
+    base_groups = _parse_qemu_tokens(base_cmd)
+    extra_groups = _parse_qemu_tokens(extra_tokens)
+    override_flags = {flag for flag, _ in extra_groups if flag.startswith("-")}
+    merged = [g for g in base_groups if g[0] not in override_flags]
+    merged.extend(extra_groups)
+    result: list[str] = []
+    for flag, vals in merged:
+        result.append(flag)
+        result.extend(vals)
+    return result
+
+
+
 class NodeRuntimeError(Exception):
     pass
 
@@ -1498,19 +1547,22 @@ class NodeRuntimeService:
                 ]
                 unconnected_nic_indices.append(index)
 
+        boot_order = _extra_str(extras, "boot_order")
         if iso_path:
-            cmd += ["-cdrom", str(iso_path), "-boot", "order=dc"]
+            cmd += ["-cdrom", str(iso_path)]
+        if boot_order or iso_path:
+            effective_order = boot_order or "cd"
+            cmd += ["-boot", f"order={effective_order}"]
 
         extra_args = _extra_str(extras, "qemu_options")
-        if extra_args:
-            try:
-                cmd += shlex.split(extra_args)
-            except ValueError as exc:
-                # Sweep TAPs we already created so the lab does not leak
-                # kernel objects when arg parsing rejects the launch.
-                for tap in provisioned_taps:
-                    host_net.try_link_del(tap)
-                raise NodeRuntimeError(f"Invalid qemu_options: {exc}") from exc
+        try:
+            cmd = _merge_qemu_args(cmd, extra_args)
+        except ValueError as exc:
+            # Sweep TAPs we already created so the lab does not leak
+            # kernel objects when arg parsing rejects the launch.
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise NodeRuntimeError(f"Invalid qemu_options: {exc}") from exc
 
         try:
             with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
@@ -1602,6 +1654,126 @@ class NodeRuntimeService:
             ],
             "started_at": time.time(),
         }
+
+    def qemu_command_preview(
+        self, lab_data: dict[str, Any], node_id: int
+    ) -> dict[str, Any]:
+        """Return an annotated token list for the QEMU command of *node_id*.
+
+        Running nodes: tokens come from the recorded command and are all
+        marked ``"actual"`` (authoritative from the live process).
+
+        Stopped nodes: performs a dry-run command assembly (no TAPs created,
+        placeholder paths for overlay/sockets) and marks each token as
+        ``"default"`` or ``"user"`` depending on whether the token's flag was
+        supplied in ``extras.qemu_options``.
+        """
+        node = (lab_data.get("nodes") or {}).get(str(node_id))
+        if node is None:
+            raise NodeRuntimeError(f"Node {node_id} not found in lab.")
+        if node.get("type") not in ("qemu",):
+            raise NodeRuntimeError("QEMU command preview is only available for QEMU nodes.")
+
+        lab_id = self._lab_id(lab_data)
+        runtime = self._runtime_record(lab_id, node_id, include_stopped=False)
+
+        if runtime and runtime.get("kind") == "qemu":
+            actual_cmd: list[str] = runtime.get("command") or []
+            return {
+                "tokens": [{"token": tok, "source": "actual"} for tok in actual_cmd],
+                "running": True,
+            }
+
+        # ── Stopped node: dry-run ─────────────────────────────────────────
+        extras = _node_extras(node)
+        architecture = _extra_str(extras, "architecture") or "x86_64"
+        qemu_binary = self._resolve_qemu_binary(architecture) or f"qemu-system-{architecture}"
+        machine, max_nics, _ = self._resolve_qemu_machine(node)
+        accel = "kvm" if Path("/dev/kvm").exists() else "tcg"
+        console_mode = node.get("console", "telnet")
+
+        overlay_ph = "<work-dir>/overlay.qcow2"
+        qmp_ph = "<work-dir>/qmp.sock"
+        console_port_ph = 5900
+
+        cmd: list[str] = [
+            qemu_binary,
+            "-display", "none",
+            "-machine", f"type={machine},accel={accel}",
+            "-smp", str(node.get("cpu", 1)),
+            "-m", str(node.get("ram", 1024)),
+            "-name", str(node.get("name", f"node-{node_id}")),
+            "-uuid", str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node_id}"),
+            "-drive", f"file={overlay_ph},if=virtio,cache=writeback,format=qcow2",
+        ]
+        cmd += ["-cpu", "host,vmx=off,svm=off"] if accel == "kvm" else ["-cpu", "max"]
+        if console_mode == "vnc":
+            cmd += ["-vnc", f":{console_port_ph - 5900}"]
+        else:
+            cmd += ["-serial", f"telnet::{console_port_ph},server,nowait"]
+        cmd += ["-qmp", f"unix:{qmp_ph},server,nowait"]
+
+        if machine == "q35" and max_nics > 0:
+            for i in range(max_nics):
+                slot = i + 1
+                cmd += ["-device", f"pcie-root-port,id=rp{i},chassis={slot},slot={slot}"]
+
+        nic_model = _extra_str(extras, "qemu_nic") or "e1000"
+        first_mac = node.get("firstmac") or extras.get("firstmac")
+        ethernet_count = int(node.get("ethernet", 0))
+        node_interfaces = node.get("interfaces") or []
+        attachments = self._qemu_attachments(lab_data, node)
+        attachment_by_index: dict[int, dict[str, Any]] = {
+            int(a["interface_index"]): a for a in attachments
+        }
+        for index in range(ethernet_count):
+            tap_name = host_net.tap_name(lab_id, node_id, index)
+            device_args = (
+                f"{nic_model},netdev=net{index},mac={self._mac_for_index(first_mac, index)}"
+            )
+            if machine == "q35" and index < max_nics:
+                device_args += f",bus=rp{index}"
+            if index in attachment_by_index:
+                cmd += [
+                    "-netdev", f"tap,id=net{index},ifname={tap_name},script=no,downscript=no",
+                    "-device", device_args,
+                ]
+            elif self._interface_uplink(node_interfaces, index):
+                cmd += ["-netdev", f"user,id=net{index}", "-device", device_args]
+            else:
+                cmd += ["-netdev", f"hubport,id=net{index},hubid={index}", "-device", device_args]
+
+        boot_order_str = _extra_str(extras, "boot_order")
+        iso_path = self._resolve_qemu_iso(node)
+        if iso_path:
+            cmd += ["-cdrom", str(iso_path)]
+        if boot_order_str or iso_path:
+            cmd += ["-boot", f"order={boot_order_str or 'cd'}"]
+
+        extra_args = _extra_str(extras, "qemu_options")
+        try:
+            merged_cmd = _merge_qemu_args(cmd, extra_args)
+        except ValueError as exc:
+            raise NodeRuntimeError(f"Invalid qemu_options: {exc}") from exc
+
+        user_flags: set[str] = set()
+        if extra_args:
+            try:
+                for tok in shlex.split(extra_args):
+                    if tok.startswith("-"):
+                        user_flags.add(tok)
+            except ValueError:
+                pass
+
+        tokens: list[dict[str, str]] = []
+        current_flag: str | None = None
+        for tok in merged_cmd:
+            if tok.startswith("-"):
+                current_flag = tok
+            source = "user" if current_flag in user_flags else "default"
+            tokens.append({"token": tok, "source": source})
+
+        return {"tokens": tokens, "running": False}
 
     @staticmethod
     def _interface_uplink(interfaces: list[Any], interface_index: int) -> bool:
