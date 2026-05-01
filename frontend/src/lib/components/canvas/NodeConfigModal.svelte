@@ -409,6 +409,7 @@
     previewTokens = [];
     previewLoading = false;
     previewError = false;
+    previewRunning = false;
   }
 </script>
 
