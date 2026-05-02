@@ -1652,6 +1652,7 @@ class NodeRuntimeService:
             "command": cmd,
             "machine": machine,
             "max_nics": max_nics,
+            "boot_ethernet": ethernet_count,
             "hotplug_capable": hotplug_capable,
             "allocated_slots": allocated_slots,
             "tap_names": list(provisioned_taps),
@@ -2689,19 +2690,11 @@ class NodeRuntimeService:
         device_id = f"dev{int(interface_index)}"
         tap = host_net.tap_name(lab_id, int(node_id), int(interface_index))
 
-        # Detect whether this interface index was already registered in QEMU
-        # at boot time as a hubport netdev. If so, we swap the netdev backend
-        # rather than adding a new device (which would collide on id=net{idx}).
-        try:
-            _netdev_resp = self._qmp_command(socket_path, "query-netdev", {})
-        except Exception as exc:
-            raise NodeRuntimeError(f"QMP query-netdev failed: {exc}") from exc
-        _existing_netdev_list = (
-            _netdev_resp.get("return", [])
-            if isinstance(_netdev_resp, dict)
-            else (_netdev_resp if isinstance(_netdev_resp, list) else [])
-        )
-        is_boot_nic = any(nd.get("id") == netdev_id for nd in _existing_netdev_list)
+        # Boot-time NICs (indices 0..boot_ethernet-1) are registered in QEMU
+        # with hubport placeholder netdevs at start. Connecting one to a network
+        # requires swapping the backend (hubport → tap), not adding a new device.
+        boot_ethernet = int(runtime.get("boot_ethernet") or 0)
+        is_boot_nic = int(interface_index) < boot_ethernet
 
         if is_boot_nic:
             # ----- Boot-time NIC: swap hubport → TAP (no device_add) ----
