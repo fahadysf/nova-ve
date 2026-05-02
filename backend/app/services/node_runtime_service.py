@@ -1546,6 +1546,18 @@ class NodeRuntimeService:
                     bridge = attachment_by_index[index]["bridge_name"]
                     host_net.link_master(tap, bridge)
                     host_net.link_up(tap)
+                else:
+                    # Issue #174: ensure unconnected boot TAPs do not
+                    # inherit a stale bridge membership from a previous
+                    # run (e.g. links were deleted while the node was
+                    # stopped, or pre-#174 detach left orphans). Idempotent.
+                    try:
+                        host_net.link_set_nomaster(tap)
+                    except host_net.HostNetError:
+                        # Best-effort: if the TAP has no master, the helper
+                        # may exit non-zero. Either way the desired end
+                        # state ("not on a bridge") is reached or harmless.
+                        pass
         except Exception:
             for tap in provisioned_taps:
                 host_net.try_link_del(tap)
@@ -1664,7 +1676,11 @@ class NodeRuntimeService:
             "boot_ethernet": ethernet_count,
             "hotplug_capable": hotplug_capable,
             "allocated_slots": allocated_slots,
-            "tap_names": list(provisioned_taps),
+            # Issue #174: stop-time sweep needs every boot TAP, even those
+            # we did not create this start (e.g. orphans recovered from a
+            # prior run). ``tap_names.values()`` contains all of them;
+            # ``provisioned_taps`` only newly-created.
+            "tap_names": list(tap_names.values()),
             "interface_attachments": [
                 {
                     "interface_index": a["interface_index"],
