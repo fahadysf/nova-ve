@@ -116,9 +116,6 @@ class RuntimeMutexRegistry:
         # Guards ``_locks`` / ``_node_locks`` themselves.
         self._registry_lock = threading.Lock()
         self._locks: Dict[_MutexKey, threading.Lock] = {}
-        # Issue #175: node-scoped lock is RLock for re-entrant acquires from
-        # nested paths (e.g. outer attach + inner slot-allocation in
-        # ``_attach_qemu_interface_locked``).
         self._node_locks: Dict[_NodeKey, threading.RLock] = {}
 
     def _key(self, lab_id: str, node_id: int, interface_index: int) -> _MutexKey:
@@ -145,9 +142,6 @@ class RuntimeMutexRegistry:
         with self._registry_lock:
             lock = self._node_locks.get(key)
             if lock is None:
-                # Issue #175: re-entrant so the outer acquire taken by
-                # attach/detach/reconcile/start can be nested by the inner
-                # slot-allocation acquire in ``_attach_qemu_interface_locked``.
                 lock = threading.RLock()
                 self._node_locks[key] = lock
             return lock

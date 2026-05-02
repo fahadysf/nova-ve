@@ -625,11 +625,8 @@ class NodeRuntimeService:
         self._record_transition(lab_id, node_id)
         kind = runtime.get("kind")
         if kind == "qemu":
-            # Issue #175 (C1): serialize stop against concurrent
-            # reconcile / attach / detach / start on the same (lab, node)
-            # so the runtime mutation in ``_stop_qemu_runtime`` +
-            # ``_delete_runtime`` cannot interleave with another
-            # ``_persist_runtime`` writer. RLock — safe to nest.
+            # Issue #175 (C1): hold node mutex so stop + delete cannot
+            # interleave a concurrent reconcile/attach/start persist write.
             from app.services.runtime_mutex import runtime_mutex
 
             with runtime_mutex.acquire_node_sync(lab_id, node_id):
@@ -1505,11 +1502,8 @@ class NodeRuntimeService:
     def _start_qemu_node(
         self, lab_data: dict[str, Any], node: dict[str, Any]
     ) -> dict[str, Any]:
-        # Issue #175 (C1): hold the node-scoped mutex for the entire
-        # boot path so an in-flight reconcile / attach / detach on the
-        # same (lab, node) cannot race with the freshly-started runtime
-        # record write. The node-scoped lock is RLock — safe to nest if
-        # any inner helper re-acquires.
+        # Issue #175 (C1): hold node mutex for the entire boot path so
+        # a concurrent reconcile/attach/detach cannot race the runtime write.
         lab_id = self._lab_id(lab_data)
         node_id = int(node["id"])
         from app.services.runtime_mutex import runtime_mutex
@@ -2694,12 +2688,8 @@ class NodeRuntimeService:
             f"runtime_mutex.acquire(...) yourself."
         )
 
-        # Issue #175 (C1): acquire the node-scoped mutex AFTER the
-        # per-iface mutex (held by caller). Wraps the entire host-side +
-        # runtime mutation body so concurrent reconcile/start/stop on
-        # this (lab, node) cannot interleave _persist_runtime writes.
-        # RLock — safe nesting with the inner ``acquire_node_sync`` used
-        # for slot allocation in the hot-plug branch.
+        # Issue #175 (C1): acquire node mutex AFTER per-iface mutex (lock
+        # ordering invariant above) to prevent interleaved persist writes.
         with runtime_mutex.acquire_node_sync(lab_id, node_id):
             return self._attach_qemu_interface_inner(
                 lab_id,
@@ -3730,10 +3720,7 @@ class NodeRuntimeService:
             return {"node_id": None, "applied": [], "removed": [], "warnings": [], "skipped_hotplug": []}
 
         # Issue #175 (C1): serialize the entire reconcile pass against
-        # concurrent attach/detach/start/stop on the same (lab, node) so
-        # interleaved _persist_runtime writes cannot drop fields. The
-        # node-scoped lock is RLock — safe to nest if a reconcile path
-        # ever needs to delegate into another method that re-acquires.
+        # concurrent attach/detach/start/stop to prevent interleaved persist writes.
         from app.services.runtime_mutex import runtime_mutex
 
         with runtime_mutex.acquire_node_sync(lab_id, node_id):
