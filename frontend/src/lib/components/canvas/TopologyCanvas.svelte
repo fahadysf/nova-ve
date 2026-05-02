@@ -816,13 +816,20 @@
     }
   }
 
-  function deleteLink(edgeId: string) {
+  async function deleteLink(edgeId: string) {
     const index = getEdgeIndex(edgeId);
     if (index < 0) {
       return;
     }
 
     const v2Link = localLinks[index];
+    // Capture pre-mutation snapshot for rollback on API failure.
+    const previousLinks = localLinks;
+    const previousNodes = localNodes;
+    const previousNetworks = localNetworks;
+    const previousTopology = localTopology;
+    const linkId = v2Link?.id ?? null;
+
     if (v2Link) {
       if (
         typeof v2Link.from?.node_id === 'number' &&
@@ -849,12 +856,47 @@
     localLinks = localLinks.filter((_, currentIndex) => currentIndex !== index);
     recalculateNetworks();
     publishFlowState();
-    scheduleSave();
     dispatchCanvasChange('topology', {
       nodes: deepClone(localNodes),
       networks: deepClone(localNetworks),
       topology: deepClone(localTopology),
     });
+
+    // Issue #174 follow-up: link deletion is a v2 link operation. Use
+    // DELETE /links/{id} (the proper REST surface) instead of the legacy
+    // PUT /topology — that endpoint regenerates links[] from topology[]
+    // and used to silently wipe ALL surviving links on this lab when the
+    // delete trimmed an entry from a localTopology that was already empty
+    // (v2-only labs). tmp_ ids are placeholders for in-flight POST /links;
+    // skip the DELETE because there's no server-side link yet.
+    if (!linkId || linkId.startsWith('tmp_')) {
+      return;
+    }
+
+    try {
+      await apiRequest(`/labs/${labId}/links/${encodeURIComponent(linkId)}`, {
+        method: 'DELETE',
+        suppressToast: true,
+      });
+    } catch (error) {
+      localLinks = previousLinks;
+      localNodes = previousNodes;
+      localNetworks = previousNetworks;
+      localTopology = previousTopology;
+      publishFlowState();
+      dispatchCanvasChange('topology', {
+        nodes: deepClone(localNodes),
+        networks: deepClone(localNetworks),
+        topology: deepClone(localTopology),
+      });
+      const message =
+        error instanceof ApiError
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : 'Failed to delete link';
+      toastStore.push(message, 'error');
+    }
   }
 
   async function setLinkStyle(edgeId: string, style: LinkStyle | null) {

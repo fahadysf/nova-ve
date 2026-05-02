@@ -844,6 +844,21 @@ async def delete_node(
         for link in data.get("topology", [])
         if link.get("source") != f"node{node_id}" and link.get("destination") != f"node{node_id}"
     ]
+    # Issue #174 follow-up: write_lab_json_static no longer regenerates
+    # links[] from topology[] for v2 labs (it preserves links[] as
+    # authoritative). Drop links[] entries referencing the deleted node
+    # explicitly so the topology[] filter above doesn't leave stale links.
+    data["links"] = [
+        link
+        for link in data.get("links", []) or []
+        if not (
+            isinstance(link, dict)
+            and (
+                (isinstance(link.get("from"), dict) and link["from"].get("node_id") == node_id)
+                or (isinstance(link.get("to"), dict) and link["to"].get("node_id") == node_id)
+            )
+        )
+    ]
     LabService.write_lab_json_static(scoped_path, data)
 
     return {
@@ -1399,6 +1414,20 @@ async def delete_network(
         if link.get("network_id") != network_id
         and link.get("source") != f"network{network_id}"
         and link.get("destination") != f"network{network_id}"
+    ]
+    # Issue #174 follow-up: also drop v2 links[] entries referencing the
+    # deleted network — write_lab_json_static no longer regenerates
+    # links[] from topology[] for v2 labs.
+    data["links"] = [
+        link
+        for link in data.get("links", []) or []
+        if not (
+            isinstance(link, dict)
+            and (
+                (isinstance(link.get("from"), dict) and link["from"].get("network_id") == network_id)
+                or (isinstance(link.get("to"), dict) and link["to"].get("network_id") == network_id)
+            )
+        )
     ]
     LabService.write_lab_json_static(scoped_path, data)
 
