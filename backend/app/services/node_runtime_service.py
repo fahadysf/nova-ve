@@ -1597,10 +1597,10 @@ class NodeRuntimeService:
                     try:
                         host_net.link_set_nomaster(tap)
                     except host_net.HostNetError:
-                        # Best-effort: if the TAP has no master, the helper
-                        # may exit non-zero. Either way the desired end
-                        # state ("not on a bridge") is reached or harmless.
-                        pass
+                        _logger.debug(
+                            "boot loop: link_set_nomaster(%s) returned non-zero — likely already had no master (idempotent)",
+                            tap,
+                        )
         except Exception:
             for tap in provisioned_taps:
                 host_net.try_link_del(tap)
@@ -3310,10 +3310,16 @@ class NodeRuntimeService:
                     "detach boot-nic: set_link(%s, up=False) failed (best-effort)",
                     netdev_id,
                 )
-            try:
-                host_net.link_set_nomaster(tap)
-            except Exception:  # noqa: BLE001
-                _logger.exception("detach boot-nic: link_set_nomaster(%s) failed", tap)
+            # Issue #175 (M3): link_set_nomaster failure is a HARD detach
+            # failure. If we swallow it, the TAP stays on the bridge, packets
+            # still flow, and the system thinks the detach succeeded (the
+            # attachment record below would get dropped + generation bumped
+            # + lab.json link removed → no way to retry). Match the prior
+            # 'Codex hotfix HIGH-2' contract for hot-plug detach: raise so
+            # link_service.delete_link surfaces the failure to the caller and
+            # leaves interface_attachments / current_attach_generation /
+            # lab.json UNCHANGED for retry.
+            host_net.link_set_nomaster(tap)
             device_gone = True
         else:
             # ----- Step 1: device_del with race-A retry ------------------
@@ -3832,7 +3838,14 @@ class NodeRuntimeService:
                             socket_path, "set_link", {"name": f"net{idx}", "up": True}
                         )
                     except Exception:  # noqa: BLE001 — best-effort
-                        pass
+                        _logger.debug(
+                            "reconciler: set_link(net%d, up=True) failed for node=%s (best-effort)",
+                            idx, node_id,
+                        )
+                        warnings.append({
+                            "interface_index": idx,
+                            "reason": "set_link up=True failed (best-effort)",
+                        })
             except host_net.HostNetError as exc:
                 warnings.append({"interface_index": idx, "reason": str(exc)})
                 continue
@@ -3862,6 +3875,17 @@ class NodeRuntimeService:
                 if not replaced:
                     attachments_now.append(new_record)
                 runtime["interface_attachments"] = attachments_now
+                # Issue #175 (M1): force-sync runtime's current_attach_generation to
+                # the link's attach_generation from lab.json. NOT a bump — bumping
+                # in Phase 1 can produce runtime_gen > lab.json_gen, causing the
+                # next user-driven delete_link to silently no-op via the stale-gen
+                # guard (link's expected_generation < runtime's current). Force-sync
+                # means: after reconcile, runtime gen == lab.json gen, so a future
+                # delete_link's expected check matches exactly.
+                iface_runtime = runtime.setdefault("interface_runtime", {})
+                key = str(int(idx))
+                record = iface_runtime.setdefault(key, {})
+                record["current_attach_generation"] = int(want["attach_generation"])
                 tap_names = list(runtime.get("tap_names") or [])
                 if tap not in tap_names:
                     tap_names.append(tap)
@@ -3869,6 +3893,9 @@ class NodeRuntimeService:
             applied.append({"interface_index": idx, "bridge": bridge, "tap": tap})
 
         # ---- Phase 2: tear down attachments not in lab.json ------------
+        # Issue #175 (M1): Phase 2 does NOT bump generation for removed
+        # entries. The next user-driven create_link will bump both lab.json
+        # and runtime sides naturally when the link is re-established.
         for entry in attachments:
             try:
                 idx = int(entry.get("interface_index", -1))
