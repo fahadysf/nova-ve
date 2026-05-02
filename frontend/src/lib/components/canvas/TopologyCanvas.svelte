@@ -857,24 +857,36 @@
     });
   }
 
-  function setLinkStyle(edgeId: string, style: LinkStyle | null) {
+  async function setLinkStyle(edgeId: string, style: LinkStyle | null) {
     const index = getEdgeIndex(edgeId);
     if (index < 0) return;
+    const target = localLinks[index];
+    if (!target?.id) return;
+
+    const previousStyle = target.style_override ?? null;
     localLinks = localLinks.map((link, i) =>
       i === index ? { ...link, style_override: style } : link
     );
-    if (index < localTopology.length) {
-      localTopology = localTopology.map((tl, i) =>
-        i === index ? { ...tl, style_override: style } : tl
-      );
-    }
     publishFlowState();
-    scheduleSave();
-    dispatchCanvasChange('topology', {
-      nodes: deepClone(localNodes),
-      networks: deepClone(localNetworks),
-      topology: deepClone(localTopology),
-    });
+
+    // tmp_ ids are placeholders for in-flight POST /links; the eventual
+    // server response will carry the override, so skip the PATCH.
+    if (target.id.startsWith('tmp_')) return;
+
+    try {
+      await apiRequest(`/labs/${labId}/links/${encodeURIComponent(target.id)}`, {
+        method: 'PATCH',
+        body: { style_override: style },
+        suppressToast: true,
+      });
+    } catch (error) {
+      localLinks = localLinks.map((link, i) =>
+        i === index ? { ...link, style_override: previousStyle } : link
+      );
+      publishFlowState();
+      const message = error instanceof Error ? error.message : 'Failed to update link style';
+      toastStore.push(message, 'error');
+    }
   }
 
   async function handleNodeAction(action: 'start' | 'stop' | 'wipe' | 'delete' | 'console', targetId: string) {
