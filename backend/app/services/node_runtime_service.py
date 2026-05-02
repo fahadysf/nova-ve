@@ -2693,12 +2693,15 @@ class NodeRuntimeService:
         # at boot time as a hubport netdev. If so, we swap the netdev backend
         # rather than adding a new device (which would collide on id=net{idx}).
         try:
-            existing_netdevs = self._qmp_command(socket_path, "query-netdev", {})
+            _netdev_resp = self._qmp_command(socket_path, "query-netdev", {})
         except Exception as exc:
             raise NodeRuntimeError(f"QMP query-netdev failed: {exc}") from exc
-        is_boot_nic = isinstance(existing_netdevs, list) and any(
-            nd.get("id") == netdev_id for nd in existing_netdevs
+        _existing_netdev_list = (
+            _netdev_resp.get("return", [])
+            if isinstance(_netdev_resp, dict)
+            else (_netdev_resp if isinstance(_netdev_resp, list) else [])
         )
+        is_boot_nic = any(nd.get("id") == netdev_id for nd in _existing_netdev_list)
 
         if is_boot_nic:
             # ----- Boot-time NIC: swap hubport → TAP (no device_add) ----
