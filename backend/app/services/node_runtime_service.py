@@ -625,8 +625,18 @@ class NodeRuntimeService:
         self._record_transition(lab_id, node_id)
         kind = runtime.get("kind")
         if kind == "qemu":
-            self._stop_qemu_runtime(runtime)
-        elif kind == "docker":
+            # Issue #175 (C1): serialize stop against concurrent
+            # reconcile / attach / detach / start on the same (lab, node)
+            # so the runtime mutation in ``_stop_qemu_runtime`` +
+            # ``_delete_runtime`` cannot interleave with another
+            # ``_persist_runtime`` writer. RLock — safe to nest.
+            from app.services.runtime_mutex import runtime_mutex
+
+            with runtime_mutex.acquire_node_sync(lab_id, node_id):
+                self._stop_qemu_runtime(runtime)
+                self._delete_runtime(lab_id, node_id)
+            return
+        if kind == "docker":
             self._stop_docker_runtime(runtime)
 
         self._delete_runtime(lab_id, node_id)
@@ -1341,9 +1351,13 @@ class NodeRuntimeService:
             self._loaded = True
 
     def _persist_runtime(self, runtime: dict[str, Any]) -> None:
-        self._state_path(runtime["lab_id"], runtime["node_id"]).write_text(
-            json.dumps(runtime, indent=2)
-        )
+        # Issue #175 (Q2): atomic write via tmpfile + os.replace so a
+        # concurrent reader cannot observe a torn JSON. ``os.replace``
+        # is atomic on POSIX (rename(2) within the same filesystem).
+        state_path = self._state_path(runtime["lab_id"], runtime["node_id"])
+        tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
+        tmp_path.write_text(json.dumps(runtime, indent=2))
+        os.replace(tmp_path, state_path)
 
     def _delete_runtime(self, lab_id: str, node_id: int) -> None:
         key = self._key(lab_id, node_id)
@@ -1464,7 +1478,17 @@ class NodeRuntimeService:
                 # is permanent and "connect" becomes a host-only op (link_master
                 # + link_up + QMP set_link up=true). Hubport placeholders
                 # orphaned the e1000 peer on netdev_del + netdev_add (see #174).
-                tap = tap_names[index]
+                # Issue #175 (M4): defensive lookup. _interface_uplink should
+                # return identical results between the provisioning loop and
+                # here, but a stale node mutation between calls would cause
+                # KeyError mid-spawn — surface it as a typed runtime error.
+                tap = tap_names.get(index)
+                if tap is None:
+                    raise NodeRuntimeError(
+                        f"QEMU command build: no TAP provisioned for non-uplink "
+                        f"iface {index}; uplink classification likely changed "
+                        f"between provisioning and command build."
+                    )
                 cmd += [
                     "-netdev", f"tap,id=net{index},ifname={tap},script=no,downscript=no",
                     "-device", device_args,
@@ -1481,6 +1505,28 @@ class NodeRuntimeService:
     def _start_qemu_node(
         self, lab_data: dict[str, Any], node: dict[str, Any]
     ) -> dict[str, Any]:
+        # Issue #175 (C1): hold the node-scoped mutex for the entire
+        # boot path so an in-flight reconcile / attach / detach on the
+        # same (lab, node) cannot race with the freshly-started runtime
+        # record write. The node-scoped lock is RLock — safe to nest if
+        # any inner helper re-acquires.
+        lab_id = self._lab_id(lab_data)
+        node_id = int(node["id"])
+        from app.services.runtime_mutex import runtime_mutex
+
+        with runtime_mutex.acquire_node_sync(lab_id, node_id):
+            return self._start_qemu_node_locked(lab_data, node, lab_id, node_id)
+
+    def _start_qemu_node_locked(
+        self,
+        lab_data: dict[str, Any],
+        node: dict[str, Any],
+        lab_id: str,
+        node_id: int,
+    ) -> dict[str, Any]:
+        """Body of :meth:`_start_qemu_node`. Caller holds the per-(lab,
+        node) node-scoped mutex (issue #175 C1).
+        """
         extras = _node_extras(node)
         architecture = _extra_str(extras, "architecture") or "x86_64"
         qemu_binary = self._resolve_qemu_binary(architecture)
@@ -1488,9 +1534,6 @@ class NodeRuntimeService:
             raise NodeRuntimeError(
                 f"QEMU binary not found for arch {architecture}: {self.settings.QEMU_BINARY}"
             )
-
-        lab_id = self._lab_id(lab_data)
-        node_id = int(node["id"])
         machine, max_nics, hotplug_capable = self._resolve_qemu_machine(node)
 
         # US-302: per-NIC TAP attachments. Pre-flight every declared
@@ -2635,6 +2678,11 @@ class NodeRuntimeService:
         Returns the attachment record (with ``attach_generation``) for the
         link router / link_service to stamp on ``Link.runtime``.
         """
+        # Lock ordering invariant (issue #175): when both per-iface mutex
+        # and node-mutex are needed, per-iface is acquired FIRST by the
+        # external caller, then node-mutex is acquired here. Any new code
+        # path acquiring node-mutex BEFORE per-iface would deadlock —
+        # never do that.
         from app.services.runtime_mutex import runtime_mutex
 
         # Defensive contract: catches accidental bypass of the public API.
@@ -2646,6 +2694,38 @@ class NodeRuntimeService:
             f"runtime_mutex.acquire(...) yourself."
         )
 
+        # Issue #175 (C1): acquire the node-scoped mutex AFTER the
+        # per-iface mutex (held by caller). Wraps the entire host-side +
+        # runtime mutation body so concurrent reconcile/start/stop on
+        # this (lab, node) cannot interleave _persist_runtime writes.
+        # RLock — safe nesting with the inner ``acquire_node_sync`` used
+        # for slot allocation in the hot-plug branch.
+        with runtime_mutex.acquire_node_sync(lab_id, node_id):
+            return self._attach_qemu_interface_inner(
+                lab_id,
+                node_id,
+                network_id,
+                interface_index,
+                bridge_name=bridge_name,
+                nic_model=nic_model,
+                planned_mac=planned_mac,
+            )
+
+    def _attach_qemu_interface_inner(
+        self,
+        lab_id: str,
+        node_id: int,
+        network_id: int,
+        interface_index: int,
+        *,
+        bridge_name: str | None = None,
+        nic_model: str | None = None,
+        planned_mac: str | None = None,
+    ) -> dict[str, Any]:
+        """Body of :meth:`_attach_qemu_interface_locked`. Caller holds
+        BOTH the per-iface mutex (from the outer public entrypoint) and
+        the per-(lab, node) node-scoped mutex (issue #175 C1).
+        """
         runtime = self._runtime_record(lab_id, node_id)
         if runtime is None:
             raise NodeRuntimeError(
@@ -3100,6 +3180,9 @@ class NodeRuntimeService:
         ``links[]`` will be the source of truth and the kernel-side
         object is no longer reachable.
         """
+        # Lock ordering invariant (issue #175): per-iface mutex acquired
+        # FIRST by external caller; node-mutex acquired here SECOND. Same
+        # contract as :meth:`_attach_qemu_interface_locked`.
         from app.services.runtime_mutex import runtime_mutex
 
         # Defensive contract: catches accidental bypass of the public API.
@@ -3111,6 +3194,30 @@ class NodeRuntimeService:
             f"runtime_mutex.acquire(...) yourself."
         )
 
+        # Issue #175 (C1): acquire node-scoped mutex AFTER per-iface
+        # mutex. Wraps the entire host-side + runtime mutation body.
+        with runtime_mutex.acquire_node_sync(lab_id, node_id):
+            return self._detach_qemu_interface_inner(
+                lab_id,
+                node_id,
+                interface_index,
+                lab_path=lab_path,
+                expected_generation=expected_generation,
+            )
+
+    def _detach_qemu_interface_inner(
+        self,
+        lab_id: str,
+        node_id: int,
+        interface_index: int,
+        *,
+        lab_path: str | None = None,
+        expected_generation: int | None = None,
+    ) -> dict[str, Any]:
+        """Body of :meth:`_detach_qemu_interface_locked`. Caller holds
+        BOTH the per-iface mutex and the per-(lab, node) node-scoped
+        mutex (issue #175 C1).
+        """
         runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
         if runtime is None:
             # No runtime record means the node already stopped or never
@@ -3616,6 +3723,28 @@ class NodeRuntimeService:
         except (TypeError, ValueError):
             return {"node_id": None, "applied": [], "removed": [], "warnings": [], "skipped_hotplug": []}
 
+        # Issue #175 (C1): serialize the entire reconcile pass against
+        # concurrent attach/detach/start/stop on the same (lab, node) so
+        # interleaved _persist_runtime writes cannot drop fields. The
+        # node-scoped lock is RLock — safe to nest if a reconcile path
+        # ever needs to delegate into another method that re-acquires.
+        from app.services.runtime_mutex import runtime_mutex
+
+        with runtime_mutex.acquire_node_sync(lab_id, node_id):
+            return self._reconcile_qemu_node_links_locked(
+                lab_id, lab_data, node, node_id
+            )
+
+    def _reconcile_qemu_node_links_locked(
+        self,
+        lab_id: str,
+        lab_data: dict,
+        node: dict,
+        node_id: int,
+    ) -> dict:
+        """Body of :meth:`reconcile_qemu_node_links`. Caller holds the
+        per-(lab, node) node-scoped mutex (issue #175 C1).
+        """
         runtime = self._runtime_record(lab_id, node_id)
         if runtime is None or runtime.get("kind") != "qemu":
             return {"node_id": node_id, "applied": [], "removed": [], "warnings": [], "skipped_hotplug": []}
@@ -3632,7 +3761,15 @@ class NodeRuntimeService:
             ):
                 if not isinstance(endpoint, dict) or not isinstance(peer, dict):
                     continue
-                if endpoint.get("node_id") != node_id:
+                # Issue #175 (C2): lab.json may carry node_id as str (manual
+                # edit / migration / 3rd-party tooling). A bare `!=` against
+                # an int silently skips the endpoint and Phase 2 then tears
+                # down ALL boot-NIC attachments. Match the int(...) pattern
+                # used by every other link-parsing loop in this file.
+                try:
+                    if int(endpoint.get("node_id", -1)) != node_id:
+                        continue
+                except (TypeError, ValueError):
                     continue
                 if "interface_index" not in endpoint:
                     continue
@@ -3678,9 +3815,6 @@ class NodeRuntimeService:
         # ---- Phase 1: ensure expected attachments are present ----------
         with self._lock:
             attachments = list(runtime.get("interface_attachments") or [])
-        existing_by_idx = {
-            int(a.get("interface_index", -1)): a for a in attachments
-        }
 
         for idx, want in expected.items():
             tap = want["tap_name"]
@@ -3744,9 +3878,10 @@ class NodeRuntimeService:
                 continue
             if not bool(entry.get("boot_nic", False)) or idx >= boot_ethernet:
                 # Hot-add ifaces have their own US-304 path. We don't drive
-                # device_del from here. Just observe drift.
-                if idx not in expected:
-                    skipped_hotplug.append({"interface_index": idx})
+                # device_del from here. Just observe drift. (We already
+                # `continue`d above when idx is in expected, so this entry
+                # is by definition not in expected.)
+                skipped_hotplug.append({"interface_index": idx})
                 continue
 
             tap = entry.get("tap_name") or host_net.tap_name(lab_id, node_id, idx)

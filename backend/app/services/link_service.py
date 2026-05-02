@@ -528,28 +528,34 @@ class LinkService:
                         link_payload = _link_with_state(link)
                         break
 
-        # Issue #174: bulletproof reconcile after create. The targeted attach
-        # in `_hot_attach_running_endpoints` is generation-gated and can no-op
-        # silently on stale state; converge runtime + kernel for every running
-        # QEMU node against the JSON we just wrote.
-        try:
-            from app.services.node_runtime_service import (  # noqa: WPS433
-                NodeRuntimeService,
-            )
+            # Issue #174 / #175 (M2): bulletproof reconcile after create.
+            # The targeted attach in `_hot_attach_running_endpoints` is
+            # generation-gated and can no-op silently on stale state;
+            # converge runtime + kernel for every running QEMU node
+            # against the JSON we just wrote. MUST run INSIDE lab_lock
+            # so the post-write re-read sees the same JSON state that
+            # was written under the lock and another writer cannot slip
+            # a divergent state in between. The reconciler exception is
+            # swallowed so a reconcile failure cannot corrupt the
+            # otherwise-successful create_link op.
+            try:
+                from app.services.node_runtime_service import (  # noqa: WPS433
+                    NodeRuntimeService,
+                )
 
-            rt_svc = NodeRuntimeService()
-            data_after = LabService.read_lab_json_static(normalized)
-            lab_id_after = str(data_after.get("id") or normalized)
-            for raw_id, node_after in (data_after.get("nodes") or {}).items():
-                if not isinstance(node_after, dict):
-                    continue
-                if str(node_after.get("type") or "").lower() != "qemu":
-                    continue
-                rt_svc.reconcile_qemu_node_links(lab_id_after, data_after, node_after)
-        except Exception:  # noqa: BLE001 — best-effort safety net
-            _logger.exception(
-                "create_link: post-create reconcile failed (lab=%s)", normalized
-            )
+                rt_svc = NodeRuntimeService()
+                data_after = LabService.read_lab_json_static(normalized)
+                lab_id_after = str(data_after.get("id") or normalized)
+                for raw_id, node_after in (data_after.get("nodes") or {}).items():
+                    if not isinstance(node_after, dict):
+                        continue
+                    if str(node_after.get("type") or "").lower() != "qemu":
+                        continue
+                    rt_svc.reconcile_qemu_node_links(lab_id_after, data_after, node_after)
+            except Exception:  # noqa: BLE001 — best-effort safety net
+                _logger.exception(
+                    "create_link: post-create reconcile failed (lab=%s)", normalized
+                )
 
         for event_type, payload in ws_events:
             await ws_hub.publish(normalized, event_type, payload)
@@ -1253,30 +1259,36 @@ class LinkService:
 
             ws_events.append(("link_deleted", {"link_id": str(link_id)}))
 
-        # Issue #174: bulletproof reconcile after delete. The targeted detach
-        # in Phase 2 might have stale-gen no-op'd or failed silently mid-flight;
-        # walk every running QEMU node in the lab and converge runtime + kernel
-        # to the JSON we just wrote.
-        try:
-            from app.services.node_runtime_service import (  # noqa: WPS433
-                NodeRuntimeService,
-            )
+            # Issue #174 / #175 (M2): bulletproof reconcile after delete.
+            # The targeted detach in Phase 2 might have stale-gen no-op'd
+            # or failed silently mid-flight; walk every running QEMU node
+            # in the lab and converge runtime + kernel to the JSON we
+            # just wrote. MUST run INSIDE lab_lock so the post-write
+            # re-read sees the same JSON state that was written under
+            # the lock and another writer cannot slip a divergent state
+            # in between. The reconciler exception is swallowed so a
+            # reconcile failure cannot corrupt the otherwise-successful
+            # delete_link op.
+            try:
+                from app.services.node_runtime_service import (  # noqa: WPS433
+                    NodeRuntimeService,
+                )
 
-            rt_svc = NodeRuntimeService()
-            data_after = LabService.read_lab_json_static(normalized)
-            lab_id_after = str(data_after.get("id") or normalized)
-            for raw_id, node_after in (data_after.get("nodes") or {}).items():
-                if not isinstance(node_after, dict):
-                    continue
-                if str(node_after.get("type") or "").lower() != "qemu":
-                    continue
-                rt_svc.reconcile_qemu_node_links(lab_id_after, data_after, node_after)
-        except Exception:  # noqa: BLE001 — best-effort safety net
-            _logger.exception(
-                "delete_link: post-delete reconcile failed (lab=%s link=%s)",
-                normalized,
-                link_id,
-            )
+                rt_svc = NodeRuntimeService()
+                data_after = LabService.read_lab_json_static(normalized)
+                lab_id_after = str(data_after.get("id") or normalized)
+                for raw_id, node_after in (data_after.get("nodes") or {}).items():
+                    if not isinstance(node_after, dict):
+                        continue
+                    if str(node_after.get("type") or "").lower() != "qemu":
+                        continue
+                    rt_svc.reconcile_qemu_node_links(lab_id_after, data_after, node_after)
+            except Exception:  # noqa: BLE001 — best-effort safety net
+                _logger.exception(
+                    "delete_link: post-delete reconcile failed (lab=%s link=%s)",
+                    normalized,
+                    link_id,
+                )
 
         for event_type, payload in ws_events:
             await ws_hub.publish(normalized, event_type, payload)
