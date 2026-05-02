@@ -41,6 +41,15 @@ Locking discipline (split public / private — Codex v5 finding #1):
 The registry is intentionally process-local — there is exactly one
 backend process and the mutex protects in-process kernel sequencing only.
 A restart drops every mutex (no leaked state to clean up).
+
+Issue #175: the per-(lab, node) "node-scoped" lock is :class:`threading.RLock`
+(re-entrant) so the existing inner ``acquire_node_sync`` used by
+``_attach_qemu_interface_locked`` for PCIe slot allocation can nest safely
+inside an outer ``acquire_node_sync`` taken by the same thread for the
+full attach / detach / start / reconcile body. The per-(lab, node, iface)
+mutex (``_locks``) stays a plain :class:`threading.Lock` because per-iface
+re-entrance is not needed and keeping it non-reentrant lets the
+``is_held`` defensive contract catch accidental double-acquire bugs.
 """
 
 from __future__ import annotations
@@ -107,7 +116,10 @@ class RuntimeMutexRegistry:
         # Guards ``_locks`` / ``_node_locks`` themselves.
         self._registry_lock = threading.Lock()
         self._locks: Dict[_MutexKey, threading.Lock] = {}
-        self._node_locks: Dict[_NodeKey, threading.Lock] = {}
+        # Issue #175: node-scoped lock is RLock for re-entrant acquires from
+        # nested paths (e.g. outer attach + inner slot-allocation in
+        # ``_attach_qemu_interface_locked``).
+        self._node_locks: Dict[_NodeKey, threading.RLock] = {}
 
     def _key(self, lab_id: str, node_id: int, interface_index: int) -> _MutexKey:
         return (str(lab_id), int(node_id), int(interface_index))
@@ -128,12 +140,15 @@ class RuntimeMutexRegistry:
 
     def _get_or_create_node_lock(
         self, lab_id: str, node_id: int
-    ) -> threading.Lock:
+    ) -> "threading.RLock":
         key = self._node_key(lab_id, node_id)
         with self._registry_lock:
             lock = self._node_locks.get(key)
             if lock is None:
-                lock = threading.Lock()
+                # Issue #175: re-entrant so the outer acquire taken by
+                # attach/detach/reconcile/start can be nested by the inner
+                # slot-allocation acquire in ``_attach_qemu_interface_locked``.
+                lock = threading.RLock()
                 self._node_locks[key] = lock
             return lock
 
