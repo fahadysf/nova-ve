@@ -524,10 +524,7 @@ def test_detach_boot_nic_raises_on_link_set_nomaster_failure(
     # link_set_nomaster call below).
     _capture_qmp(service)
 
-    # Stub ``host_net.tap_name`` to match the seeded TAP name (the detach
-    # path falls back to ``host_net.tap_name(...)`` if ``target.tap_name``
-    # is missing, but we set it on the attachment so this is purely
-    # defensive — keep it for parity with the start-path stubs).
+    # Stub ``host_net.tap_name`` so the detach fallback resolves consistently.
     monkeypatch.setattr(
         "app.services.node_runtime_service.host_net.tap_name",
         lambda lab_id, node_id, iface: f"nve-test-d{node_id}i{iface}",

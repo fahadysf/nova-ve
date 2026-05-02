@@ -2,24 +2,19 @@ import pytest
 
 
 def _stub_host_net_for_qemu_start(monkeypatch):
-    """Issue #174: every non-uplink boot iface provisions a host TAP at
-    start. This helper stubs the host_net surface used by the QEMU start
-    path so unit tests run without a privileged helper or real
-    ``instance_id`` file.
+    """Issue #174 / #175 (S3): stub the host_net surface used by the QEMU
+    start path so tests run without a privileged helper or real
+    ``instance_id`` file. Canonicalised here so test_node_runtime.py,
+    test_node_extras.py, and test_qemu_pcie_root_ports.py share one
+    definition.
 
     Call this *only* from tests that don't already supply their own
     ``host_net`` patches (e.g. via ``_us302_helper_mock`` or
     ``_us203_helper_mock``); those tests record real call sequences and
     overwriting them here would mask their assertions.
 
-    Issue #175 (S3): canonicalised here so test_node_runtime.py,
-    test_node_extras.py, and test_qemu_pcie_root_ports.py share one
-    definition. Stubs the seven ``host_net`` calls exercised by the QEMU
-    start path: ``tap_name`` / ``tap_exists`` / ``tap_add`` /
-    ``link_master`` / ``link_up`` / ``try_link_del`` / ``bridge_exists``.
-    Tests that need to observe ``link_set_nomaster`` (e.g. the orphan-TAP
-    cleanup test) layer their own monkeypatch on top after calling this
-    helper — leaving it unstubbed here keeps the call observable.
+    ``link_set_nomaster`` is intentionally left unstubbed so tests that
+    need to observe the orphan-TAP cleanup branch can layer their own patch.
     """
     monkeypatch.setattr(
         "app.services.node_runtime_service.host_net.tap_name",
