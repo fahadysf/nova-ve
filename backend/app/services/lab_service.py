@@ -446,7 +446,14 @@ class LabService:
         filepath = _lab_file_path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
-        if "topology" in data:
+        # Issue #174 follow-up: only synthesize links[] from topology[]
+        # for v1-shaped writes (no v2 links[] yet). Previously this ran
+        # unconditionally, so a PUT /topology with topology=[] would
+        # regenerate links[]=[] and silently wipe every link from the
+        # lab — even though the caller never asked to touch links[].
+        # For v2 labs, links[] is authoritative; topology[] is a derived
+        # legacy view (`read_lab_json_static` re-derives it on every read).
+        if "topology" in data and not data.get("links"):
             data["links"] = _legacy_topology_to_links(data)
 
         cleaned = _strip_legacy_fields(data)
