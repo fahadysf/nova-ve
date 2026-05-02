@@ -165,6 +165,27 @@ def _reconcile_qemu_nic_link_state(
         if runtime is None:
             continue
 
+        # Issue #174: full per-node reconcile of boot ifaces (TAP master,
+        # UP, runtime.interface_attachments) to lab.json links[]. Bring the
+        # host side into agreement with the JSON before we ask QEMU to
+        # flip carrier — otherwise QMP set_link runs on stale TAP state.
+        try:
+            recon = runtime_service.reconcile_qemu_node_links(lab_id, lab_data, node)
+            for w in recon.get("warnings", []):
+                logger.warning(
+                    "reconcile_qemu_node_links: lab=%s node=%s iface=%s reason=%s",
+                    lab_id,
+                    node_id,
+                    w.get("interface_index"),
+                    w.get("reason"),
+                )
+        except Exception:  # noqa: BLE001 — best-effort observability
+            logger.exception(
+                "reconcile_qemu_node_links failed for lab=%s node=%s",
+                lab_id,
+                node_id,
+            )
+
         node_connected = connected.get(node_id, set())
         for index in range(ethernet):
             up = index in node_connected

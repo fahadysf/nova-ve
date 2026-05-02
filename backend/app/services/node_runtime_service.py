@@ -1455,17 +1455,18 @@ class NodeRuntimeService:
             if machine == "q35" and index < max_nics:
                 device_args += f",bus=rp{index}"
 
-            if index in tap_names:
+            if self._interface_uplink(node_interfaces, index):
+                cmd += ["-netdev", f"user,id=net{index}", "-device", device_args]
+            else:
+                # Issue #174: every boot ethernet binds to a real TAP at start.
+                # Connected ifaces have the TAP on the target bridge; unconnected
+                # ifaces have the TAP without any master so the e1000 ↔ TAP peer
+                # is permanent and "connect" becomes a host-only op (link_master
+                # + link_up + QMP set_link up=true). Hubport placeholders
+                # orphaned the e1000 peer on netdev_del + netdev_add (see #174).
                 tap = tap_names[index]
                 cmd += [
                     "-netdev", f"tap,id=net{index},ifname={tap},script=no,downscript=no",
-                    "-device", device_args,
-                ]
-            elif self._interface_uplink(node_interfaces, index):
-                cmd += ["-netdev", f"user,id=net{index}", "-device", device_args]
-            else:
-                cmd += [
-                    "-netdev", f"hubport,id=net{index},hubid={index}",
                     "-device", device_args,
                 ]
 
@@ -1522,22 +1523,29 @@ class NodeRuntimeService:
             int(a["interface_index"]): a for a in attachments
         }
         ethernet_count = int(node.get("ethernet", 0))
+        node_interfaces = node.get("interfaces") or []
 
-        # US-302: provision TAPs BEFORE spawning QEMU. Track every TAP we
-        # successfully created so a partial-failure path can sweep them.
+        # Issue #174: provision a TAP for EVERY non-uplink boot ethernet
+        # before spawning QEMU. Connected ifaces also get attached to their
+        # bridge and brought UP. Unconnected ifaces are left with no master
+        # — the QEMU `set_link up=False` post-spawn keeps the guest carrier
+        # down. This makes the e1000 ↔ TAP peer permanent so "connect" is a
+        # host-only op (no QMP netdev swap needed).
         provisioned_taps: list[str] = []
         try:
             tap_names: dict[int, str] = {}
             for index in range(ethernet_count):
+                if self._interface_uplink(node_interfaces, index):
+                    continue  # SLIRP user netdev, no TAP
+                tap = host_net.tap_name(lab_id, node_id, index)
+                if not host_net.tap_exists(tap):
+                    host_net.tap_add(tap)
+                    provisioned_taps.append(tap)
+                tap_names[index] = tap
                 if index in attachment_by_index:
-                    tap = host_net.tap_name(lab_id, node_id, index)
                     bridge = attachment_by_index[index]["bridge_name"]
-                    if not host_net.tap_exists(tap):
-                        host_net.tap_add(tap)
-                        provisioned_taps.append(tap)
                     host_net.link_master(tap, bridge)
                     host_net.link_up(tap)
-                    tap_names[index] = tap
         except Exception:
             for tap in provisioned_taps:
                 host_net.try_link_del(tap)
@@ -1555,10 +1563,11 @@ class NodeRuntimeService:
             attachment_by_index=attachment_by_index,
         )
         # Compute unconnected indices for post-spawn QMP set_link calls.
-        node_interfaces = node.get("interfaces") or []
+        # Issue #174: every non-uplink iface now has a TAP, so distinguish by
+        # the attachment map (declared link to a network) — not by tap_names.
         unconnected_nic_indices = [
             i for i in range(ethernet_count)
-            if i not in tap_names and not self._interface_uplink(node_interfaces, i)
+            if i not in attachment_by_index and not self._interface_uplink(node_interfaces, i)
         ]
         # US-301: in-flight slot reservations for hot-plug race-window only
         # (between slot-pick and device_add visibility in query-pci).
@@ -1707,10 +1716,12 @@ class NodeRuntimeService:
         attachment_by_index: dict[int, dict[str, Any]] = {
             int(a["interface_index"]): a for a in attachments
         }
+        node_interfaces = node.get("interfaces") or []
+        # Issue #174: every non-uplink boot iface uses a TAP (connected or not).
         tap_names = {
             index: host_net.tap_name(lab_id, node_id, index)
             for index in range(ethernet_count)
-            if index in attachment_by_index
+            if not self._interface_uplink(node_interfaces, index)
         }
 
         cmd = self._build_qemu_base_cmd(
@@ -2690,63 +2701,42 @@ class NodeRuntimeService:
         device_id = f"dev{int(interface_index)}"
         tap = host_net.tap_name(lab_id, int(node_id), int(interface_index))
 
-        # Boot-time NICs (indices 0..boot_ethernet-1) are registered in QEMU
-        # with hubport placeholder netdevs at start. Connecting one to a network
-        # requires swapping the backend (hubport → tap), not adding a new device.
+        # Boot-time NICs (indices 0..boot_ethernet-1) are bound to a
+        # permanent host TAP at start (issue #174). Attach is a host-only op:
+        # link_master + link_up on the existing TAP, plus QMP set_link to
+        # bring the guest carrier UP. No netdev_del/add; no device_add.
         boot_ethernet = int(runtime.get("boot_ethernet") or 0)
         is_boot_nic = int(interface_index) < boot_ethernet
 
         if is_boot_nic:
-            # ----- Boot-time NIC: swap hubport → TAP (no device_add) ----
+            # ----- Boot-time NIC: host-only attach ----------------------
             tap_provisioned = False
             bridge_attached = False
-            hubport_deleted = False
             try:
-                host_net.tap_add(tap)
-                tap_provisioned = True
+                if not host_net.tap_exists(tap):
+                    # Defensive: a boot TAP might be missing if a pre-#174
+                    # process is running, or if the host swept it. Recreate.
+                    host_net.tap_add(tap)
+                    tap_provisioned = True
 
                 host_net.link_master(tap, bridge)
                 bridge_attached = True
                 host_net.link_up(tap)
 
-                # Remove the boot-time hubport placeholder so we can attach
-                # the real TAP backend under the same id.
-                self._qmp_command(socket_path, "netdev_del", {"id": netdev_id})
-                hubport_deleted = True
-
-                netdev_response = self._qmp_command(
-                    socket_path,
-                    "netdev_add",
-                    {
-                        "type": "tap",
-                        "id": netdev_id,
-                        "ifname": tap,
-                        "script": "no",
-                        "downscript": "no",
-                    },
-                )
-                if isinstance(netdev_response, dict) and "error" in netdev_response:
-                    raise NodeRuntimeError(
-                        f"QMP netdev_add (swap) failed: {netdev_response['error']}"
+                # Drive guest-visible carrier UP. Best-effort — errors
+                # surface via the reconciler instead of the attach call.
+                try:
+                    self._qmp_command(
+                        socket_path,
+                        "set_link",
+                        {"name": netdev_id, "up": True},
+                    )
+                except Exception:  # noqa: BLE001
+                    _logger.exception(
+                        "boot-nic attach: set_link(%s, up=True) failed",
+                        netdev_id,
                     )
             except Exception:
-                if hubport_deleted:
-                    # Hubport was removed but TAP netdev wasn't attached —
-                    # restore the placeholder so the guest NIC still exists.
-                    try:
-                        self._qmp_command(
-                            socket_path,
-                            "netdev_add",
-                            {
-                                "type": "hubport",
-                                "id": netdev_id,
-                                "hubid": int(interface_index),
-                            },
-                        )
-                    except Exception:  # noqa: BLE001
-                        _logger.exception(
-                            "rollback: failed to restore hubport netdev %s", netdev_id
-                        )
                 if bridge_attached:
                     try:
                         host_net.link_set_nomaster(tap)
@@ -3181,44 +3171,26 @@ class NodeRuntimeService:
         forced_fallback = False
 
         if is_boot_nic:
-            # Boot-time NIC: the PCI device is permanent (created at boot).
-            # Skip device_del. Instead swap the TAP netdev back to a hubport
-            # placeholder so the guest gets link-down but the device remains.
+            # Issue #174: Boot-time NIC is permanently bound to a TAP at
+            # start. Detach is a host-only op: drop guest carrier via QMP,
+            # detach the TAP from the bridge. Do NOT delete the TAP — it
+            # stays alive for the QEMU lifetime so the e1000 ↔ TAP peer
+            # remains valid for any future re-attach.
             try:
-                self._qmp_command(socket_path, "netdev_del", {"id": netdev_id})
-            except Exception as exc:  # noqa: BLE001
-                err_str = str(exc).lower()
-                if "no such" not in err_str and "not found" not in err_str:
-                    raise
-            try:
-                restore_resp = self._qmp_command(
+                self._qmp_command(
                     socket_path,
-                    "netdev_add",
-                    {
-                        "type": "hubport",
-                        "id": netdev_id,
-                        "hubid": int(interface_index),
-                    },
+                    "set_link",
+                    {"name": netdev_id, "up": False},
                 )
-                if isinstance(restore_resp, dict) and "error" in restore_resp:
-                    _logger.warning(
-                        "detach boot-nic: failed to restore hubport %s: %s",
-                        netdev_id,
-                        restore_resp["error"],
-                    )
             except Exception:  # noqa: BLE001
                 _logger.exception(
-                    "detach boot-nic: failed to restore hubport %s (best-effort)",
+                    "detach boot-nic: set_link(%s, up=False) failed (best-effort)",
                     netdev_id,
                 )
             try:
                 host_net.link_set_nomaster(tap)
             except Exception:  # noqa: BLE001
                 _logger.exception("detach boot-nic: link_set_nomaster(%s) failed", tap)
-            try:
-                host_net.tap_del(tap)
-            except host_net.HostNetEINVAL:
-                pass
             device_gone = True
         else:
             # ----- Step 1: device_del with race-A retry ------------------
@@ -3392,7 +3364,11 @@ class NodeRuntimeService:
             # stop-time sweep doesn't double-process. Forced fallback:
             # leave the TAP entry in place so stop-time cleanup still
             # removes the kernel object on node restart.
-            if not forced_fallback:
+            #
+            # Issue #174: boot-NIC TAPs are permanent for the QEMU lifetime
+            # (the e1000 peer is bound to it). Keep them in tap_names so
+            # stop-time sweep removes them on node stop.
+            if not forced_fallback and not is_boot_nic:
                 tap_names = [
                     t for t in (runtime.get("tap_names") or []) if t != tap
                 ]
@@ -3593,6 +3569,201 @@ class NodeRuntimeService:
         if isinstance(response, dict) and isinstance(response.get("error"), dict):
             return False, f"qmp error: {response['error']}"
         return True, None
+
+    def reconcile_qemu_node_links(
+        self, lab_id: str, lab_data: dict, node: dict
+    ) -> dict:
+        """Issue #174: converge runtime + kernel state for a running QEMU
+        node to match ``lab_data["links"]`` for every BOOT-time interface
+        (idx < ``boot_ethernet``).
+
+        For each declared link to (node, idx):
+          * Ensure host TAP exists, master == expected bridge, UP.
+          * QMP ``set_link netN up=true``.
+          * Add a matching ``interface_attachments`` entry if missing.
+
+        For each ``interface_attachments`` entry on a boot iface NOT in the
+        declared links:
+          * link_set_nomaster + QMP ``set_link netN up=false``. TAP stays.
+          * Drop the attachment record.
+
+        Hot-plug ifaces (idx >= ``boot_ethernet``) are NOT touched here —
+        they have their own US-303/US-304 paths. Drift on those is logged
+        as a warning so the operator can investigate.
+
+        Returns a summary dict for observability:
+            {"node_id", "applied": [...], "removed": [...],
+             "warnings": [...], "skipped_hotplug": [...]}.
+        """
+        try:
+            node_id = int(node.get("id"))
+        except (TypeError, ValueError):
+            return {"node_id": None, "applied": [], "removed": [], "warnings": [], "skipped_hotplug": []}
+
+        runtime = self._runtime_record(lab_id, node_id)
+        if runtime is None or runtime.get("kind") != "qemu":
+            return {"node_id": node_id, "applied": [], "removed": [], "warnings": [], "skipped_hotplug": []}
+
+        boot_ethernet = int(runtime.get("boot_ethernet") or 0)
+
+        # Build expected boot-iface attachments from the lab's links[].
+        expected: dict[int, dict] = {}
+        for link in lab_data.get("links", []) or []:
+            attach_gen = (link.get("runtime") or {}).get("attach_generation")
+            for endpoint, peer in (
+                (link.get("from"), link.get("to")),
+                (link.get("to"), link.get("from")),
+            ):
+                if not isinstance(endpoint, dict) or not isinstance(peer, dict):
+                    continue
+                if endpoint.get("node_id") != node_id:
+                    continue
+                if "interface_index" not in endpoint:
+                    continue
+                try:
+                    idx = int(endpoint["interface_index"])
+                except (TypeError, ValueError):
+                    continue
+                # We only reconcile boot ifaces here.
+                if idx >= boot_ethernet:
+                    continue
+                # The peer must point at a network for this to be a TAP-on-bridge link.
+                if "network_id" not in peer:
+                    continue
+                try:
+                    network_id = int(peer["network_id"])
+                except (TypeError, ValueError):
+                    continue
+                bridge = host_net.bridge_name(lab_id, network_id)
+                # Allow per-network override.
+                networks = lab_data.get("networks") or {}
+                net = networks.get(str(network_id)) or {}
+                rt = net.get("runtime") or {}
+                if isinstance(rt.get("bridge_name"), str) and rt["bridge_name"]:
+                    bridge = rt["bridge_name"]
+                expected[idx] = {
+                    "interface_index": idx,
+                    "network_id": network_id,
+                    "bridge_name": bridge,
+                    "tap_name": host_net.tap_name(lab_id, node_id, idx),
+                    "attach_generation": int(attach_gen) if attach_gen else 1,
+                }
+
+        applied: list[dict] = []
+        removed: list[dict] = []
+        warnings: list[dict] = []
+        skipped_hotplug: list[dict] = []
+
+        socket_path = runtime.get("qmp_socket") or ""
+        if not socket_path:
+            work_dir = runtime.get("work_dir")
+            socket_path = str(Path(work_dir) / "qmp.sock") if work_dir else ""
+
+        # ---- Phase 1: ensure expected attachments are present ----------
+        with self._lock:
+            attachments = list(runtime.get("interface_attachments") or [])
+        existing_by_idx = {
+            int(a.get("interface_index", -1)): a for a in attachments
+        }
+
+        for idx, want in expected.items():
+            tap = want["tap_name"]
+            bridge = want["bridge_name"]
+            try:
+                if not host_net.tap_exists(tap):
+                    # Defensive: a pre-#174 process or a race left no TAP.
+                    # Recreate so the e1000 backend has something to talk to.
+                    host_net.tap_add(tap)
+                host_net.link_master(tap, bridge)
+                host_net.link_up(tap)
+                if socket_path:
+                    try:
+                        self._qmp_command(
+                            socket_path, "set_link", {"name": f"net{idx}", "up": True}
+                        )
+                    except Exception:  # noqa: BLE001 — best-effort
+                        pass
+            except host_net.HostNetError as exc:
+                warnings.append({"interface_index": idx, "reason": str(exc)})
+                continue
+
+            # Add or refresh the runtime attachment record.
+            new_record = {
+                "interface_index": idx,
+                "network_id": int(want["network_id"]),
+                "bridge_name": bridge,
+                "tap_name": tap,
+                "slot": None,
+                "boot_nic": True,
+                "nic_model": self._resolve_qemu_nic_model(lab_id, node_id, runtime),
+                "attach_generation": int(want["attach_generation"]),
+                "planned_mac": self._resolve_qemu_planned_mac(
+                    lab_id, node_id, runtime, idx
+                ),
+            }
+            with self._lock:
+                attachments_now = list(runtime.get("interface_attachments") or [])
+                replaced = False
+                for i, entry in enumerate(attachments_now):
+                    if int(entry.get("interface_index", -1)) == idx:
+                        attachments_now[i] = new_record
+                        replaced = True
+                        break
+                if not replaced:
+                    attachments_now.append(new_record)
+                runtime["interface_attachments"] = attachments_now
+                tap_names = list(runtime.get("tap_names") or [])
+                if tap not in tap_names:
+                    tap_names.append(tap)
+                    runtime["tap_names"] = tap_names
+            applied.append({"interface_index": idx, "bridge": bridge, "tap": tap})
+
+        # ---- Phase 2: tear down attachments not in lab.json ------------
+        for entry in attachments:
+            try:
+                idx = int(entry.get("interface_index", -1))
+            except (TypeError, ValueError):
+                continue
+            if idx in expected:
+                continue
+            if not bool(entry.get("boot_nic", False)) or idx >= boot_ethernet:
+                # Hot-add ifaces have their own US-304 path. We don't drive
+                # device_del from here. Just observe drift.
+                if idx not in expected:
+                    skipped_hotplug.append({"interface_index": idx})
+                continue
+
+            tap = entry.get("tap_name") or host_net.tap_name(lab_id, node_id, idx)
+            if socket_path:
+                try:
+                    self._qmp_command(
+                        socket_path, "set_link", {"name": f"net{idx}", "up": False}
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                host_net.link_set_nomaster(tap)
+            except host_net.HostNetError as exc:
+                warnings.append({"interface_index": idx, "reason": f"nomaster: {exc}"})
+
+            with self._lock:
+                attachments_now = [
+                    a for a in (runtime.get("interface_attachments") or [])
+                    if int(a.get("interface_index", -1)) != idx
+                ]
+                runtime["interface_attachments"] = attachments_now
+            removed.append({"interface_index": idx, "tap": tap})
+
+        if applied or removed:
+            self._persist_runtime(runtime)
+
+        return {
+            "node_id": node_id,
+            "applied": applied,
+            "removed": removed,
+            "warnings": warnings,
+            "skipped_hotplug": skipped_hotplug,
+        }
 
     def _find_free_pcie_slot(
         self,

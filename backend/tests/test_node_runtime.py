@@ -172,6 +172,42 @@ def _mock_runtime_binaries(monkeypatch):
     )
 
 
+def _stub_host_net_for_qemu_start(monkeypatch):
+    """Issue #174: every non-uplink boot iface provisions a host TAP at
+    start. This helper stubs the host_net surface used by the QEMU start
+    path so unit tests run without a privileged helper or real
+    ``instance_id`` file.
+
+    Call this *only* from tests that don't already supply their own
+    ``host_net`` patches (e.g. via ``_us302_helper_mock`` or
+    ``_us203_helper_mock``); those tests record real call sequences and
+    overwriting them here would mask their assertions.
+    """
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_name",
+        lambda lab_id, node_id, iface: f"nve-test-d{node_id}i{iface}",
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_exists", lambda name: False
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_add", lambda name: None
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_master",
+        lambda iface, bridge: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_up", lambda iface: None
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.try_link_del", lambda name: None
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_exists", lambda name: True
+    )
+
+
 def test_resolve_qemu_machine_uses_inferred_q35_defaults_when_template_omits_capabilities(
     monkeypatch, patched_settings, tmp_path
 ):
@@ -292,6 +328,7 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
     killed = []
 
     _mock_runtime_binaries(monkeypatch)
+    _stub_host_net_for_qemu_start(monkeypatch)
     monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", _fake_subprocess_run_factory(recorded_runs))
 
     def fake_popen(cmd, cwd=None, stdin=None, stdout=None, stderr=None, start_new_session=None):
@@ -2478,10 +2515,13 @@ def test_qemu_unconnected_nics_get_set_link_off_after_spawn(
     # not exist on e1000 and would crash QEMU at boot.
     for idx, arg in by_index.items():
         assert "link=" not in arg, f"unexpected link= on idx {idx}: {arg!r}"
-    # Sanity: connected NIC is tap-backed, others are hubport.
+    # Issue #174: every non-uplink iface (connected OR not) is tap-backed
+    # so the e1000 ↔ TAP peer is permanent. No hubport placeholders.
     flat = " ".join(cmd)
     assert "-netdev tap," in flat
-    assert "-netdev hubport," in flat
+    assert "-netdev hubport," not in flat
+    tap_count = flat.count("-netdev tap,")
+    assert tap_count == 4, f"expected 4 tap netdevs (one per iface), got {tap_count}"
 
     # Post-spawn set_link issued for the three unconnected indices only.
     set_link_args = [

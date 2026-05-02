@@ -270,6 +270,32 @@ def _stub_qemu_subprocess(monkeypatch, recorded):
         ),
     )
 
+    # Issue #174: every non-uplink boot iface now provisions a host TAP at
+    # start. Stub host_net so this unit test runs without a privileged helper.
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_name",
+        lambda lab_id, node_id, iface: f"nve-test-d{node_id}i{iface}",
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_exists", lambda name: False
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_add", lambda name: None
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_master",
+        lambda iface, bridge: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_up", lambda iface: None
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.try_link_del", lambda name: None
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_exists", lambda name: True
+    )
+
 
 @pytest.mark.asyncio
 async def test_qemu_runtime_honors_qemu_options_and_nic(monkeypatch, populated_templates):
