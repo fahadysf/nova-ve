@@ -104,6 +104,40 @@ def argv_capture(monkeypatch):
         "app.services.node_runtime_service.NodeRuntimeService._resolve_binary",
         staticmethod(lambda binary: binary),
     )
+
+    # Issue #174: every non-uplink boot iface now provisions a TAP at start.
+    # Stub host_net so unit tests that don't have a real instance_id or
+    # privileged helper still exercise the argv path.
+    def fake_tap_name(lab_id, node_id, iface):
+        return f"nve-test-d{node_id}i{iface}"
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_name", fake_tap_name
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_exists",
+        lambda name: False,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_add",
+        lambda name: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_master",
+        lambda iface, bridge: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_up",
+        lambda iface: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.try_link_del",
+        lambda name: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_exists",
+        lambda name: True,
+    )
     return captured
 
 
