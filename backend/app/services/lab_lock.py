@@ -20,6 +20,10 @@ def lab_lock(lab_id: str, labs_dir: Path, timeout_s: float = 5.0):
     labs_dir = Path(labs_dir)
     labs_dir.mkdir(parents=True, exist_ok=True)
     lock_path = labs_dir / f"{lab_id}.lock"
+    # Issue #174 follow-up: when lab_id contains path separators (nested
+    # labs like "nested/lab.json"), the lock file's parent directory may
+    # not exist. Create it so open(...) doesn't fail with FileNotFoundError.
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + timeout_s
     with open(lock_path, 'a+') as fd:  # 'a+' avoids truncation
         while True:

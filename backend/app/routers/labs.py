@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
+import logging
 import uuid
 from urllib.parse import quote
 
@@ -22,6 +23,8 @@ from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateError, TemplateService, _icon_filename_for, render_interface_name
 from app.services.ws_hub import ws_hub
+
+_logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/labs", tags=["labs"])
 
@@ -414,15 +417,6 @@ async def update_topology(
 ):
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-        data = _read_lab_data(scoped_path)
-    except LegacyLabSchemaError as exc:
-        return _legacy_schema_response(exc)
-    except FileNotFoundError:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
     except PermissionError as e:
         return {
             "code": 403,
@@ -430,24 +424,72 @@ async def update_topology(
             "message": str(e),
         }
 
-    if isinstance(payload, list):
-        data["topology"] = payload
-    else:
-        data["topology"] = payload.get("topology", data.get("topology", []))
-        for node_id, node_patch in payload.get("nodes", {}).items():
-            node = data.get("nodes", {}).get(str(node_id))
-            if node and isinstance(node_patch, dict):
-                for field, value in node_patch.items():
-                    if value is not None:
-                        node[field] = value
-        for network_id, network_patch in payload.get("networks", {}).items():
-            network = data.get("networks", {}).get(str(network_id))
-            if network and isinstance(network_patch, dict):
-                for field, value in network_patch.items():
-                    if value is not None:
-                        network[field] = value
+    settings = get_settings()
+    normalized = _normalize_relative_lab_path(scoped_path)
 
-    LabService.write_lab_json_static(scoped_path, data)
+    # Issue #174 follow-up: serialize topology writes against link_service /
+    # network_service via lab_lock. Without this, two concurrent writers can
+    # interleave and lose mutations. Plus, the post-write reconcile below has
+    # to see the same JSON state we just wrote — read inside the lock.
+    with lab_lock(normalized, settings.LABS_DIR):
+        try:
+            data = _read_lab_data(scoped_path)
+        except LegacyLabSchemaError as exc:
+            return _legacy_schema_response(exc)
+        except FileNotFoundError:
+            return {
+                "code": 404,
+                "status": "fail",
+                "message": "Lab does not exist (60038).",
+            }
+
+        if isinstance(payload, list):
+            data["topology"] = payload
+        else:
+            data["topology"] = payload.get("topology", data.get("topology", []))
+            for node_id, node_patch in payload.get("nodes", {}).items():
+                node = data.get("nodes", {}).get(str(node_id))
+                if node and isinstance(node_patch, dict):
+                    for field, value in node_patch.items():
+                        if value is not None:
+                            node[field] = value
+            for network_id, network_patch in payload.get("networks", {}).items():
+                network = data.get("networks", {}).get(str(network_id))
+                if network and isinstance(network_patch, dict):
+                    for field, value in network_patch.items():
+                        if value is not None:
+                            network[field] = value
+
+        LabService.write_lab_json_static(scoped_path, data)
+
+        # Issue #174 follow-up: bridge the legacy PUT /topology bypass that
+        # previously skipped runtime reconciliation. The UI deletes a link by
+        # PUT /topology with the shorter array (NOT DELETE /links/{id}), and
+        # write_lab_json_static regenerates links[] from topology[] — so links
+        # disappear from lab.json without link_service.delete_link ever
+        # firing. Result: kernel TAPs stayed on the bridge and QMP set_link
+        # stayed UP, leaving guest carrier up forever even though the link
+        # was "deleted" in lab.json. Mirror the reconcile-after-write block
+        # from link_service.create_link / delete_link so any path that
+        # mutates lab.json drives runtime + kernel state to match.
+        try:
+            data_after = LabService.read_lab_json_static(scoped_path)
+            lab_id_after = str(data_after.get("id") or scoped_path)
+            rt_svc = NodeRuntimeService()
+            for raw_id, node_after in (data_after.get("nodes") or {}).items():
+                if not isinstance(node_after, dict):
+                    continue
+                if str(node_after.get("type") or "").lower() != "qemu":
+                    continue
+                rt_svc.reconcile_qemu_node_links(
+                    lab_id_after, data_after, node_after
+                )
+        except Exception:  # noqa: BLE001 — best-effort, observability only
+            _logger.exception(
+                "PUT /topology: post-write reconcile failed (lab=%s)",
+                scoped_path,
+            )
+
     return {
         "code": 200,
         "status": "success",
