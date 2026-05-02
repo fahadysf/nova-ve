@@ -17,6 +17,7 @@ from app.services.node_runtime_service import (
     _merge_qemu_args,
     _parse_qemu_tokens,
 )
+from tests.conftest import _stub_host_net_for_qemu_start
 
 
 @pytest.fixture(autouse=True)
@@ -169,42 +170,6 @@ def _mock_runtime_binaries(monkeypatch):
     monkeypatch.setattr(
         "app.services.node_runtime_service.NodeRuntimeService._resolve_binary",
         staticmethod(lambda binary: binary),
-    )
-
-
-def _stub_host_net_for_qemu_start(monkeypatch):
-    """Issue #174: every non-uplink boot iface provisions a host TAP at
-    start. This helper stubs the host_net surface used by the QEMU start
-    path so unit tests run without a privileged helper or real
-    ``instance_id`` file.
-
-    Call this *only* from tests that don't already supply their own
-    ``host_net`` patches (e.g. via ``_us302_helper_mock`` or
-    ``_us203_helper_mock``); those tests record real call sequences and
-    overwriting them here would mask their assertions.
-    """
-    monkeypatch.setattr(
-        "app.services.node_runtime_service.host_net.tap_name",
-        lambda lab_id, node_id, iface: f"nve-test-d{node_id}i{iface}",
-    )
-    monkeypatch.setattr(
-        "app.services.node_runtime_service.host_net.tap_exists", lambda name: False
-    )
-    monkeypatch.setattr(
-        "app.services.node_runtime_service.host_net.tap_add", lambda name: None
-    )
-    monkeypatch.setattr(
-        "app.services.node_runtime_service.host_net.link_master",
-        lambda iface, bridge: None,
-    )
-    monkeypatch.setattr(
-        "app.services.node_runtime_service.host_net.link_up", lambda iface: None
-    )
-    monkeypatch.setattr(
-        "app.services.node_runtime_service.host_net.try_link_del", lambda name: None
-    )
-    monkeypatch.setattr(
-        "app.services.node_runtime_service.host_net.bridge_exists", lambda name: True
     )
 
 
