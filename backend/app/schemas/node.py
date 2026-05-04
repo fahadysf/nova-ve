@@ -146,3 +146,4 @@ class NodeUpdate(BaseModel):
     icon: Optional[str] = None
     config: Optional[str] = None
     extras: Optional[Dict[str, Any]] = None
+    interface_naming_scheme: Optional[str] = None
