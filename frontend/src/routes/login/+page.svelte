@@ -30,8 +30,7 @@
 <div class="flex flex-1 items-center justify-center bg-gray-900 px-4 py-10">
   <div class="w-full max-w-sm rounded-xl border border-gray-700 bg-gray-800 px-8 py-8 shadow-2xl shadow-black/30">
     <div class="text-center">
-      <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Operator Access</div>
-      <div class="mt-5 flex items-center justify-center gap-3">
+      <div class="flex items-center justify-center gap-3">
         <div class="flex h-11 w-11 items-center justify-center rounded-2xl border border-gray-700 bg-gray-950/90 shadow-lg shadow-black/20">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <line x1="5" y1="5" x2="12" y2="12" stroke="#6b7280" stroke-width="1.25" />
