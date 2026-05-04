@@ -128,7 +128,7 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     });
 
     await tick();
-    await fireEvent.change(screen.getByRole('combobox', { name: /interface naming/i }), {
+    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
       target: { value: 'Port{n}' },
     });
     const createForm = screen.getByRole('dialog').querySelector('form');
@@ -155,7 +155,7 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     });
 
     await tick();
-    await fireEvent.change(screen.getByRole('combobox', { name: /interface naming/i }), {
+    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
       target: { value: '' },
     });
     const editForm = screen.getByRole('dialog').querySelector('form');
@@ -169,6 +169,51 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
         mode: 'edit',
         payload: expect.objectContaining({
           interface_naming_scheme: null,
+        }),
+      }),
+    );
+  });
+
+  it('blocks submit when interface naming input is invalid', async () => {
+    const catalog = makeCatalog(makeTemplate());
+    const node = makeNode({ interface_naming_scheme: 'eth{n}' });
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'edit', catalog, node },
+    });
+
+    await tick();
+    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
+      target: { value: 'mgmt{n},Gi{port}' },
+    });
+    await tick();
+    const editForm = screen.getByRole('dialog').querySelector('form');
+    await fireEvent.submit(editForm as HTMLFormElement);
+    await tick();
+
+    expect(screen.getByTestId('submit-payload').textContent).toBe('');
+  });
+
+  it('accepts a comma-separated list with placeholder on the last entry', async () => {
+    const catalog = makeCatalog(makeTemplate());
+    const node = makeNode({ interface_naming_scheme: 'eth{n}' });
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'edit', catalog, node },
+    });
+
+    await tick();
+    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
+      target: { value: 'mgmt0,eth{n}' },
+    });
+    await tick();
+    const editForm = screen.getByRole('dialog').querySelector('form');
+    await fireEvent.submit(editForm as HTMLFormElement);
+    await tick();
+
+    expect(JSON.parse(screen.getByTestId('submit-payload').textContent ?? 'null')).toEqual(
+      expect.objectContaining({
+        mode: 'edit',
+        payload: expect.objectContaining({
+          interface_naming_scheme: 'mgmt0,eth{n}',
         }),
       }),
     );

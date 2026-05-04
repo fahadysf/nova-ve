@@ -12,6 +12,7 @@
     NodeData,
   } from '$lib/types';
   import { apiGetData } from '$lib/api';
+  import { validateInterfaceNamingScheme } from '$lib/services/interfaceNaming';
 
   export let open = false;
   export let mode: 'create' | 'edit' = 'create';
@@ -65,16 +66,7 @@
     { key: 'dynamips', label: 'Dynamips', icon: HardDrive },
   ];
   const DEFAULT_INTERFACE_NAMING = '';
-  const COMMON_INTERFACE_NAMING_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-    { value: DEFAULT_INTERFACE_NAMING, label: 'Default' },
-    { value: 'GigabitEthernet0/0/{n}', label: 'GigabitEthernet0/0/{n}' },
-    { value: 'eth{n}', label: 'eth{n}' },
-    { value: 'Port{n}', label: 'Port{n}' },
-  ];
-  const DOCKER_INTERFACE_NAMING_OPTIONS: ReadonlyArray<{ value: string; label: string }> = [
-    { value: DEFAULT_INTERFACE_NAMING, label: 'Default' },
-    { value: 'eth{n}', label: 'eth{n}' },
-  ];
+  const DOCKER_INTERFACE_NAMING_FIXED = 'eth{n}';
 
   let selectedType: NodeTypeKey = 'qemu';
   let selectedTemplateId = '';
@@ -126,12 +118,18 @@
     return template?.extras_schema ?? [];
   }
 
-  function interfaceNamingOptionsFor(type: NodeTypeKey): ReadonlyArray<{ value: string; label: string }> {
-    return type === 'docker' ? DOCKER_INTERFACE_NAMING_OPTIONS : COMMON_INTERFACE_NAMING_OPTIONS;
+  function interfaceNamingErrorFor(value: string, type: NodeTypeKey): string | null {
+    const trimmed = value.trim();
+    if (type === 'docker') {
+      if (trimmed === '' || trimmed === DOCKER_INTERFACE_NAMING_FIXED) return null;
+      return `Docker uses ${DOCKER_INTERFACE_NAMING_FIXED}; the field is system-fixed.`;
+    }
+    return validateInterfaceNamingScheme(value);
   }
 
   function normalizedInterfaceNamingScheme(): string | null {
-    return interfaceNamingScheme || null;
+    const trimmed = interfaceNamingScheme.trim();
+    return trimmed || null;
   }
 
   function defaultExtrasFromTemplate(template: NodeCatalogTemplate | undefined): ExtrasMap {
@@ -305,6 +303,7 @@
   }
 
   function submitForm() {
+    if (interfaceNamingError) return;
     if (mode === 'edit' && node) {
       dispatch('submit', {
         mode: 'edit',
@@ -357,10 +356,7 @@
 
   $: selectedTemplate = templateForId(selectedTemplateId);
   $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
-  $: availableInterfaceNamingOptions = interfaceNamingOptionsFor(selectedType);
-  $: if (!availableInterfaceNamingOptions.some((option) => option.value === interfaceNamingScheme)) {
-    interfaceNamingScheme = DEFAULT_INTERFACE_NAMING;
-  }
+  $: interfaceNamingError = interfaceNamingErrorFor(interfaceNamingScheme, selectedType);
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
   $: if (open && catalog && signature !== lastSignature) {
     lastSignature = signature;
@@ -617,18 +613,23 @@
               </label>
               <label class="block">
                 <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Interface naming</div>
-                <select
+                <input
                   bind:value={interfaceNamingScheme}
-                  on:change={() => markDirty('interfaceNamingScheme')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
-                >
-                  {#each availableInterfaceNamingOptions as option}
-                    <option value={option.value}>{option.label}</option>
-                  {/each}
-                </select>
-                <div class="mt-1 text-[11px] text-slate-500">
-                  Default keeps template or platform naming. Set an override to render ports from the selected format.
-                </div>
+                  on:input={() => markDirty('interfaceNamingScheme')}
+                  type="text"
+                  spellcheck="false"
+                  autocomplete="off"
+                  placeholder={'eth{n}  or  mgmt0,eth{n}'}
+                  aria-invalid={interfaceNamingError ? 'true' : 'false'}
+                  class="w-full rounded-xl border bg-slate-900 px-3 py-1.5 font-mono text-sm text-slate-100 {interfaceNamingError ? 'border-red-500/60' : 'border-slate-800'}"
+                />
+                {#if interfaceNamingError}
+                  <div class="mt-1 text-[11px] text-red-400">{interfaceNamingError}</div>
+                {:else}
+                  <div class="mt-1 text-[11px] text-slate-500">
+                    Empty keeps template default. Comma-separated list: only the last entry may use {'{n}'}, {'{slot}'}, or {'{port}'}.
+                  </div>
+                {/if}
               </label>
               {#if mode === 'create'}
                 <label class="block">
@@ -822,7 +823,7 @@
             </button>
             <button
               type="submit"
-              disabled={submitting || !selectedTemplate || !image}
+              disabled={submitting || !selectedTemplate || !image || !!interfaceNamingError}
               class="rounded-full border border-blue-500/40 bg-blue-500/15 px-4 py-2 text-sm text-blue-100 transition hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {#if submitting}

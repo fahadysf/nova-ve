@@ -399,12 +399,24 @@ _INTERFACE_NAMING_FORMAT_PLACEHOLDERS = ("{n}", "{slot}", "{port}")
 def render_interface_name(fmt: str, index: int) -> str:
     """Render an interface name from a format string and a 0-based interface index.
 
-    Supported placeholders (matching ``interface_naming.format`` contract):
+    Supports comma-separated lists where only the last entry may carry a
+    placeholder; earlier entries are fixed names that map to one interface
+    each, in order.
+
+    Placeholders (in the trailing entry, with relative numbering):
     - ``{n}``    — 0-based index (e.g. ``eth{n}`` → ``eth0``)
     - ``{slot}`` — alias for ``{n}``
     - ``{port}`` — 1-based index (e.g. ``Gi{port}`` → ``Gi1``)
     """
-    return fmt.replace("{n}", str(index)).replace("{slot}", str(index)).replace("{port}", str(index + 1))
+    items = [s.strip() for s in str(fmt).split(",") if s.strip()]
+    if not items:
+        return ""
+    fixed_count = len(items) - 1
+    if index < fixed_count:
+        return items[index]
+    last = items[-1]
+    rel = index - fixed_count
+    return last.replace("{n}", str(rel)).replace("{slot}", str(rel)).replace("{port}", str(rel + 1))
 
 
 def _validate_interface_naming(payload: dict[str, Any], source: str) -> dict[str, Any]:
