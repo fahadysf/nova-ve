@@ -793,11 +793,14 @@ async def update_node(
     )
     LabService.write_lab_json_static(scoped_path, data)
 
+    lab_id = str(data.get("id", "")).strip()
+    enriched = NodeRuntimeService().enrich_node(lab_id, node_id, node) if lab_id else node
+
     return {
         "code": 200,
         "status": "success",
         "message": "Node updated successfully.",
-        "data": node,
+        "data": enriched,
     }
 
 
