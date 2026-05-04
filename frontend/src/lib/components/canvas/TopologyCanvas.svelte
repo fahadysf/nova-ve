@@ -467,7 +467,8 @@
           console: node.console,
           nodeId: node.id,
           interfaces: node.interfaces ?? [],
-          highlightedInterfaceIndex: highlightedTargetForNode(node.id)
+          highlightedInterfaceIndex: highlightedTargetForNode(node.id),
+          interface_naming_scheme: node.interface_naming_scheme ?? null
         },
         style: `width: ${node.width ? parseInt(node.width, 10) + 60 : 104}px;`
       });
