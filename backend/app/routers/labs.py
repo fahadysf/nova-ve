@@ -45,7 +45,7 @@ def _legacy_schema_response(error: LegacyLabSchemaError) -> dict:
         "lab_path": error.lab_path,
     }
 
-NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top"}
+NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top", "interface_naming_scheme"}
 NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "delay", "extras"}
 NODE_FIELDS_MUTABLE = NODE_FIELDS_EDITABLE_WHILE_RUNNING | NODE_FIELDS_EDITABLE_WHILE_STOPPED | {"config"}
 NODE_CREATE_FIELDS = [
