@@ -30,36 +30,96 @@ export interface DiscoveredLink {
   peer_interface_index?: number | null;
 }
 
+export type NetworkSide = 'top' | 'right' | 'bottom' | 'left';
+
+export interface NetworkSlotPlacement {
+  side: NetworkSide;
+  offset: number;
+}
+
+const SLOT_SIDE_ORDER: readonly NetworkSide[] = ['right', 'bottom', 'left', 'top'];
+
 /**
- * Pick which side handle of a NetworkNode to connect to.
+ * Place slot ``slotIdx`` (0-indexed) for a network rendering ``totalSlots``
+ * connection points. Slots round-robin across the four sides starting at
+ * ``right``; offsets along each side are evenly spaced for the slots that
+ * share it.
  *
- * When node and network positions are available the caller can supply them;
- * otherwise we fall back to the deterministic default `'right'`.
- *
- * The network node exposes four handles: `network:{N}:top`, `network:{N}:right`,
- * `network:{N}:bottom`, `network:{N}:left`.  We choose the side whose midpoint
- * is geometrically closest to the connecting node.  When positions are absent
- * the default side is `'right'` (deterministic, stable across rerenders).
+ * Examples:
+ *   slotPosition(0, 1) → { side: 'right',  offset: 0.5 }
+ *   slotPosition(1, 4) → { side: 'bottom', offset: 0.5 }
+ *   slotPosition(0, 5) → { side: 'right',  offset: 0.333 }
+ *   slotPosition(4, 5) → { side: 'right',  offset: 0.667 }
  */
-export function pickNetworkSide(
-  networkId: number,
-  nodePos?: { x: number; y: number } | null,
-  networkPos?: { x: number; y: number } | null
-): string {
-  if (nodePos && networkPos) {
-    const dx = nodePos.x - networkPos.x;
-    const dy = nodePos.y - networkPos.y;
-    const absDx = Math.abs(dx);
-    const absDy = Math.abs(dy);
-    let side: string;
-    if (absDx >= absDy) {
-      side = dx >= 0 ? 'left' : 'right';
-    } else {
-      side = dy >= 0 ? 'top' : 'bottom';
-    }
-    return `network:${networkId}:${side}`;
+export function slotPosition(slotIdx: number, totalSlots: number): NetworkSlotPlacement {
+  if (totalSlots <= 0 || slotIdx < 0 || slotIdx >= totalSlots) {
+    return { side: 'right', offset: 0.5 };
   }
-  return `network:${networkId}:right`;
+  const sideIdx = slotIdx % 4;
+  const slotOnSide = Math.floor(slotIdx / 4);
+  const base = Math.floor(totalSlots / 4);
+  const extra = totalSlots % 4;
+  const slotsOnThisSide = sideIdx < extra ? base + 1 : base;
+  const offset = (slotOnSide + 1) / (slotsOnThisSide + 1);
+  return { side: SLOT_SIDE_ORDER[sideIdx], offset };
+}
+
+/**
+ * Stable handle id for a per-link slot on a network node.
+ */
+export function slotHandleId(networkId: number, slotIdx: number): string {
+  return `network:${networkId}:slot:${slotIdx}`;
+}
+
+/**
+ * Sort link ids deterministically, preferring real ids over the optimistic
+ * ``tmp_*`` placeholders so a freshly-created link does not yank existing
+ * slots around while the POST is in flight.
+ */
+function sortLinkIdsForSlots(linkIds: readonly string[]): string[] {
+  const real: string[] = [];
+  const optimistic: string[] = [];
+  for (const id of linkIds) {
+    (id.startsWith('tmp_') ? optimistic : real).push(id);
+  }
+  real.sort();
+  optimistic.sort();
+  return [...real, ...optimistic];
+}
+
+/**
+ * Assign each link id a stable slot index for a single network. Slot
+ * ``links.length`` is the always-open slot used for new connections.
+ */
+export function assignNetworkSlots(linkIds: readonly string[]): Map<string, number> {
+  const sorted = sortLinkIdsForSlots(linkIds);
+  const out = new Map<string, number>();
+  sorted.forEach((id, idx) => out.set(id, idx));
+  return out;
+}
+
+/**
+ * Group declared links by ``link.to.network_id`` and build per-network slot
+ * assignments. Networks not present in the map have zero declared links and
+ * render only the open slot at index ``0``.
+ */
+export function buildNetworkSlotMap(
+  links: Link[] | null | undefined
+): Map<number, Map<string, number>> {
+  const out = new Map<number, Map<string, number>>();
+  if (!links) return out;
+  const grouped = new Map<number, string[]>();
+  for (const link of links) {
+    if (!link?.id) continue;
+    const networkId = link.to?.network_id;
+    if (typeof networkId !== 'number') continue;
+    if (!grouped.has(networkId)) grouped.set(networkId, []);
+    grouped.get(networkId)!.push(link.id);
+  }
+  for (const [networkId, ids] of grouped) {
+    out.set(networkId, assignNetworkSlots(ids));
+  }
+  return out;
 }
 
 /**
@@ -89,6 +149,7 @@ export function deriveEdges(
 
   const defaultStyle: LinkStyle = defaults?.link_style ?? 'orthogonal';
   const edges: Edge[] = [];
+  const slotMapByNetwork = buildNetworkSlotMap(links);
 
   if (hasLinks) for (const link of links!) {
     if (!link || !link.id) continue;
@@ -103,7 +164,10 @@ export function deriveEdges(
 
     if (typeof link.to?.network_id === 'number') {
       target = `network${link.to.network_id}`;
-      targetHandle = pickNetworkSide(link.to.network_id);
+      const networkSlots = slotMapByNetwork.get(link.to.network_id);
+      const slotIdx = networkSlots?.get(link.id);
+      const resolvedSlot = typeof slotIdx === 'number' ? slotIdx : (networkSlots?.size ?? 0);
+      targetHandle = slotHandleId(link.to.network_id, resolvedSlot);
     } else if (typeof link.to?.node_id === 'number') {
       target = `node${link.to.node_id}`;
       const toIfaceIndex = link.to.interface_index;
@@ -170,7 +234,10 @@ export function deriveEdges(
     const ifaceIndex = discovered.peer_interface_index;
     const sourceHandle =
       typeof ifaceIndex === 'number' ? `iface-${ifaceIndex}` : 'default';
-    const targetHandle = pickNetworkSide(networkId);
+    // Discovered (kernel-only) overlays target the open slot — they are
+    // observation-only so we do not allocate a dedicated slot for them.
+    const declaredSlots = slotMapByNetwork.get(networkId)?.size ?? 0;
+    const targetHandle = slotHandleId(networkId, declaredSlots);
 
     edges.push({
       id: `discovered:${discovered.iface}`,
