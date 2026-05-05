@@ -2,8 +2,8 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { Handle, Position } from '@xyflow/svelte';
   import NetworkPort from './NetworkPort.svelte';
+  import { assignNetworkSlots, slotPosition } from '$lib/services/canvasEdges';
 
   export let id: string | undefined = undefined;
   export let data: {
@@ -11,6 +11,7 @@
     icon?: string;
     count?: number;
     networkId?: number;
+    linkIds?: string[];
   };
 
   $: networkId = (() => {
@@ -21,72 +22,40 @@
     }
     return 0;
   })();
+
+  // Dynamic slot rendering: one slot per declared link plus one always-open
+  // slot for new connections. Slot assignment is purely a frontend rendering
+  // concern — the backend stores no slot info on links.
+  $: linkIds = data.linkIds ?? [];
+  $: slotAssignments = assignNetworkSlots(linkIds);
+  $: slotCount = linkIds.length + 1;
+  $: openSlotIdx = linkIds.length;
+  $: slots = Array.from({ length: slotCount }, (_, idx) => ({
+    idx,
+    placement: slotPosition(idx, slotCount),
+    isOpen: idx === openSlotIdx,
+  }));
+  // slotAssignments is consumed by canvasEdges.deriveEdges — referenced here
+  // so the reactive dependency on linkIds re-evaluates the helper too.
+  $: void slotAssignments;
 </script>
 
 <div
   class="relative min-w-[7.5rem] rounded-full border border-blue-500 bg-blue-500/15 px-3 py-1.5 text-blue-100 shadow-lg shadow-black/20"
   data-testid="network-node"
   data-network-id={networkId}
+  data-network-slot-count={slotCount}
 >
-  <!--
-    Each side needs both a source and a target handle with the same id so
-    SvelteFlow accepts edges in either direction (links use
-    sourceHandle=iface-N → targetHandle=network:N:side, so the network side
-    must expose a target handle, not just a source).
-  -->
-  <Handle
-    type="source"
-    position={Position.Top}
-    id={`network:${networkId}:top`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-  <Handle
-    type="target"
-    position={Position.Top}
-    id={`network:${networkId}:top`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-  <Handle
-    type="source"
-    position={Position.Right}
-    id={`network:${networkId}:right`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-  <Handle
-    type="target"
-    position={Position.Right}
-    id={`network:${networkId}:right`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-  <Handle
-    type="source"
-    position={Position.Bottom}
-    id={`network:${networkId}:bottom`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-  <Handle
-    type="target"
-    position={Position.Bottom}
-    id={`network:${networkId}:bottom`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-  <Handle
-    type="source"
-    position={Position.Left}
-    id={`network:${networkId}:left`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-  <Handle
-    type="target"
-    position={Position.Left}
-    id={`network:${networkId}:left`}
-    class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
-  />
-
-  <NetworkPort {networkId} networkName={data.label} side="top" />
-  <NetworkPort {networkId} networkName={data.label} side="right" />
-  <NetworkPort {networkId} networkName={data.label} side="bottom" />
-  <NetworkPort {networkId} networkName={data.label} side="left" />
+  {#each slots as slot (slot.idx)}
+    <NetworkPort
+      {networkId}
+      networkName={data.label}
+      side={slot.placement.side}
+      offset={slot.placement.offset}
+      slotIndex={slot.idx}
+      isOpen={slot.isOpen}
+    />
+  {/each}
 
   <div class="flex items-center justify-between gap-2">
     <div class="min-w-0">

@@ -474,6 +474,15 @@
       });
     }
 
+    const linkIdsByNetwork = new Map<number, string[]>();
+    for (const link of localLinks) {
+      if (!link?.id) continue;
+      const networkId = link.to?.network_id;
+      if (typeof networkId !== 'number') continue;
+      if (!linkIdsByNetwork.has(networkId)) linkIdsByNetwork.set(networkId, []);
+      linkIdsByNetwork.get(networkId)!.push(link.id);
+    }
+
     for (const network of Object.values(localNetworks)) {
       if (!network.visibility) continue;
       flowNodes.push({
@@ -484,7 +493,9 @@
           label: network.name,
           icon: network.icon,
           type: 'network',
-          count: network.count ?? 0
+          count: network.count ?? 0,
+          networkId: network.id,
+          linkIds: linkIdsByNetwork.get(network.id) ?? []
         },
         style: `width: ${network.width ? network.width + 40 : 110}px;`
       });

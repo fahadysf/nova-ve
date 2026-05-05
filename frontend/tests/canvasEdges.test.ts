@@ -3,9 +3,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  assignNetworkSlots,
+  buildNetworkSlotMap,
   deriveEdges,
   parseIfaceInterfaceIndex,
-  pickNetworkSide,
+  slotHandleId,
+  slotPosition,
   type DiscoveredLink,
 } from '$lib/services/canvasEdges';
 import type { Link, LinkReconciliation } from '$lib/types';
@@ -109,11 +112,14 @@ describe('canvasEdges.deriveEdges', () => {
     expect(edges[1].sourceHandle).toBe('iface-0');
   });
 
-  it('targetHandle is network:{N}:right for node→network link (default side)', () => {
+  it('targetHandle is network:{N}:slot:{k} unique per link into the same network', () => {
     const edges = deriveEdges(ALPINE_DEMO_LINKS, { link_style: 'orthogonal' });
-    // Both links go to network_id=1
-    expect(edges[0].targetHandle).toBe('network:1:right');
-    expect(edges[1].targetHandle).toBe('network:1:right');
+    // Both links go to network_id=1 — each gets its own slot, sorted by id.
+    // lnk_001 < lnk_002 → lnk_001 → slot 0, lnk_002 → slot 1.
+    expect(edges[0].targetHandle).toBe('network:1:slot:0');
+    expect(edges[1].targetHandle).toBe('network:1:slot:1');
+    // Critically: the two links no longer collapse onto the same handle id.
+    expect(edges[0].targetHandle).not.toBe(edges[1].targetHandle);
   });
 
   it('targetHandle is iface-{index} for node-to-node link', () => {
@@ -227,38 +233,110 @@ describe('canvasEdges.deriveEdges — overlay branches (US-403 / US-404)', () =>
   });
 });
 
-describe('canvasEdges.pickNetworkSide', () => {
-  it('returns right when no positions are provided', () => {
-    expect(pickNetworkSide(1)).toBe('network:1:right');
+describe('canvasEdges slot helpers', () => {
+  describe('slotHandleId', () => {
+    it('formats as network:{N}:slot:{k}', () => {
+      expect(slotHandleId(1, 0)).toBe('network:1:slot:0');
+      expect(slotHandleId(42, 5)).toBe('network:42:slot:5');
+    });
   });
 
-  it('returns left when node is to the right of the network', () => {
-    // node at x=300, network at x=100 → node is right-of-network → attach to network's right side
-    // dx = 300-100 = 200 > 0 → side = 'left' (node is to the right so network's left faces away)
-    // Per implementation: dx >= 0 → 'left'
-    expect(pickNetworkSide(2, { x: 300, y: 100 }, { x: 100, y: 100 })).toBe('network:2:left');
+  describe('slotPosition', () => {
+    it('places the only slot on the right at offset 0.5', () => {
+      expect(slotPosition(0, 1)).toEqual({ side: 'right', offset: 0.5 });
+    });
+
+    it('round-robins across right → bottom → left → top for low slot counts', () => {
+      expect(slotPosition(0, 4)).toEqual({ side: 'right', offset: 0.5 });
+      expect(slotPosition(1, 4)).toEqual({ side: 'bottom', offset: 0.5 });
+      expect(slotPosition(2, 4)).toEqual({ side: 'left', offset: 0.5 });
+      expect(slotPosition(3, 4)).toEqual({ side: 'top', offset: 0.5 });
+    });
+
+    it('packs extra slots evenly along the same side', () => {
+      // 5 slots → right gets 2, others get 1 each.
+      const p0 = slotPosition(0, 5); // right, slot-on-side 0 of 2
+      const p4 = slotPosition(4, 5); // right, slot-on-side 1 of 2
+      expect(p0.side).toBe('right');
+      expect(p4.side).toBe('right');
+      expect(p0.offset).toBeCloseTo(1 / 3, 5);
+      expect(p4.offset).toBeCloseTo(2 / 3, 5);
+    });
+
+    it('falls back to right/0.5 for out-of-range slot indices', () => {
+      expect(slotPosition(0, 0)).toEqual({ side: 'right', offset: 0.5 });
+      expect(slotPosition(-1, 4)).toEqual({ side: 'right', offset: 0.5 });
+      expect(slotPosition(10, 4)).toEqual({ side: 'right', offset: 0.5 });
+    });
   });
 
-  it('returns right when node is to the left of the network', () => {
-    // dx = 50-200 = -150 < 0 → side = 'right'
-    expect(pickNetworkSide(3, { x: 50, y: 100 }, { x: 200, y: 100 })).toBe('network:3:right');
+  describe('assignNetworkSlots', () => {
+    it('assigns sequential slot indices to ids sorted lexicographically', () => {
+      const map = assignNetworkSlots(['lnk_002', 'lnk_001', 'lnk_003']);
+      expect(map.get('lnk_001')).toBe(0);
+      expect(map.get('lnk_002')).toBe(1);
+      expect(map.get('lnk_003')).toBe(2);
+    });
+
+    it('keeps optimistic tmp_* ids after real ids so a freshly-created link does not bump existing slots', () => {
+      const map = assignNetworkSlots(['tmp_abc', 'lnk_001', 'lnk_002']);
+      expect(map.get('lnk_001')).toBe(0);
+      expect(map.get('lnk_002')).toBe(1);
+      expect(map.get('tmp_abc')).toBe(2);
+    });
+
+    it('returns an empty map for no inputs', () => {
+      expect(assignNetworkSlots([]).size).toBe(0);
+    });
   });
 
-  it('returns top when node is above the network (dy dominant)', () => {
-    // dx=10, dy=-200 → absDy > absDx → dy < 0 → 'bottom' (node is above → network bottom faces up)
-    // Per implementation: dy < 0 → 'bottom'
-    expect(pickNetworkSide(4, { x: 105, y: 0 }, { x: 100, y: 200 })).toBe('network:4:bottom');
+  describe('buildNetworkSlotMap', () => {
+    it('groups links by to.network_id and assigns slots per network', () => {
+      const links: Link[] = [
+        { id: 'a', from: { node_id: 1, interface_index: 0 }, to: { network_id: 1 }, style_override: null, label: '', color: '', width: '1' },
+        { id: 'b', from: { node_id: 2, interface_index: 0 }, to: { network_id: 1 }, style_override: null, label: '', color: '', width: '1' },
+        { id: 'c', from: { node_id: 3, interface_index: 0 }, to: { network_id: 2 }, style_override: null, label: '', color: '', width: '1' },
+      ];
+      const slotMap = buildNetworkSlotMap(links);
+      expect(slotMap.get(1)?.get('a')).toBe(0);
+      expect(slotMap.get(1)?.get('b')).toBe(1);
+      expect(slotMap.get(2)?.get('c')).toBe(0);
+    });
+
+    it('ignores p2p links (no to.network_id)', () => {
+      const links: Link[] = [
+        { id: 'p2p', from: { node_id: 1, interface_index: 0 }, to: { node_id: 2, interface_index: 0 }, style_override: null, label: '', color: '', width: '1' },
+      ];
+      expect(buildNetworkSlotMap(links).size).toBe(0);
+    });
+
+    it('returns an empty map for null/undefined input', () => {
+      expect(buildNetworkSlotMap(null).size).toBe(0);
+      expect(buildNetworkSlotMap(undefined).size).toBe(0);
+    });
   });
 
-  it('returns bottom when node is below the network (dy dominant)', () => {
-    // dy = 300-100 = 200 > 0 → 'top'
-    expect(pickNetworkSide(5, { x: 105, y: 300 }, { x: 100, y: 100 })).toBe('network:5:top');
-  });
+  describe('deriveEdges slot resolution', () => {
+    it('survives re-derivation with the same links — slot ids are stable', () => {
+      const a = deriveEdges(ALPINE_DEMO_LINKS, { link_style: 'orthogonal' });
+      const b = deriveEdges(ALPINE_DEMO_LINKS, { link_style: 'orthogonal' });
+      expect(a.map((e) => e.targetHandle)).toEqual(b.map((e) => e.targetHandle));
+    });
 
-  it('is deterministic for the same inputs', () => {
-    const a = pickNetworkSide(7, { x: 100, y: 200 }, { x: 400, y: 50 });
-    const b = pickNetworkSide(7, { x: 100, y: 200 }, { x: 400, y: 50 });
-    expect(a).toBe(b);
+    it('discovered overlay targets the open slot of the receiving network', () => {
+      const declared: Link[] = [
+        { id: 'lnk_only', from: { node_id: 1, interface_index: 0 }, to: { network_id: 9 }, style_override: null, label: '', color: '', width: '1' },
+      ];
+      const discovered: DiscoveredLink[] = [
+        { iface: 'nve00aad2i0h', bridge_name: 'noveXn9', network_id: 9, peer_node_id: 2, peer_interface_index: 0 },
+      ];
+      const edges = deriveEdges(declared, { link_style: 'orthogonal' }, discovered);
+      // declared link → slot 0; discovered → open slot 1.
+      const declaredEdge = edges.find((e) => e.id === 'link:lnk_only');
+      const discoveredEdge = edges.find((e) => e.id === 'discovered:nve00aad2i0h');
+      expect(declaredEdge?.targetHandle).toBe('network:9:slot:0');
+      expect(discoveredEdge?.targetHandle).toBe('network:9:slot:1');
+    });
   });
 });
 
