@@ -25,9 +25,16 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "required_fields"
 
 @pytest.fixture(autouse=True)
 def _isolated_registry():
-    """Snapshot/restore the registry around each test so registrations don't leak."""
+    """Snapshot/restore the registry around each test so registrations don't leak.
+
+    Resets to a minimal baseline (generic_linux only) for framework-level tests
+    that exercise sort order / tiebreaker / dispatch invariants without the
+    noise of every shipped vendor adapter. Vendor-specific tests call
+    ``reset_registry_for_tests()`` themselves to get the full production registry.
+    """
     saved = list(adapter_registry.ADAPTERS)
-    reset_registry_for_tests()
+    adapter_registry.ADAPTERS.clear()
+    register(GenericLinuxAdapter())
     yield
     adapter_registry.ADAPTERS.clear()
     adapter_registry.ADAPTERS.extend(saved)

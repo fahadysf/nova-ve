@@ -24,6 +24,9 @@ from __future__ import annotations
 
 from .base import NeedsManualReview, VendorAdapter
 from .generic_linux import GenericLinuxAdapter
+from .juniper_vmx import JuniperVMXAdapter
+from .juniper_vqfx import JuniperVQFXAdapter
+from .juniper_vsrx import JuniperVSRXAdapter
 
 ADAPTERS: list[VendorAdapter] = []
 
@@ -36,6 +39,9 @@ def register(adapter: VendorAdapter) -> None:
 def reset_registry_for_tests() -> None:
     """Clear and re-prime the registry. Test-only: do not call from production paths."""
     ADAPTERS.clear()
+    register(JuniperVMXAdapter())
+    register(JuniperVQFXAdapter())
+    register(JuniperVSRXAdapter())
     register(GenericLinuxAdapter())
 
 
@@ -53,12 +59,18 @@ def select_adapter(raw: dict) -> VendorAdapter | None:
 
 
 # Built-in registrations. Vendor PRs prepend their entries above this line.
+register(JuniperVMXAdapter())
+register(JuniperVQFXAdapter())
+register(JuniperVSRXAdapter())
 register(GenericLinuxAdapter())
 
 
 __all__ = [
     "ADAPTERS",
     "GenericLinuxAdapter",
+    "JuniperVMXAdapter",
+    "JuniperVQFXAdapter",
+    "JuniperVSRXAdapter",
     "NeedsManualReview",
     "VendorAdapter",
     "iter_adapters",
