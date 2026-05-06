@@ -92,15 +92,23 @@ def _record_imported_files(
 
 
 def _ensure_qemu_cdrom_symlink(item: MigrationItem) -> None:
-    """Create the stable ``cdrom.iso`` symlink in the destination dir."""
+    """Create the stable ``cdrom.iso`` symlink in the destination dir.
+
+    No-op when the boot disk is already named ``cdrom.iso`` — the file itself
+    already serves the stable-handle role and a same-name symlink would be a
+    self-loop (caught by US-190's e2e idempotency test).
+    """
     boot_disk = item.meta.get("boot_disk")
     if not isinstance(boot_disk, str) or not boot_disk:
         return
+    if boot_disk == "cdrom.iso":
+        return
     link_path = item.dst_dir / "cdrom.iso"
-    if link_path.is_symlink() or link_path.exists():
-        # Idempotent: replace if pointing at a different name; leave alone otherwise.
-        if link_path.is_symlink() and link_path.readlink().name == boot_disk:
+    if link_path.is_symlink():
+        if link_path.readlink().name == boot_disk:
             return
+        link_path.unlink()
+    elif link_path.exists():
         link_path.unlink()
     link_path.symlink_to(boot_disk)
 
