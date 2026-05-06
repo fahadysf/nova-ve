@@ -285,6 +285,20 @@ def _docker_extras_schema() -> list[dict[str, Any]]:
             "stoppedOnly": True,
             "runtime": True,
         },
+        {
+            "key": "command",
+            "label": "Command (overrides image CMD)",
+            "type": "textarea",
+            "default": "",
+            "placeholder": "tail -f /dev/null",
+            "description": (
+                "Override the container's default CMD. Appended after the image "
+                "in the docker run argv. Shlex-split when given as a string; "
+                "passed verbatim when given as a list of strings."
+            ),
+            "stoppedOnly": True,
+            "runtime": True,
+        },
     ]
 
 

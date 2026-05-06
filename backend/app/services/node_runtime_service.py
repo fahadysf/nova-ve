@@ -2090,6 +2090,20 @@ class NodeRuntimeService:
 
         cmd += [str(node.get("image"))]
 
+        command_override = extras.get("command")
+        if isinstance(command_override, str):
+            if command_override.strip():
+                try:
+                    cmd += shlex.split(command_override)
+                except ValueError as exc:
+                    raise NodeRuntimeError(f"Invalid command: {exc}") from exc
+        elif isinstance(command_override, list):
+            if not all(isinstance(arg, str) for arg in command_override):
+                raise NodeRuntimeError("extras.command list entries must all be strings")
+            cmd += list(command_override)
+        elif command_override is not None:
+            raise NodeRuntimeError("extras.command must be a string or list of strings")
+
         # ----- Step 2: docker run -d --network=none ------------------------
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
