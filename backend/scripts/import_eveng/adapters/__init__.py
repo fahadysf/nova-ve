@@ -22,6 +22,7 @@ This layout keeps the per-PR conflict surface here predictable and small.
 
 from __future__ import annotations
 
+from .arista_veos import AristaVEosAdapter
 from .base import NeedsManualReview, VendorAdapter
 from .cisco_csr1000v import CiscoCSR1000vAdapter
 from .cisco_iol import CiscoIOLAdapter
@@ -31,6 +32,8 @@ from .generic_linux import GenericLinuxAdapter
 from .juniper_vmx import JuniperVMXAdapter
 from .juniper_vqfx import JuniperVQFXAdapter
 from .juniper_vsrx import JuniperVSRXAdapter
+from .mikrotik_chr import MikrotikCHRAdapter
+from .vyos import VyOSAdapter
 
 ADAPTERS: list[VendorAdapter] = []
 
@@ -43,6 +46,7 @@ def register(adapter: VendorAdapter) -> None:
 def reset_registry_for_tests() -> None:
     """Clear and re-prime the registry. Test-only: do not call from production paths."""
     ADAPTERS.clear()
+    register(AristaVEosAdapter())
     register(CiscoCSR1000vAdapter())
     register(CiscoIOLAdapter())
     register(CiscoIOSvL2Adapter())
@@ -50,6 +54,8 @@ def reset_registry_for_tests() -> None:
     register(JuniperVMXAdapter())
     register(JuniperVQFXAdapter())
     register(JuniperVSRXAdapter())
+    register(MikrotikCHRAdapter())
+    register(VyOSAdapter())
     register(GenericLinuxAdapter())
 
 
@@ -67,6 +73,7 @@ def select_adapter(raw: dict) -> VendorAdapter | None:
 
 
 # Built-in registrations. Vendor PRs prepend their entries above this line.
+register(AristaVEosAdapter())
 register(CiscoCSR1000vAdapter())
 register(CiscoIOLAdapter())
 register(CiscoIOSvL2Adapter())
@@ -74,11 +81,14 @@ register(CiscoIOSvL3Adapter())
 register(JuniperVMXAdapter())
 register(JuniperVQFXAdapter())
 register(JuniperVSRXAdapter())
+register(MikrotikCHRAdapter())
+register(VyOSAdapter())
 register(GenericLinuxAdapter())
 
 
 __all__ = [
     "ADAPTERS",
+    "AristaVEosAdapter",
     "CiscoCSR1000vAdapter",
     "CiscoIOLAdapter",
     "CiscoIOSvL2Adapter",
@@ -87,8 +97,10 @@ __all__ = [
     "JuniperVMXAdapter",
     "JuniperVQFXAdapter",
     "JuniperVSRXAdapter",
+    "MikrotikCHRAdapter",
     "NeedsManualReview",
     "VendorAdapter",
+    "VyOSAdapter",
     "iter_adapters",
     "register",
     "reset_registry_for_tests",
