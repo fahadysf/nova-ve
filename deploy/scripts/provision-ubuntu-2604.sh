@@ -268,6 +268,28 @@ install_nova_ve_net_helper
 run systemctl enable docker
 run systemctl restart docker
 run usermod -aG docker "${APP_OWNER}"
+
+# Build bundled demo images (NOVA_VE_SKIP_DEMO_IMAGES=1 to skip; idempotent —
+# only builds images that are not already present locally). Build failure
+# does NOT abort the provisioner; the install summary records the status.
+DEMO_IMAGES_STATUS_FILE=/var/lib/nova-ve/.demo-images-status
+run rm -f "${DEMO_IMAGES_STATUS_FILE}"
+DEMO_BUILD_CMD=(sudo -u "${APP_OWNER}" -H bash "${REPO_ROOT}/deploy/scripts/build-demo-images.sh")
+if [[ "${NOVA_VE_SKIP_DEMO_IMAGES:-0}" == "1" ]]; then
+  DEMO_BUILD_CMD=(env NOVA_VE_SKIP_DEMO_IMAGES=1 "${DEMO_BUILD_CMD[@]}")
+fi
+if run "${DEMO_BUILD_CMD[@]}"; then
+  if [[ "${NOVA_VE_SKIP_DEMO_IMAGES:-0}" == "1" ]]; then
+    run bash -c "echo skipped > ${DEMO_IMAGES_STATUS_FILE}"
+  else
+    run bash -c "echo ok > ${DEMO_IMAGES_STATUS_FILE}"
+  fi
+else
+  run bash -c "echo failed > ${DEMO_IMAGES_STATUS_FILE}"
+  echo "WARN: demo-image build failed; nova-ve-alpine-telnet may not be available locally." >&2
+fi
+run chown "${APP_OWNER}:${APP_GROUP}" "${DEMO_IMAGES_STATUS_FILE}" || true
+
 ensure_backend_env
 ensure_instance_id
 
