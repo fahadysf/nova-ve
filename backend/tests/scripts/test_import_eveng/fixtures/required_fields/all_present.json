@@ -1,0 +1,7 @@
+{
+  "image": "alpine:latest",
+  "cpu": 1,
+  "ram": 256,
+  "ethernet": 1,
+  "console": "telnet"
+}

@@ -14,7 +14,7 @@ from app.config import get_settings
 from app.dependencies import get_current_user
 from app.schemas.lab import LabMetaCreate, LabMetaUpdate
 from app.schemas.network import NetworkCreate, NetworkUpdate
-from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
+from app.schemas.node import NodeBatchCreate, NodeCreate, NodeFromTemplate, NodeUpdate
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionError, Html5SessionService
@@ -627,6 +627,61 @@ async def create_node(
         "message": "Node created successfully.",
         "data": node,
     }
+
+
+@router.post("/{lab_path:path}/nodes/from-template")
+async def create_node_from_template(
+    lab_path: str,
+    request: NodeFromTemplate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Instantiate a node from a template (#185).
+
+    Looks up ``(template_type, template_key)`` in :class:`TemplateService` and
+    creates a node with the template's defaults pre-filled, allowing the
+    caller to override ``name`` / ``image`` / ``cpu`` / ``ram`` / ``ethernet``
+    / ``console`` / ``left`` / ``top`` / ``extras``.
+
+    Paired-node templates (``kind == "paired"`` from #188) are rejected with
+    HTTP 400 until the multi-node picker UI follow-up lands (R-OOB-3).
+    """
+    template_service = TemplateService()
+
+    if template_service.is_paired_user_template(request.template_key):
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": (
+                f"Template {request.template_key!r} is a paired-node template "
+                "and cannot be instantiated yet; multi-node template support "
+                "is tracked in paired-template-picker-fu (#185 follow-up)."
+            ),
+        }
+
+    try:
+        template_def = template_service.get_template(request.template_type, request.template_key)
+    except TemplateError as exc:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": str(exc),
+        }
+
+    # Build a NodeCreate from the template defaults, allowing per-request overrides.
+    node_create = NodeCreate(
+        name=request.name,
+        type=request.template_type,
+        template=request.template_key,
+        image=request.image,
+        console=request.console or template_def.console_type or "telnet",
+        cpu=request.cpu if request.cpu is not None else template_def.cpu,
+        ram=request.ram if request.ram is not None else template_def.ram,
+        ethernet=request.ethernet if request.ethernet is not None else template_def.ethernet,
+        left=request.left,
+        top=request.top,
+        extras=dict(request.extras),
+    )
+    return await create_node(lab_path, node_create, current_user=current_user)
 
 
 @router.post("/{lab_path:path}/nodes/batch")
