@@ -129,6 +129,7 @@ PRIMARY_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
 INSTANCE_ID="$(cat /etc/nova-ve/instance_id 2>/dev/null || echo '<missing>')"
 GIT_COMMIT="$(sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" rev-parse --short HEAD)"
 GENERATED_AT="$(date --iso-8601=seconds)"
+DEMO_IMAGES_STATUS="$(cat /var/lib/nova-ve/.demo-images-status 2>/dev/null || echo unknown)"
 
 cat > "${SUMMARY_PATH}" <<EOF
 # nova-ve install summary
@@ -150,6 +151,21 @@ cat > "${SUMMARY_PATH}" <<EOF
 
 Full env file (mode 0600, root-owned) lives at \`${ENV_FILE}\`.
 This summary is mode 0600, owned by \`${APP_OWNER}\`.
+
+## Demo images (#191)
+
+Status: \`${DEMO_IMAGES_STATUS}\` (one of: \`ok\`, \`skipped\`, \`failed\`, \`unknown\`)
+
+The \`nova-ve-alpine-telnet:latest\` image is built during provisioning so a docker node with
+\`image: alpine:latest\` and \`extras.command: "sleep infinity"\` (#181) works out of the box.
+
+Re-build manually:
+
+\`\`\`
+cd ${REPO_DIR} && bash deploy/scripts/build-demo-images.sh
+\`\`\`
+
+Skip on next install: \`NOVA_VE_SKIP_DEMO_IMAGES=1 curl -fsSL ... | sudo bash\`.
 
 ## Critical files
 
