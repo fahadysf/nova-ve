@@ -157,7 +157,7 @@ def test_catalog_surfaces_extras_schema_per_type(populated_templates):
 
     docker_template = by_type[("docker", "docker")]
     docker_keys = {field["key"] for field in docker_template["extras_schema"]}
-    assert {"cpulimit", "restart_policy", "environment", "extra_args"} <= docker_keys
+    assert {"cpulimit", "restart_policy", "environment", "extra_args", "command"} <= docker_keys
 
     iol_template = by_type[("iol", "iol")]
     iol_keys = {field["key"] for field in iol_template["extras_schema"]}
@@ -408,6 +408,117 @@ async def test_docker_runtime_honors_env_restart_and_extra_args(monkeypatch, pop
     assert "BAZ=qux" in env_pairs
 
     assert "--cap-add=NET_ADMIN" in run_cmd
+
+
+def _docker_lab_with_command(command_value):
+    return {
+        "schema": 2,
+        "id": "lab-docker",
+        "meta": {"name": "docker"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "alpine-a",
+                "type": "docker",
+                "image": "alpine:latest",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 1,
+                "interfaces": [],
+                "extras": {"command": command_value},
+            }
+        },
+        "networks": {},
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_honors_command_string(monkeypatch, populated_templates):
+    (populated_templates.LABS_DIR / "docker.json").write_text(
+        json.dumps(_docker_lab_with_command("tail -f /dev/null"))
+    )
+
+    recorded: list[list[str]] = []
+    containers: dict[str, dict] = {}
+    _stub_docker_subprocess(monkeypatch, recorded, containers)
+
+    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    assert response["code"] == 200
+
+    run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
+    assert run_cmd.index("alpine:latest") < run_cmd.index("tail")
+    assert run_cmd.index("tail") < run_cmd.index("-f")
+    assert run_cmd.index("-f") < run_cmd.index("/dev/null")
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_honors_command_list(monkeypatch, populated_templates):
+    (populated_templates.LABS_DIR / "docker.json").write_text(
+        json.dumps(_docker_lab_with_command(["sleep", "infinity"]))
+    )
+
+    recorded: list[list[str]] = []
+    containers: dict[str, dict] = {}
+    _stub_docker_subprocess(monkeypatch, recorded, containers)
+
+    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    assert response["code"] == 200
+
+    run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
+    assert run_cmd.index("alpine:latest") < run_cmd.index("sleep")
+    assert run_cmd.index("sleep") < run_cmd.index("infinity")
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_rejects_malformed_command_string(monkeypatch, populated_templates):
+    (populated_templates.LABS_DIR / "docker.json").write_text(
+        json.dumps(_docker_lab_with_command("sh -c 'unterminated"))
+    )
+
+    recorded: list[list[str]] = []
+    containers: dict[str, dict] = {}
+    _stub_docker_subprocess(monkeypatch, recorded, containers)
+
+    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    assert response["code"] == 400
+    assert "command" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_rejects_command_list_with_non_string(monkeypatch, populated_templates):
+    (populated_templates.LABS_DIR / "docker.json").write_text(
+        json.dumps(_docker_lab_with_command(["sleep", 123]))
+    )
+
+    recorded: list[list[str]] = []
+    containers: dict[str, dict] = {}
+    _stub_docker_subprocess(monkeypatch, recorded, containers)
+
+    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    assert response["code"] == 400
+    assert "command" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_command_empty_is_no_op(monkeypatch, populated_templates):
+    (populated_templates.LABS_DIR / "docker.json").write_text(
+        json.dumps(_docker_lab_with_command(""))
+    )
+
+    recorded: list[list[str]] = []
+    containers: dict[str, dict] = {}
+    _stub_docker_subprocess(monkeypatch, recorded, containers)
+
+    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    assert response["code"] == 200
+
+    run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
+    image_idx = run_cmd.index("alpine:latest")
+    assert image_idx == len(run_cmd) - 1
 
 
 @pytest.mark.asyncio
