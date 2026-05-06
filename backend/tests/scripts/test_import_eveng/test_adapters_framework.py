@@ -25,9 +25,17 @@ FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "required_fields"
 
 @pytest.fixture(autouse=True)
 def _isolated_registry():
-    """Snapshot/restore the registry around each test so registrations don't leak."""
+    """Snapshot/restore the registry around each test so registrations don't leak.
+
+    Resets to a minimal baseline (generic_linux only) for framework-level tests
+    that exercise sort order / tiebreaker / dispatch invariants without the
+    noise of every shipped vendor adapter. Vendor-specific tests (e.g.
+    test_adapters_cisco) call ``reset_registry_for_tests()`` themselves to get
+    the full production registry.
+    """
     saved = list(adapter_registry.ADAPTERS)
-    reset_registry_for_tests()
+    adapter_registry.ADAPTERS.clear()
+    register(GenericLinuxAdapter())
     yield
     adapter_registry.ADAPTERS.clear()
     adapter_registry.ADAPTERS.extend(saved)
@@ -108,8 +116,22 @@ def test_required_fields_is_presence_only_not_semantic() -> None:
 # ---- registry order ----------------------------------------------------
 
 
-def test_registry_starts_with_generic_linux() -> None:
-    """Bare registry has only generic_linux; iter_adapters() returns it as last."""
+def test_registry_default_state_has_generic_linux_last() -> None:
+    """After reset_registry_for_tests, generic_linux must be the LAST entry.
+
+    The exact set of preceding adapters depends on which vendor PRs have landed
+    (Cisco from #187, Juniper from #188, etc.) — what's invariant is that
+    generic_linux remains the structural fallback.
+    """
+    adapters = iter_adapters()
+    assert len(adapters) >= 1
+    assert isinstance(adapters[-1], GenericLinuxAdapter)
+
+
+def test_registry_with_only_generic_linux_when_cleared() -> None:
+    """Manually clearing the registry and registering only generic_linux yields a 1-element registry."""
+    adapter_registry.ADAPTERS.clear()
+    register(GenericLinuxAdapter())
     adapters = iter_adapters()
     assert len(adapters) == 1
     assert isinstance(adapters[0], GenericLinuxAdapter)
