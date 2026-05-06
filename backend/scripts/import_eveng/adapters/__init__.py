@@ -23,6 +23,10 @@ This layout keeps the per-PR conflict surface here predictable and small.
 from __future__ import annotations
 
 from .base import NeedsManualReview, VendorAdapter
+from .cisco_csr1000v import CiscoCSR1000vAdapter
+from .cisco_iol import CiscoIOLAdapter
+from .cisco_iosv_l2 import CiscoIOSvL2Adapter
+from .cisco_iosv_l3 import CiscoIOSvL3Adapter
 from .generic_linux import GenericLinuxAdapter
 from .juniper_vmx import JuniperVMXAdapter
 from .juniper_vqfx import JuniperVQFXAdapter
@@ -39,6 +43,10 @@ def register(adapter: VendorAdapter) -> None:
 def reset_registry_for_tests() -> None:
     """Clear and re-prime the registry. Test-only: do not call from production paths."""
     ADAPTERS.clear()
+    register(CiscoCSR1000vAdapter())
+    register(CiscoIOLAdapter())
+    register(CiscoIOSvL2Adapter())
+    register(CiscoIOSvL3Adapter())
     register(JuniperVMXAdapter())
     register(JuniperVQFXAdapter())
     register(JuniperVSRXAdapter())
@@ -59,6 +67,10 @@ def select_adapter(raw: dict) -> VendorAdapter | None:
 
 
 # Built-in registrations. Vendor PRs prepend their entries above this line.
+register(CiscoCSR1000vAdapter())
+register(CiscoIOLAdapter())
+register(CiscoIOSvL2Adapter())
+register(CiscoIOSvL3Adapter())
 register(JuniperVMXAdapter())
 register(JuniperVQFXAdapter())
 register(JuniperVSRXAdapter())
@@ -67,6 +79,10 @@ register(GenericLinuxAdapter())
 
 __all__ = [
     "ADAPTERS",
+    "CiscoCSR1000vAdapter",
+    "CiscoIOLAdapter",
+    "CiscoIOSvL2Adapter",
+    "CiscoIOSvL3Adapter",
     "GenericLinuxAdapter",
     "JuniperVMXAdapter",
     "JuniperVQFXAdapter",
