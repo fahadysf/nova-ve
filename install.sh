@@ -40,6 +40,19 @@
 
 set -euo pipefail
 
+# When invoked via `curl ... | sudo bash` our source code is being streamed
+# through stdin. Child processes that read stdin -- notably `docker exec -i`
+# inside deploy/scripts/run-guacamole.sh -- will silently drain that pipe and
+# the script terminates partway through. Detect pipe mode and re-exec from a
+# tempfile with stdin pointed at /dev/null so child processes can never eat
+# our source.
+if [[ ! -r "${BASH_SOURCE[0]:-}" ]]; then
+  __nv_self="$(mktemp /tmp/nova-ve-install.XXXXXX.sh)"
+  cat > "${__nv_self}"
+  chmod 0700 "${__nv_self}"
+  exec bash "${__nv_self}" "$@" </dev/null
+fi
+
 REPO_URL="${NOVA_VE_REPO_URL:-https://github.com/fahadysf/nova-ve.git}"
 REPO_REF="${NOVA_VE_REPO_REF:-main}"
 LAUNCH_DIR="${NOVA_VE_LAUNCH_DIR:-${PWD}}"
