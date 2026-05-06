@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     IMAGES_DIR: Path = Path("/var/lib/nova-ve/images")
     TMP_DIR: Path = Path("/var/lib/nova-ve/tmp")
     TEMPLATES_DIR: Path = Path(__file__).resolve().parents[1] / "templates"
+    # USER_TEMPLATES_DIR (#185): operator-imported templates (e.g. from the
+    # EVE-NG importer #182). Walked alongside the builtin TEMPLATES_DIR; on
+    # filename collisions, user-dir entries shadow builtin and a WARNING is
+    # logged. Additive (TEMPLATES_DIR is preserved verbatim) so existing
+    # /etc/nova-ve/backend.env files don't need changes.
+    USER_TEMPLATES_DIR: Path = Path("/var/lib/nova-ve/templates")
 
     # Auth
     SESSION_COOKIE_NAME: str = "nova_session"
