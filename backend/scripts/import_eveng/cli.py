@@ -13,8 +13,17 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from ._app_owner import AppOwnerError, resolve as resolve_app_owner
+from .copy_engine import CopyMode
+from .idempotency import evaluate
 from .logging_setup import configure_logging, write_summary
-from .manifest import ImportManifest
+from .manifest import (
+    ImportedEntry,
+    ImportManifest,
+    SkippedEntry,
+)
+from .migrate import MigrateOptions, run_migration
+from .walker import KIND_DOCKER, walk_all
 
 DEFAULT_SOURCE = Path("/opt/unetlab")
 DEFAULT_DEST = Path("/var/lib/nova-ve/images")
@@ -117,6 +126,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 2
 
+    if args.delete_source:
+        mode = CopyMode.DELETE_SOURCE
+    elif args.move:
+        mode = CopyMode.MOVE
+    else:
+        mode = CopyMode.DEFAULT
+
     logger.info(
         "importer.start",
         extra={
@@ -124,16 +140,42 @@ def main(argv: Sequence[str] | None = None) -> int:
             "dest": str(args.dest),
             "dry_run": args.dry_run,
             "force": args.force,
-            "move": args.move,
-            "delete_source": args.delete_source,
-            "copy_only": args.copy_only,
+            "mode": mode.value,
+            "copy_only_alias": args.copy_only,
         },
     )
 
     manifest = ImportManifest()
 
-    if args.dry_run and not args.source.exists():
-        logger.info("importer.dry_run.empty", extra={"source": str(args.source)})
+    items = walk_all(args.source, args.dest) if args.source.exists() else []
+    logger.info("importer.walk_complete", extra={"items": len(items)})
+
+    if args.dry_run:
+        _emit_dry_run_plan(items, mode, manifest)
+    else:
+        try:
+            owner = resolve_app_owner()
+        except AppOwnerError as exc:
+            print(f"import_eveng: {exc}", file=sys.stderr)
+            return 3
+        logger.info(
+            "importer.app_owner_resolved",
+            extra={
+                "owner": owner.name,
+                "group": owner.group,
+                "uid": owner.uid,
+                "gid": owner.gid,
+                "source": owner.source,
+            },
+        )
+        options = MigrateOptions(mode=mode, force=args.force)
+        run_migration(
+            items,
+            options=options,
+            manifest=manifest,
+            owner=owner,
+            dest_root=args.dest,
+        )
 
     manifest.mark_finished()
     if not args.dry_run:
@@ -147,6 +189,44 @@ def main(argv: Sequence[str] | None = None) -> int:
     write_summary(sys.stdout, manifest.to_dict(), manifest_path=str(args.manifest))
     logger.info("importer.done", extra={"manifest": str(args.manifest)})
     return 0
+
+
+def _emit_dry_run_plan(items, mode, manifest: ImportManifest) -> None:
+    """Populate ``manifest`` with would-imported / would-skipped entries.
+
+    Walks every item's planned files and runs the sha256 idempotency check;
+    items with no source files (e.g. ``docker`` build contexts) emit a single
+    ``imported`` entry pointing at the planned image marker.
+    """
+    for item in items:
+        if not item.files and item.kind == KIND_DOCKER:
+            tag = str(item.meta.get("image_tag", f"nova-ve-{item.image_key}:latest"))
+            manifest.imported.append(
+                ImportedEntry(
+                    src=str(item.src_dir),
+                    dst=str(item.dst_dir / "image.txt"),
+                    sha256="",
+                    bytes=0,
+                    mode=f"dry-run/{mode.value}",
+                )
+            )
+            continue
+        for src, dst in item.files:
+            decision = evaluate(src, dst)
+            if decision.skip:
+                manifest.skipped.append(
+                    SkippedEntry(src=str(src), dst=str(dst), reason=decision.reason)
+                )
+            else:
+                manifest.imported.append(
+                    ImportedEntry(
+                        src=str(src),
+                        dst=str(dst),
+                        sha256=decision.src_sha256 or "",
+                        bytes=src.stat().st_size if src.exists() else 0,
+                        mode=f"dry-run/{mode.value}",
+                    )
+                )
 
 
 if __name__ == "__main__":  # pragma: no cover

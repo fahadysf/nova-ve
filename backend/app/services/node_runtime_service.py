@@ -50,6 +50,37 @@ _TRANSITION_SUPPRESS_S: float = 30.0
 
 _logger = logging.getLogger("nova-ve.heartbeat")
 _discovery_logger = logging.getLogger("nova-ve.discovery")
+_legacy_layout_logger = logging.getLogger("nova-ve.legacy_image_layout")
+
+# Once-per-process cache: keys are "<kind>:<path>" so each (kind, path) pair
+# warns at most once for the lifetime of the process. The EVE-NG importer
+# (#184) is the migration off this layout; removal tracked in
+# legacy-image-layout-removal-fu.
+_LEGACY_LAYOUT_LOGGED: set[str] = set()
+
+
+def _log_legacy_image_fallback(path: Path, fallback_kind: str) -> None:
+    """Emit a one-shot DEPRECATION warning when the legacy un-nested IMAGES_DIR
+    layout resolves an image or iso path.
+
+    Tests assert on ``LogRecord.deprecation`` (the structured ``extra`` field),
+    not on substring matching of the human-readable message.
+    """
+    cache_key = f"{fallback_kind}:{path}"
+    if cache_key in _LEGACY_LAYOUT_LOGGED:
+        return
+    _LEGACY_LAYOUT_LOGGED.add(cache_key)
+    _legacy_layout_logger.warning(
+        "DEPRECATION: legacy un-nested IMAGES_DIR layout used for %s; "
+        "migrate the image into IMAGES_DIR/qemu/<image>/. "
+        "(Tracking removal in legacy-image-layout-removal-fu.)",
+        fallback_kind,
+        extra={
+            "deprecation": True,
+            "fallback_path": str(path),
+            "fallback_kind": fallback_kind,
+        },
+    )
 
 
 def _node_extras(node: dict[str, Any]) -> dict[str, Any]:
@@ -4405,18 +4436,22 @@ class NodeRuntimeService:
         if not image_name:
             return None
 
-        candidates = [
-            self.settings.IMAGES_DIR / "qemu" / image_name / "hda.qcow2",
-            self.settings.IMAGES_DIR / image_name / "hda.qcow2",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
+        nested_disk = self.settings.IMAGES_DIR / "qemu" / image_name / "hda.qcow2"
+        legacy_disk = self.settings.IMAGES_DIR / image_name / "hda.qcow2"
+        if nested_disk.exists():
+            return nested_disk
+        if legacy_disk.exists():
+            _log_legacy_image_fallback(legacy_disk, "qemu_image_hda")
+            return legacy_disk
 
-        for directory in [self.settings.IMAGES_DIR / "qemu" / image_name, self.settings.IMAGES_DIR / image_name]:
+        nested_dir = self.settings.IMAGES_DIR / "qemu" / image_name
+        legacy_dir = self.settings.IMAGES_DIR / image_name
+        for directory, is_legacy in ((nested_dir, False), (legacy_dir, True)):
             if directory.exists():
                 qcow_images = sorted(directory.glob("*.qcow2"))
                 if qcow_images:
+                    if is_legacy:
+                        _log_legacy_image_fallback(qcow_images[0], "qemu_image_dir")
                     return qcow_images[0]
 
         return None
@@ -4426,18 +4461,22 @@ class NodeRuntimeService:
         if not image_name:
             return None
 
-        candidates = [
-            self.settings.IMAGES_DIR / "qemu" / image_name / "cdrom.iso",
-            self.settings.IMAGES_DIR / image_name / "cdrom.iso",
-        ]
-        for candidate in candidates:
-            if candidate.exists():
-                return candidate
+        nested_iso = self.settings.IMAGES_DIR / "qemu" / image_name / "cdrom.iso"
+        legacy_iso = self.settings.IMAGES_DIR / image_name / "cdrom.iso"
+        if nested_iso.exists():
+            return nested_iso
+        if legacy_iso.exists():
+            _log_legacy_image_fallback(legacy_iso, "qemu_iso_cdrom")
+            return legacy_iso
 
-        for directory in [self.settings.IMAGES_DIR / "qemu" / image_name, self.settings.IMAGES_DIR / image_name]:
+        nested_dir = self.settings.IMAGES_DIR / "qemu" / image_name
+        legacy_dir = self.settings.IMAGES_DIR / image_name
+        for directory, is_legacy in ((nested_dir, False), (legacy_dir, True)):
             if directory.exists():
                 iso_images = sorted(directory.glob("*.iso"))
                 if iso_images:
+                    if is_legacy:
+                        _log_legacy_image_fallback(iso_images[0], "qemu_iso_dir")
                     return iso_images[0]
 
         return None
