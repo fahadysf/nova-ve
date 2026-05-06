@@ -231,6 +231,8 @@ def test_main_real_run_writes_manifest_with_empty_arrays(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Real (non-dry-run) invocation against an empty source still emits a shaped manifest."""
+    from scripts.import_eveng._app_owner import AppOwner
+
     src = tmp_path / "empty"
     src.mkdir()
     dst = tmp_path / "dst"
@@ -238,6 +240,13 @@ def test_main_real_run_writes_manifest_with_empty_arrays(
 
     # Pretend we are root so the root-check does not bail.
     monkeypatch.setattr("scripts.import_eveng.cli._is_root", lambda: True)
+
+    # Stub APP_OWNER resolution: macOS test runners do not have a 'ubuntu'
+    # user, but the production target (Ubuntu 26.04 host) does.
+    fake_owner = AppOwner(
+        name="ubuntu", uid=1000, group="ubuntu", gid=1000, home="/home/ubuntu", source="default"
+    )
+    monkeypatch.setattr("scripts.import_eveng.cli.resolve_app_owner", lambda: fake_owner)
 
     rc = main(
         [
