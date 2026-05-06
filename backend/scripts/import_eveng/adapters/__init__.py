@@ -22,8 +22,11 @@ This layout keeps the per-PR conflict surface here predictable and small.
 
 from __future__ import annotations
 
+from .arista_veos import AristaVEosAdapter
 from .base import NeedsManualReview, VendorAdapter
 from .generic_linux import GenericLinuxAdapter
+from .mikrotik_chr import MikrotikCHRAdapter
+from .vyos import VyOSAdapter
 
 ADAPTERS: list[VendorAdapter] = []
 
@@ -36,6 +39,9 @@ def register(adapter: VendorAdapter) -> None:
 def reset_registry_for_tests() -> None:
     """Clear and re-prime the registry. Test-only: do not call from production paths."""
     ADAPTERS.clear()
+    register(AristaVEosAdapter())
+    register(MikrotikCHRAdapter())
+    register(VyOSAdapter())
     register(GenericLinuxAdapter())
 
 
@@ -53,14 +59,20 @@ def select_adapter(raw: dict) -> VendorAdapter | None:
 
 
 # Built-in registrations. Vendor PRs prepend their entries above this line.
+register(AristaVEosAdapter())
+register(MikrotikCHRAdapter())
+register(VyOSAdapter())
 register(GenericLinuxAdapter())
 
 
 __all__ = [
     "ADAPTERS",
+    "AristaVEosAdapter",
     "GenericLinuxAdapter",
+    "MikrotikCHRAdapter",
     "NeedsManualReview",
     "VendorAdapter",
+    "VyOSAdapter",
     "iter_adapters",
     "register",
     "reset_registry_for_tests",
