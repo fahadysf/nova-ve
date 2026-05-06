@@ -108,6 +108,29 @@ class NodeCreate(BaseModel):
         return self
 
 
+class NodeFromTemplate(BaseModel):
+    """Request body for ``POST /api/labs/{lab_path:path}/nodes/from-template`` (#185).
+
+    Operator selects a template from the existing
+    ``GET /api/list/templates/{template_type}`` listing and asks the server to
+    instantiate a node with the template's defaults pre-applied. The server
+    rejects paired-node templates (kind="paired") with HTTP 400 until the
+    multi-node picker UI follow-up lands (#185 + #188 + R-OOB-3).
+    """
+
+    template_type: Literal["qemu", "docker", "iol", "dynamips"]
+    template_key: str
+    name: str
+    image: str
+    console: Optional[Literal["telnet", "vnc", "rdp"]] = None
+    cpu: Optional[int] = None
+    ram: Optional[int] = None
+    ethernet: Optional[int] = None
+    left: int = 0
+    top: int = 0
+    extras: Dict[str, Any] = Field(default_factory=dict)
+
+
 class NodeBatchCreate(BaseModel):
     name_prefix: str = Field(default="Node")
     count: int = Field(default=1, ge=1, le=24)

@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from pathlib import Path
+import logging
 import os
 import shutil
 import subprocess
@@ -8,6 +9,9 @@ from typing import Any
 import yaml
 
 from app.config import get_settings
+
+
+_logger = logging.getLogger("nova-ve.template_service")
 
 
 SUPPORTED_TEMPLATE_TYPES = {"qemu", "docker", "iol", "dynamips"}
@@ -523,6 +527,13 @@ class TemplateService:
     def __init__(self) -> None:
         self.settings = get_settings()
         self.templates_dir = self.settings.TEMPLATES_DIR
+        # USER_TEMPLATES_DIR (#185): operator-imported templates. Walked alongside
+        # the builtin TEMPLATES_DIR; user-dir entries shadow builtin on key
+        # collision and a WARNING is logged. Tolerate older settings shapes that
+        # have not yet been refreshed by reading the attribute defensively.
+        self.user_templates_dir = getattr(
+            self.settings, "USER_TEMPLATES_DIR", None
+        )
         self.images_dir = self.settings.IMAGES_DIR
 
     def list_templates(self, template_type: str) -> dict[str, dict[str, Any]]:
@@ -539,6 +550,26 @@ class TemplateService:
             if template.type == template_type and template.key == key:
                 return template
         raise TemplateError(f"Template {key} does not exist for type {template_type}.")
+
+    def is_paired_user_template(self, template_key: str) -> bool:
+        """Check if a JSON file under USER_TEMPLATES_DIR has ``kind == "paired"``.
+
+        Used by ``POST /api/labs/.../nodes/from-template`` to reject paired-node
+        templates with HTTP 400 until the multi-node picker UI follow-up lands
+        (see #185 + #188 + R-OOB-3 in the consensus plan). The check is read-only
+        and tolerant of malformed JSON / missing files (returns False).
+        """
+        if self.user_templates_dir is None or not self.user_templates_dir.exists():
+            return False
+        candidates = list(self.user_templates_dir.rglob(f"{template_key}.json"))
+        for path in candidates:
+            try:
+                data = yaml.safe_load(path.read_text()) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            if isinstance(data, dict) and data.get("kind") == "paired":
+                return True
+        return False
 
     def list_images(self, template_type: str, template_key: str) -> dict[str, dict[str, Any]]:
         template = self.get_template(template_type, template_key)
@@ -672,18 +703,59 @@ class TemplateService:
             "path": str(target_path),
         }
 
+    def _iter_template_paths(self) -> list[tuple[Path, str]]:
+        """Return (path, source) for every *.yml/*.json template file across both dirs.
+
+        ``source`` is ``"builtin"`` for entries from ``TEMPLATES_DIR`` and
+        ``"user"`` for entries from ``USER_TEMPLATES_DIR``. User-dir entries
+        come AFTER builtin entries so they win on key collision (#185).
+        """
+        paths: list[tuple[Path, str]] = []
+        if self.templates_dir.exists():
+            for p in sorted(self.templates_dir.rglob("*.yml")):
+                paths.append((p, "builtin"))
+        user_dir = self.user_templates_dir
+        if user_dir is not None and user_dir.exists():
+            for p in sorted(user_dir.rglob("*.yml")):
+                paths.append((p, "user"))
+            for p in sorted(user_dir.rglob("*.json")):
+                paths.append((p, "user"))
+        return paths
+
     def _load_templates(self) -> list[TemplateDefinition]:
-        if not self.templates_dir.exists():
+        if not self.templates_dir.exists() and (
+            self.user_templates_dir is None or not self.user_templates_dir.exists()
+        ):
             return []
 
+        # Track keys we've already loaded so we can detect shadowing.
+        seen_keys_by_type: dict[tuple[str, str], str] = {}  # (type, key) -> source
+
         templates: list[TemplateDefinition] = []
-        for template_path in sorted(self.templates_dir.rglob("*.yml")):
+        for template_path, source in self._iter_template_paths():
             payload = yaml.safe_load(template_path.read_text()) or {}
             template_type = str(payload.get("type") or template_path.parent.name).strip().lower()
             if template_type not in SUPPORTED_TEMPLATE_TYPES:
                 continue
 
             key = template_path.stem
+            type_key = (template_type, key)
+            if type_key in seen_keys_by_type:
+                prior_source = seen_keys_by_type[type_key]
+                if source == "user" and prior_source == "builtin":
+                    _logger.warning(
+                        "USER_TEMPLATES_DIR template shadows builtin",
+                        extra={
+                            "template_type": template_type,
+                            "template_key": key,
+                            "user_path": str(template_path),
+                        },
+                    )
+                # Remove the prior entry; the new one (last-loaded) wins.
+                templates[:] = [
+                    t for t in templates if not (t.type == template_type and t.key == key)
+                ]
+            seen_keys_by_type[type_key] = source
             yaml_extras = payload.get("extras") or {}
             if not isinstance(yaml_extras, dict):
                 yaml_extras = {}
