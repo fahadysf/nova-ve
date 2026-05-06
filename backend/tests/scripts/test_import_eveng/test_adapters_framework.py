@@ -30,7 +30,7 @@ def _isolated_registry():
     Resets to a minimal baseline (generic_linux only) for framework-level tests
     that exercise sort order / tiebreaker / dispatch invariants without the
     noise of every shipped vendor adapter. Vendor-specific tests (e.g.
-    test_adapters_cisco, test_adapters_juniper, test_adapters_arista_*)
+    test_adapters_cisco, test_adapters_juniper, test_adapters_arista_mikrotik_vyos)
     call ``reset_registry_for_tests()`` themselves to get the full production
     registry.
     """
