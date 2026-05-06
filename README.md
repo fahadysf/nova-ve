@@ -26,6 +26,8 @@ On a fresh Ubuntu 26.04 LTS x86_64 host with sudo access:
 curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | sudo bash
 ```
 
+> **Migrating from EVE-NG / UNetLab / PNETLab?** See [`docs/migrating-from-eve-ng.md`](docs/migrating-from-eve-ng.md) for the importer walk-through (default mode is non-destructive — sources preserved unless `--delete-source` is passed).
+
 That single command:
 
 1. Installs git, Docker, PostgreSQL, Caddy, Node.js, Python 3 + venv, build tooling, and other OS deps.
