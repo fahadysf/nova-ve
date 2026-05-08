@@ -402,6 +402,14 @@
       return;
     }
 
+    // Paired-template creation adds N nodes + an implicit bridge + 2N link
+    // halves in one shot; full lab reload is the simplest way to pick all of
+    // that up consistently in localNodes/localNetworks/localTopology.
+    if (reason === 'paired-create' && !isLabIndexRoute) {
+      await loadLab({ blocking: false });
+      return;
+    }
+
     if (!isLabIndexRoute) {
       await loadLab({ blocking: false });
     }
