@@ -8,6 +8,7 @@
   import type {
     NodeCatalog,
     NodeCatalogExtraField,
+    NodeCatalogPairedTemplate,
     NodeCatalogTemplate,
     NodeData,
   } from '$lib/types';
@@ -41,6 +42,11 @@
     interface_naming_scheme: string | null;
   };
 
+  type CreatePairedSubmitPayload = {
+    template_key: string;
+    name_overrides: Record<string, string>;
+  };
+
   type EditSubmitPayload = {
     name: string;
     image: string;
@@ -56,7 +62,10 @@
 
   const dispatch = createEventDispatcher<{
     cancel: void;
-    submit: { mode: 'create'; payload: CreateSubmitPayload } | { mode: 'edit'; nodeId: number; payload: EditSubmitPayload };
+    submit:
+      | { mode: 'create'; payload: CreateSubmitPayload }
+      | { mode: 'create-paired'; payload: CreatePairedSubmitPayload }
+      | { mode: 'edit'; nodeId: number; payload: EditSubmitPayload };
   }>();
 
   const NODE_TYPES: ReadonlyArray<{ key: NodeTypeKey; label: string; icon: ComponentType }> = [
@@ -70,6 +79,8 @@
 
   let selectedType: NodeTypeKey = 'qemu';
   let selectedTemplateId = '';
+  let pairedTemplateKey = '';
+  let pairedNameOverrides: Record<string, string> = {};
   let name = '';
   let namePrefix = '';
   let image = '';
@@ -96,6 +107,18 @@
 
   function templatesForType(type: NodeTypeKey): NodeCatalogTemplate[] {
     return (catalog?.templates ?? []).filter((template) => template.type === type);
+  }
+
+  function pairedTemplates(): NodeCatalogPairedTemplate[] {
+    return catalog?.paired_templates ?? [];
+  }
+
+  function pairedTemplateForKey(key: string): NodeCatalogPairedTemplate | undefined {
+    return pairedTemplates().find((entry) => entry.key === key);
+  }
+
+  function setPairedNameOverride(childId: string, value: string) {
+    pairedNameOverrides = { ...pairedNameOverrides, [childId]: value };
   }
 
   function firstAvailableType(): NodeTypeKey {
@@ -185,6 +208,8 @@
     selectedType = firstAvailableType();
     const templateValue = firstTemplateIdOfType(selectedType);
     selectedTemplateId = templateValue;
+    pairedTemplateKey = '';
+    pairedNameOverrides = {};
     name = '';
     count = 1;
     placement = 'grid';
@@ -324,6 +349,24 @@
       return;
     }
 
+    if (pairedTemplateKey) {
+      const sanitizedOverrides: Record<string, string> = {};
+      for (const [childId, value] of Object.entries(pairedNameOverrides)) {
+        const trimmed = value.trim();
+        if (trimmed) {
+          sanitizedOverrides[childId] = trimmed;
+        }
+      }
+      dispatch('submit', {
+        mode: 'create-paired',
+        payload: {
+          template_key: pairedTemplateKey,
+          name_overrides: sanitizedOverrides,
+        },
+      });
+      return;
+    }
+
     const template = templateForId(selectedTemplateId);
     if (!template) {
       return;
@@ -356,6 +399,9 @@
 
   $: selectedTemplate = templateForId(selectedTemplateId);
   $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
+  $: visiblePairedTemplates = catalog ? pairedTemplates() : [];
+  $: selectedPairedTemplate = pairedTemplateKey ? pairedTemplateForKey(pairedTemplateKey) : undefined;
+  $: pairedActive = mode === 'create' && Boolean(selectedPairedTemplate);
   $: interfaceNamingError = interfaceNamingErrorFor(interfaceNamingScheme, selectedType);
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
   $: if (open && catalog && signature !== lastSignature) {
@@ -456,8 +502,8 @@
                     {active
                       ? 'border-blue-500/60 bg-blue-500/15 text-blue-100'
                       : 'border-slate-800 bg-slate-900/60 text-slate-300 hover:border-slate-600 hover:text-white'}
-                    {!available || mode === 'edit' ? 'cursor-not-allowed opacity-50' : ''}"
-                  disabled={!available || mode === 'edit'}
+                    {!available || mode === 'edit' || pairedActive ? 'cursor-not-allowed opacity-50' : ''}"
+                  disabled={!available || mode === 'edit' || pairedActive}
                   aria-pressed={active}
                   on:click={() => selectType(entry.key)}
                 >
@@ -467,6 +513,76 @@
               {/each}
             </div>
 
+            {#if mode === 'create' && visiblePairedTemplates.length > 0}
+              <div class="rounded-2xl border border-purple-500/30 bg-purple-500/5 p-4">
+                <div class="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div class="text-[10px] uppercase tracking-[0.06em] text-purple-300">Paired vendor templates</div>
+                    <div class="mt-0.5 text-xs text-slate-400">Multi-VM appliances (vMX, vQFX) instantiated as a group with auto-links.</div>
+                  </div>
+                  <label class="flex items-center gap-2 text-xs text-slate-300">
+                    <select
+                      bind:value={pairedTemplateKey}
+                      class="rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
+                    >
+                      <option value="">— Single node —</option>
+                      {#each visiblePairedTemplates as paired}
+                        <option value={paired.key}>
+                          {paired.name} [{paired.child_count} nodes / {paired.link_count} link{paired.link_count === 1 ? '' : 's'}]
+                        </option>
+                      {/each}
+                    </select>
+                  </label>
+                </div>
+
+                {#if selectedPairedTemplate}
+                  <div class="mt-4 space-y-3">
+                    <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                      <div class="text-[10px] uppercase tracking-[0.06em] text-slate-500">Will create</div>
+                      <ul class="mt-2 space-y-1.5 text-xs text-slate-200">
+                        {#each selectedPairedTemplate.children as child}
+                          <li class="flex flex-wrap items-center gap-2">
+                            <span class="rounded-md border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-slate-300">{child.kind}</span>
+                            <span class="font-medium text-slate-100">{child.name}</span>
+                            <span class="text-slate-500">·</span>
+                            <span>{child.cpu} vCPU · {child.ram} MB · {child.ethernet} eth</span>
+                          </li>
+                        {/each}
+                      </ul>
+                    </div>
+
+                    {#if selectedPairedTemplate.links.length > 0}
+                      <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
+                        <div class="text-[10px] uppercase tracking-[0.06em] text-slate-500">Auto-links</div>
+                        <ul class="mt-2 space-y-1 text-xs text-slate-300">
+                          {#each selectedPairedTemplate.links as link}
+                            <li class="font-mono">
+                              {link.from_node}.{link.from_iface} ↔ {link.to_node}.{link.to_iface}
+                            </li>
+                          {/each}
+                        </ul>
+                      </div>
+                    {/if}
+
+                    <div class="grid gap-2 sm:grid-cols-2">
+                      {#each selectedPairedTemplate.children as child}
+                        <label class="block">
+                          <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Name · {child.id}</div>
+                          <input
+                            value={pairedNameOverrides[child.id] ?? ''}
+                            on:input={(e) => setPairedNameOverride(child.id, (e.currentTarget as HTMLInputElement).value)}
+                            placeholder={child.name}
+                            class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
+                          />
+                        </label>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/if}
+
+            {#if !pairedActive}
             <div class="grid gap-4 md:grid-cols-3">
               {#if mode === 'create'}
                 <label class="block">
@@ -811,6 +927,7 @@
                 <span class="rounded-full border border-slate-800 px-2 py-1">{image || 'no image'}</span>
               </div>
             </div>
+            {/if}
           </div>
 
           <div class="flex justify-end gap-3 border-t border-slate-800 bg-slate-950/80 px-5 py-4">
@@ -823,13 +940,15 @@
             </button>
             <button
               type="submit"
-              disabled={submitting || !selectedTemplate || !image || !!interfaceNamingError}
+              disabled={submitting || (!pairedActive && (!selectedTemplate || !image)) || !!interfaceNamingError}
               class="rounded-full border border-blue-500/40 bg-blue-500/15 px-4 py-2 text-sm text-blue-100 transition hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {#if submitting}
                 Saving…
               {:else if mode === 'edit'}
                 Save node
+              {:else if pairedActive && selectedPairedTemplate}
+                Add {selectedPairedTemplate.child_count} nodes + {selectedPairedTemplate.link_count} link{selectedPairedTemplate.link_count === 1 ? '' : 's'}
               {:else}
                 Add node
               {/if}

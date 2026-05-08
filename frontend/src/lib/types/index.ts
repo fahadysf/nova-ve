@@ -294,8 +294,36 @@ export interface NodeCatalogTemplate {
   capabilities?: TemplateCapabilities;
 }
 
+export interface NodeCatalogPairedChild {
+  id: string;
+  name: string;
+  kind: string;
+  image: string;
+  cpu: number;
+  ram: number;
+  ethernet: number;
+}
+
+export interface NodeCatalogPairedLink {
+  from_node: string;
+  from_iface: string;
+  to_node: string;
+  to_iface: string;
+}
+
+export interface NodeCatalogPairedTemplate {
+  key: string;
+  name: string;
+  vendor: string;
+  child_count: number;
+  link_count: number;
+  children: NodeCatalogPairedChild[];
+  links: NodeCatalogPairedLink[];
+}
+
 export interface NodeCatalog {
   templates: NodeCatalogTemplate[];
+  paired_templates?: NodeCatalogPairedTemplate[];
   icon_options: string[];
   create_fields: string[];
   edit_fields: string[];

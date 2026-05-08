@@ -551,25 +551,34 @@ class TemplateService:
                 return template
         raise TemplateError(f"Template {key} does not exist for type {template_type}.")
 
-    def is_paired_user_template(self, template_key: str) -> bool:
-        """Check if a JSON file under USER_TEMPLATES_DIR has ``kind == "paired"``.
+    def get_paired_user_template(self, template_key: str) -> dict[str, Any] | None:
+        """Load a paired-node template (``kind="paired"``) from USER_TEMPLATES_DIR.
 
-        Used by ``POST /api/labs/.../nodes/from-template`` to reject paired-node
-        templates with HTTP 400 until the multi-node picker UI follow-up lands
-        (see #185 + #188 + R-OOB-3 in the consensus plan). The check is read-only
-        and tolerant of malformed JSON / missing files (returns False).
+        Returns the parsed dict (with ``nodes:[...]`` + ``links:[...]`` siblings
+        validated as lists) or ``None`` when no matching paired template exists.
+        Used by ``POST /api/labs/.../nodes/from-paired-template`` (#202) to
+        instantiate multi-node templates atomically. Read-only; tolerant of
+        malformed JSON.
         """
         if self.user_templates_dir is None or not self.user_templates_dir.exists():
-            return False
+            return None
         candidates = list(self.user_templates_dir.rglob(f"{template_key}.json"))
         for path in candidates:
             try:
                 data = yaml.safe_load(path.read_text()) or {}
             except (OSError, yaml.YAMLError):
                 continue
-            if isinstance(data, dict) and data.get("kind") == "paired":
-                return True
-        return False
+            if not isinstance(data, dict) or data.get("kind") != "paired":
+                continue
+            nodes = data.get("nodes")
+            links = data.get("links")
+            if isinstance(nodes, list) and nodes and isinstance(links, list):
+                return data
+        return None
+
+    def is_paired_user_template(self, template_key: str) -> bool:
+        """Boolean check used by the single-node from-template endpoint to 400 paired keys."""
+        return self.get_paired_user_template(template_key) is not None
 
     def list_images(self, template_type: str, template_key: str) -> dict[str, dict[str, Any]]:
         template = self.get_template(template_type, template_key)
@@ -654,8 +663,70 @@ class TemplateService:
             )
         return {
             "templates": templates,
+            "paired_templates": self._build_paired_catalog(),
             "icon_options": icon_options,
         }
+
+    def _build_paired_catalog(self) -> list[dict[str, Any]]:
+        """Enumerate paired user-templates (#202) for the node catalog response.
+
+        Paired templates live as JSON files at the root of ``USER_TEMPLATES_DIR``
+        with ``kind="paired"`` and sibling ``nodes:[...]`` + ``links:[...]``
+        arrays (see :class:`scripts.import_eveng.adapters.juniper_vmx.JuniperVMXAdapter`).
+        Each entry is a self-contained multi-node instantiation directive — the
+        frontend renders these with a distinct visual treatment ("2 nodes" badge)
+        and routes submissions to ``POST /nodes/from-paired-template`` instead of
+        the single-node ``/nodes/batch`` path.
+        """
+        if self.user_templates_dir is None or not self.user_templates_dir.exists():
+            return []
+        result: list[dict[str, Any]] = []
+        for path in sorted(self.user_templates_dir.rglob("*.json")):
+            try:
+                data = yaml.safe_load(path.read_text()) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            if not isinstance(data, dict) or data.get("kind") != "paired":
+                continue
+            nodes = data.get("nodes")
+            links = data.get("links")
+            if not (isinstance(nodes, list) and nodes and isinstance(links, list)):
+                continue
+            child_summary = [
+                {
+                    "id": str(child.get("id") or f"child-{i}"),
+                    "name": str(child.get("name") or child.get("id") or f"child-{i}"),
+                    "kind": str(child.get("kind") or "qemu"),
+                    "image": str(child.get("image") or ""),
+                    "cpu": int(child.get("cpu", 1)),
+                    "ram": int(child.get("ram", 1024)),
+                    "ethernet": int(child.get("ethernet", 1)),
+                }
+                for i, child in enumerate(nodes)
+                if isinstance(child, dict)
+            ]
+            link_summary = [
+                {
+                    "from_node": str(link.get("from_node") or ""),
+                    "from_iface": str(link.get("from_iface") or ""),
+                    "to_node": str(link.get("to_node") or ""),
+                    "to_iface": str(link.get("to_iface") or ""),
+                }
+                for link in links
+                if isinstance(link, dict)
+            ]
+            result.append(
+                {
+                    "key": path.stem,
+                    "name": str(data.get("name") or path.stem),
+                    "vendor": str(data.get("vendor") or ""),
+                    "child_count": len(child_summary),
+                    "link_count": len(link_summary),
+                    "children": child_summary,
+                    "links": link_summary,
+                }
+            )
+        return result
 
     def template_extras(self, template_type: str, template_key: str) -> dict[str, Any]:
         """Return the merged default extras (schema defaults + YAML overrides) for a template."""

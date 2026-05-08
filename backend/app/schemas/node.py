@@ -131,6 +131,27 @@ class NodeFromTemplate(BaseModel):
     extras: Dict[str, Any] = Field(default_factory=dict)
 
 
+class NodeFromPairedTemplate(BaseModel):
+    """Request body for ``POST /api/labs/{lab_path:path}/nodes/from-paired-template`` (#202).
+
+    Operator selects a paired-node template (``kind="paired"``) from the catalog
+    (which exposes ``paired_templates:[...]`` alongside the regular templates list)
+    and asks the server to instantiate ALL child nodes plus the auto-links between
+    them in a single atomic call. On partial failure the server rolls back lab.json
+    so no orphan nodes are left behind.
+
+    The base position is the drop-point on the canvas; child nodes are laid out in
+    a row with a 180-px horizontal offset relative to that anchor. ``name_overrides``
+    maps the paired template's child id (e.g. ``"vcp"``, ``"vfp"``) to a user-chosen
+    node name; missing entries use ``f"{template_key}-{child_id}"``.
+    """
+
+    template_key: str
+    base_left: int = 0
+    base_top: int = 0
+    name_overrides: Dict[str, str] = Field(default_factory=dict)
+
+
 class NodeBatchCreate(BaseModel):
     name_prefix: str = Field(default="Node")
     count: int = Field(default=1, ge=1, le=24)
