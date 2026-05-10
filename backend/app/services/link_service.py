@@ -16,7 +16,7 @@ import logging
 from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Tuple
 
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 
 from app.config import get_settings
 from app.services import host_net
@@ -256,12 +256,20 @@ class LinkService:
         *,
         style_override: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        _lab_lock_held: bool = False,
     ) -> Tuple[dict, Optional[dict], bool]:
         """Create a link, applying the implicit-bridge state machine.
 
         Returns ``(link_payload, network_payload_or_none, replayed)``. When
         ``replayed`` is True the caller should respond 200 (not 201) and skip
         WebSocket publishing.
+
+        ``_lab_lock_held`` (#208a): set True when the caller already holds
+        ``lab_lock(normalized, labs_dir)`` so the inner ``_create_link_locked``
+        skips its own re-acquisition (fcntl.flock would deadlock). This is
+        used by paired-create which holds one outer lab_lock spanning
+        snapshot + node-creation + multi-link creation + (rollback or
+        success). Default False keeps the historical contract intact.
         """
         normalized = _normalize_relative_lab_path(lab_path)
 
@@ -323,6 +331,7 @@ class LinkService:
                     idempotency_key=idempotency_key,
                     ws_events=ws_events,
                     mutex_lab_id=mutex_lab_id,
+                    _lab_lock_held=_lab_lock_held,
                 )
         except RuntimeMutexContention as exc:
             # US-303 codex iter1 MEDIUM: bounded-wait timeout → 409.
@@ -339,14 +348,23 @@ class LinkService:
         idempotency_key: Optional[str],
         ws_events: List[Tuple[str, dict]],
         mutex_lab_id: str,
+        _lab_lock_held: bool = False,
     ) -> Tuple[dict, Optional[dict], bool]:
         """Per-iface mutex(es) ARE held by the caller (US-204b). This
         helper does the lab_lock-bounded mutation + hot-attach work.
+
+        ``_lab_lock_held`` (#208a): when True the caller already holds
+        ``lab_lock(normalized, labs_dir)``; we skip re-acquisition (fcntl
+        flock is not reentrant on Linux even within the same process).
         """
         link_payload: dict
         network_payload: Optional[dict] = None
 
-        with lab_lock(normalized, labs_dir):
+        lab_lock_cm = (
+            nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
+        )
+
+        with lab_lock_cm:
             data = LabService.read_lab_json_static(normalized)
             networks = data.setdefault("networks", {})
             links = data.setdefault("links", [])
@@ -944,8 +962,20 @@ class LinkService:
                 return bridge
         return host_net.bridge_name(lab_id, network_id)
 
-    async def delete_link(self, lab_path: str, link_id: str) -> Tuple[bool, Optional[dict]]:
+    async def delete_link(
+        self,
+        lab_path: str,
+        link_id: str,
+        *,
+        _lab_lock_held: bool = False,
+    ) -> Tuple[bool, Optional[dict]]:
         """Delete a link. Idempotent: missing link returns ``(True, None)``.
+
+        ``_lab_lock_held`` (#208a/b): set True when the caller already holds
+        ``lab_lock(normalized, labs_dir)`` so the inner lab_lock acquisition
+        is skipped (fcntl flock is not reentrant on Linux). Used by
+        paired-create's link-rollback compensation to undo previously-attached
+        links inside the outer lab_lock window.
 
         Returns ``(already_deleted_or_succeeded, deleted_implicit_network)``.
         ``deleted_implicit_network`` is None unless an implicit network's
@@ -1005,6 +1035,7 @@ class LinkService:
                     labs_dir=labs_dir,
                     link_id=link_id,
                     mutex_lab_id=mutex_lab_id,
+                    _lab_lock_held=_lab_lock_held,
                 )
         except RuntimeMutexContention as exc:
             # US-303 codex iter1 MEDIUM: bounded-wait timeout → 409.
@@ -1017,6 +1048,7 @@ class LinkService:
         labs_dir,
         link_id: str,
         mutex_lab_id: str,
+        _lab_lock_held: bool = False,
     ) -> Tuple[bool, Optional[dict]]:
         """Per-iface mutex(es) ARE held by the caller (US-205 / US-204b).
 
@@ -1210,7 +1242,16 @@ class LinkService:
         ):
             from app.services.network_service import NetworkService  # noqa: WPS433
 
-            NetworkService()._release_ip(normalized, int(paired_net_id), removed_ip)
+            # #208a/b architect-iter1: thread _lab_lock_held so paired-create
+            # compensation (which holds the outer lab_lock) does not deadlock
+            # on the inner per-lab fcntl flock when releasing IPAM-bearing
+            # links. Default-path delete_link callers pass False here.
+            NetworkService()._release_ip(
+                normalized,
+                int(paired_net_id),
+                removed_ip,
+                _lab_lock_held=_lab_lock_held,
+            )
 
         # ------------------------------------------------------------------
         # Phase 4 — under ``lab_lock``: remove the link from lab.json + GC
@@ -1219,7 +1260,10 @@ class LinkService:
         # changed by ``_release_ip`` so the original ``target_link`` is
         # still findable by id.
         # ------------------------------------------------------------------
-        with lab_lock(normalized, labs_dir):
+        delete_lab_lock_cm = (
+            nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
+        )
+        with delete_lab_lock_cm:
             data = LabService.read_lab_json_static(normalized)
             links = data.get("links", []) or []
             networks = data.get("networks", {}) or {}
