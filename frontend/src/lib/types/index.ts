@@ -212,7 +212,7 @@ export interface NodeData {
   type: 'qemu' | 'docker' | 'iol' | 'dynamips';
   template: string;
   image: string;
-  console: 'telnet' | 'vnc' | 'rdp';
+  console: 'telnet' | 'vnc' | 'rdp' | 'serial';
   status: 0 | 2;
   transientStatus?: 'starting' | 'stopping';
   delay: number;
@@ -252,7 +252,7 @@ export interface NodeCatalogDefaults {
   cpu: number;
   ram: number;
   ethernet: number;
-  console_type: 'telnet' | 'vnc' | 'rdp';
+  console_type: 'telnet' | 'vnc' | 'rdp' | 'serial';
   delay: number;
   cpulimit: number;
   extras?: Record<string, unknown>;
@@ -292,6 +292,13 @@ export interface NodeCatalogTemplate {
   icon_options: string[];
   extras_schema?: NodeCatalogExtraField[];
   capabilities?: TemplateCapabilities;
+  /**
+   * #206 — when set, this template entry was synthesized from a paired
+   * template's child block (key shape ``<paired_parent>__<child_id>``).
+   * Frontends should hide these from the standalone create-flow type-tab
+   * picker but still resolve them by key for edit-mode + capability lookups.
+   */
+  paired_parent?: string | null;
 }
 
 export interface NodeCatalogPairedChild {
@@ -302,6 +309,10 @@ export interface NodeCatalogPairedChild {
   cpu: number;
   ram: number;
   ethernet: number;
+  /** #206 — synthetic template key (`<paired_parent>__<child_id>`) the child
+   *  node carries on its `template` field once instantiated. Lets callers
+   *  cross-reference the matching catalog entry for capabilities / extras. */
+  template_key?: string;
 }
 
 export interface NodeCatalogPairedLink {
@@ -319,6 +330,12 @@ export interface NodeCatalogPairedTemplate {
   link_count: number;
   children: NodeCatalogPairedChild[];
   links: NodeCatalogPairedLink[];
+  /** #207 — false when the template fails pre-flight (link references an
+   *  interface name no child will expose, e.g. pre-#202 imports without
+   *  ``interface_naming.explicit``). Endpoint returns 422 in that case. */
+  valid?: boolean;
+  /** #207 — human-readable reason when valid is false. */
+  invalid_reason?: string | null;
 }
 
 export interface NodeCatalog {
