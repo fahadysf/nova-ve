@@ -936,6 +936,27 @@ async def create_nodes_from_paired_template(
                 next_id += 1
 
             LabService.write_lab_json_static(scoped_path, data)
+        except (ValueError, TemplateError) as exc:
+            # #208-MEDIUM — bad child scalars (e.g. ``ethernet: "not-an-int"``)
+            # and malformed-child entries are template defects, not server
+            # bugs. Surface as 422 so the operator sees a fix-the-template
+            # message instead of a generic 500. Pre-flight already catches
+            # link/iface defects; this catches the scalar shape that pre-flight
+            # doesn't (and shouldn't, to keep validator scope tight).
+            LabService.write_lab_json_static(scoped_path, snapshot)
+            _logger.exception(
+                "from-paired-template: node-creation phase failed for %s "
+                "(template defect); rolled back",
+                request.template_key,
+            )
+            return {
+                "code": 422,
+                "status": "fail",
+                "message": (
+                    f"Paired template {request.template_key!r} has malformed "
+                    f"child data: {exc}"
+                ),
+            }
         except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
             LabService.write_lab_json_static(scoped_path, snapshot)
             _logger.exception(
