@@ -77,6 +77,25 @@
   const DEFAULT_INTERFACE_NAMING = '';
   const DOCKER_INTERFACE_NAMING_FIXED = 'eth{n}';
 
+  // #179 — vendor presets for the interface-naming scheme. Each preset
+  // value is a comma-separated list (last entry carries the placeholder).
+  // Empty value = (template default); 'custom' = whatever the operator
+  // typed by hand. Presets just populate the freeform input — the input
+  // remains the source of truth and is independently validated.
+  type InterfaceNamingPreset = { label: string; value: string };
+  const INTERFACE_NAMING_PRESETS: ReadonlyArray<InterfaceNamingPreset> = [
+    { label: '(template default)', value: '' },
+    { label: 'Linux — eth{n}', value: 'eth{n}' },
+    { label: 'Cisco IOS — Gi{port}', value: 'Gi{port}' },
+    { label: 'Cisco IOS-XE — GigabitEthernet0/0/{n}', value: 'GigabitEthernet0/0/{n}' },
+    { label: 'Arista — Ethernet{port}', value: 'Ethernet{port}' },
+    { label: 'Linux + mgmt0 — mgmt0,eth{n}', value: 'mgmt0,eth{n}' },
+    { label: 'Juniper vMX — fxp0,ge-0/0/{n}', value: 'fxp0,ge-0/0/{n}' },
+    { label: 'Arista + Management1', value: 'Management1,Ethernet{port}' },
+    { label: 'Cisco IOSv-L2', value: 'Management0/0,GigabitEthernet0/{n}' },
+  ];
+  const INTERFACE_NAMING_CUSTOM = '__custom__';
+
   let selectedType: NodeTypeKey = 'qemu';
   let selectedTemplateId = '';
   let pairedTemplateKey = '';
@@ -153,6 +172,20 @@
   function normalizedInterfaceNamingScheme(): string | null {
     const trimmed = interfaceNamingScheme.trim();
     return trimmed || null;
+  }
+
+  function presetValueFor(scheme: string): string {
+    const trimmed = scheme.trim();
+    const match = INTERFACE_NAMING_PRESETS.find((preset) => preset.value === trimmed);
+    return match ? match.value : INTERFACE_NAMING_CUSTOM;
+  }
+
+  function applyInterfaceNamingPreset(presetValue: string) {
+    if (presetValue === INTERFACE_NAMING_CUSTOM) {
+      return;
+    }
+    interfaceNamingScheme = presetValue;
+    markDirty('interfaceNamingScheme');
   }
 
   function defaultExtrasFromTemplate(template: NodeCatalogTemplate | undefined): ExtrasMap {
@@ -403,6 +436,7 @@
   $: selectedPairedTemplate = pairedTemplateKey ? pairedTemplateForKey(pairedTemplateKey) : undefined;
   $: pairedActive = mode === 'create' && Boolean(selectedPairedTemplate);
   $: interfaceNamingError = interfaceNamingErrorFor(interfaceNamingScheme, selectedType);
+  $: selectedInterfaceNamingPreset = presetValueFor(interfaceNamingScheme);
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
   $: if (open && catalog && signature !== lastSignature) {
     lastSignature = signature;
@@ -729,6 +763,17 @@
               </label>
               <label class="block">
                 <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Interface naming</div>
+                <select
+                  value={selectedInterfaceNamingPreset}
+                  on:change={(event) => applyInterfaceNamingPreset((event.currentTarget as HTMLSelectElement).value)}
+                  class="mb-1 w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
+                  aria-label="Interface naming preset"
+                >
+                  {#each INTERFACE_NAMING_PRESETS as preset}
+                    <option value={preset.value}>{preset.label}</option>
+                  {/each}
+                  <option value={INTERFACE_NAMING_CUSTOM}>Custom…</option>
+                </select>
                 <input
                   bind:value={interfaceNamingScheme}
                   on:input={() => markDirty('interfaceNamingScheme')}

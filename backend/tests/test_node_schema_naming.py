@@ -8,7 +8,11 @@ from pydantic import ValidationError
 
 from app.routers.labs import _default_interfaces
 from app.schemas.node import NodeBase, NodeCreate, NodeBatchCreate
-from app.services.template_service import render_interface_name
+from app.services.template_service import (
+    TemplateError,
+    _validate_interface_naming,
+    render_interface_name,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -195,3 +199,83 @@ class TestNodeBatchCreateValidator:
             interface_naming_scheme="eth{n}",
         )
         assert nb.interface_naming_scheme == "eth{n}"
+
+
+# ---------------------------------------------------------------------------
+# _validate_interface_naming — list-form 'format' (#179)
+# ---------------------------------------------------------------------------
+
+class TestValidateInterfaceNamingFormatList:
+    """The YAML ``format`` field accepts either a string (historical shape)
+    or a list of fixed names ending in a placeholder entry (#179). Lists
+    normalize to a comma-separated string so downstream consumers
+    (``render_interface_name``) stay unchanged."""
+
+    def test_string_format_accepted_unchanged(self):
+        result = _validate_interface_naming({"format": "eth{n}"}, source="vyos.yml")
+        assert result == {"format": "eth{n}"}
+
+    def test_list_format_accepted_and_normalized_to_comma_string(self):
+        result = _validate_interface_naming(
+            {"format": ["fxp0", "ge-0/0/{n}"]}, source="juniper-vmx.yml"
+        )
+        assert result == {"format": "fxp0,ge-0/0/{n}"}
+
+    def test_list_format_three_fixed_then_template(self):
+        result = _validate_interface_naming(
+            {"format": ["mgmt0", "mgmt1", "ge-0/0/{port}"]},
+            source="multi-mgmt.yml",
+        )
+        assert result == {"format": "mgmt0,mgmt1,ge-0/0/{port}"}
+
+    def test_list_format_strips_whitespace_in_items(self):
+        result = _validate_interface_naming(
+            {"format": [" fxp0 ", "  ge-0/0/{n}  "]}, source="ws.yml"
+        )
+        assert result == {"format": "fxp0,ge-0/0/{n}"}
+
+    def test_list_format_round_trip_via_render(self):
+        normalized = _validate_interface_naming(
+            {"format": ["fxp0", "ge-0/0/{n}"]}, source="vmx.yml"
+        )["format"]
+        assert render_interface_name(normalized, 0) == "fxp0"
+        assert render_interface_name(normalized, 1) == "ge-0/0/0"
+        assert render_interface_name(normalized, 4) == "ge-0/0/3"
+
+    def test_list_format_empty_list_rejected(self):
+        with pytest.raises(TemplateError, match="non-empty list"):
+            _validate_interface_naming({"format": []}, source="empty.yml")
+
+    def test_list_format_no_placeholder_anywhere_rejected(self):
+        with pytest.raises(TemplateError, match="last list entry must contain"):
+            _validate_interface_naming(
+                {"format": ["fxp0", "fxp1"]}, source="explicit-only.yml"
+            )
+
+    def test_list_format_placeholder_in_non_last_entry_rejected(self):
+        with pytest.raises(TemplateError, match="only the last list entry"):
+            _validate_interface_naming(
+                {"format": ["ge-0/0/{n}", "extra"]}, source="bad-mid.yml"
+            )
+
+    def test_list_format_placeholder_in_middle_three_entries_rejected(self):
+        with pytest.raises(TemplateError, match="only the last list entry"):
+            _validate_interface_naming(
+                {"format": ["fxp0", "mgmt{n}", "ge-0/0/{n}"]}, source="bad-mid3.yml"
+            )
+
+    def test_list_format_non_string_item_rejected(self):
+        with pytest.raises(TemplateError, match="non-empty strings"):
+            _validate_interface_naming(
+                {"format": ["fxp0", 42]}, source="non-str.yml"
+            )
+
+    def test_list_format_blank_item_rejected(self):
+        with pytest.raises(TemplateError, match="non-empty strings"):
+            _validate_interface_naming(
+                {"format": ["fxp0", "   ", "ge-0/0/{n}"]}, source="blank.yml"
+            )
+
+    def test_string_format_without_placeholder_rejected(self):
+        with pytest.raises(TemplateError, match="must contain at least one of"):
+            _validate_interface_naming({"format": "loopback"}, source="bad-str.yml")
