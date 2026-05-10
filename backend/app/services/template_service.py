@@ -122,7 +122,17 @@ def validate_paired_template(data: dict[str, Any]) -> str | None:
             child = children_by_id.get(child_id)
             if child is None:
                 return f"link references unknown child id {child_id!r}"
-            available = _paired_child_iface_names(child)
+            # #208-MEDIUM — predictor casts ``ethernet`` to int. A child with
+            # ``ethernet: "not-an-int"`` would otherwise propagate ValueError
+            # uncaught out of pre-flight back to the FastAPI handler → 500.
+            # Surface as a reason string so the endpoint returns 422.
+            try:
+                available = _paired_child_iface_names(child)
+            except (ValueError, TypeError) as exc:
+                return (
+                    f"child {child_id!r} has malformed scalar field "
+                    f"(ethernet must be an int): {exc}"
+                )
             if iface_name not in available:
                 return (
                     f"child {child_id!r} interface {iface_name!r} not in available "

@@ -1210,3 +1210,94 @@ async def test_208e_unexpected_exception_still_returns_500(patched_split, monkey
     assert response["code"] == 500, response
     assert "filesystem" in response["message"]
 
+
+# ---- #208-MEDIUM: bad child scalars surface as 422 (template defect) ----
+
+
+@pytest.mark.asyncio
+async def test_208medium_bad_ethernet_scalar_returns_422_via_preflight(patched_split):
+    """``ethernet: "not-an-int"`` is a template defect, not a server bug.
+    The pre-flight predictor casts ethernet to int; without the #208-MEDIUM
+    guard, the resulting ValueError propagates uncaught from
+    validate_paired_template back to the FastAPI handler → 500. Now it
+    surfaces as a reason string and the endpoint returns 422 with a
+    fix-the-template message."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad["nodes"][1]["ethernet"] = "not-an-int"
+    _seed_paired_template(settings, bad)
+    _seed_empty_lab(settings)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 422, response
+    assert "malformed scalar" in response["message"]
+    assert "ethernet" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_208medium_bad_cpu_scalar_returns_422_via_node_phase(patched_split):
+    """``cpu``/``ram``/``cpulimit`` are not consulted by the pre-flight
+    predictor — they only blow up in ``_build_paired_child_payload`` during
+    the node-creation phase. The new ``(ValueError, TemplateError)`` handler
+    in that phase maps the failure to 422 instead of 500."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad["nodes"][0]["cpu"] = "not-an-int"
+    _seed_paired_template(settings, bad)
+    _seed_empty_lab(settings)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 422, response
+    assert "malformed child data" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_208medium_bad_ram_scalar_returns_422_via_node_phase(patched_split):
+    """Same path as bad cpu — verifies ram is also covered by the
+    node-creation phase exception mapping."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad["nodes"][0]["ram"] = "huge"
+    _seed_paired_template(settings, bad)
+    _seed_empty_lab(settings)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 422, response
+    assert "malformed child data" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_208medium_node_phase_422_path_rolls_back_lab(patched_split):
+    """Bad-scalar 422 must still trigger snapshot restore — partial node
+    payloads written before the failing child must not survive in lab.json."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    # Make the SECOND child fail so the first has already been written into
+    # the in-memory ``nodes_map`` before the ValueError fires.
+    bad["nodes"][1]["cpu"] = "not-an-int"
+    _seed_paired_template(settings, bad)
+    lab_path = _seed_empty_lab(settings)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 422, response
+
+    # Snapshot restore: lab.json must be back to empty nodes/links.
+    restored = json.loads(lab_path.read_text())
+    assert restored.get("nodes") == {}, restored
+    assert restored.get("links") == [], restored
