@@ -674,6 +674,24 @@ async def create_node_from_template(
             "message": str(exc),
         }
 
+    # #206 codex-iter2: synthetic per-child template entries (paired_parent set,
+    # e.g. ``juniper-vmx__vcp``) must NOT be instantiable via the single-node
+    # route. They live in the catalog only so node.template lookups in edit
+    # mode + capability gates resolve; their console_type can violate
+    # ``NodeCreate.console`` Literal (Juniper children declare ``serial``),
+    # raising an uncaught Pydantic ValidationError. Reject explicitly.
+    if template_def.paired_parent is not None:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": (
+                f"Template {request.template_key!r} is a synthetic per-child entry "
+                f"of paired template {template_def.paired_parent!r}; "
+                "use POST /api/labs/{lab_path}/nodes/from-paired-template with "
+                f"template_key={template_def.paired_parent!r} instead (see #206)."
+            ),
+        }
+
     # Build a NodeCreate from the template defaults, allowing per-request overrides.
     node_create = NodeCreate(
         name=request.name,
