@@ -674,6 +674,24 @@ async def create_node_from_template(
             "message": str(exc),
         }
 
+    # #206 codex-iter2: synthetic per-child template entries (paired_parent set,
+    # e.g. ``juniper-vmx__vcp``) must NOT be instantiable via the single-node
+    # route. They live in the catalog only so node.template lookups in edit
+    # mode + capability gates resolve; their console_type can violate
+    # ``NodeCreate.console`` Literal (Juniper children declare ``serial``),
+    # raising an uncaught Pydantic ValidationError. Reject explicitly.
+    if template_def.paired_parent is not None:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": (
+                f"Template {request.template_key!r} is a synthetic per-child entry "
+                f"of paired template {template_def.paired_parent!r}; "
+                "use POST /api/labs/{lab_path}/nodes/from-paired-template with "
+                f"template_key={template_def.paired_parent!r} instead (see #206)."
+            ),
+        }
+
     # Build a NodeCreate from the template defaults, allowing per-request overrides.
     node_create = NodeCreate(
         name=request.name,
@@ -727,6 +745,7 @@ def _build_paired_child_payload(
     node_id: int,
     template_key: str,
     child: dict,
+    child_id: str,
     name: str,
     left: int,
     top: int,
@@ -739,6 +758,10 @@ def _build_paired_child_payload(
     :func:`_build_node_payload`. The child's ``interface_naming`` (if present)
     is honored so links that reference vendor-specific names (e.g. ``fxp0``)
     resolve cleanly via :func:`_resolve_iface_index`.
+
+    #206: ``template`` is the synthetic per-child key
+    ``<paired_key>__<child_id>`` so node.template lookups by edit-mode (image
+    validation, capability gates, frontend modal resolution) succeed.
     """
     child_type = str(child.get("kind") or "qemu").lower()
     if child_type not in {"qemu", "docker", "iol", "dynamips"}:
@@ -769,11 +792,13 @@ def _build_paired_child_payload(
             if idx < len(explicit_names) and isinstance(explicit_names[idx], str):
                 iface["name"] = explicit_names[idx]
 
+    from app.services.template_service import synthetic_paired_child_key
+
     return {
         "id": node_id,
         "name": name,
         "type": child_type,
-        "template": template_key,
+        "template": synthetic_paired_child_key(template_key, child_id),
         "image": str(child.get("image") or ""),
         "console": str(child.get("console") or "telnet"),
         "status": 0,
@@ -811,6 +836,8 @@ async def create_nodes_from_paired_template(
     children and ALL auto-links in a single transaction; on partial failure
     lab.json is rolled back from a snapshot taken before the first mutation.
     """
+    from app.services.template_service import validate_paired_template
+
     template_service = TemplateService()
     paired = template_service.get_paired_user_template(request.template_key)
     if paired is None:
@@ -823,17 +850,23 @@ async def create_nodes_from_paired_template(
             ),
         }
 
+    # #207 — pre-flight before any mutation. Catches old (#202-pre) imports
+    # whose link refs reference interfaces no child will expose (e.g. paired
+    # JSONs without ``interface_naming.explicit``). Surface as 422 so the UI
+    # can render a fix-the-template message instead of a generic 500.
+    pre_flight_reason = validate_paired_template(paired)
+    if pre_flight_reason is not None:
+        return {
+            "code": 422,
+            "status": "fail",
+            "message": (
+                f"Paired template {request.template_key!r} cannot be instantiated: "
+                f"{pre_flight_reason}"
+            ),
+        }
+
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-        data = _read_lab_data(scoped_path)
-    except LegacyLabSchemaError as exc:
-        return _legacy_schema_response(exc)
-    except FileNotFoundError:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
     except PermissionError as e:
         return {
             "code": 403,
@@ -841,89 +874,200 @@ async def create_nodes_from_paired_template(
             "message": str(e),
         }
 
-    snapshot = copy.deepcopy(data)
-    nodes_map = data.setdefault("nodes", {})
-    next_id = max((int(node_key) for node_key in nodes_map.keys()), default=0) + 1
-
-    child_id_to_node_id: dict[str, int] = {}
-    created_nodes: list[dict] = []
-
-    try:
-        for index, child in enumerate(paired["nodes"]):
-            if not isinstance(child, dict):
-                raise ValueError(f"Paired template {request.template_key!r} has malformed child entry at index {index}.")
-            child_id = str(child.get("id") or f"child-{index}")
-            override_name = request.name_overrides.get(child_id)
-            child_name = override_name or str(child.get("name") or f"{request.template_key}-{child_id}")
-            left, top = _node_position(index, request.base_left, request.base_top, "row")
-            payload = _build_paired_child_payload(
-                node_id=next_id,
-                template_key=request.template_key,
-                child=child,
-                name=child_name,
-                left=left,
-                top=top,
-            )
-            nodes_map[str(next_id)] = payload
-            child_id_to_node_id[child_id] = next_id
-            created_nodes.append(payload)
-            next_id += 1
-
-        LabService.write_lab_json_static(scoped_path, data)
-    except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
-        LabService.write_lab_json_static(scoped_path, snapshot)
-        _logger.exception(
-            "from-paired-template: node-creation phase failed for %s; rolled back",
-            request.template_key,
-        )
-        return {
-            "code": 500,
-            "status": "fail",
-            "message": f"Failed to create paired nodes: {exc}",
-        }
+    settings = get_settings()
+    normalized = _normalize_relative_lab_path(scoped_path)
 
     from app.services.link_service import LinkService
 
     link_service = LinkService()
+    created_nodes: list[dict] = []
     created_links: list[dict] = []
 
-    try:
-        for link in paired["links"]:
-            if not isinstance(link, dict):
-                continue
-            from_child = str(link.get("from_node") or "")
-            to_child = str(link.get("to_node") or "")
-            from_iface_name = str(link.get("from_iface") or "")
-            to_iface_name = str(link.get("to_iface") or "")
+    # #208a — hold lab_lock across snapshot+phase1+phase2+restore so a
+    # concurrent writer cannot slip in between snapshot and restore (which
+    # would silently clobber their work). LinkService.create_link normally
+    # acquires its own lab_lock; we pass _lab_lock_held=True so the inner
+    # call uses a nullcontext (fcntl flock is not reentrant on Linux).
+    with lab_lock(normalized, settings.LABS_DIR):
+        try:
+            data = _read_lab_data(scoped_path)
+        except LegacyLabSchemaError as exc:
+            return _legacy_schema_response(exc)
+        except FileNotFoundError:
+            return {
+                "code": 404,
+                "status": "fail",
+                "message": "Lab does not exist (60038).",
+            }
 
-            from_node_id = child_id_to_node_id.get(from_child)
-            to_node_id = child_id_to_node_id.get(to_child)
-            if from_node_id is None or to_node_id is None:
-                raise ValueError(
-                    f"Paired link references unknown child id "
-                    f"({from_child!r}↔{to_child!r}) in template {request.template_key!r}."
+        snapshot = copy.deepcopy(data)
+        nodes_map = data.setdefault("nodes", {})
+        next_id = max((int(node_key) for node_key in nodes_map.keys()), default=0) + 1
+
+        child_id_to_node_id: dict[str, int] = {}
+
+        try:
+            for index, child in enumerate(paired["nodes"]):
+                if not isinstance(child, dict):
+                    raise ValueError(
+                        f"Paired template {request.template_key!r} has malformed "
+                        f"child entry at index {index}."
+                    )
+                child_id = str(child.get("id") or f"child-{index}")
+                override_name = request.name_overrides.get(child_id)
+                child_name = override_name or str(
+                    child.get("name") or f"{request.template_key}-{child_id}"
+                )
+                left, top = _node_position(
+                    index, request.base_left, request.base_top, "row"
+                )
+                payload = _build_paired_child_payload(
+                    node_id=next_id,
+                    template_key=request.template_key,
+                    child=child,
+                    child_id=child_id,
+                    name=child_name,
+                    left=left,
+                    top=top,
+                )
+                nodes_map[str(next_id)] = payload
+                child_id_to_node_id[child_id] = next_id
+                created_nodes.append(payload)
+                next_id += 1
+
+            LabService.write_lab_json_static(scoped_path, data)
+        except (ValueError, TemplateError) as exc:
+            # #208-MEDIUM — bad child scalars (e.g. ``ethernet: "not-an-int"``)
+            # and malformed-child entries are template defects, not server
+            # bugs. Surface as 422 so the operator sees a fix-the-template
+            # message instead of a generic 500. Pre-flight already catches
+            # link/iface defects; this catches the scalar shape that pre-flight
+            # doesn't (and shouldn't, to keep validator scope tight).
+            LabService.write_lab_json_static(scoped_path, snapshot)
+            _logger.exception(
+                "from-paired-template: node-creation phase failed for %s "
+                "(template defect); rolled back",
+                request.template_key,
+            )
+            return {
+                "code": 422,
+                "status": "fail",
+                "message": (
+                    f"Paired template {request.template_key!r} has malformed "
+                    f"child data: {exc}"
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
+            LabService.write_lab_json_static(scoped_path, snapshot)
+            _logger.exception(
+                "from-paired-template: node-creation phase failed for %s; rolled back",
+                request.template_key,
+            )
+            return {
+                "code": 500,
+                "status": "fail",
+                "message": f"Failed to create paired nodes: {exc}",
+            }
+
+        try:
+            for link in paired["links"]:
+                if not isinstance(link, dict):
+                    continue
+                from_child = str(link.get("from_node") or "")
+                to_child = str(link.get("to_node") or "")
+                from_iface_name = str(link.get("from_iface") or "")
+                to_iface_name = str(link.get("to_iface") or "")
+
+                from_node_id = child_id_to_node_id.get(from_child)
+                to_node_id = child_id_to_node_id.get(to_child)
+                if from_node_id is None or to_node_id is None:
+                    raise ValueError(
+                        f"Paired link references unknown child id "
+                        f"({from_child!r}↔{to_child!r}) in template {request.template_key!r}."
+                    )
+
+                from_iface_idx = _resolve_iface_index(
+                    nodes_map[str(from_node_id)], from_iface_name
+                )
+                to_iface_idx = _resolve_iface_index(
+                    nodes_map[str(to_node_id)], to_iface_name
                 )
 
-            from_iface_idx = _resolve_iface_index(nodes_map[str(from_node_id)], from_iface_name)
-            to_iface_idx = _resolve_iface_index(nodes_map[str(to_node_id)], to_iface_name)
-
-            link_payload, _network_payload, _replayed = await link_service.create_link(
-                lab_path,
-                {"node_id": from_node_id, "interface_index": from_iface_idx},
-                {"node_id": to_node_id, "interface_index": to_iface_idx},
+                link_payload, _network_payload, _replayed = await link_service.create_link(
+                    lab_path,
+                    {"node_id": from_node_id, "interface_index": from_iface_idx},
+                    {"node_id": to_node_id, "interface_index": to_iface_idx},
+                    _lab_lock_held=True,
+                )
+                created_links.append(link_payload)
+        except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
+            # #208b — compensate already-created links before snapshot restore
+            # so host-side attach work, implicit bridges, and runtime stamps
+            # are torn down (snapshot restore only reverts lab.json content;
+            # kernel state survives without delete_link). Order: reverse of
+            # creation. Errors during compensation are logged but do not
+            # prevent snapshot restore — we want to leave the lab in the
+            # cleanest state we can.
+            for done in reversed(created_links):
+                try:
+                    await link_service.delete_link(
+                        lab_path, str(done.get("id", "")), _lab_lock_held=True
+                    )
+                except Exception as comp_exc:  # noqa: BLE001 — best-effort cleanup
+                    _logger.warning(
+                        "from-paired-template: compensation delete_link(%s) "
+                        "failed during rollback: %s",
+                        done.get("id"),
+                        comp_exc,
+                    )
+            LabService.write_lab_json_static(scoped_path, snapshot)
+            _logger.exception(
+                "from-paired-template: link-creation phase failed for %s; rolled back",
+                request.template_key,
             )
-            created_links.append(link_payload)
-    except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
-        LabService.write_lab_json_static(scoped_path, snapshot)
-        _logger.exception(
-            "from-paired-template: link-creation phase failed for %s; rolled back",
-            request.template_key,
-        )
-        return {
-            "code": 500,
-            "status": "fail",
-            "message": f"Failed to create paired links: {exc}",
-        }
+            # #208e — map exception classes to operator-meaningful HTTP codes.
+            # _PairedIfaceLookupError = template defect → 422 (operator can
+            # fix the template); LinkService DuplicateLinkError/LinkContention
+            # = retryable / racy → 409; NodeRuntimeError / host_net.HostNetError
+            # = hot-attach / kernel-side failure → 422 (mirrors the /links route
+            # at routers/links.py:146,198,236, added in #208 codex-iter3 to
+            # close the drift Codex flagged); everything else stays 500.
+            from app.services import host_net
+            from app.services.link_service import (
+                DuplicateLinkError,
+                LinkContentionError,
+            )
+            from app.services.node_runtime_service import NodeRuntimeError
+
+            if isinstance(exc, _PairedIfaceLookupError):
+                return {
+                    "code": 422,
+                    "status": "fail",
+                    "message": f"Paired link interface lookup failed: {exc}",
+                }
+            if isinstance(exc, DuplicateLinkError):
+                return {
+                    "code": 409,
+                    "status": "fail",
+                    "message": f"Paired link conflicts with an existing link: {exc}",
+                }
+            if isinstance(exc, LinkContentionError):
+                return {
+                    "code": 409,
+                    "status": "fail",
+                    "message": f"Paired link blocked by concurrent attach/detach: {exc}",
+                }
+            if isinstance(exc, (NodeRuntimeError, host_net.HostNetError)):
+                return {
+                    "code": 422,
+                    "status": "fail",
+                    "message": f"Paired link hot-attach/host-net failure: {exc}",
+                }
+            return {
+                "code": 500,
+                "status": "fail",
+                "message": f"Failed to create paired links: {exc}",
+            }
 
     return {
         "code": 200,
