@@ -30,15 +30,13 @@ def synthetic_paired_child_key(paired_key: str, child_id: str) -> str:
     return f"{paired_key}{SYNTHETIC_PAIRED_CHILD_SEP}{child_id}"
 
 
-def _normalize_paired_child_kind(raw: Any) -> str:
-    """Mirror the runtime kind coercion in
-    ``backend/app/routers/labs.py::_build_paired_child_payload``: any kind
-    outside the supported set falls back to ``qemu``. Predictor and runtime
-    must agree on this — Codex iter-2 finding: predictor was treating any
-    non-qemu kind as ``eth*``, but runtime coerces unsupported kinds to
-    qemu and uses ``Gi*`` fallback naming. Result: a child with
-    ``kind:"weirdkind"`` and link reference ``Gi1`` was wrongly flagged
-    invalid by pre-flight while runtime built ``Gi1`` cleanly.
+def normalize_paired_child_kind(raw: Any) -> str:
+    """Normalize paired-child kinds for both predictor and runtime.
+
+    Whitespace is stripped before the allowlist check because imported
+    template data commonly arrives human-edited, and ``" docker "`` should
+    behave like ``"docker"`` instead of silently falling back to ``qemu``.
+    Keeping this rule in one helper prevents predictor/runtime drift.
     """
     kind = str(raw or "qemu").strip().lower()
     if kind not in {"qemu", "docker", "iol", "dynamips"}:
@@ -81,7 +79,7 @@ def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
     # coerces any unsupported kind to ``qemu`` (→ ``Gi*`` naming); pre-fix
     # predictor treated every non-qemu kind as ``eth*``, so a link to
     # ``Gi1`` on a ``kind:"weirdkind"`` child was wrongly flagged invalid.
-    kind = _normalize_paired_child_kind(child.get("kind"))
+    kind = normalize_paired_child_kind(child.get("kind"))
     iface_naming = child.get("interface_naming") if isinstance(child.get("interface_naming"), dict) else None
 
     # Step 1 — base list (format if present, else kind-default).
@@ -166,10 +164,11 @@ def _safe_paired_child_int(child: dict[str, Any], field: str, default: int) -> i
 def validate_paired_template(data: dict[str, Any]) -> str | None:
     """Pre-flight a paired template (#207). Returns ``None`` when the template
     can be instantiated end-to-end, or a human-readable reason string when a
-    link references an interface name that no child will expose, or a child
-    has a malformed scalar field (#208). Used by the catalog builder to flag
-    old imports + by the from-paired-template endpoint to return 422 instead
-    of 500.
+    link references an interface name that no child will expose, a child has
+    malformed scalar data (#208), or a child carries invalid interface naming
+    / capabilities blocks that synthetic child loading would reject. Used by
+    the catalog builder to flag old imports + by the from-paired-template
+    endpoint to return 422 instead of 500.
     """
     nodes = data.get("nodes") or []
     links = data.get("links") or []
@@ -187,6 +186,17 @@ def validate_paired_template(data: dict[str, Any]) -> str | None:
         scalar_reason = _paired_child_scalar_problem(child)
         if scalar_reason is not None:
             return f"child {child_id!r} {scalar_reason}"
+        child_kind = normalize_paired_child_kind(child.get("kind"))
+        child_source = f"paired child {child_id!r}"
+        try:
+            child_iface = child.get("interface_naming")
+            if child_iface is not None:
+                _validate_interface_naming(child_iface, source=child_source)
+            _validate_capabilities(
+                child.get("capabilities"), child_kind, source=child_source
+            )
+        except TemplateError as exc:
+            return f"child {child_id!r} {exc}"
 
     for link in links:
         if not isinstance(link, dict):
@@ -1166,9 +1176,7 @@ class TemplateService:
                 if not isinstance(child, dict):
                     continue
                 child_id = str(child.get("id") or f"child-{index}")
-                child_kind = str(child.get("kind") or "qemu").strip().lower()
-                if child_kind not in SUPPORTED_TEMPLATE_TYPES:
-                    child_kind = "qemu"
+                child_kind = normalize_paired_child_kind(child.get("kind"))
                 synthetic_key = synthetic_paired_child_key(paired_key, child_id)
                 source = f"{path}::nodes[{index}]"
                 # #208 codex-iter3 — paired imports may be malformed (bad
