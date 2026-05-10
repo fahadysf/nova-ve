@@ -42,7 +42,10 @@ class NodeBase(BaseModel):
     type: Literal["qemu", "docker", "iol", "dynamips"] = "qemu"
     template: str = Field(default="")
     image: str = Field(default="")
-    console: Literal["telnet", "vnc", "rdp"] = "telnet"
+    # ``serial`` is a paired-template-only console type (Juniper VCP/VFP).
+    # Single-node create flows still default to ``telnet``; the value only
+    # appears on lab.json entries that came from /from-paired-template.
+    console: Literal["telnet", "vnc", "rdp", "serial"] = "telnet"
     status: Literal[0, 2] = 0
     delay: int = 0
     cpu: int = 1
@@ -183,7 +186,12 @@ class NodeUpdate(BaseModel):
     ram: Optional[int] = None
     ethernet: Optional[int] = None
     image: Optional[str] = None
-    console: Optional[Literal["telnet", "vnc", "rdp"]] = None
+    # ``serial`` accepted so paired-template children (Juniper VCP/VFP) can
+    # round-trip through the edit modal — the modal always re-submits
+    # ``console`` and the existing value is whatever the paired template
+    # declared. Without ``serial`` here, saving an unchanged paired child
+    # would 422 on schema validation (#206 codex-iter3).
+    console: Optional[Literal["telnet", "vnc", "rdp", "serial"]] = None
     delay: Optional[int] = None
     left: Optional[int] = None
     top: Optional[int] = None

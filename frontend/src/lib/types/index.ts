@@ -212,7 +212,7 @@ export interface NodeData {
   type: 'qemu' | 'docker' | 'iol' | 'dynamips';
   template: string;
   image: string;
-  console: 'telnet' | 'vnc' | 'rdp';
+  console: 'telnet' | 'vnc' | 'rdp' | 'serial';
   status: 0 | 2;
   transientStatus?: 'starting' | 'stopping';
   delay: number;
@@ -252,7 +252,7 @@ export interface NodeCatalogDefaults {
   cpu: number;
   ram: number;
   ethernet: number;
-  console_type: 'telnet' | 'vnc' | 'rdp';
+  console_type: 'telnet' | 'vnc' | 'rdp' | 'serial';
   delay: number;
   cpulimit: number;
   extras?: Record<string, unknown>;
