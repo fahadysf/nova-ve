@@ -1185,6 +1185,63 @@ async def test_208a_release_ip_does_not_deadlock_when_lab_lock_held(patched_spli
 
 
 @pytest.mark.asyncio
+async def test_208iter3_node_runtime_error_returns_422(patched_split, monkeypatch):
+    """``LinkService.create_link`` re-raises ``NodeRuntimeError`` from
+    ``_hot_attach_running_endpoints`` when the runtime refuses a hot-attach.
+    The single-node /links route maps that to 422; this test enforces that
+    the paired route does the same so the two routes don't drift (Codex
+    re-review finding)."""
+    settings = patched_split
+    _seed_paired_template(settings, VMX_PAIRED_TEMPLATE)
+    _seed_empty_lab(settings)
+
+    from app.services.link_service import LinkService
+    from app.services.node_runtime_service import NodeRuntimeError
+
+    async def attach_refused(self, lab_path, from_endpoint, to_endpoint,
+                              *, style_override=None, idempotency_key=None,
+                              _lab_lock_held=False):
+        raise NodeRuntimeError("hot-attach refused: node not running")
+
+    monkeypatch.setattr(LinkService, "create_link", attach_refused)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 422, response
+    assert "hot-attach" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_208iter3_host_net_error_returns_422(patched_split, monkeypatch):
+    """Same path for ``host_net.HostNetError`` (kernel-side bridge/veth/TAP
+    failure during hot-attach)."""
+    settings = patched_split
+    _seed_paired_template(settings, VMX_PAIRED_TEMPLATE)
+    _seed_empty_lab(settings)
+
+    from app.services import host_net
+    from app.services.link_service import LinkService
+
+    async def host_net_failed(self, lab_path, from_endpoint, to_endpoint,
+                               *, style_override=None, idempotency_key=None,
+                               _lab_lock_held=False):
+        raise host_net.HostNetError("bridge_add: permission denied")
+
+    monkeypatch.setattr(LinkService, "create_link", host_net_failed)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 422, response
+    assert "host-net" in response["message"]
+
+
+@pytest.mark.asyncio
 async def test_208e_unexpected_exception_still_returns_500(patched_split, monkeypatch):
     """Exception classes outside the documented mapping (operator-meaningful
     error subset) keep returning 500 so they show up in error monitoring as
@@ -1368,6 +1425,37 @@ def test_208iter3_validate_paired_template_flags_bad_cpu(patched_split):
     reason_cpulimit = validate_paired_template(bad_cpulimit)
     assert reason_cpulimit is not None
     assert "cpulimit" in reason_cpulimit
+
+
+# ---- #206 codex-iter3: NodeUpdate.console accepts "serial" -------------
+
+
+def test_206iter3_node_update_accepts_serial_console():
+    """Paired-template Juniper children persist ``console: "serial"``. The
+    edit modal always re-submits ``console`` along with the rest of the form,
+    so before this fix saving an unchanged paired child would 422 on
+    ``NodeUpdate.console`` Literal validation. Verify ``serial`` round-trips
+    cleanly through the schema now."""
+    from app.schemas.node import NodeUpdate
+
+    update = NodeUpdate(console="serial")
+    assert update.console == "serial"
+
+    # Other valid values still accepted.
+    for v in ("telnet", "vnc", "rdp"):
+        assert NodeUpdate(console=v).console == v
+
+
+def test_206iter3_node_update_rejects_unknown_console():
+    """Widening NodeUpdate.console to allow ``serial`` must NOT open the
+    door to arbitrary console types — anything outside the four-value enum
+    still 422s."""
+    import pydantic
+
+    from app.schemas.node import NodeUpdate
+
+    with pytest.raises(pydantic.ValidationError):
+        NodeUpdate(console="ssh")
 
 
 @pytest.mark.asyncio

@@ -725,6 +725,9 @@
                   <option value="telnet">telnet</option>
                   <option value="vnc">vnc</option>
                   <option value="rdp">rdp</option>
+                  {#if consoleMode === 'serial'}
+                    <option value="serial">serial (paired-template)</option>
+                  {/if}
                 </select>
               </label>
             </div>
