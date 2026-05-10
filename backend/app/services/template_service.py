@@ -440,9 +440,18 @@ def render_interface_name(fmt: str, index: int) -> str:
 def _validate_interface_naming(payload: dict[str, Any], source: str) -> dict[str, Any]:
     """Validate the optional ``interface_naming`` block on a template YAML.
 
-    Either ``format: <str>`` (a pattern containing one of {n}|{slot}|{port})
-    OR ``explicit: [<str>, ...]`` may be supplied — exactly one. Any other
-    combination raises :class:`TemplateError`.
+    Either ``format`` OR ``explicit: [<str>, ...]`` may be supplied — exactly
+    one. Any other combination raises :class:`TemplateError`.
+
+    ``format`` may be either:
+
+    * a single string carrying a placeholder (``{n}``, ``{slot}``, or
+      ``{port}``), e.g. ``"eth{n}"`` — the historical shape; or
+    * a non-empty ``list[str]`` of fixed names with a trailing placeholder
+      entry (#179), e.g. ``["fxp0", "ge-0/0/{n}"]``. Earlier entries are
+      fixed; only the last entry may carry a placeholder. The list is
+      normalized to a comma-separated string for downstream consumers
+      (``render_interface_name`` already understands that form).
     """
 
     if not isinstance(payload, dict):
@@ -464,9 +473,33 @@ def _validate_interface_naming(payload: dict[str, Any], source: str) -> dict[str
 
     if has_format:
         fmt = payload["format"]
+        if isinstance(fmt, list):
+            if not fmt:
+                raise TemplateError(
+                    f"interface_naming.format on {source} must be a non-empty list when given as a list."
+                )
+            for i, item in enumerate(fmt):
+                if not isinstance(item, str) or not item.strip():
+                    raise TemplateError(
+                        f"interface_naming.format on {source} list entries must be non-empty strings."
+                    )
+                has_placeholder = any(t in item for t in _INTERFACE_NAMING_FORMAT_PLACEHOLDERS)
+                if i < len(fmt) - 1 and has_placeholder:
+                    raise TemplateError(
+                        f"interface_naming.format on {source}: only the last list entry "
+                        f"may contain {', '.join(_INTERFACE_NAMING_FORMAT_PLACEHOLDERS)} (got placeholder in entry {i!r})."
+                    )
+            last_has_placeholder = any(t in fmt[-1] for t in _INTERFACE_NAMING_FORMAT_PLACEHOLDERS)
+            if not last_has_placeholder:
+                raise TemplateError(
+                    f"interface_naming.format on {source}: last list entry must contain "
+                    f"{', '.join(_INTERFACE_NAMING_FORMAT_PLACEHOLDERS)} "
+                    f"(use 'explicit: [...]' for a fixed-only list)."
+                )
+            return {"format": ",".join(item.strip() for item in fmt)}
         if not isinstance(fmt, str) or not fmt.strip():
             raise TemplateError(
-                f"interface_naming.format on {source} must be a non-empty string."
+                f"interface_naming.format on {source} must be a non-empty string or list of strings."
             )
         if not any(token in fmt for token in _INTERFACE_NAMING_FORMAT_PLACEHOLDERS):
             raise TemplateError(
