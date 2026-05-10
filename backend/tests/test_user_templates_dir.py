@@ -113,7 +113,16 @@ def test_user_dir_missing_does_not_break_listing(patched_split):
 def test_is_paired_user_template_returns_true_for_paired_json(patched_split):
     settings = patched_split
     (settings.USER_TEMPLATES_DIR / "juniper-vmx.json").write_text(
-        json.dumps({"schema": 1, "id": "juniper-vmx", "kind": "paired", "nodes": [], "links": []})
+        json.dumps({
+                "schema": 1,
+                "id": "juniper-vmx",
+                "kind": "paired",
+                "nodes": [
+                    {"id": "vcp", "name": "vMX VCP", "kind": "qemu", "image": "vmx-vcp.qcow2"},
+                    {"id": "vfp", "name": "vMX VFP", "kind": "qemu", "image": "vmx-vfp.qcow2"},
+                ],
+                "links": [{"from_node": "vcp", "from_iface": "fxp0", "to_node": "vfp", "to_iface": "em0"}],
+            })
     )
     assert TemplateService().is_paired_user_template("juniper-vmx") is True
 
@@ -190,7 +199,16 @@ async def test_from_template_rejects_paired_with_400(patched_split):
     """Paired-node templates (kind='paired' in user-dir JSON) must be rejected with 400."""
     settings = patched_split
     (settings.USER_TEMPLATES_DIR / "juniper-vmx.json").write_text(
-        json.dumps({"schema": 1, "id": "juniper-vmx", "kind": "paired", "nodes": [], "links": []})
+        json.dumps({
+                "schema": 1,
+                "id": "juniper-vmx",
+                "kind": "paired",
+                "nodes": [
+                    {"id": "vcp", "name": "vMX VCP", "kind": "qemu", "image": "vmx-vcp.qcow2"},
+                    {"id": "vfp", "name": "vMX VFP", "kind": "qemu", "image": "vmx-vfp.qcow2"},
+                ],
+                "links": [{"from_node": "vcp", "from_iface": "fxp0", "to_node": "vfp", "to_iface": "em0"}],
+            })
     )
     (settings.LABS_DIR / "demo.json").write_text(json.dumps({
         "schema": 2,

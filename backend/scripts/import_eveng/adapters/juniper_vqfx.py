@@ -47,8 +47,11 @@ class JuniperVQFXAdapter(VendorAdapter):
                     "image": str(raw["image_re"]),
                     "cpu": int(raw.get("cpu_re", 1)),
                     "ram": int(raw["ram_re"]),
-                    "ethernet": int(raw.get("ethernet_re", 1)),
+                    # Default bumped 1 → 2 so the internal em1 link interface
+                    # is in range; fxp0 occupies index 0 per Junos convention.
+                    "ethernet": int(raw.get("ethernet_re", 2)),
                     "console": str(raw.get("console_type", "serial")),
+                    "interface_naming": {"explicit": ["fxp0", "em1"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
                         "_eveng_paired_role": "re",
@@ -63,6 +66,7 @@ class JuniperVQFXAdapter(VendorAdapter):
                     "ram": int(raw["ram_pfe"]),
                     "ethernet": int(raw.get("ethernet_pfe", 4)),
                     "console": str(raw.get("console_type", "serial")),
+                    "interface_naming": {"explicit": ["em0", "em1", "em2", "em3"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
                         "_eveng_paired_role": "pfe",

@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
 import logging
 import uuid
 from urllib.parse import quote
@@ -14,7 +15,13 @@ from app.config import get_settings
 from app.dependencies import get_current_user
 from app.schemas.lab import LabMetaCreate, LabMetaUpdate
 from app.schemas.network import NetworkCreate, NetworkUpdate
-from app.schemas.node import NodeBatchCreate, NodeCreate, NodeFromTemplate, NodeUpdate
+from app.schemas.node import (
+    NodeBatchCreate,
+    NodeCreate,
+    NodeFromPairedTemplate,
+    NodeFromTemplate,
+    NodeUpdate,
+)
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.html5_service import Html5SessionError, Html5SessionService
@@ -652,9 +659,9 @@ async def create_node_from_template(
             "code": 400,
             "status": "fail",
             "message": (
-                f"Template {request.template_key!r} is a paired-node template "
-                "and cannot be instantiated yet; multi-node template support "
-                "is tracked in paired-template-picker-fu (#185 follow-up)."
+                f"Template {request.template_key!r} is a paired-node template; "
+                "use POST /api/labs/{lab_path}/nodes/from-paired-template instead "
+                "(see #202)."
             ),
         }
 
@@ -682,6 +689,254 @@ async def create_node_from_template(
         extras=dict(request.extras),
     )
     return await create_node(lab_path, node_create, current_user=current_user)
+
+
+class _PairedIfaceLookupError(ValueError):
+    """Raised when a paired-link interface name doesn't match any child interface.
+
+    Caught by ``create_nodes_from_paired_template`` to trigger lab.json rollback;
+    paired templates are required to declare ``interface_naming.explicit`` per
+    child so vendor-specific link references (Junos ``fxp0``/``em0``, ...) resolve
+    exactly. The error message names the missing iface so the operator can fix
+    the template definition.
+    """
+
+
+def _resolve_iface_index(node: dict, iface_name: str) -> int:
+    """Find the interface index by name on a paired-template child node (#202).
+
+    Strict: raises :class:`_PairedIfaceLookupError` when no interface matches.
+    """
+    interfaces = node.get("interfaces") or []
+    for idx, iface in enumerate(interfaces):
+        if isinstance(iface, dict) and str(iface.get("name") or "") == iface_name:
+            return idx
+    available = ", ".join(
+        str(iface.get("name") or "") for iface in interfaces if isinstance(iface, dict)
+    )
+    raise _PairedIfaceLookupError(
+        f"Paired-link references unknown interface {iface_name!r} on node "
+        f"{node.get('name')!r} (available: {available or '<none>'}). "
+        "Add interface_naming.explicit:[...] to the paired-template child so "
+        "link references resolve exactly."
+    )
+
+
+def _build_paired_child_payload(
+    *,
+    node_id: int,
+    template_key: str,
+    child: dict,
+    name: str,
+    left: int,
+    top: int,
+) -> dict:
+    """Compose a lab-node payload from a paired-template child entry.
+
+    Paired children are self-describing — image / cpu / ram / ethernet / console /
+    extras come from the template JSON, not from a :class:`TemplateDefinition`
+    lookup, so we build the payload directly instead of routing through
+    :func:`_build_node_payload`. The child's ``interface_naming`` (if present)
+    is honored so links that reference vendor-specific names (e.g. ``fxp0``)
+    resolve cleanly via :func:`_resolve_iface_index`.
+    """
+    child_type = str(child.get("kind") or "qemu").lower()
+    if child_type not in {"qemu", "docker", "iol", "dynamips"}:
+        child_type = "qemu"
+    ethernet = int(child.get("ethernet", 1))
+    extras = dict(child.get("extras") or {})
+
+    if child_type == "qemu":
+        if not extras.get("uuid"):
+            extras["uuid"] = str(uuid.uuid4())
+        if not extras.get("firstmac"):
+            extras["firstmac"] = _first_mac_for_node(node_id)
+
+    template_iface_naming = child.get("interface_naming")
+    if not isinstance(template_iface_naming, dict):
+        template_iface_naming = None
+
+    interfaces = _default_interfaces(
+        child_type,
+        ethernet,
+        interface_naming_scheme=None,
+        template_interface_naming=template_iface_naming,
+    )
+
+    explicit_names = (template_iface_naming or {}).get("explicit") if template_iface_naming else None
+    if isinstance(explicit_names, list):
+        for idx, iface in enumerate(interfaces):
+            if idx < len(explicit_names) and isinstance(explicit_names[idx], str):
+                iface["name"] = explicit_names[idx]
+
+    return {
+        "id": node_id,
+        "name": name,
+        "type": child_type,
+        "template": template_key,
+        "image": str(child.get("image") or ""),
+        "console": str(child.get("console") or "telnet"),
+        "status": 0,
+        "delay": 0,
+        "cpu": int(child.get("cpu", 1)),
+        "ram": int(child.get("ram", 1024)),
+        "ethernet": ethernet,
+        "cpulimit": int(child.get("cpulimit", 1)),
+        "uuid": extras.get("uuid") if child_type == "qemu" else None,
+        "firstmac": extras.get("firstmac") if child_type == "qemu" else None,
+        "left": left,
+        "top": top,
+        "icon": _icon_filename_for(str(child.get("icon_type") or "router")),
+        "width": "0",
+        "config": False,
+        "config_list": [],
+        "sat": 0,
+        "computed_sat": 0,
+        "interfaces": interfaces,
+        "extras": extras,
+    }
+
+
+@router.post("/{lab_path:path}/nodes/from-paired-template")
+async def create_nodes_from_paired_template(
+    lab_path: str,
+    request: NodeFromPairedTemplate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Instantiate a paired-node template (#202): all children + auto-links, atomic.
+
+    Paired templates (``kind="paired"``) declare two-or-more child nodes plus the
+    intra-template links that connect them — vMX (VCP+VFP fxp0↔em0), vQFX
+    (RE+PFE em1↔em1), and other multi-VM appliances. This endpoint creates ALL
+    children and ALL auto-links in a single transaction; on partial failure
+    lab.json is rolled back from a snapshot taken before the first mutation.
+    """
+    template_service = TemplateService()
+    paired = template_service.get_paired_user_template(request.template_key)
+    if paired is None:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": (
+                f"Paired template {request.template_key!r} not found in "
+                "USER_TEMPLATES_DIR or is not a valid paired-node template."
+            ),
+        }
+
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    snapshot = copy.deepcopy(data)
+    nodes_map = data.setdefault("nodes", {})
+    next_id = max((int(node_key) for node_key in nodes_map.keys()), default=0) + 1
+
+    child_id_to_node_id: dict[str, int] = {}
+    created_nodes: list[dict] = []
+
+    try:
+        for index, child in enumerate(paired["nodes"]):
+            if not isinstance(child, dict):
+                raise ValueError(f"Paired template {request.template_key!r} has malformed child entry at index {index}.")
+            child_id = str(child.get("id") or f"child-{index}")
+            override_name = request.name_overrides.get(child_id)
+            child_name = override_name or str(child.get("name") or f"{request.template_key}-{child_id}")
+            left, top = _node_position(index, request.base_left, request.base_top, "row")
+            payload = _build_paired_child_payload(
+                node_id=next_id,
+                template_key=request.template_key,
+                child=child,
+                name=child_name,
+                left=left,
+                top=top,
+            )
+            nodes_map[str(next_id)] = payload
+            child_id_to_node_id[child_id] = next_id
+            created_nodes.append(payload)
+            next_id += 1
+
+        LabService.write_lab_json_static(scoped_path, data)
+    except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
+        LabService.write_lab_json_static(scoped_path, snapshot)
+        _logger.exception(
+            "from-paired-template: node-creation phase failed for %s; rolled back",
+            request.template_key,
+        )
+        return {
+            "code": 500,
+            "status": "fail",
+            "message": f"Failed to create paired nodes: {exc}",
+        }
+
+    from app.services.link_service import LinkService
+
+    link_service = LinkService()
+    created_links: list[dict] = []
+
+    try:
+        for link in paired["links"]:
+            if not isinstance(link, dict):
+                continue
+            from_child = str(link.get("from_node") or "")
+            to_child = str(link.get("to_node") or "")
+            from_iface_name = str(link.get("from_iface") or "")
+            to_iface_name = str(link.get("to_iface") or "")
+
+            from_node_id = child_id_to_node_id.get(from_child)
+            to_node_id = child_id_to_node_id.get(to_child)
+            if from_node_id is None or to_node_id is None:
+                raise ValueError(
+                    f"Paired link references unknown child id "
+                    f"({from_child!r}↔{to_child!r}) in template {request.template_key!r}."
+                )
+
+            from_iface_idx = _resolve_iface_index(nodes_map[str(from_node_id)], from_iface_name)
+            to_iface_idx = _resolve_iface_index(nodes_map[str(to_node_id)], to_iface_name)
+
+            link_payload, _network_payload, _replayed = await link_service.create_link(
+                lab_path,
+                {"node_id": from_node_id, "interface_index": from_iface_idx},
+                {"node_id": to_node_id, "interface_index": to_iface_idx},
+            )
+            created_links.append(link_payload)
+    except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
+        LabService.write_lab_json_static(scoped_path, snapshot)
+        _logger.exception(
+            "from-paired-template: link-creation phase failed for %s; rolled back",
+            request.template_key,
+        )
+        return {
+            "code": 500,
+            "status": "fail",
+            "message": f"Failed to create paired links: {exc}",
+        }
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": (
+            f"Paired template {request.template_key!r} instantiated: "
+            f"{len(created_nodes)} node(s), {len(created_links)} link(s)."
+        ),
+        "data": {
+            "nodes": created_nodes,
+            "links": created_links,
+        },
+    }
 
 
 @router.post("/{lab_path:path}/nodes/batch")
