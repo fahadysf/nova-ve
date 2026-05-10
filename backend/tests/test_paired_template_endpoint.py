@@ -20,7 +20,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
+from app.dependencies import get_current_user
 from app.routers import labs
 from app.schemas.node import NodeFromPairedTemplate, NodeFromTemplate
 from app.services.template_service import TemplateService
@@ -99,6 +102,7 @@ def patched_split(monkeypatch, split_template_dirs):
     monkeypatch.setattr("app.services.lab_service.get_settings", lambda: split_template_dirs)
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: split_template_dirs)
     monkeypatch.setattr("app.services.link_service.get_settings", lambda: split_template_dirs)
+    monkeypatch.setattr("app.routers.labs.get_settings", lambda: split_template_dirs)
     return split_template_dirs
 
 
@@ -123,6 +127,28 @@ def _seed_empty_lab(settings, lab_id: str = "lab-paired") -> Path:
 
 def _seed_paired_template(settings, template: dict, key: str = "juniper-vmx") -> None:
     (settings.USER_TEMPLATES_DIR / f"{key}.json").write_text(json.dumps(template))
+
+
+def _response_json(response) -> dict:
+    if isinstance(response, dict):
+        return response
+    return json.loads(response.body)
+
+
+def _response_status(response) -> int:
+    if isinstance(response, dict):
+        return int(response.get("code", 200))
+    return int(response.status_code)
+
+
+@pytest.fixture()
+def paired_route_client(patched_split):
+    test_app = FastAPI()
+    test_app.include_router(labs.router)
+    test_app.dependency_overrides[get_current_user] = _admin
+    with TestClient(test_app) as client:
+        yield client
+    test_app.dependency_overrides.clear()
 
 
 # ---- get_paired_user_template -------------------------------------------
@@ -252,8 +278,10 @@ async def test_returns_404_for_unknown_template(patched_split):
         NodeFromPairedTemplate(template_key="nonexistent"),
         current_user=_admin(),
     )
-    assert response["code"] == 404
-    assert "paired template" in response["message"].lower()
+    body = _response_json(response)
+    assert _response_status(response) == 404
+    assert body["code"] == 404
+    assert "paired template" in body["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -270,7 +298,9 @@ async def test_returns_404_for_singleton_template(patched_split):
         NodeFromPairedTemplate(template_key="csr"),
         current_user=_admin(),
     )
-    assert response["code"] == 404
+    body = _response_json(response)
+    assert _response_status(response) == 404
+    assert body["code"] == 404
 
 
 @pytest.mark.asyncio
@@ -293,13 +323,121 @@ async def test_rolls_back_when_link_creation_fails(patched_split, monkeypatch):
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 500
-    assert "simulated link creation failure" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 500
+    assert body["code"] == 500
+    assert "simulated link creation failure" in body["message"]
 
     # Lab file must be back to the pre-call state — no orphan nodes left behind.
     on_disk = json.loads(lab_file.read_text())
     assert on_disk["nodes"] == {}
     assert on_disk["links"] == []
+
+
+def test_http_transport_returns_422_for_bad_scalar_preflight(
+    paired_route_client, patched_split
+):
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad["nodes"][0]["cpu"] = "not-an-int"
+    _seed_paired_template(settings, bad)
+    _seed_empty_lab(settings)
+
+    response = paired_route_client.post(
+        "/api/labs/demo.json/nodes/from-paired-template",
+        json={"template_key": "juniper-vmx"},
+    )
+
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["code"] == 422
+    assert "cpu" in body["message"]
+
+
+def test_http_transport_returns_422_for_node_runtime_error(
+    paired_route_client, patched_split, monkeypatch
+):
+    settings = patched_split
+    _seed_paired_template(settings, VMX_PAIRED_TEMPLATE)
+    _seed_empty_lab(settings)
+
+    from app.services.link_service import LinkService
+    from app.services.node_runtime_service import NodeRuntimeError
+
+    async def attach_refused(
+        self,
+        lab_path,
+        from_endpoint,
+        to_endpoint,
+        *,
+        style_override=None,
+        idempotency_key=None,
+        _lab_lock_held=False,
+    ):
+        raise NodeRuntimeError("hot-attach refused: node not running")
+
+    monkeypatch.setattr(LinkService, "create_link", attach_refused)
+
+    response = paired_route_client.post(
+        "/api/labs/demo.json/nodes/from-paired-template",
+        json={"template_key": "juniper-vmx"},
+    )
+
+    assert response.status_code == 422, response.text
+    body = response.json()
+    assert body["code"] == 422
+    assert "hot-attach" in body["message"]
+
+
+def test_http_transport_returns_409_for_duplicate_link(
+    paired_route_client, patched_split, monkeypatch
+):
+    settings = patched_split
+    _seed_paired_template(settings, VMX_PAIRED_TEMPLATE)
+    _seed_empty_lab(settings)
+
+    from app.services.link_service import DuplicateLinkError, LinkService
+
+    async def dupe_create_link(
+        self,
+        lab_path,
+        from_endpoint,
+        to_endpoint,
+        *,
+        style_override=None,
+        idempotency_key=None,
+        _lab_lock_held=False,
+    ):
+        raise DuplicateLinkError({"id": "existing-link-id"})
+
+    monkeypatch.setattr(LinkService, "create_link", dupe_create_link)
+
+    response = paired_route_client.post(
+        "/api/labs/demo.json/nodes/from-paired-template",
+        json={"template_key": "juniper-vmx"},
+    )
+
+    assert response.status_code == 409, response.text
+    body = response.json()
+    assert body["code"] == 409
+    assert "existing" in body["message"].lower() or "conflict" in body["message"].lower()
+
+
+def test_http_transport_returns_200_on_success(paired_route_client, patched_split):
+    settings = patched_split
+    _seed_paired_template(settings, VMX_PAIRED_TEMPLATE)
+    _seed_empty_lab(settings)
+
+    response = paired_route_client.post(
+        "/api/labs/demo.json/nodes/from-paired-template",
+        json={"template_key": "juniper-vmx"},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["code"] == 200
+    assert len(body["data"]["nodes"]) == 2
+    assert len(body["data"]["links"]) == 1
 
 
 @pytest.mark.asyncio
@@ -607,9 +745,11 @@ async def test_207_endpoint_returns_422_for_invalid_template(patched_split):
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
-    assert "fxp0" in response["message"]
-    assert "interface_naming.explicit" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
+    assert "fxp0" in body["message"]
+    assert "interface_naming.explicit" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -969,8 +1109,10 @@ async def test_208b_compensates_first_link_when_second_fails(patched_split, monk
         current_user=_admin(),
     )
 
-    assert response["code"] == 500, response
-    assert "simulated link 2 failure" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 500, response
+    assert body["code"] == 500
+    assert "simulated link 2 failure" in body["message"]
     # Compensation: delete_link called once for the first (successful) link,
     # with _lab_lock_held=True (we're inside the outer lab_lock).
     assert len(delete_args) == 1, delete_args
@@ -1031,8 +1173,10 @@ async def test_208b_compensation_failure_logged_but_does_not_block_restore(
         )
 
     # Endpoint still returns 500 with the original error (not the compensation error).
-    assert response["code"] == 500
-    assert "link 2 failed" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 500
+    assert body["code"] == 500
+    assert "link 2 failed" in body["message"]
     # Compensation failure was logged but did NOT prevent snapshot restore.
     comp_warnings = [r for r in caplog.records if "compensation delete_link" in r.message]
     assert len(comp_warnings) == 1
@@ -1071,8 +1215,10 @@ async def test_208e_paired_iface_lookup_error_returns_422(patched_split, monkeyp
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
-    assert "interface lookup" in response["message"].lower()
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
+    assert "interface lookup" in body["message"].lower()
     monkeypatch.setattr(labs_module, "_resolve_iface_index", real_resolve)
 
 
@@ -1099,8 +1245,10 @@ async def test_208e_duplicate_link_returns_409(patched_split, monkeypatch):
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 409, response
-    assert "conflict" in response["message"].lower() or "existing" in response["message"].lower()
+    body = _response_json(response)
+    assert _response_status(response) == 409, response
+    assert body["code"] == 409
+    assert "conflict" in body["message"].lower() or "existing" in body["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -1125,8 +1273,10 @@ async def test_208e_link_contention_returns_409(patched_split, monkeypatch):
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 409, response
-    assert "concurrent" in response["message"].lower() or "blocked" in response["message"].lower()
+    body = _response_json(response)
+    assert _response_status(response) == 409, response
+    assert body["code"] == 409
+    assert "concurrent" in body["message"].lower() or "blocked" in body["message"].lower()
 
 
 @pytest.mark.asyncio
@@ -1210,8 +1360,10 @@ async def test_208iter3_node_runtime_error_returns_422(patched_split, monkeypatc
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
-    assert "hot-attach" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
+    assert "hot-attach" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -1237,8 +1389,10 @@ async def test_208iter3_host_net_error_returns_422(patched_split, monkeypatch):
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
-    assert "host-net" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
+    assert "host-net" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -1264,8 +1418,10 @@ async def test_208e_unexpected_exception_still_returns_500(patched_split, monkey
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 500, response
-    assert "filesystem" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 500, response
+    assert body["code"] == 500
+    assert "filesystem" in body["message"]
 
 
 # ---- #208-MEDIUM: bad child scalars surface as 422 (template defect) ----
@@ -1287,9 +1443,11 @@ async def test_208medium_bad_ethernet_scalar_returns_422_via_preflight(patched_s
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
-    assert "ethernet" in response["message"]
-    assert "integer" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
+    assert "ethernet" in body["message"]
+    assert "integer" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -1308,9 +1466,11 @@ async def test_208medium_bad_cpu_scalar_returns_422_via_preflight(patched_split)
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
-    assert "cpu" in response["message"]
-    assert "integer" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
+    assert "cpu" in body["message"]
+    assert "integer" in body["message"]
 
 
 @pytest.mark.asyncio
@@ -1327,9 +1487,11 @@ async def test_208medium_bad_ram_scalar_returns_422_via_preflight(patched_split)
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
-    assert "ram" in response["message"]
-    assert "integer" in response["message"]
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
+    assert "ram" in body["message"]
+    assert "integer" in body["message"]
 
 
 # ---- #208 codex-iter3: catalog-build paths fault-tolerate bad scalars --
@@ -1372,6 +1534,33 @@ def test_208iter3_synthetic_child_load_skips_broken_child(patched_split, caplog)
     service = TemplateService()
     with caplog.at_level("WARNING"):
         templates = service._load_synthetic_paired_child_templates()
+
+    keys = {t.key for t in templates}
+    assert "juniper-vmx__vfp" in keys
+    assert "juniper-vmx__vcp" not in keys
+    assert any(
+        "Synthetic paired-child template skipped" in rec.message for rec in caplog.records
+    )
+
+
+def test_208iter3_invalid_child_marks_parent_invalid_and_skips_synthetic(
+    patched_split, caplog
+):
+    """Synthetic-child rejection and parent ``valid:false`` must stay aligned."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad["nodes"][0]["interface_naming"] = ["wrong", "shape"]
+    _seed_paired_template(settings, bad)
+
+    service = TemplateService()
+    with caplog.at_level("WARNING"):
+        catalog = service._build_paired_catalog()
+        templates = service._load_synthetic_paired_child_templates()
+
+    entry = catalog[0]
+    assert entry["valid"] is False
+    assert entry["invalid_reason"] is not None
+    assert "interface_naming" in entry["invalid_reason"]
 
     keys = {t.key for t in templates}
     assert "juniper-vmx__vfp" in keys
@@ -1432,6 +1621,39 @@ def test_207iter3_predictor_normalizes_unsupported_kind_to_qemu(patched_split):
 
     reason = validate_paired_template(weird_template)
     assert reason is None, f"Predictor drifted from runtime — got reason: {reason}"
+
+
+def test_207iter3_predictor_and_runtime_share_kind_normalization():
+    """Whitespace-padded supported kinds must yield identical iface names."""
+    from app.services.template_service import (
+        _paired_child_iface_names,
+        normalize_paired_child_kind,
+    )
+
+    child = {
+        "id": "docker-child",
+        "name": "Docker Child",
+        "kind": " docker ",
+        "image": "alpine:latest",
+        "ethernet": 2,
+        "console": "telnet",
+    }
+
+    predictor_names = _paired_child_iface_names(child)
+    payload = labs._build_paired_child_payload(
+        node_id=7,
+        template_key="paired-docker",
+        child=child,
+        child_id="docker-child",
+        name="Docker Child",
+        left=0,
+        top=0,
+    )
+    runtime_names = [iface["name"] for iface in payload["interfaces"]]
+
+    assert normalize_paired_child_kind(child["kind"]) == "docker"
+    assert predictor_names == ["eth0", "eth1"]
+    assert runtime_names == predictor_names
 
 
 def test_207iter3_predictor_blank_kind_falls_back_to_qemu():
@@ -1519,7 +1741,9 @@ async def test_208medium_node_phase_422_path_rolls_back_lab(patched_split):
         NodeFromPairedTemplate(template_key="juniper-vmx"),
         current_user=_admin(),
     )
-    assert response["code"] == 422, response
+    body = _response_json(response)
+    assert _response_status(response) == 422, response
+    assert body["code"] == 422
 
     # Snapshot restore: lab.json must be back to empty nodes/links.
     restored = json.loads(lab_path.read_text())
