@@ -717,6 +717,70 @@ def test_207_predictor_handles_interface_naming_format_list(patched_split):
     assert validate_paired_template(template) is None
 
 
+def test_207_predictor_overlays_explicit_onto_kind_default_base(patched_split):
+    """Codex-iter2 fix: when interface_naming.explicit is shorter than
+    ethernet count, runtime overlays explicit onto a kind-default base
+    (qemu→Gi{n+1}, others→eth{n}) at positions 0..len(explicit)-1. The
+    predictor must mirror this — pre-fix it returned just the explicit
+    list and wrongly rejected links to the un-overlaid trailing
+    interfaces.
+    """
+    from app.services.template_service import validate_paired_template
+
+    # qemu child: ethernet=2, explicit=["mgmt0"] → ["mgmt0", "Gi2"]
+    template = {
+        "kind": "paired",
+        "nodes": [
+            {"id": "a", "kind": "qemu", "ethernet": 2,
+             "interface_naming": {"explicit": ["mgmt0"]}},
+            {"id": "b", "kind": "qemu", "ethernet": 1,
+             "interface_naming": {"explicit": ["mgmt0"]}},
+        ],
+        "links": [
+            # Link references the runtime-overlaid trailing iface "Gi2"
+            {"from_node": "a", "from_iface": "Gi2",
+             "to_node": "b", "to_iface": "mgmt0"},
+        ],
+    }
+    assert validate_paired_template(template) is None
+
+
+def test_207_predictor_overlay_matches_runtime_for_docker_kind(patched_split):
+    """Same overlay semantics for non-qemu kinds (eth{n} base)."""
+    from app.services.template_service import validate_paired_template
+
+    template = {
+        "kind": "paired",
+        "nodes": [
+            {"id": "a", "kind": "docker", "ethernet": 3,
+             "interface_naming": {"explicit": ["mgmt0", "data0"]}},
+            {"id": "b", "kind": "docker", "ethernet": 1,
+             "interface_naming": {"explicit": ["mgmt0"]}},
+        ],
+        "links": [
+            # Links target overlaid name (mgmt0), explicit-name (data0),
+            # and the un-overlaid base (eth2).
+            {"from_node": "a", "from_iface": "data0", "to_node": "b", "to_iface": "mgmt0"},
+        ],
+    }
+    assert validate_paired_template(template) is None
+    # And eth2 (the un-overlaid trailing index) should also resolve:
+    template2 = dict(template)
+    template2["links"] = [
+        {"from_node": "a", "from_iface": "eth2", "to_node": "b", "to_iface": "mgmt0"},
+    ]
+    assert validate_paired_template(template2) is None
+
+
+def test_207_predictor_overlay_preserves_runtime_match_for_full_explicit(patched_split):
+    """Sanity: when explicit covers the full ethernet count (the existing
+    juniper-vmx shape), the overlay produces the explicit list verbatim."""
+    from app.services.template_service import validate_paired_template
+
+    # Same as VMX_PAIRED_TEMPLATE shape (vfp explicit = 4 names, ethernet=4)
+    assert validate_paired_template(VMX_PAIRED_TEMPLATE) is None
+
+
 def test_207_predictor_format_string_still_catches_unresolvable(patched_split):
     """A format-shape template that references an interface name OUTSIDE the
     rendered set must still be flagged invalid (not silently passed)."""

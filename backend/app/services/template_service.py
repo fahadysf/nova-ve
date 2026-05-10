@@ -30,42 +30,73 @@ def synthetic_paired_child_key(paired_key: str, child_id: str) -> str:
     return f"{paired_key}{SYNTHETIC_PAIRED_CHILD_SEP}{child_id}"
 
 
+def _kind_default_iface_names(kind: str, ethernet: int) -> list[str]:
+    """Hardcoded fallback interface names by node kind. Mirrors the qemu
+    branch and ``eth{n}`` else-branch in ``_default_interfaces``."""
+    if kind == "qemu":
+        return [f"Gi{i + 1}" for i in range(ethernet)]
+    return [f"eth{i}" for i in range(ethernet)]
+
+
 def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
     """Predict the interface names a paired child will have at creation
     time. Used by :func:`validate_paired_template` to pre-flight link
     resolution at catalog-load time so old (#202-pre) imports surface as
     invalid in the catalog rather than failing only at instantiation.
 
-    Must mirror the runtime priority order in
-    ``backend/app/routers/labs.py::_default_interfaces``:
+    Must mirror the runtime overlay sequence in
+    ``backend/app/routers/labs.py::_build_paired_child_payload``:
 
-    1. ``interface_naming.explicit:[...]`` — fixed list of names
-    2. ``interface_naming.format`` — comma-separated string or list[str]
-       (post-#179 normalization), rendered per-index via
-       :func:`render_interface_name`
-    3. Hardcoded fallback by kind (qemu→Gi{n+1}, others→eth{n})
+    1. Build the base interface list:
+       a. ``interface_naming.format`` (string or list[str]) → per-index
+          via :func:`render_interface_name`, OR
+       b. Hardcoded fallback by kind (qemu→``Gi{n+1}``, others→``eth{n}``).
+    2. Overlay ``interface_naming.explicit:[name0, name1, ...]`` onto
+       positions ``0..len(explicit)-1`` of the base.
+
+    Codex-iter2 fix: previously this returned the explicit list verbatim,
+    so a child with ``ethernet=2, explicit=["mgmt0"]`` was predicted as
+    ``["mgmt0"]`` and any link to the second interface (``Gi2``/``eth1``)
+    was wrongly flagged invalid. The runtime overlays explicit onto a
+    full-length base, so the predictor must too.
     """
     ethernet = int(child.get("ethernet", 1))
-    iface_naming = child.get("interface_naming")
-    if isinstance(iface_naming, dict):
-        explicit = iface_naming.get("explicit")
-        if isinstance(explicit, list) and all(isinstance(x, str) for x in explicit):
-            return list(explicit)
+    kind = str(child.get("kind") or "qemu").strip().lower()
+    iface_naming = child.get("interface_naming") if isinstance(child.get("interface_naming"), dict) else None
+
+    # Step 1 — base list (format if present, else kind-default).
+    base: list[str]
+    if iface_naming is not None:
         fmt = iface_naming.get("format")
         if isinstance(fmt, str) and fmt.strip():
-            return [render_interface_name(fmt, i) for i in range(ethernet)]
-        if isinstance(fmt, list) and fmt:
+            base = [render_interface_name(fmt, i) for i in range(ethernet)]
+        elif isinstance(fmt, list) and fmt:
             # Pre-validation list shape (#179) — _validate_interface_naming
             # would normalize this to a comma-string before reaching the
-            # runtime, but the predictor sees raw template JSON so handle
-            # both shapes by joining and rendering.
+            # runtime; the predictor sees raw template JSON so normalize
+            # here too.
             normalized = ",".join(str(item).strip() for item in fmt if str(item).strip())
-            if normalized:
-                return [render_interface_name(normalized, i) for i in range(ethernet)]
-    kind = str(child.get("kind") or "qemu").strip().lower()
-    if kind == "qemu":
-        return [f"Gi{i + 1}" for i in range(ethernet)]
-    return [f"eth{i}" for i in range(ethernet)]
+            base = (
+                [render_interface_name(normalized, i) for i in range(ethernet)]
+                if normalized
+                else _kind_default_iface_names(kind, ethernet)
+            )
+        else:
+            base = _kind_default_iface_names(kind, ethernet)
+    else:
+        base = _kind_default_iface_names(kind, ethernet)
+
+    # Step 2 — overlay explicit names onto the front of the base list.
+    if iface_naming is not None:
+        explicit = iface_naming.get("explicit")
+        if isinstance(explicit, list):
+            for idx, name in enumerate(explicit):
+                if idx >= len(base):
+                    break
+                if isinstance(name, str):
+                    base[idx] = name
+
+    return base
 
 
 def validate_paired_template(data: dict[str, Any]) -> str | None:
