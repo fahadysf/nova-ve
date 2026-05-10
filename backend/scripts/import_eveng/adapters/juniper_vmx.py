@@ -66,6 +66,7 @@ class JuniperVMXAdapter(VendorAdapter):
                     "ram": int(raw["ram_vcp"]),
                     "ethernet": int(raw.get("ethernet_vcp", 1)),
                     "console": str(raw.get("console_type", "serial")),
+                    "interface_naming": {"explicit": ["fxp0"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
                         "_eveng_paired_role": "vcp",
@@ -80,6 +81,7 @@ class JuniperVMXAdapter(VendorAdapter):
                     "ram": int(raw["ram_vfp"]),
                     "ethernet": int(raw.get("ethernet_vfp", 4)),
                     "console": str(raw.get("console_type", "serial")),
+                    "interface_naming": {"explicit": ["em0", "em1", "em2", "em3"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
                         "_eveng_paired_role": "vfp",

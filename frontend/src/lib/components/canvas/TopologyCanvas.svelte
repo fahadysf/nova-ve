@@ -1364,6 +1364,13 @@
           };
         }
       | {
+          mode: 'create-paired';
+          payload: {
+            template_key: string;
+            name_overrides: Record<string, string>;
+          };
+        }
+      | {
           mode: 'edit';
           nodeId: number;
           payload: {
@@ -1400,6 +1407,23 @@
         dispatchCanvasChange('node-create', {
           nodes: deepClone(localNodes),
         });
+      } else if (event.detail.mode === 'create-paired') {
+        await apiRequest<{ nodes: NodeData[]; links: unknown[] }>(
+          `/labs/${labId}/nodes/from-paired-template`,
+          {
+            method: 'POST',
+            body: {
+              template_key: event.detail.payload.template_key,
+              name_overrides: event.detail.payload.name_overrides,
+              base_left: Math.round(nodeCreateAnchor.x),
+              base_top: Math.round(nodeCreateAnchor.y),
+            }
+          }
+        );
+        // Paired creation adds 2+ nodes plus an implicit bridge network and
+        // the auto-link halves; route through the parent's full lab refresh
+        // path so localNetworks/localTopology stay consistent.
+        dispatchCanvasChange('paired-create', {});
       } else {
         const response = await apiRequest<NodeData>(`/labs/${labId}/nodes/${event.detail.nodeId}`, {
           method: 'PUT',
