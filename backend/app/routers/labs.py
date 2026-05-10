@@ -7,7 +7,7 @@ import uuid
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends
-from fastapi.responses import PlainTextResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -28,7 +28,13 @@ from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
-from app.services.template_service import TemplateError, TemplateService, _icon_filename_for, render_interface_name
+from app.services.template_service import (
+    TemplateError,
+    TemplateService,
+    _icon_filename_for,
+    normalize_paired_child_kind,
+    render_interface_name,
+)
 from app.services.ws_hub import ws_hub
 
 _logger = logging.getLogger(__name__)
@@ -51,6 +57,10 @@ def _legacy_schema_response(error: LegacyLabSchemaError) -> dict:
         "message": LEGACY_SCHEMA_ERROR,
         "lab_path": error.lab_path,
     }
+
+
+def _json_error(status_code: int, content: dict) -> JSONResponse:
+    return JSONResponse(status_code=status_code, content=content)
 
 NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top", "interface_naming_scheme"}
 NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "delay", "extras"}
@@ -763,9 +773,7 @@ def _build_paired_child_payload(
     ``<paired_key>__<child_id>`` so node.template lookups by edit-mode (image
     validation, capability gates, frontend modal resolution) succeed.
     """
-    child_type = str(child.get("kind") or "qemu").lower()
-    if child_type not in {"qemu", "docker", "iol", "dynamips"}:
-        child_type = "qemu"
+    child_type = normalize_paired_child_kind(child.get("kind"))
     ethernet = int(child.get("ethernet", 1))
     extras = dict(child.get("extras") or {})
 
@@ -841,14 +849,17 @@ async def create_nodes_from_paired_template(
     template_service = TemplateService()
     paired = template_service.get_paired_user_template(request.template_key)
     if paired is None:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": (
-                f"Paired template {request.template_key!r} not found in "
-                "USER_TEMPLATES_DIR or is not a valid paired-node template."
-            ),
-        }
+        return _json_error(
+            404,
+            {
+                "code": 404,
+                "status": "fail",
+                "message": (
+                    f"Paired template {request.template_key!r} not found in "
+                    "USER_TEMPLATES_DIR or is not a valid paired-node template."
+                ),
+            },
+        )
 
     # #207 — pre-flight before any mutation. Catches old (#202-pre) imports
     # whose link refs reference interfaces no child will expose (e.g. paired
@@ -856,23 +867,29 @@ async def create_nodes_from_paired_template(
     # can render a fix-the-template message instead of a generic 500.
     pre_flight_reason = validate_paired_template(paired)
     if pre_flight_reason is not None:
-        return {
-            "code": 422,
-            "status": "fail",
-            "message": (
-                f"Paired template {request.template_key!r} cannot be instantiated: "
-                f"{pre_flight_reason}"
-            ),
-        }
+        return _json_error(
+            422,
+            {
+                "code": 422,
+                "status": "fail",
+                "message": (
+                    f"Paired template {request.template_key!r} cannot be instantiated: "
+                    f"{pre_flight_reason}"
+                ),
+            },
+        )
 
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
     except PermissionError as e:
-        return {
-            "code": 403,
-            "status": "fail",
-            "message": str(e),
-        }
+        return _json_error(
+            403,
+            {
+                "code": 403,
+                "status": "fail",
+                "message": str(e),
+            },
+        )
 
     settings = get_settings()
     normalized = _normalize_relative_lab_path(scoped_path)
@@ -892,13 +909,16 @@ async def create_nodes_from_paired_template(
         try:
             data = _read_lab_data(scoped_path)
         except LegacyLabSchemaError as exc:
-            return _legacy_schema_response(exc)
+            return _json_error(422, _legacy_schema_response(exc))
         except FileNotFoundError:
-            return {
-                "code": 404,
-                "status": "fail",
-                "message": "Lab does not exist (60038).",
-            }
+            return _json_error(
+                404,
+                {
+                    "code": 404,
+                    "status": "fail",
+                    "message": "Lab does not exist (60038).",
+                },
+            )
 
         snapshot = copy.deepcopy(data)
         nodes_map = data.setdefault("nodes", {})
@@ -949,25 +969,31 @@ async def create_nodes_from_paired_template(
                 "(template defect); rolled back",
                 request.template_key,
             )
-            return {
-                "code": 422,
-                "status": "fail",
-                "message": (
-                    f"Paired template {request.template_key!r} has malformed "
-                    f"child data: {exc}"
-                ),
-            }
+            return _json_error(
+                422,
+                {
+                    "code": 422,
+                    "status": "fail",
+                    "message": (
+                        f"Paired template {request.template_key!r} has malformed "
+                        f"child data: {exc}"
+                    ),
+                },
+            )
         except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
             LabService.write_lab_json_static(scoped_path, snapshot)
             _logger.exception(
                 "from-paired-template: node-creation phase failed for %s; rolled back",
                 request.template_key,
             )
-            return {
-                "code": 500,
-                "status": "fail",
-                "message": f"Failed to create paired nodes: {exc}",
-            }
+            return _json_error(
+                500,
+                {
+                    "code": 500,
+                    "status": "fail",
+                    "message": f"Failed to create paired nodes: {exc}",
+                },
+            )
 
         try:
             for link in paired["links"]:
@@ -1040,34 +1066,49 @@ async def create_nodes_from_paired_template(
             from app.services.node_runtime_service import NodeRuntimeError
 
             if isinstance(exc, _PairedIfaceLookupError):
-                return {
-                    "code": 422,
-                    "status": "fail",
-                    "message": f"Paired link interface lookup failed: {exc}",
-                }
+                return _json_error(
+                    422,
+                    {
+                        "code": 422,
+                        "status": "fail",
+                        "message": f"Paired link interface lookup failed: {exc}",
+                    },
+                )
             if isinstance(exc, DuplicateLinkError):
-                return {
-                    "code": 409,
-                    "status": "fail",
-                    "message": f"Paired link conflicts with an existing link: {exc}",
-                }
+                return _json_error(
+                    409,
+                    {
+                        "code": 409,
+                        "status": "fail",
+                        "message": f"Paired link conflicts with an existing link: {exc}",
+                    },
+                )
             if isinstance(exc, LinkContentionError):
-                return {
-                    "code": 409,
-                    "status": "fail",
-                    "message": f"Paired link blocked by concurrent attach/detach: {exc}",
-                }
+                return _json_error(
+                    409,
+                    {
+                        "code": 409,
+                        "status": "fail",
+                        "message": f"Paired link blocked by concurrent attach/detach: {exc}",
+                    },
+                )
             if isinstance(exc, (NodeRuntimeError, host_net.HostNetError)):
-                return {
-                    "code": 422,
+                return _json_error(
+                    422,
+                    {
+                        "code": 422,
+                        "status": "fail",
+                        "message": f"Paired link hot-attach/host-net failure: {exc}",
+                    },
+                )
+            return _json_error(
+                500,
+                {
+                    "code": 500,
                     "status": "fail",
-                    "message": f"Paired link hot-attach/host-net failure: {exc}",
-                }
-            return {
-                "code": 500,
-                "status": "fail",
-                "message": f"Failed to create paired links: {exc}",
-            }
+                    "message": f"Failed to create paired links: {exc}",
+                },
+            )
 
     return {
         "code": 200,
