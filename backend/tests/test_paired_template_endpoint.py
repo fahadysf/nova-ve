@@ -1217,11 +1217,8 @@ async def test_208e_unexpected_exception_still_returns_500(patched_split, monkey
 @pytest.mark.asyncio
 async def test_208medium_bad_ethernet_scalar_returns_422_via_preflight(patched_split):
     """``ethernet: "not-an-int"`` is a template defect, not a server bug.
-    The pre-flight predictor casts ethernet to int; without the #208-MEDIUM
-    guard, the resulting ValueError propagates uncaught from
-    validate_paired_template back to the FastAPI handler → 500. Now it
-    surfaces as a reason string and the endpoint returns 422 with a
-    fix-the-template message."""
+    The pre-flight scalar check (#208 codex-iter3) returns a reason string
+    so the endpoint returns 422 with a fix-the-template message."""
     settings = patched_split
     bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
     bad["nodes"][1]["ethernet"] = "not-an-int"
@@ -1234,16 +1231,15 @@ async def test_208medium_bad_ethernet_scalar_returns_422_via_preflight(patched_s
         current_user=_admin(),
     )
     assert response["code"] == 422, response
-    assert "malformed scalar" in response["message"]
     assert "ethernet" in response["message"]
+    assert "integer" in response["message"]
 
 
 @pytest.mark.asyncio
-async def test_208medium_bad_cpu_scalar_returns_422_via_node_phase(patched_split):
-    """``cpu``/``ram``/``cpulimit`` are not consulted by the pre-flight
-    predictor — they only blow up in ``_build_paired_child_payload`` during
-    the node-creation phase. The new ``(ValueError, TemplateError)`` handler
-    in that phase maps the failure to 422 instead of 500."""
+async def test_208medium_bad_cpu_scalar_returns_422_via_preflight(patched_split):
+    """``cpu`` is now scalar-validated by ``validate_paired_template`` at
+    pre-flight (#208 codex-iter3); endpoint returns 422 before the node
+    phase even runs."""
     settings = patched_split
     bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
     bad["nodes"][0]["cpu"] = "not-an-int"
@@ -1256,13 +1252,13 @@ async def test_208medium_bad_cpu_scalar_returns_422_via_node_phase(patched_split
         current_user=_admin(),
     )
     assert response["code"] == 422, response
-    assert "malformed child data" in response["message"]
+    assert "cpu" in response["message"]
+    assert "integer" in response["message"]
 
 
 @pytest.mark.asyncio
-async def test_208medium_bad_ram_scalar_returns_422_via_node_phase(patched_split):
-    """Same path as bad cpu — verifies ram is also covered by the
-    node-creation phase exception mapping."""
+async def test_208medium_bad_ram_scalar_returns_422_via_preflight(patched_split):
+    """Same path as bad cpu — covers the ram scalar."""
     settings = patched_split
     bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
     bad["nodes"][0]["ram"] = "huge"
@@ -1275,7 +1271,103 @@ async def test_208medium_bad_ram_scalar_returns_422_via_node_phase(patched_split
         current_user=_admin(),
     )
     assert response["code"] == 422, response
-    assert "malformed child data" in response["message"]
+    assert "ram" in response["message"]
+    assert "integer" in response["message"]
+
+
+# ---- #208 codex-iter3: catalog-build paths fault-tolerate bad scalars --
+
+
+def test_208iter3_node_catalog_survives_bad_paired_child_scalar(patched_split):
+    """A paired template with ``cpu: "not-an-int"`` on one child must not
+    crash ``build_node_catalog()`` — Codex re-review showed the int casts in
+    ``_build_paired_catalog`` and ``_load_synthetic_paired_child_templates``
+    propagated ValueError out of the catalog endpoint, taking the modal down
+    before the new ``valid:false`` banner ever rendered."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad["nodes"][0]["cpu"] = "not-an-int"
+    _seed_paired_template(settings, bad)
+
+    service = TemplateService()
+    catalog = service.build_node_catalog()
+    paired_entries = catalog["paired_templates"]
+    assert len(paired_entries) == 1
+    entry = paired_entries[0]
+    assert entry["valid"] is False
+    assert entry["invalid_reason"] is not None
+    assert "cpu" in entry["invalid_reason"]
+
+
+def test_208iter3_synthetic_child_load_skips_broken_child(patched_split, caplog):
+    """A child with a busted ``interface_naming`` block (raises TemplateError
+    via ``_validate_interface_naming``) must not crash the catalog load. The
+    other children still appear; only the broken child is skipped with a
+    warning log."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    # ``interface_naming`` must be an object — handing it a list trips
+    # _validate_interface_naming → TemplateError, which the new try/except
+    # catches and converts into skip-but-log.
+    bad["nodes"][0]["interface_naming"] = ["this", "shape", "is", "wrong"]
+    _seed_paired_template(settings, bad)
+
+    service = TemplateService()
+    with caplog.at_level("WARNING"):
+        templates = service._load_synthetic_paired_child_templates()
+
+    keys = {t.key for t in templates}
+    assert "juniper-vmx__vfp" in keys
+    assert "juniper-vmx__vcp" not in keys
+    assert any(
+        "Synthetic paired-child template skipped" in rec.message for rec in caplog.records
+    )
+
+
+def test_208iter3_synthetic_child_load_uses_safe_default_for_bad_scalar(patched_split):
+    """Bad scalars on a synthetic child don't take the catalog down — the
+    template's parent paired entry already gets ``valid:false`` (via
+    ``validate_paired_template``), and the synthetic child loads with a
+    safe default. Together they keep the catalog endpoint serving while
+    surfacing the real defect to the operator."""
+    settings = patched_split
+    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad["nodes"][0]["cpu"] = "not-an-int"
+    _seed_paired_template(settings, bad)
+
+    service = TemplateService()
+    templates = service._load_synthetic_paired_child_templates()
+    by_key = {t.key: t for t in templates}
+    # Both children still load — the bad scalar defaults to 1, but the
+    # operator-facing signal is the parent paired entry's valid:false.
+    assert "juniper-vmx__vcp" in by_key
+    assert by_key["juniper-vmx__vcp"].cpu == 1
+
+
+def test_208iter3_validate_paired_template_flags_bad_cpu(patched_split):
+    """``validate_paired_template`` returns a reason for any non-int scalar
+    field on any child — covers cpu/ram/ethernet/cpulimit, not just the
+    ethernet that was already covered via the predictor crash path."""
+    from app.services.template_service import validate_paired_template
+
+    bad_cpu = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad_cpu["nodes"][1]["cpu"] = "huge"
+    reason_cpu = validate_paired_template(bad_cpu)
+    assert reason_cpu is not None
+    assert "cpu" in reason_cpu
+    assert "integer" in reason_cpu
+
+    bad_ram = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad_ram["nodes"][0]["ram"] = "lots"
+    reason_ram = validate_paired_template(bad_ram)
+    assert reason_ram is not None
+    assert "ram" in reason_ram
+
+    bad_cpulimit = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
+    bad_cpulimit["nodes"][0]["cpulimit"] = "max"
+    reason_cpulimit = validate_paired_template(bad_cpulimit)
+    assert reason_cpulimit is not None
+    assert "cpulimit" in reason_cpulimit
 
 
 @pytest.mark.asyncio
