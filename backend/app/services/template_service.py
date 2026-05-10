@@ -30,6 +30,22 @@ def synthetic_paired_child_key(paired_key: str, child_id: str) -> str:
     return f"{paired_key}{SYNTHETIC_PAIRED_CHILD_SEP}{child_id}"
 
 
+def _normalize_paired_child_kind(raw: Any) -> str:
+    """Mirror the runtime kind coercion in
+    ``backend/app/routers/labs.py::_build_paired_child_payload``: any kind
+    outside the supported set falls back to ``qemu``. Predictor and runtime
+    must agree on this — Codex iter-2 finding: predictor was treating any
+    non-qemu kind as ``eth*``, but runtime coerces unsupported kinds to
+    qemu and uses ``Gi*`` fallback naming. Result: a child with
+    ``kind:"weirdkind"`` and link reference ``Gi1`` was wrongly flagged
+    invalid by pre-flight while runtime built ``Gi1`` cleanly.
+    """
+    kind = str(raw or "qemu").strip().lower()
+    if kind not in {"qemu", "docker", "iol", "dynamips"}:
+        return "qemu"
+    return kind
+
+
 def _kind_default_iface_names(kind: str, ethernet: int) -> list[str]:
     """Hardcoded fallback interface names by node kind. Mirrors the qemu
     branch and ``eth{n}`` else-branch in ``_default_interfaces``."""
@@ -61,7 +77,11 @@ def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
     full-length base, so the predictor must too.
     """
     ethernet = int(child.get("ethernet", 1))
-    kind = str(child.get("kind") or "qemu").strip().lower()
+    # #207 codex-iter3 — must mirror runtime kind coercion exactly. Runtime
+    # coerces any unsupported kind to ``qemu`` (→ ``Gi*`` naming); pre-fix
+    # predictor treated every non-qemu kind as ``eth*``, so a link to
+    # ``Gi1`` on a ``kind:"weirdkind"`` child was wrongly flagged invalid.
+    kind = _normalize_paired_child_kind(child.get("kind"))
     iface_naming = child.get("interface_naming") if isinstance(child.get("interface_naming"), dict) else None
 
     # Step 1 — base list (format if present, else kind-default).

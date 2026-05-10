@@ -1401,6 +1401,50 @@ def test_208iter3_synthetic_child_load_uses_safe_default_for_bad_scalar(patched_
     assert by_key["juniper-vmx__vcp"].cpu == 1
 
 
+def test_207iter3_predictor_normalizes_unsupported_kind_to_qemu(patched_split):
+    """Codex re-review caught predictor/runtime drift on unsupported child
+    kinds. Runtime ``_build_paired_child_payload`` coerces any kind outside
+    ``{qemu, docker, iol, dynamips}`` to ``qemu`` (→ ``Gi{n+1}`` fallback
+    naming). Pre-fix predictor treated every non-qemu kind as ``eth{n}``,
+    so a ``kind:"weirdkind"`` child linked via ``Gi1`` was rejected by
+    pre-flight while runtime would have built ``Gi1`` cleanly. Verify the
+    pre-flight reason matches runtime now."""
+    from app.services.template_service import validate_paired_template
+
+    weird_template = {
+        "schema": 1,
+        "id": "weird-paired",
+        "name": "Weird paired",
+        "vendor": "test",
+        "kind": "paired",
+        "nodes": [
+            {"id": "a", "name": "A", "kind": "weirdkind", "image": "x.qcow2",
+             "ethernet": 2, "console": "telnet"},
+            {"id": "b", "name": "B", "kind": "qemu", "image": "y.qcow2",
+             "ethernet": 1, "console": "telnet"},
+        ],
+        "links": [
+            # ``Gi1`` is the qemu-fallback name for ethernet index 0 on a
+            # weirdkind child (which runtime coerces to qemu).
+            {"from_node": "a", "from_iface": "Gi1", "to_node": "b", "to_iface": "Gi1"},
+        ],
+    }
+
+    reason = validate_paired_template(weird_template)
+    assert reason is None, f"Predictor drifted from runtime — got reason: {reason}"
+
+
+def test_207iter3_predictor_blank_kind_falls_back_to_qemu():
+    """Empty/None kind also normalizes to qemu (→ Gi*), same as runtime."""
+    from app.services.template_service import _paired_child_iface_names
+
+    blank = {"ethernet": 2, "kind": ""}
+    assert _paired_child_iface_names(blank) == ["Gi1", "Gi2"]
+
+    missing = {"ethernet": 1}
+    assert _paired_child_iface_names(missing) == ["Gi1"]
+
+
 def test_208iter3_validate_paired_template_flags_bad_cpu(patched_split):
     """``validate_paired_template`` returns a reason for any non-int scalar
     field on any child — covers cpu/ram/ethernet/cpulimit, not just the
