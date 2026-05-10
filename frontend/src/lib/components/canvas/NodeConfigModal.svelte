@@ -571,8 +571,9 @@
                     >
                       <option value="">— Single node —</option>
                       {#each visiblePairedTemplates as paired}
-                        <option value={paired.key}>
-                          {paired.name} [{paired.child_count} nodes / {paired.link_count} link{paired.link_count === 1 ? '' : 's'}]
+                        {@const invalid = paired.valid === false}
+                        <option value={paired.key} disabled={invalid}>
+                          {paired.name} [{paired.child_count} nodes / {paired.link_count} link{paired.link_count === 1 ? '' : 's'}]{invalid ? ' — invalid (needs re-import)' : ''}
                         </option>
                       {/each}
                     </select>
@@ -581,6 +582,12 @@
 
                 {#if selectedPairedTemplate}
                   <div class="mt-4 space-y-3">
+                    {#if selectedPairedTemplate.valid === false}
+                      <div class="rounded-xl border border-red-500/40 bg-red-500/10 p-3">
+                        <div class="text-[10px] uppercase tracking-[0.06em] text-red-300">Template invalid — cannot instantiate</div>
+                        <div class="mt-1 text-xs text-red-200">{selectedPairedTemplate.invalid_reason ?? 'Template failed pre-flight validation; re-import the source.'}</div>
+                      </div>
+                    {/if}
                     <div class="rounded-xl border border-slate-800 bg-slate-950/60 p-3">
                       <div class="text-[10px] uppercase tracking-[0.06em] text-slate-500">Will create</div>
                       <ul class="mt-2 space-y-1.5 text-xs text-slate-200">
@@ -995,7 +1002,7 @@
             </button>
             <button
               type="submit"
-              disabled={submitting || (!pairedActive && (!selectedTemplate || !image)) || (!pairedActive && !!interfaceNamingError)}
+              disabled={submitting || (!pairedActive && (!selectedTemplate || !image)) || (!pairedActive && !!interfaceNamingError) || (pairedActive && selectedPairedTemplate?.valid === false)}
               class="rounded-full border border-blue-500/40 bg-blue-500/15 px-4 py-2 text-sm text-blue-100 transition hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {#if submitting}
