@@ -467,6 +467,34 @@ def test_206_synthetic_key_helper_is_stable(patched_split):
     assert synthetic_paired_child_key("paired-with-dashes", "child-x") == "paired-with-dashes__child-x"
 
 
+@pytest.mark.asyncio
+async def test_206_synthetic_child_key_rejected_by_single_node_endpoint(patched_split):
+    """Codex-iter2 fix: POST /nodes/from-template must reject synthetic
+    per-child keys (paired_parent set) with 400 + a pointer to the paired
+    endpoint. Pre-fix the route fell through to NodeCreate construction and
+    raised an uncaught Pydantic ValidationError when the child's console_type
+    (e.g. ``serial`` for Juniper) violated NodeCreate.console's Literal.
+    """
+    settings = patched_split
+    _seed_paired_template(settings, VMX_PAIRED_TEMPLATE)
+    _seed_empty_lab(settings)
+
+    response = await labs.create_node_from_template(
+        "demo.json",
+        NodeFromTemplate(
+            template_type="qemu",
+            template_key="juniper-vmx__vcp",  # synthetic child key
+            name="x",
+            image="vmx-vcp-22.4.qcow2",
+        ),
+        current_user=_admin(),
+    )
+    assert response["code"] == 400, response
+    assert "synthetic" in response["message"].lower()
+    assert "juniper-vmx" in response["message"]
+    assert "from-paired-template" in response["message"]
+
+
 def test_206_paired_catalog_children_carry_synthetic_template_key(patched_split):
     """The catalog's paired_templates[].children entries carry the synthetic
     template_key so the frontend's paired-template "Will create" panel can
