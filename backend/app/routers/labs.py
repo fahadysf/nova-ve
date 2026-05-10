@@ -1028,11 +1028,16 @@ async def create_nodes_from_paired_template(
             # #208e — map exception classes to operator-meaningful HTTP codes.
             # _PairedIfaceLookupError = template defect → 422 (operator can
             # fix the template); LinkService DuplicateLinkError/LinkContention
-            # = retryable / racy → 409; everything else stays 500.
+            # = retryable / racy → 409; NodeRuntimeError / host_net.HostNetError
+            # = hot-attach / kernel-side failure → 422 (mirrors the /links route
+            # at routers/links.py:146,198,236, added in #208 codex-iter3 to
+            # close the drift Codex flagged); everything else stays 500.
+            from app.services import host_net
             from app.services.link_service import (
                 DuplicateLinkError,
                 LinkContentionError,
             )
+            from app.services.node_runtime_service import NodeRuntimeError
 
             if isinstance(exc, _PairedIfaceLookupError):
                 return {
@@ -1051,6 +1056,12 @@ async def create_nodes_from_paired_template(
                     "code": 409,
                     "status": "fail",
                     "message": f"Paired link blocked by concurrent attach/detach: {exc}",
+                }
+            if isinstance(exc, (NodeRuntimeError, host_net.HostNetError)):
+                return {
+                    "code": 422,
+                    "status": "fail",
+                    "message": f"Paired link hot-attach/host-net failure: {exc}",
                 }
             return {
                 "code": 500,
