@@ -99,12 +99,57 @@ def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
     return base
 
 
+_PAIRED_CHILD_INT_FIELDS: tuple[tuple[str, int], ...] = (
+    ("cpu", 1),
+    ("ram", 1024),
+    ("ethernet", 1),
+    ("cpulimit", 1),
+)
+
+
+def _paired_child_scalar_problem(child: dict[str, Any]) -> str | None:
+    """Return a reason string if any of the int-typed scalar fields on a
+    paired-child block can't be cast to int, else ``None``. Centralizes the
+    scalar-shape check so :func:`validate_paired_template`,
+    :meth:`TemplateService._build_paired_catalog`, and
+    :meth:`TemplateService._load_synthetic_paired_child_templates` agree on
+    what counts as a valid child without each having to defensively cast at
+    consumption time (#208 codex-iter3).
+    """
+    for field_name, _default in _PAIRED_CHILD_INT_FIELDS:
+        if field_name not in child:
+            continue
+        raw = child[field_name]
+        try:
+            int(raw)
+        except (TypeError, ValueError):
+            return (
+                f"field {field_name!r} must be an integer "
+                f"(got {raw!r} of type {type(raw).__name__})"
+            )
+    return None
+
+
+def _safe_paired_child_int(child: dict[str, Any], field: str, default: int) -> int:
+    """Cast a paired-child scalar to int with a fallback default. Used by the
+    catalog/synthetic loaders so a malformed scalar doesn't crash the whole
+    catalog response — :func:`validate_paired_template` already flags the
+    template as ``valid:false`` so the operator sees the real reason."""
+    if field not in child:
+        return default
+    try:
+        return int(child[field])
+    except (TypeError, ValueError):
+        return default
+
+
 def validate_paired_template(data: dict[str, Any]) -> str | None:
     """Pre-flight a paired template (#207). Returns ``None`` when the template
     can be instantiated end-to-end, or a human-readable reason string when a
-    link references an interface name that no child will expose. Used by the
-    catalog builder to flag old imports + by the from-paired-template endpoint
-    to return 422 instead of 500.
+    link references an interface name that no child will expose, or a child
+    has a malformed scalar field (#208). Used by the catalog builder to flag
+    old imports + by the from-paired-template endpoint to return 422 instead
+    of 500.
     """
     nodes = data.get("nodes") or []
     links = data.get("links") or []
@@ -112,6 +157,16 @@ def validate_paired_template(data: dict[str, Any]) -> str | None:
     for child in nodes:
         if isinstance(child, dict):
             children_by_id[str(child.get("id") or "")] = child
+
+    # #208 codex-iter3 — scalar-shape check up front so a bad cpu/ram/etc
+    # fails pre-flight with a meaningful reason instead of crashing at
+    # instantiation. Predictor only consumes ``ethernet`` so this also
+    # covers the cpu/ram/cpulimit gap that previously slipped past
+    # pre-flight to the node-creation handler.
+    for child_id, child in children_by_id.items():
+        scalar_reason = _paired_child_scalar_problem(child)
+        if scalar_reason is not None:
+            return f"child {child_id!r} {scalar_reason}"
 
     for link in links:
         if not isinstance(link, dict):
@@ -869,15 +924,19 @@ class TemplateService:
             nodes = data["nodes"]
             links = data["links"]
             paired_key = path.stem
+            # #208 codex-iter3 — int casts are scoped to ``_safe_paired_child_int``
+            # so a malformed scalar can't crash the whole node-catalog response;
+            # ``validate_paired_template`` below sets ``valid:false`` so the
+            # operator still sees the real reason in the catalog payload.
             child_summary = [
                 {
                     "id": str(child.get("id") or f"child-{i}"),
                     "name": str(child.get("name") or child.get("id") or f"child-{i}"),
                     "kind": str(child.get("kind") or "qemu"),
                     "image": str(child.get("image") or ""),
-                    "cpu": int(child.get("cpu", 1)),
-                    "ram": int(child.get("ram", 1024)),
-                    "ethernet": int(child.get("ethernet", 1)),
+                    "cpu": _safe_paired_child_int(child, "cpu", 1),
+                    "ram": _safe_paired_child_int(child, "ram", 1024),
+                    "ethernet": _safe_paired_child_int(child, "ethernet", 1),
                     # #206 — synthetic template key the child node carries on
                     # its ``template`` field once instantiated; lets the frontend
                     # cross-reference the matching catalog entry for capabilities,
@@ -1092,32 +1151,57 @@ class TemplateService:
                     child_kind = "qemu"
                 synthetic_key = synthetic_paired_child_key(paired_key, child_id)
                 source = f"{path}::nodes[{index}]"
-                child_iface = child.get("interface_naming")
-                if child_iface is not None:
-                    child_iface = _validate_interface_naming(child_iface, source=source)
-                child_caps = _validate_capabilities(
-                    child.get("capabilities"), child_kind, source=source
-                )
-                yaml_extras = dict(child.get("extras") or {}) if isinstance(child.get("extras"), dict) else {}
-                synthetic.append(
-                    TemplateDefinition(
-                        key=synthetic_key,
-                        type=child_kind,
-                        name=str(child.get("name") or synthetic_key),
-                        description=f"Paired child of {paired_key} (auto-synthesized).",
-                        icon_type=str(child.get("icon_type") or self._default_icon_type(child_kind)),
-                        cpu=int(child.get("cpu", 1)),
-                        ram=int(child.get("ram", 1024)),
-                        ethernet=int(child.get("ethernet", 1)),
-                        console_type=str(child.get("console") or self._default_console_type(child_kind)),
-                        cpulimit=int(child.get("cpulimit", 1)),
-                        extras=yaml_extras,
-                        raw=dict(child),
-                        interface_naming=child_iface,
-                        capabilities=child_caps,
-                        paired_parent=paired_key,
+                # #208 codex-iter3 — paired imports may be malformed (bad
+                # scalars, busted interface_naming/capabilities). Don't take
+                # down the entire template catalog because of one broken
+                # child; the parent paired entry already gets ``valid:false``
+                # in ``_build_paired_catalog`` via ``validate_paired_template``
+                # so the operator sees the real reason. Skip-but-log the
+                # synthetic child instead.
+                try:
+                    child_iface = child.get("interface_naming")
+                    if child_iface is not None:
+                        child_iface = _validate_interface_naming(child_iface, source=source)
+                    child_caps = _validate_capabilities(
+                        child.get("capabilities"), child_kind, source=source
                     )
-                )
+                    yaml_extras = (
+                        dict(child.get("extras") or {})
+                        if isinstance(child.get("extras"), dict)
+                        else {}
+                    )
+                    synthetic.append(
+                        TemplateDefinition(
+                            key=synthetic_key,
+                            type=child_kind,
+                            name=str(child.get("name") or synthetic_key),
+                            description=f"Paired child of {paired_key} (auto-synthesized).",
+                            icon_type=str(
+                                child.get("icon_type") or self._default_icon_type(child_kind)
+                            ),
+                            cpu=_safe_paired_child_int(child, "cpu", 1),
+                            ram=_safe_paired_child_int(child, "ram", 1024),
+                            ethernet=_safe_paired_child_int(child, "ethernet", 1),
+                            console_type=str(
+                                child.get("console") or self._default_console_type(child_kind)
+                            ),
+                            cpulimit=_safe_paired_child_int(child, "cpulimit", 1),
+                            extras=yaml_extras,
+                            raw=dict(child),
+                            interface_naming=child_iface,
+                            capabilities=child_caps,
+                            paired_parent=paired_key,
+                        )
+                    )
+                except (TemplateError, ValueError, TypeError) as exc:
+                    _logger.warning(
+                        "Synthetic paired-child template skipped at load time: "
+                        "paired=%s child=%s reason=%s",
+                        paired_key,
+                        child_id,
+                        exc,
+                    )
+                    continue
         return synthetic
 
     def _normalize_type(self, template_type: str) -> str:
