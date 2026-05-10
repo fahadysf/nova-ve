@@ -4,7 +4,7 @@ import logging
 import os
 import shutil
 import subprocess
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -19,6 +19,87 @@ SUPPORTED_TEMPLATE_TYPES = {"qemu", "docker", "iol", "dynamips"}
 QEMU_MACHINE_OPTIONS = {"q35", "pc"}
 _QEMU_MAX_NICS_HARD_CAP = 8
 _DOCKER_MAX_NICS_DEFAULT = 99
+
+# #206 — synthetic per-child template key separator. A paired template's child
+# is exposed in the catalog as ``<paired_key>__<child_id>`` so node.template
+# lookups (edit, capability, image validation) resolve to a real entry.
+SYNTHETIC_PAIRED_CHILD_SEP = "__"
+
+
+def synthetic_paired_child_key(paired_key: str, child_id: str) -> str:
+    return f"{paired_key}{SYNTHETIC_PAIRED_CHILD_SEP}{child_id}"
+
+
+def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
+    """Predict the interface names a paired child will have at creation
+    time. Used by :func:`validate_paired_template` to pre-flight link
+    resolution at catalog-load time so old (#202-pre) imports surface as
+    invalid in the catalog rather than failing only at instantiation.
+
+    Must mirror the runtime priority order in
+    ``backend/app/routers/labs.py::_default_interfaces``:
+
+    1. ``interface_naming.explicit:[...]`` — fixed list of names
+    2. ``interface_naming.format`` — comma-separated string or list[str]
+       (post-#179 normalization), rendered per-index via
+       :func:`render_interface_name`
+    3. Hardcoded fallback by kind (qemu→Gi{n+1}, others→eth{n})
+    """
+    ethernet = int(child.get("ethernet", 1))
+    iface_naming = child.get("interface_naming")
+    if isinstance(iface_naming, dict):
+        explicit = iface_naming.get("explicit")
+        if isinstance(explicit, list) and all(isinstance(x, str) for x in explicit):
+            return list(explicit)
+        fmt = iface_naming.get("format")
+        if isinstance(fmt, str) and fmt.strip():
+            return [render_interface_name(fmt, i) for i in range(ethernet)]
+        if isinstance(fmt, list) and fmt:
+            # Pre-validation list shape (#179) — _validate_interface_naming
+            # would normalize this to a comma-string before reaching the
+            # runtime, but the predictor sees raw template JSON so handle
+            # both shapes by joining and rendering.
+            normalized = ",".join(str(item).strip() for item in fmt if str(item).strip())
+            if normalized:
+                return [render_interface_name(normalized, i) for i in range(ethernet)]
+    kind = str(child.get("kind") or "qemu").strip().lower()
+    if kind == "qemu":
+        return [f"Gi{i + 1}" for i in range(ethernet)]
+    return [f"eth{i}" for i in range(ethernet)]
+
+
+def validate_paired_template(data: dict[str, Any]) -> str | None:
+    """Pre-flight a paired template (#207). Returns ``None`` when the template
+    can be instantiated end-to-end, or a human-readable reason string when a
+    link references an interface name that no child will expose. Used by the
+    catalog builder to flag old imports + by the from-paired-template endpoint
+    to return 422 instead of 500.
+    """
+    nodes = data.get("nodes") or []
+    links = data.get("links") or []
+    children_by_id: dict[str, dict[str, Any]] = {}
+    for child in nodes:
+        if isinstance(child, dict):
+            children_by_id[str(child.get("id") or "")] = child
+
+    for link in links:
+        if not isinstance(link, dict):
+            continue
+        for endpoint_key, iface_key in (("from_node", "from_iface"), ("to_node", "to_iface")):
+            child_id = str(link.get(endpoint_key) or "")
+            iface_name = str(link.get(iface_key) or "")
+            child = children_by_id.get(child_id)
+            if child is None:
+                return f"link references unknown child id {child_id!r}"
+            available = _paired_child_iface_names(child)
+            if iface_name not in available:
+                return (
+                    f"child {child_id!r} interface {iface_name!r} not in available "
+                    f"set [{', '.join(available) or '<empty>'}]. Add "
+                    f"interface_naming.explicit:[...] to the child block so "
+                    f"the link resolves at instantiation time."
+                )
+    return None
 
 
 def _default_capabilities(template_type: str) -> dict[str, Any]:
@@ -536,6 +617,12 @@ class TemplateDefinition:
     raw: dict[str, Any] = field(default_factory=dict)
     interface_naming: dict[str, Any] | None = None
     capabilities: dict[str, Any] = field(default_factory=dict)
+    # #206 — when this entry was synthesized from a paired-template child block
+    # (vs loaded from a per-type YAML), ``paired_parent`` is the originating
+    # paired template key. Surfaced in the catalog response so the frontend can
+    # exclude these from the standalone "Add node" type-tab picker while still
+    # resolving them by key for edit-mode lookups and capability gates.
+    paired_parent: str | None = None
 
     def as_response(self) -> dict[str, Any]:
         return {
@@ -584,6 +671,28 @@ class TemplateService:
                 return template
         raise TemplateError(f"Template {key} does not exist for type {template_type}.")
 
+    def _iter_paired_user_templates(self) -> Iterator[tuple[Path, dict[str, Any]]]:
+        """Yield (path, payload) for every well-formed ``kind="paired"`` JSON
+        under ``USER_TEMPLATES_DIR``. Tolerates I/O + parse errors, skips
+        non-paired files, and enforces the minimal structural invariant
+        (non-empty ``nodes`` list + ``links`` list). Shared by the loader,
+        the catalog builder, and the per-key lookup so they cannot drift.
+        """
+        if self.user_templates_dir is None or not self.user_templates_dir.exists():
+            return
+        for path in sorted(self.user_templates_dir.rglob("*.json")):
+            try:
+                data = yaml.safe_load(path.read_text()) or {}
+            except (OSError, yaml.YAMLError):
+                continue
+            if not isinstance(data, dict) or data.get("kind") != "paired":
+                continue
+            nodes = data.get("nodes")
+            links = data.get("links")
+            if not (isinstance(nodes, list) and nodes and isinstance(links, list)):
+                continue
+            yield path, data
+
     def get_paired_user_template(self, template_key: str) -> dict[str, Any] | None:
         """Load a paired-node template (``kind="paired"``) from USER_TEMPLATES_DIR.
 
@@ -593,19 +702,8 @@ class TemplateService:
         instantiate multi-node templates atomically. Read-only; tolerant of
         malformed JSON.
         """
-        if self.user_templates_dir is None or not self.user_templates_dir.exists():
-            return None
-        candidates = list(self.user_templates_dir.rglob(f"{template_key}.json"))
-        for path in candidates:
-            try:
-                data = yaml.safe_load(path.read_text()) or {}
-            except (OSError, yaml.YAMLError):
-                continue
-            if not isinstance(data, dict) or data.get("kind") != "paired":
-                continue
-            nodes = data.get("nodes")
-            links = data.get("links")
-            if isinstance(nodes, list) and nodes and isinstance(links, list):
+        for path, data in self._iter_paired_user_templates():
+            if path.stem == template_key:
                 return data
         return None
 
@@ -615,6 +713,16 @@ class TemplateService:
 
     def list_images(self, template_type: str, template_key: str) -> dict[str, dict[str, Any]]:
         template = self.get_template(template_type, template_key)
+
+        # #206 — synthetic paired children declare their image explicitly in
+        # the paired template JSON. Surface only that image so validation in
+        # validate_node_request matches what the paired-create endpoint uses.
+        if template.paired_parent is not None:
+            declared = str(template.raw.get("image") or "").strip()
+            if declared:
+                return {declared: {"image": declared, "source": "paired-child-declared"}}
+            return {}
+
         images: dict[str, dict[str, Any]] = {}
 
         if template_type == "docker":
@@ -692,6 +800,10 @@ class TemplateService:
                     "icon_options": icon_options,
                     "extras_schema": extras_schema,
                     "capabilities": dict(template.capabilities),
+                    # #206 — set on synthetic per-child entries; frontends should
+                    # filter these out of the standalone create-flow type tabs
+                    # but still resolve them by key for edit + capability lookups.
+                    "paired_parent": template.paired_parent,
                 }
             )
         return {
@@ -711,20 +823,11 @@ class TemplateService:
         and routes submissions to ``POST /nodes/from-paired-template`` instead of
         the single-node ``/nodes/batch`` path.
         """
-        if self.user_templates_dir is None or not self.user_templates_dir.exists():
-            return []
         result: list[dict[str, Any]] = []
-        for path in sorted(self.user_templates_dir.rglob("*.json")):
-            try:
-                data = yaml.safe_load(path.read_text()) or {}
-            except (OSError, yaml.YAMLError):
-                continue
-            if not isinstance(data, dict) or data.get("kind") != "paired":
-                continue
-            nodes = data.get("nodes")
-            links = data.get("links")
-            if not (isinstance(nodes, list) and nodes and isinstance(links, list)):
-                continue
+        for path, data in self._iter_paired_user_templates():
+            nodes = data["nodes"]
+            links = data["links"]
+            paired_key = path.stem
             child_summary = [
                 {
                     "id": str(child.get("id") or f"child-{i}"),
@@ -734,6 +837,13 @@ class TemplateService:
                     "cpu": int(child.get("cpu", 1)),
                     "ram": int(child.get("ram", 1024)),
                     "ethernet": int(child.get("ethernet", 1)),
+                    # #206 — synthetic template key the child node carries on
+                    # its ``template`` field once instantiated; lets the frontend
+                    # cross-reference the matching catalog entry for capabilities,
+                    # extras schema, etc.
+                    "template_key": synthetic_paired_child_key(
+                        paired_key, str(child.get("id") or f"child-{i}")
+                    ),
                 }
                 for i, child in enumerate(nodes)
                 if isinstance(child, dict)
@@ -748,6 +858,15 @@ class TemplateService:
                 for link in links
                 if isinstance(link, dict)
             ]
+            invalid_reason = validate_paired_template(data)
+            if invalid_reason is not None:
+                _logger.warning(
+                    "Paired template %s pre-flight failed: %s — instantiation "
+                    "via /from-paired-template will return 422 until the "
+                    "template is updated.",
+                    path.stem,
+                    invalid_reason,
+                )
             result.append(
                 {
                     "key": path.stem,
@@ -757,6 +876,11 @@ class TemplateService:
                     "link_count": len(link_summary),
                     "children": child_summary,
                     "links": link_summary,
+                    # #207 — pre-flighted at catalog-load time so old imports
+                    # surface a banner-friendly reason. Endpoint converts this
+                    # to a 422 if the operator tries to instantiate.
+                    "valid": invalid_reason is None,
+                    "invalid_reason": invalid_reason,
                 }
             )
         return result
@@ -894,7 +1018,66 @@ class TemplateService:
                     capabilities=capabilities,
                 )
             )
+
+        # #206 — append synthetic per-child entries for every paired template so
+        # node.template lookups (edit, capability gates, image validation) resolve
+        # cleanly. These entries advertise paired_parent so frontends can hide
+        # them from the standalone create-flow type-tab picker.
+        templates.extend(self._load_synthetic_paired_child_templates())
         return templates
+
+    def _load_synthetic_paired_child_templates(self) -> list[TemplateDefinition]:
+        """Synthesize per-child :class:`TemplateDefinition` entries from paired
+        user templates (``USER_TEMPLATES_DIR/*.json`` with ``kind="paired"``).
+
+        Each child becomes a first-class catalog entry keyed
+        ``<paired_key>__<child_id>``. Capability/interface_naming blocks on the
+        child are validated via the same helpers used for real templates so a
+        broken child raises :class:`TemplateError` at load time rather than
+        silently flowing through to runtime. The child's ``image`` is recorded
+        on the synthetic ``raw`` so :meth:`list_images` can surface it (see
+        the override in that method).
+        """
+        synthetic: list[TemplateDefinition] = []
+        for path, data in self._iter_paired_user_templates():
+            nodes = data["nodes"]
+            paired_key = path.stem
+            for index, child in enumerate(nodes):
+                if not isinstance(child, dict):
+                    continue
+                child_id = str(child.get("id") or f"child-{index}")
+                child_kind = str(child.get("kind") or "qemu").strip().lower()
+                if child_kind not in SUPPORTED_TEMPLATE_TYPES:
+                    child_kind = "qemu"
+                synthetic_key = synthetic_paired_child_key(paired_key, child_id)
+                source = f"{path}::nodes[{index}]"
+                child_iface = child.get("interface_naming")
+                if child_iface is not None:
+                    child_iface = _validate_interface_naming(child_iface, source=source)
+                child_caps = _validate_capabilities(
+                    child.get("capabilities"), child_kind, source=source
+                )
+                yaml_extras = dict(child.get("extras") or {}) if isinstance(child.get("extras"), dict) else {}
+                synthetic.append(
+                    TemplateDefinition(
+                        key=synthetic_key,
+                        type=child_kind,
+                        name=str(child.get("name") or synthetic_key),
+                        description=f"Paired child of {paired_key} (auto-synthesized).",
+                        icon_type=str(child.get("icon_type") or self._default_icon_type(child_kind)),
+                        cpu=int(child.get("cpu", 1)),
+                        ram=int(child.get("ram", 1024)),
+                        ethernet=int(child.get("ethernet", 1)),
+                        console_type=str(child.get("console") or self._default_console_type(child_kind)),
+                        cpulimit=int(child.get("cpulimit", 1)),
+                        extras=yaml_extras,
+                        raw=dict(child),
+                        interface_naming=child_iface,
+                        capabilities=child_caps,
+                        paired_parent=paired_key,
+                    )
+                )
+        return synthetic
 
     def _normalize_type(self, template_type: str) -> str:
         normalized = template_type.strip().lower()

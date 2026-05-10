@@ -20,6 +20,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -614,16 +615,33 @@ class NetworkService:
 
         return str(chosen)
 
-    def _release_ip(self, lab_path: str, network_id: int, ip: str) -> bool:
+    def _release_ip(
+        self,
+        lab_path: str,
+        network_id: int,
+        ip: str,
+        *,
+        _lab_lock_held: bool = False,
+    ) -> bool:
         """Remove ``ip`` from ``runtime.used_ips``; return True if removed.
 
         No-op (returns False) when the network or IP is absent —
         idempotent so detach paths can call this without a pre-check.
+
+        ``_lab_lock_held`` (#208a/b architect-iter1): set True when the
+        caller already holds ``lab_lock(normalized, labs_dir)`` so the
+        inner acquisition is skipped. Used by paired-create's compensation
+        path (delete_link from inside the outer paired lab_lock); fcntl
+        flock LOCK_EX is not reentrant within the same Linux process.
         """
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
-        with lab_lock(normalized, labs_dir):
+        release_lab_lock_cm = (
+            nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
+        )
+
+        with release_lab_lock_cm:
             data = LabService.read_lab_json_static(normalized)
             networks = data.get("networks", {}) or {}
             network = networks.get(str(network_id))

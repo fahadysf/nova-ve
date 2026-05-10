@@ -125,7 +125,14 @@
   }
 
   function templatesForType(type: NodeTypeKey): NodeCatalogTemplate[] {
-    return (catalog?.templates ?? []).filter((template) => template.type === type);
+    // #206 — exclude synthetic paired-child entries (paired_parent set). They
+    // exist in the catalog so node.template lookups in edit mode + capability
+    // gates can resolve them, but they must not surface as standalone choices
+    // in the create-flow type tabs (operators reach paired children only via
+    // the paired-template panel).
+    return (catalog?.templates ?? []).filter(
+      (template) => template.type === type && !template.paired_parent
+    );
   }
 
   function pairedTemplates(): NodeCatalogPairedTemplate[] {
@@ -361,7 +368,10 @@
   }
 
   function submitForm() {
-    if (interfaceNamingError) return;
+    // #208c — interfaceNamingError gates only the single-node form. The
+    // paired-template path doesn't surface the freeform interface-naming
+    // input, so a stale validation error there must NOT block submission.
+    if (!pairedActive && interfaceNamingError) return;
     if (mode === 'edit' && node) {
       dispatch('submit', {
         mode: 'edit',
@@ -551,8 +561,8 @@
               <div class="rounded-2xl border border-purple-500/30 bg-purple-500/5 p-4">
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <div class="text-[10px] uppercase tracking-[0.06em] text-purple-300">Paired vendor templates</div>
-                    <div class="mt-0.5 text-xs text-slate-400">Multi-VM appliances (vMX, vQFX) instantiated as a group with auto-links.</div>
+                    <div class="text-[10px] uppercase tracking-[0.06em] text-purple-300">Multi-node templates</div>
+                    <div class="mt-0.5 text-xs text-slate-400">Templates that instantiate multiple nodes plus auto-links as a single group.</div>
                   </div>
                   <label class="flex items-center gap-2 text-xs text-slate-300">
                     <select
@@ -985,7 +995,7 @@
             </button>
             <button
               type="submit"
-              disabled={submitting || (!pairedActive && (!selectedTemplate || !image)) || !!interfaceNamingError}
+              disabled={submitting || (!pairedActive && (!selectedTemplate || !image)) || (!pairedActive && !!interfaceNamingError)}
               class="rounded-full border border-blue-500/40 bg-blue-500/15 px-4 py-2 text-sm text-blue-100 transition hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {#if submitting}
