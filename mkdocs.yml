@@ -1,6 +1,6 @@
 site_name: nova-ve
 site_description: Documentation for nova-ve — a clean-room network virtualization environment.
-site_url: https://fahadysf.github.io/nova-ve/
+site_url: https://docs.nova-ve.com/
 repo_url: https://github.com/fahadysf/nova-ve
 repo_name: fahadysf/nova-ve
 edit_uri: edit/main/docs/

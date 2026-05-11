@@ -26,7 +26,8 @@ On a fresh Ubuntu 26.04 LTS x86_64 host with sudo access:
 curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | sudo bash
 ```
 
-> **Full documentation** lives at <https://fahadysf.github.io/nova-ve/> (built from `docs/`).
+> **Full documentation** lives at <https://docs.nova-ve.com/> (built from `docs/`).
+> A GitHub Pages mirror remains available at <https://fahadysf.github.io/nova-ve/>.
 >
 > **Migrating from EVE-NG / UNetLab / PNETLab?** See the [Importing from EVE-NG](docs/importing-eveng/index.md) section for the importer walk-through (default mode is non-destructive — sources preserved unless `--delete-source` is passed).
 
