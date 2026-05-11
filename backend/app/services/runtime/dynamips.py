@@ -413,6 +413,15 @@ class DynamipsLauncher:
         image_path = self._resolve_image_path(template)
         idle_pc = self._resolve_idle_pc(template, image_path)
 
+        # Allocate the port dynamips itself will bind (127.0.0.1 only —
+        # dynamips' ``vm set_con_tcp_port`` has no listen-addr knob in
+        # 0.2.14). The caller-supplied ``console_port`` is the EXTERNAL
+        # port guacd will dial via ``host.docker.internal``; the runtime
+        # service spawns a 0.0.0.0:<external> → 127.0.0.1:<internal>
+        # proxy after we return. Allocating before lock entry keeps the
+        # critical section short.
+        console_internal_port = self._pick_free_tcp_port()
+
         with self._lock:
             client = self._client_locked()
             vm_name = self._vm_name(lab_id, node_id)
@@ -435,7 +444,9 @@ class DynamipsLauncher:
                 client.request(f"vm set_ram {vm_name} {ram}")
                 client.request(f"vm set_ios {vm_name} {image_path}")
                 client.request(f"vm set_idle_pc {vm_name} {idle_pc}")
-                client.request(f"vm set_con_tcp_port {vm_name} {console_port}")
+                client.request(
+                    f"vm set_con_tcp_port {vm_name} {console_internal_port}"
+                )
 
                 chassis = _PLATFORM_CHASSIS.get(platform)
                 if chassis and module == "c3600":
@@ -488,7 +499,11 @@ class DynamipsLauncher:
                 "vm_name": vm_name,
                 "vm_id": vm_id,
                 "platform": platform,
+                # External port: what guacd dials via host.docker.internal.
+                # Internal port: what dynamips bound on 127.0.0.1. The
+                # runtime service bridges them with a 0.0.0.0 proxy.
                 "console_port": console_port,
+                "console_internal_port": console_internal_port,
                 "hypervisor_port": self._hypervisor_port,
                 "work_dir": str(work_dir),
                 "tap_names": tap_names,

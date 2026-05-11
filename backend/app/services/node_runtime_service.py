@@ -4486,10 +4486,30 @@ class NodeRuntimeService:
                 host_net.try_link_del(tap)
             raise NodeRuntimeError(str(exc)) from exc
 
-        # Dynamips exposes its serial console directly on the loopback
-        # via ``vm set_con_tcp_port`` — no netns-splice proxy is needed
-        # (unlike Docker, where the container netns hides the port). The
-        # Guacamole proxy can connect to 127.0.0.1:<console_port> directly.
+        # Dynamips' ``vm set_con_tcp_port`` binds the console on
+        # ``127.0.0.1`` only — there's no listen-addr knob in 0.2.x.
+        # Guacd runs inside a compose container and reaches the host via
+        # ``host.docker.internal`` (the Docker bridge IP), which CANNOT
+        # hit a loopback-only socket. Mirror the docker-node pattern:
+        # spawn the console-proxy in no-setns mode (pid=0) so it
+        # republishes the dynamips internal port on ``0.0.0.0:<console_port>``.
+        try:
+            console_proxy_pid = host_net.console_proxy_start(
+                node_pid=0,
+                listen_port=console_port,
+                target_port=int(launcher_record["console_internal_port"]),
+            )
+        except Exception:
+            # If the proxy fails to start, tear the VM back down so the
+            # operator gets a "start failed" instead of a half-running
+            # node with an unreachable console.
+            try:
+                DynamipsLauncher.instance().stop_node(launcher_record)
+            except Exception:  # noqa: BLE001
+                pass
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise
 
         runtime = {
             "kind": "dynamips",
@@ -4497,6 +4517,8 @@ class NodeRuntimeService:
             "node_id": node_id,
             "started_at": time.time(),
             "console_port": console_port,
+            "console_internal_port": int(launcher_record["console_internal_port"]),
+            "console_proxy_pid": console_proxy_pid,
             "console_mode": "telnet",
             "tap_names": launcher_record.get("tap_names", []),
             "vm_name": launcher_record["vm_name"],
@@ -4511,6 +4533,21 @@ class NodeRuntimeService:
 
     def _stop_dynamips_runtime(self, runtime: dict[str, Any]) -> None:
         from app.services.runtime.dynamips import DynamipsError, DynamipsLauncher
+
+        proxy_pid = runtime.get("console_proxy_pid")
+        if proxy_pid:
+            try:
+                host_net.console_proxy_stop(int(proxy_pid))
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning(
+                    "dynamips.console_proxy.stop.failed",
+                    extra={
+                        "lab_id": runtime.get("lab_id"),
+                        "node_id": runtime.get("node_id"),
+                        "proxy_pid": proxy_pid,
+                        "error": str(exc),
+                    },
+                )
 
         try:
             DynamipsLauncher.instance().stop_node(runtime)
