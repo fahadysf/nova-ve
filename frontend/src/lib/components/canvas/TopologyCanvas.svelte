@@ -58,6 +58,7 @@
     LinkStyle,
     LiveMacState,
     NetworkData,
+    NetworkType,
     NodeBatchCreateResult,
     NodeCatalog,
     NodeData,
@@ -81,9 +82,16 @@
     kind: 'network';
     title: string;
     subtitle: string;
-    networkType: string;
+    networkType: NetworkType;
   };
   type PaletteItem = PaletteNetworkItem;
+
+  // Single source of truth for the network palette. Add new entries here as
+  // more network types ship; ``networkType`` is the wire value posted to
+  // ``POST /api/labs/{path}/networks`` and must match ``NetworkType``.
+  const NETWORK_PALETTE: PaletteNetworkItem[] = [
+    { kind: 'network', title: 'Bridge Network', subtitle: 'linux_bridge', networkType: 'linux_bridge' }
+  ];
   type ConsoleSelectorWindow = {
     id: number;
     nodeName: string;
@@ -641,11 +649,9 @@
         suppressToast: true
       });
       nodeCatalog = catalogResponse.data;
-      paletteItems = [
-        { kind: 'network', title: 'Bridge Network', subtitle: 'bridge', networkType: 'bridge' }
-      ];
+      paletteItems = NETWORK_PALETTE;
     } catch (_error) {
-      paletteItems = [{ kind: 'network', title: 'Bridge Network', subtitle: 'bridge', networkType: 'bridge' }];
+      paletteItems = NETWORK_PALETTE;
     } finally {
       paletteLoading = false;
     }
@@ -1067,7 +1073,7 @@
     });
   }
 
-  async function createNetworkAt(position: { x: number; y: number }, networkType = 'bridge') {
+  async function createNetworkAt(position: { x: number; y: number }, networkType: NetworkType = 'linux_bridge') {
     const response = await apiRequest<NetworkData>(`/labs/${labId}/networks`, {
       method: 'POST',
       body: {
