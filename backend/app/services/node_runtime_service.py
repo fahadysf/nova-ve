@@ -4432,8 +4432,17 @@ class NodeRuntimeService:
 
         # Resolve the template once, then merge any per-node extras the
         # frontend may override (idle_pc, platform, slot bindings, ...).
+        # ``image`` lives at the top level on the node (matches QEMU's
+        # convention) and is the catalog's image selection — typically a
+        # stem like ``c3725-...`` rather than a full filename, because
+        # ``TemplateService._image_info`` reports the directory name (no
+        # extension) for the EVE-NG per-image-subdir layout. The launcher's
+        # resolver handles both stem and full-filename forms.
         template = self._resolve_template_for_node(node)
         template = dict(template)  # shallow copy — we may overlay extras
+        node_image = node.get("image")
+        if node_image:
+            template["image"] = node_image
         extras = _node_extras(node)
         for key in ("platform", "image", "ram", "idlepc", "idle_pc", "slot0", "npe"):
             value = extras.get(key)
