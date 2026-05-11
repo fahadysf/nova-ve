@@ -756,17 +756,38 @@
                   class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 />
               </label>
-              <label class="block">
-                <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Ethernets</div>
-                <input
-                  bind:value={ethernet}
-                  on:input={() => markDirty('ethernet')}
-                  type="number"
-                  min="1"
-                  disabled={isStoppedOnly('ethernet')}
-                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
-                />
-              </label>
+              {#if selectedTemplate?.type === 'dynamips'}
+                <!--
+                  For dynamips routers the FastEthernet count is derived
+                  from the slot-0 motherboard chip plus any optional
+                  network modules (NM-1FE-TX, NM-16ESW, …) bound to
+                  slots 1+. A freeform numeric input would lie — dynamips
+                  would only honor the count if a matching NM happens to
+                  be configured. Show the derived value read-only and
+                  point the operator at slot configuration (issue #217).
+                -->
+                <div class="block">
+                  <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Ethernet ports</div>
+                  <div
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-sm text-slate-300"
+                    title="Total interface count for a Dynamips router is derived from its slot modules (slot 0 motherboard + NM/PA cards in slots 1+). Edit slot bindings in the template or per-node extras to change the count."
+                  >
+                    {ethernet} (derived from slots)
+                  </div>
+                </div>
+              {:else}
+                <label class="block">
+                  <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Ethernets</div>
+                  <input
+                    bind:value={ethernet}
+                    on:input={() => markDirty('ethernet')}
+                    type="number"
+                    min="1"
+                    disabled={isStoppedOnly('ethernet')}
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
+                  />
+                </label>
+              {/if}
             </div>
 
             <div class="grid gap-4 md:grid-cols-3">
