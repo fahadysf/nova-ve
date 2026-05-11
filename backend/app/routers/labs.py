@@ -1233,6 +1233,52 @@ async def list_interfaces(
     }
 
 
+@router.get("/{lab_path:path}/nodes/{node_id}")
+async def get_node(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    # Without this route, FastAPI falls back to the catch-all
+    # ``GET /{lab_path:path}`` and tries to read
+    # ``/var/lib/nova-ve/labs/<file>.json/nodes/<id>`` as a lab JSON,
+    # which raises NotADirectoryError → 500. See issue #216.
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    node = data.get("nodes", {}).get(str(node_id))
+    if not node:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Node does not exist.",
+        }
+
+    lab_id = str(data.get("id", "")).strip()
+    enriched = NodeRuntimeService().enrich_node(lab_id, node_id, node) if lab_id else node
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Node fetched successfully.",
+        "data": enriched,
+    }
+
+
 @router.put("/{lab_path:path}/nodes/{node_id}")
 async def update_node(
     lab_path: str,
@@ -2347,7 +2393,13 @@ async def get_lab(
         data = _read_lab_data(scoped_path)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        # NotADirectoryError fires when a stray request like
+        # ``/labs/foo.json/nodes/8`` falls through to this catch-all
+        # because no matching sub-route exists — the lab file is a
+        # FILE, so the OS rejects the nested open. Treat as 404.
+        # IsADirectoryError covers the symmetric case of pointing at
+        # a directory that has no lab JSON of its own.
         return {
             "code": 404,
             "status": "fail",
