@@ -192,8 +192,13 @@ class IdlePcCache:
     atomically (write-temp-then-rename).
     """
 
-    def __init__(self, path: Path = _IDLE_PC_CACHE_PATH) -> None:
-        self._path = path
+    def __init__(self, path: Path | None = None) -> None:
+        # Defer to the module-level constant at call time so tests that
+        # monkeypatch ``_IDLE_PC_CACHE_PATH`` see their override take
+        # effect (default-argument evaluation happens once at class-
+        # definition time and would otherwise capture the production
+        # path forever).
+        self._path = path or _IDLE_PC_CACHE_PATH
         self._lock = threading.Lock()
 
     @staticmethod
@@ -466,6 +471,121 @@ class DynamipsLauncher:
             return False
 
     # ------------------------------------------------------------------
+    # Idle-PC calibration
+    # ------------------------------------------------------------------
+
+    def calibrate_image(
+        self,
+        image_path: Path,
+        *,
+        boot_wait_s: float = 90.0,
+        retry_wait_s: float = 20.0,
+    ) -> dict[str, Any]:
+        """Boot a throwaway VM against ``image_path``, harvest idle-PC
+        candidates via the hypervisor's ``vm extract_idle_pc`` command,
+        cache the first candidate keyed by image SHA-256, and return
+        a result record.
+
+        Blocks for ``boot_wait_s`` seconds while IOS settles. Caller
+        is responsible for surfacing that latency to the user (the
+        HTTP layer treats this as a long-running sync call).
+
+        Result shape::
+
+            {
+              "image": <basename>,
+              "image_sha256": <hex>,
+              "idle_pc": "0x...",
+              "candidates": ["0x...", ...],
+              "duration_s": <float>,
+              "platform": "c3725" | "c7200",
+            }
+        """
+        platform = self._platform_for_image(image_path.name)
+        module = _PLATFORM_MODULE[platform]
+        ram = _PLATFORM_RAM_DEFAULT_MB[platform]
+        vm_name = f"calibrate_{platform}_{int(time.time())}"
+        vm_id = (int(time.time()) % 65000) + 1
+        started = time.monotonic()
+
+        with self._lock:
+            client = self._client_locked()
+            client.request(f"{module} create {vm_name} {vm_id} {platform}")
+            try:
+                client.request(f"{module} set_ram {vm_name} {ram}")
+                client.request(f"{module} set_image {vm_name} {image_path}")
+                chassis = _PLATFORM_CHASSIS.get(platform)
+                if chassis:
+                    client.request(f"{module} set_chassis {vm_name} {chassis}")
+                if platform == "c7200":
+                    client.request(
+                        f"{module} set_npe {vm_name} "
+                        f"{_PLATFORM_DEFAULT_NPE[platform]}"
+                    )
+                client.request(f"vm start {vm_name}")
+            except Exception:
+                self._destroy_vm_locked(client, module, vm_name)
+                raise
+
+        # Release the launcher lock while IOS boots — calibration is
+        # the only consumer of this VM, but holding the lock would
+        # serialise unrelated start_node calls behind a 90 s wait.
+        try:
+            time.sleep(boot_wait_s)
+            with self._lock:
+                client = self._client_locked()
+                candidates = self._extract_idle_pc_candidates(client, vm_name)
+                if not candidates:
+                    time.sleep(retry_wait_s)
+                    candidates = self._extract_idle_pc_candidates(client, vm_name)
+        finally:
+            with self._lock:
+                client = self._client_locked()
+                self._destroy_vm_locked(client, module, vm_name)
+
+        if not candidates:
+            raise DynamipsError(
+                f"dynamips extracted no idle-PC candidates for "
+                f"{image_path.name} after {boot_wait_s + retry_wait_s}s"
+            )
+
+        idle_pc = candidates[0]
+        image_sha = IdlePcCache.hash_image(image_path)
+        self._idle_pc_cache.set(image_sha, idle_pc)
+        duration = time.monotonic() - started
+
+        return {
+            "image": image_path.name,
+            "image_sha256": image_sha,
+            "idle_pc": idle_pc,
+            "candidates": candidates,
+            "duration_s": round(duration, 2),
+            "platform": platform,
+        }
+
+    @staticmethod
+    def _platform_for_image(image_name: str) -> str:
+        lower = image_name.lower()
+        for platform in _PLATFORM_MODULE:
+            if lower.startswith(platform):
+                return platform
+        raise DynamipsError(
+            f"cannot infer platform from image name {image_name!r}; "
+            f"expected a prefix in {sorted(_PLATFORM_MODULE)}"
+        )
+
+    @staticmethod
+    def _extract_idle_pc_candidates(
+        client: HypervisorClient, vm_name: str
+    ) -> list[str]:
+        reply = client.request(f"vm extract_idle_pc {vm_name}")
+        return [
+            line.strip()
+            for line in reply.lines
+            if line.strip().startswith("0x")
+        ]
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -493,16 +613,24 @@ class DynamipsLauncher:
     def _resolve_image_path(template: dict[str, Any]) -> Path:
         """Resolve a dynamips template's ``image`` field to a real path.
 
-        Two on-disk layouts are accepted:
+        Three input shapes are accepted, all reflecting how the frontend
+        catalog labels images:
 
-        * **Flat**: ``/var/lib/nova-ve/images/dynamips/<filename>`` — what
-          a hand-authored template typically points at.
-        * **EVE-NG-imported (per-image subdir)**:
-          ``/var/lib/nova-ve/images/dynamips/<stem>/<filename>`` — what
-          the importer produces for ``<source>/addons/dynamips/*.image``.
+        * **Full filename with extension** (``foo.image`` / ``foo.bin``)
+          — what hand-authored templates typically write.
+        * **Stem only** (``foo``) — what the node-create catalog hands
+          back when the EVE-NG importer used the per-image-subdir
+          layout: ``TemplateService._image_info`` reports
+          ``dir.name`` (no extension) as the image label, so when the
+          frontend saves the user's selection onto the node, the bare
+          stem is what we see at start time.
+        * **Absolute path** — passes through if it exists.
 
-        Templates store just the filename in ``image`` and let the
-        runtime locate it; absolute paths are honoured as-is.
+        For each of the first two, both the flat
+        (``/var/lib/nova-ve/images/dynamips/<file>``) and EVE-NG nested
+        (``.../dynamips/<stem>/<file>``) layouts are searched. Known
+        extensions ``.image`` (EVE-NG) and ``.bin`` (Cisco) are probed
+        when a stem is supplied.
         """
         image = template.get("image")
         if not image:
@@ -513,14 +641,33 @@ class DynamipsLauncher:
                 raise DynamipsError(f"dynamips image not found at {path}")
             return path
 
-        flat = _IMAGES_ROOT / path
-        if flat.is_file():
-            return flat
-        nested = _IMAGES_ROOT / path.stem / path.name
-        if nested.is_file():
-            return nested
+        # Cisco image filenames have dots that ``Path.suffix`` happily
+        # treats as extensions (``...mz.124-25d`` → suffix=``.124-25d``),
+        # so we cannot use ``path.suffix`` to decide "is this a stem or a
+        # filename". Instead, probe every plausible layout in order and
+        # return the first hit.
+        name = path.name
+        candidates: list[Path] = [
+            # Input is exactly the filename (flat layout).
+            _IMAGES_ROOT / name,
+            # Input is the filename and EVE-NG used a subdir of that
+            # filename's stem.
+            _IMAGES_ROOT / path.stem / name,
+        ]
+        # Input might also be a stem (no extension). Probe each known
+        # extension in both layouts. ``.image`` comes first because
+        # that's what the EVE-NG importer — the most common source of
+        # stem-style image labels — produces.
+        for ext in (".image", ".bin"):
+            candidates.append(_IMAGES_ROOT / f"{name}{ext}")
+            candidates.append(_IMAGES_ROOT / name / f"{name}{ext}")
+
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+        searched = ", ".join(str(c) for c in candidates)
         raise DynamipsError(
-            f"dynamips image {path.name!r} not found at {flat} or {nested}"
+            f"dynamips image {name!r} not found; searched: {searched}"
         )
 
     def _resolve_idle_pc(self, template: dict[str, Any], image_path: Path) -> str:
@@ -572,9 +719,77 @@ class DynamipsLauncher:
             record.unlink()
 
 
+def list_dynamips_images(
+    *, images_root: Path | None = None
+) -> list[dict[str, Any]]:
+    """Enumerate Dynamips images on disk and report calibration status.
+
+    Mirrors the launcher's image-path resolution: both flat
+    (``<root>/<file>``) and per-image-subdir (``<root>/<stem>/<file>``)
+    layouts are accepted, so a single image is reported once regardless
+    of which on-disk layout the importer or operator used.
+
+    Each entry::
+
+        {
+          "image": "<basename>",
+          "path": "<absolute path>",
+          "size_bytes": <int>,
+          "platform": "c3725" | "c7200" | null,
+          "image_sha256": "<hex>",
+          "calibrated": <bool>,
+          "idle_pc": "0x..." | null,
+        }
+    """
+    root = images_root or _IMAGES_ROOT
+    if not root.is_dir():
+        return []
+
+    cache = IdlePcCache()
+    seen: set[str] = set()
+    entries: list[dict[str, Any]] = []
+
+    def _report(image_path: Path) -> None:
+        name = image_path.name
+        if name in seen:
+            return
+        seen.add(name)
+        try:
+            platform = DynamipsLauncher._platform_for_image(name)
+        except DynamipsError:
+            platform = None
+        sha = IdlePcCache.hash_image(image_path)
+        idle_pc = cache.get(sha)
+        entries.append(
+            {
+                "image": name,
+                "path": str(image_path),
+                "size_bytes": image_path.stat().st_size,
+                "platform": platform,
+                "image_sha256": sha,
+                "calibrated": idle_pc is not None,
+                "idle_pc": idle_pc,
+            }
+        )
+
+    # Flat layout first, then nested. The launcher prefers flat → nested
+    # for path resolution; mirror that order here so the "primary" path
+    # surfaced in the report matches what start_node would pick.
+    for child in sorted(root.iterdir()):
+        if child.is_file() and child.suffix in {".bin", ".image"}:
+            _report(child)
+        elif child.is_dir():
+            for grandchild in sorted(child.iterdir()):
+                if grandchild.is_file() and grandchild.suffix in {".bin", ".image"}:
+                    _report(grandchild)
+
+    return entries
+
+
 __all__ = [
     "DynamipsError",
     "DynamipsLauncher",
     "HypervisorClient",
     "IdlePcCache",
+    "list_dynamips_images",
 ]

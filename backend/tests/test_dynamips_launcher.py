@@ -200,3 +200,58 @@ def test_resolve_image_path_missing_raises(
 def test_resolve_image_path_no_image_field_raises() -> None:
     with pytest.raises(DynamipsError, match="no image path"):
         DynamipsLauncher._resolve_image_path({})
+
+
+def test_resolve_image_path_stem_only_nested_eveng_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The node-create catalog reports the image directory name (no
+    extension) for the EVE-NG subdir layout. Saved onto a node, that
+    is the stem the launcher receives — it must still find the
+    ``<stem>/<stem>.image`` file on disk.
+    """
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    stem = "c3725-%5B1%5D-adventerprisek9-mz.124-25d"
+    subdir = tmp_path / stem
+    subdir.mkdir()
+    actual = subdir / f"{stem}.image"
+    actual.write_bytes(b"FAKE")
+
+    resolved = DynamipsLauncher._resolve_image_path({"image": stem})
+    assert resolved == actual
+
+
+def test_resolve_image_path_stem_only_flat_image_ext(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    stem = "c7200-bare-stem"
+    actual = tmp_path / f"{stem}.image"
+    actual.write_bytes(b"FAKE")
+
+    resolved = DynamipsLauncher._resolve_image_path({"image": stem})
+    assert resolved == actual
+
+
+def test_resolve_image_path_stem_only_flat_bin_ext(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    stem = "c7200-binary-stem"
+    actual = tmp_path / f"{stem}.bin"
+    actual.write_bytes(b"FAKE")
+
+    resolved = DynamipsLauncher._resolve_image_path({"image": stem})
+    assert resolved == actual
+
+
+def test_resolve_image_path_stem_only_missing_lists_candidates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    with pytest.raises(DynamipsError) as exc:
+        DynamipsLauncher._resolve_image_path({"image": "missing-stem"})
+    # Error must enumerate the candidate paths searched so operators
+    # can diagnose layout issues from the message alone.
+    assert ".image" in str(exc.value)
+    assert ".bin" in str(exc.value)
