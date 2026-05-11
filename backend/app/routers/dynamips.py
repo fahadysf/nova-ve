@@ -17,6 +17,7 @@ parallel POSTs queue up rather than fight.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -65,7 +66,10 @@ async def list_images(
     status. Use this to drive a "Calibrate" button in the node-edit
     modal for any image where ``calibrated`` is false.
     """
-    data = list_dynamips_images()
+    # SHA-256 over every image file is filesystem-bound (tens to
+    # hundreds of ms each for an unpacked IOS .bin); hand it to a
+    # worker thread so the event loop stays free.
+    data = await asyncio.to_thread(list_dynamips_images)
     return {
         "code": 200,
         "status": "success",
@@ -92,7 +96,13 @@ async def calibrate(
     """
     image_path = _resolve_image(body.image)
     try:
-        result = DynamipsLauncher.instance().calibrate_image(image_path)
+        # Calibration sleeps ~90s while IOS boots; running it on the
+        # event loop would block every other request the worker is
+        # juggling. Hand it to the default thread executor so uvicorn
+        # stays responsive.
+        result = await asyncio.to_thread(
+            DynamipsLauncher.instance().calibrate_image, image_path
+        )
     except DynamipsError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
