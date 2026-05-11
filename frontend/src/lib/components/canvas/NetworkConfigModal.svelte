@@ -24,14 +24,20 @@
   let type: NetworkType = defaultType;
   let modalEl: HTMLDivElement | null = null;
   let nameInputEl: HTMLInputElement | null = null;
-  let prevOpen = false;
+  let wasOpen = false;
 
-  $: if (open && !prevOpen) {
-    name = defaultName;
-    type = defaultType;
-    void focusName();
+  // Single reactive block so the open-edge detection and the prev-state
+  // update share one Svelte invalidation pass — the two-block form let
+  // the trailing ``wasOpen = open`` race ahead of the edge check on
+  // simultaneous prop transitions.
+  $: {
+    if (open && !wasOpen) {
+      name = defaultName;
+      type = defaultType;
+      void focusName();
+    }
+    wasOpen = open;
   }
-  $: prevOpen = open;
 
   $: trimmedName = name.trim();
   $: canSubmit = trimmedName.length > 0;
