@@ -243,6 +243,12 @@ ensure_instance_id() {
 require_target_host
 
 run apt-get update
+# NOTE: we do NOT install the apt ``dynamips`` package. Ubuntu's stock
+# 0.2.14 (built Dec 2025 for resolute) segfaults on ``vm start`` for
+# c3725 in hypervisor mode — confirmed reproducer logged with a core
+# dump but no useful stderr. We build the GNS3 community fork (0.2.24,
+# many crash fixes) from source instead via ``install_dynamips``.
+# ``cmake``, ``libelf-dev``, ``libpcap-dev`` are its build deps.
 run apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
@@ -260,7 +266,34 @@ run apt-get install -y --no-install-recommends \
   python3-venv \
   nodejs \
   npm \
-  dynamips
+  cmake \
+  libelf-dev \
+  libpcap-dev
+
+# Build + install dynamips 0.2.24 (GNS3 community fork). Idempotent:
+# skipped if /usr/local/bin/dynamips is already at that version or
+# newer. See note above for why we don't use the apt package.
+install_dynamips() {
+  local target=/usr/local/bin/dynamips
+  local desired_version="0.2.24"
+  if [[ -x "${target}" ]] && "${target}" --version 2>&1 | grep -q "${desired_version}"; then
+    echo "dynamips ${desired_version} already installed at ${target}; skipping build."
+    return 0
+  fi
+  local src=/var/lib/nova-ve/.build/dynamips
+  run mkdir -p "${src}"
+  if [[ ! -d "${src}/.git" ]]; then
+    run git clone --depth=1 --branch=v"${desired_version}" \
+      https://github.com/GNS3/dynamips.git "${src}"
+  fi
+  run bash -c "cd '${src}' && mkdir -p build && cd build && cmake .. -DCMAKE_BUILD_TYPE=Release -DBUILD_NVRAM_EXPORT=ON >/dev/null && make -j\$(nproc) >/dev/null"
+  run install -m 0755 "${src}/build/stable/dynamips" "${target}"
+  if [[ -x "${src}/build/nvram_export/nvram_export" ]]; then
+    run install -m 0755 "${src}/build/nvram_export/nvram_export" /usr/local/bin/nvram_export
+  fi
+  "${target}" --version 2>&1 | head -1
+}
+install_dynamips
 
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/templates /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole /var/lib/nova-ve/guacamole/db /var/lib/nova-ve/runtime "${FRONTEND_ROOT}"
