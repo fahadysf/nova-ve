@@ -46,7 +46,10 @@ _IMAGES_ROOT = Path("/var/lib/nova-ve/images/dynamips")
 _IDLE_PC_CACHE_PATH = _RUNTIME_ROOT / "idle_pc_cache.json"
 _HYPERVISOR_HOST = "127.0.0.1"
 _HYPERVISOR_CONNECT_TIMEOUT_S = 5.0
-_HYPERVISOR_READ_TIMEOUT_S = 30.0
+# ``vm start`` triggers IOS image load + decompress + initial MIPS
+# translation; for a stock c3725 with 12.4 IOS this can take 30-50s
+# before the hypervisor returns ``100 OK``. Give it room.
+_HYPERVISOR_READ_TIMEOUT_S = 120.0
 _DYNAMIPS_BINARY = os.environ.get("NOVA_VE_DYNAMIPS_BIN", "dynamips")
 
 
@@ -139,6 +142,12 @@ class HypervisorClient:
             except ConnectionResetError as exc:
                 raise DynamipsError(
                     "hypervisor closed the connection unexpectedly"
+                ) from exc
+            except socket.timeout as exc:
+                raise DynamipsError(
+                    f"hypervisor read timed out after "
+                    f"{_HYPERVISOR_READ_TIMEOUT_S}s — the previous command "
+                    f"did not complete"
                 ) from exc
             if not chunk:
                 raise DynamipsError("hypervisor closed the connection unexpectedly")
