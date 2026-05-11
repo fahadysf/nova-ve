@@ -23,6 +23,8 @@ The script provisions Docker, PostgreSQL, Caddy, the Python backend, the SvelteK
 
 After install, open `http://<host>/` and log in with the admin credentials printed at the end of the run (also written to `nova-ve-install-summary.md` in the directory you launched the installer from).
 
+Docs are published at `docs.nova-ve.com` and mirrored to GitHub Pages.
+
 [Full quick-start walk-through →](getting-started/quick-start.md){ .md-button .md-button--primary }
 [Migrating from EVE-NG? →](importing-eveng/index.md){ .md-button }
 
