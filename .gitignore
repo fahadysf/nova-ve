@@ -63,3 +63,7 @@ tmp/
 .omx/
 research/
 AGENTS.md
+
+# MkDocs build output
+site/
+.cache/

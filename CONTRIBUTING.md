@@ -19,8 +19,7 @@ Direct pushes to the upstream repository are reserved for project maintainers.
 
 ## Before You Start
 
-- Read [README.md](README.md)
-- Read [README.md](README.md) and [CONTRIBUTING.md](CONTRIBUTING.md) for project context and conventions
+- Read [README.md](README.md) for project context and conventions
 - Review the relevant documents in `research/` before changing API behavior
 - Prefer discussing large changes in an issue before starting implementation
 

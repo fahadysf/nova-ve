@@ -1,0 +1,123 @@
+site_name: nova-ve
+site_description: Documentation for nova-ve — a clean-room network virtualization environment.
+site_url: https://fahadysf.github.io/nova-ve/
+repo_url: https://github.com/fahadysf/nova-ve
+repo_name: fahadysf/nova-ve
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.instant
+    - navigation.tracking
+    - navigation.indexes
+    - toc.follow
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - search.suggest
+    - search.highlight
+    - search.share
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path:
+        - .
+        - docs
+      check_paths: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - getting-started/index.md
+      - Quick start: getting-started/quick-start.md
+      - System requirements: getting-started/requirements.md
+      - First login: getting-started/first-login.md
+  - User Guides:
+      - user-guides/index.md
+      - Creating your first lab: user-guides/first-lab.md
+      - Adding nodes: user-guides/adding-nodes.md
+      - Connecting nodes: user-guides/connecting-nodes.md
+      - Console access: user-guides/console-access.md
+      - The lab canvas: user-guides/canvas.md
+      - Lab lifecycle: user-guides/lab-lifecycle.md
+  - Importing from EVE-NG:
+      - importing-eveng/index.md
+      - Overview: importing-eveng/overview.md
+      - Importing images: importing-eveng/images.md
+      - Vendor coverage: importing-eveng/vendor-coverage.md
+      - Reading the manifest: importing-eveng/manifest.md
+  - Operations:
+      - operations/index.md
+      - Backups: operations/backups.md
+      - Upgrading: operations/upgrading.md
+      - Troubleshooting: operations/troubleshooting.md
+  - Reference:
+      - reference/index.md
+      - CLI — import-eveng-templates: reference/cli-import-eveng.md
+      - Filesystem layout: reference/filesystem.md
+      - Glossary: reference/glossary.md
+  - Development:
+      - development/index.md
+      - Architecture overview: development/architecture.md
+      - Backend: development/backend.md
+      - Frontend: development/frontend.md
+      - Node add/edit workflow: development/node-add-edit-workflow.md
+      - Design system adoption: development/design-system.md
+      - Deployment contract: development/deployment-contract.md
+      - CI — self-hosted runner: development/ci/self-hosted-runner.md
+      - CI — Ubuntu 26.04 beta ISO: development/ci/ubuntu-2604-iso.md
+      - CI — fy-lab validation: development/ci/fy-lab-validation.md
+      - Contributing: development/contributing.md
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/fahadysf/nova-ve
+
+copyright: Copyright &copy; 2026 Fahad Yousuf. Licensed under Apache-2.0.
