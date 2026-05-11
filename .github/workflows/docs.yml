@@ -10,13 +10,19 @@ on:
       - "docs-requirements.txt"
       - ".python-version"
       - ".github/workflows/docs.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "mkdocs.yml"
+      - "docs-requirements.txt"
+      - ".python-version"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
-  deployments: write
-  pages: write
-  id-token: write
 
 concurrency:
   group: docs-pages
@@ -51,7 +57,11 @@ jobs:
 
   deploy_github_pages:
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -61,6 +71,7 @@ jobs:
 
   deploy_cloudflare_pages:
     needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     env:
       CLOUDFLARE_PAGES_PROJECT: nova-ve-docs
