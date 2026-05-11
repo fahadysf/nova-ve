@@ -296,16 +296,44 @@ class DynamipsLauncher:
                 f"{_DYNAMIPS_BINARY!r} not found on PATH — "
                 "install the dynamips package or set NOVA_VE_DYNAMIPS_BIN"
             )
-        # `-H 0` asks Dynamips to bind to an OS-chosen TCP port; the chosen
-        # port is printed to stdout as "Hypervisor TCP control server started
-        # (port <N>)." Parse it back out.
+        # Pre-pick a free TCP port. ``dynamips -H 0`` is NOT an
+        # "auto-pick" knob in 0.2.14 — it prints "Hypervisor: unable
+        # to create TCP sockets." and silently falls back to its
+        # default port (7200), which would collide with any other
+        # dynamips on the host. Choose explicitly.
+        port = self._pick_free_tcp_port()
         proc = subprocess.Popen(
-            [_DYNAMIPS_BINARY, "-H", "0"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            bufsize=0,
+            [_DYNAMIPS_BINARY, "-H", str(port)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        port = self._wait_for_hypervisor_port(proc)
+        # Poll connect() until dynamips is listening, capped at 10s.
+        # No stdout parsing — we KNOW the port.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if proc.poll() is not None:
+                raise DynamipsError(
+                    f"dynamips hypervisor exited before binding port {port} "
+                    f"(exit code {proc.returncode})"
+                )
+            try:
+                with socket.create_connection(
+                    ("127.0.0.1", port), timeout=0.5
+                ) as probe:
+                    probe.close()
+                break
+            except OSError:
+                time.sleep(0.2)
+        else:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+            raise DynamipsError(
+                f"dynamips hypervisor did not start listening on 127.0.0.1:{port} "
+                f"within 10s"
+            )
+
         self._hypervisor_proc = proc
         self._hypervisor_port = port
         self._client = HypervisorClient(port)
@@ -316,29 +344,17 @@ class DynamipsLauncher:
         )
 
     @staticmethod
-    def _wait_for_hypervisor_port(proc: "subprocess.Popen[bytes]") -> int:
-        deadline = time.monotonic() + 10.0
-        assert proc.stdout is not None
-        while time.monotonic() < deadline:
-            line = proc.stdout.readline()
-            if not line:
-                if proc.poll() is not None:
-                    raise DynamipsError(
-                        f"dynamips hypervisor exited before announcing its port "
-                        f"(exit code {proc.returncode})"
-                    )
-                continue
-            decoded = line.decode("utf-8", errors="replace").strip()
-            # Match either:
-            #   "Hypervisor TCP control server started (port 12345)."
-            #   "Hypervisor listening on TCP port 12345"
-            for token in decoded.replace("(", " ").replace(")", " ").split():
-                if token.isdigit():
-                    return int(token)
-            if "tcp" in decoded.lower() and "port" in decoded.lower():
-                # Heuristic continues — fall through and try again.
-                pass
-        raise DynamipsError("timed out waiting for dynamips hypervisor port announcement")
+    def _pick_free_tcp_port() -> int:
+        """Bind to port 0, read back the kernel-assigned port, close.
+
+        A tiny TOCTOU window exists between the close and dynamips
+        binding the same port — acceptable for a per-host singleton
+        started once at first use.
+        """
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            s.bind(("127.0.0.1", 0))
+            return int(s.getsockname()[1])
 
     def _client_locked(self) -> HypervisorClient:
         if not self._hypervisor_running() or self._client is None:
@@ -529,14 +545,18 @@ class DynamipsLauncher:
 
         # Release the launcher lock while IOS boots — calibration is
         # the only consumer of this VM, but holding the lock would
-        # serialise unrelated start_node calls behind a 90 s wait.
+        # serialise unrelated start_node calls behind the 90 s wait.
+        # The retry sleep is also outside the lock-held window so a
+        # caller starting a regular node can interleave.
         try:
             time.sleep(boot_wait_s)
             with self._lock:
                 client = self._client_locked()
                 candidates = self._extract_idle_pc_candidates(client, vm_name)
-                if not candidates:
-                    time.sleep(retry_wait_s)
+            if not candidates:
+                time.sleep(retry_wait_s)
+                with self._lock:
+                    client = self._client_locked()
                     candidates = self._extract_idle_pc_candidates(client, vm_name)
         finally:
             with self._lock:
