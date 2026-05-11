@@ -5,7 +5,18 @@
   import { onMount, tick } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { ChevronDown, ChevronRight, ChevronsLeft, ChevronsRight, Monitor, RefreshCw } from 'lucide-svelte';
+  import {
+    Activity,
+    ChevronDown,
+    ChevronRight,
+    ChevronsLeft,
+    ChevronsRight,
+    Cpu,
+    Monitor,
+    Network as NetworkIcon,
+    RefreshCw,
+    Server
+  } from 'lucide-svelte';
   import { authStore } from '$lib/stores/auth';
   import { apiGetData, apiRequest, ApiError } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
@@ -941,18 +952,34 @@
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab Editor</div>
             <div class="flex flex-wrap items-center gap-[0.15rem]">
               <h1 class="truncate text-lg font-semibold tracking-tight text-gray-100">{labMeta?.name || labId}</h1>
-              <div class="ml-2 inline-flex items-center gap-1 rounded-full border border-gray-800 bg-gray-950/70 px-1 py-0.5">
-                <span class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5`}
-                  >{nodeList.length} <span class="text-gray-500">nodes</span></span>
+              <div class="ml-3 grid w-fit grid-cols-2 gap-1.5">
+                <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
+                  <Server class="h-3 w-3 text-gray-400" aria-hidden="true" />
+                  <span class="text-gray-500">Nodes:</span>
+                  <span class="font-mono text-gray-100">{nodeList.length}</span>
+                </span>
                 <span
-                  class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5 ${
-                    runningNodeCount ? 'text-emerald-200' : ''
+                  class={`inline-flex items-center gap-1.5 rounded-md border bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight ${
+                    runningNodeCount ? 'border-emerald-500/40 text-emerald-100' : 'border-gray-800 text-gray-300'
                   }`}
-                  >{runningNodeCount} <span class="text-gray-500">running</span></span>
-                <span class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5`}
-                  >{networkList.length} <span class="text-gray-500">net</span></span>
-                <span class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5`}
-                  >{totalVCpu} <span class="text-gray-500">vCPU</span></span>
+                >
+                  <Activity
+                    class={`h-3 w-3 ${runningNodeCount ? 'text-emerald-300' : 'text-gray-400'}`}
+                    aria-hidden="true"
+                  />
+                  <span class="text-gray-500">Running:</span>
+                  <span class="font-mono">{runningNodeCount}</span>
+                </span>
+                <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
+                  <NetworkIcon class="h-3 w-3 text-gray-400" aria-hidden="true" />
+                  <span class="text-gray-500">Networks:</span>
+                  <span class="font-mono text-gray-100">{networkList.length}</span>
+                </span>
+                <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
+                  <Cpu class="h-3 w-3 text-gray-400" aria-hidden="true" />
+                  <span class="text-gray-500">vCPU:</span>
+                  <span class="font-mono text-gray-100">{totalVCpu}</span>
+                </span>
               </div>
               {#if consoleMode === 'tabbed'}
                 <span class={chromePillClass}>{consoleTabCount} consoles</span>

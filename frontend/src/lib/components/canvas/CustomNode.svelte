@@ -105,7 +105,7 @@
 
   <button
     type="button"
-    class="nodrag absolute bottom-1 right-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-700 bg-gray-900/80 text-gray-400 transition hover:border-blue-500/40 hover:text-white"
+    class="nodrag absolute bottom-1 left-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-700 bg-gray-900/80 text-gray-400 transition hover:border-blue-500/40 hover:text-white"
     aria-label="Open node info panel"
     title="Open info panel"
     data-testid="node-info-button"
