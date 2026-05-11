@@ -1083,9 +1083,13 @@
         top: Math.round(position.y)
       }
     });
+    // POST /networks (US-063/US-064) returns ``{...,"network": <record>}`` — the
+    // single-record envelope chosen for write routes. List routes still use
+    // ``data:``; ApiResponse<T>.data is therefore unset here.
+    const created = (response as unknown as { network: NetworkData }).network;
     localNetworks = {
       ...localNetworks,
-      [String(response.data.id)]: response.data
+      [String(created.id)]: created
     };
     publishFlowState();
     dispatchCanvasChange('network-create', {
