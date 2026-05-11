@@ -53,18 +53,25 @@ _HYPERVISOR_READ_TIMEOUT_S = 120.0
 _DYNAMIPS_BINARY = os.environ.get("NOVA_VE_DYNAMIPS_BIN", "dynamips")
 
 
-# Platforms and their hypervisor command-module names. Phase 1 ships only
-# the two below; extending to c3745/c2691/c2600/c1700 is a 1-line addition.
+# Platforms and their hypervisor command-module names. In dynamips 0.2.14
+# every supported platform is its OWN module (verified via
+# ``hypervisor module_list``: c1700, c2600, c2691, c3745, c3725, c3600,
+# c7200). The c3600 module is reserved for the true c3600 family
+# (3620/3640/3660); c3725 is independent. Phase 1 ships the two below;
+# extending to c3745/c2691/c2600/c1700 is a 1-line addition.
 _PLATFORM_MODULE = {
-    "c3725": "c3600",   # c3725 is part of Dynamips' c3600 module family
+    "c3725": "c3725",
     "c7200": "c7200",
 }
 
 # Dynamips' c3600 module requires `set_chassis` so it knows which c3600
-# variant to emulate (3620 / 3640 / 3660 / 3725 / 3745).
-_PLATFORM_CHASSIS = {
-    "c3725": "3725",
-}
+# variant to emulate (3620 / 3640 / 3660). c3725 / c3745 are SEPARATE
+# top-level modules in 0.2.14 (created via ``vm create ... c3725``) — they
+# do NOT support set_chassis (the c3725 module doesn't expose it, and
+# trying ``c3600 set_chassis`` on them errors with "is not a VM type
+# c3600"). So this map is empty in Phase 1 and only gets populated if
+# we add a true c3600-class platform.
+_PLATFORM_CHASSIS: dict[str, str] = {}
 
 # RAM defaults per platform. User can override via template ``ram`` field.
 _PLATFORM_RAM_DEFAULT_MB = {
@@ -78,6 +85,11 @@ _PLATFORM_SLOT0_DEFAULT_PA = {
     "c3725": "GT96100-FE",   # built-in 2x FastEthernet on the motherboard
     "c7200": "C7200-IO-FE",  # I/O FastEthernet card in slot 0
 }
+
+# Platforms whose slot 0 is fixed hardware that dynamips pre-binds at
+# ``vm create`` time. Re-binding fails with "unable to add binding for
+# slot 0/0", so we skip the explicit slot_add_binding for these.
+_PLATFORM_SLOT0_PREBOUND = {"c3725"}
 
 # c7200 NPE (Network Processing Engine) selector. Templates may override.
 _PLATFORM_DEFAULT_NPE = {
@@ -159,14 +171,17 @@ class HypervisorClient:
     def request(self, command: str) -> _Reply:
         """Send one command, read until the terminal reply line.
 
-        Dynamips replies use the format ``CODE-text`` for continuation
-        lines and ``CODE text`` (space separator) for the terminal line.
-        Codes 100-199 indicate success.
+        Dynamips 0.2.14 replies use the format ``CODE text`` (space
+        separator) for data/continuation lines (typically code 101) and
+        ``CODE-text`` (dash separator) for the TERMINAL line. ``100-OK``
+        is the canonical success terminator; ``1xx-message`` is a
+        single-line success; ``2xx-message`` is a single-line error.
+        This is the inverse of SMTP-style protocols — beware.
         """
         if self._sock is None:
             self.connect()
         assert self._sock is not None
-        self._sock.sendall(command.encode("utf-8") + b"\r\n")
+        self._sock.sendall(command.encode("utf-8") + b"\n")
 
         code = 0
         lines: list[str] = []
@@ -178,9 +193,9 @@ class HypervisorClient:
             sep = raw[3]
             payload = raw[4:]
             lines.append(payload)
-            if sep == " ":
+            if sep == "-":
                 break
-            if sep != "-":
+            if sep != " ":
                 raise DynamipsError(f"unknown reply separator {sep!r} in {raw!r}")
         reply = _Reply(code=code, lines=lines)
         if not reply.ok:
@@ -406,31 +421,45 @@ class DynamipsLauncher:
             work_dir = _RUNTIME_ROOT / lab_id / str(node_id)
             work_dir.mkdir(parents=True, exist_ok=True)
 
-            # 1. Create the VM.
-            client.request(f"{module} create {vm_name} {vm_id} {platform}")
+            # 1. Create the VM under the generic ``vm`` namespace — in
+            #    dynamips 0.2.14 only ``vm create`` exists; the
+            #    platform-prefixed modules (c3600/c7200) have no
+            #    ``create`` command.
+            client.request(f"vm create {vm_name} {vm_id} {platform}")
             try:
-                # 2. Per-platform configuration.
+                # 2. Per-VM configuration. Everything common (RAM, IOS
+                #    image, idle-PC, console port) lives in the ``vm``
+                #    namespace; only hardware-shape knobs (chassis, NPE)
+                #    live under the platform module.
                 ram = int(template.get("ram") or _PLATFORM_RAM_DEFAULT_MB[platform])
-                client.request(f"{module} set_ram {vm_name} {ram}")
-                client.request(f"{module} set_image {vm_name} {image_path}")
-                client.request(f"{module} set_idle_pc {vm_name} {idle_pc}")
-                client.request(f"{module} set_con_tcp_port {vm_name} {console_port}")
+                client.request(f"vm set_ram {vm_name} {ram}")
+                client.request(f"vm set_ios {vm_name} {image_path}")
+                client.request(f"vm set_idle_pc {vm_name} {idle_pc}")
+                client.request(f"vm set_con_tcp_port {vm_name} {console_port}")
 
                 chassis = _PLATFORM_CHASSIS.get(platform)
-                if chassis:
+                if chassis and module == "c3600":
+                    # c3600 family needs the chassis variant (3620/3640/3660),
+                    # but c3725 is its own module without a chassis command.
                     client.request(f"{module} set_chassis {vm_name} {chassis}")
                 npe = template.get("npe") or _PLATFORM_DEFAULT_NPE.get(platform)
                 if npe and platform == "c7200":
                     client.request(f"{module} set_npe {vm_name} {npe}")
 
                 # 3. Default slot 0 binding (interfaces live here).
-                slot0_pa = (
-                    template.get("slot0")
-                    or _PLATFORM_SLOT0_DEFAULT_PA[platform]
-                )
-                client.request(
-                    f"{module} add_slot_binding {vm_name} 0 0 {slot0_pa}"
-                )
+                #    On c3725 (and other motherboard-FE platforms) the
+                #    builtin GT96100-FE is pre-bound at ``vm create``;
+                #    re-binding fails. We skip the call for those and
+                #    only emit slot_add_binding where it's required
+                #    (e.g. c7200 needs an explicit C7200-IO-FE).
+                if platform not in _PLATFORM_SLOT0_PREBOUND:
+                    slot0_pa = (
+                        template.get("slot0")
+                        or _PLATFORM_SLOT0_DEFAULT_PA[platform]
+                    )
+                    client.request(
+                        f"vm slot_add_binding {vm_name} 0 0 {slot0_pa}"
+                    )
 
                 # 4. Per-interface TAP+NIO wiring.
                 tap_names: list[str] = []
@@ -441,7 +470,7 @@ class DynamipsLauncher:
                     nio_name = self._nio_name(lab_id, node_id, iface_idx)
                     client.request(f"nio create_tap {nio_name} {tap}")
                     client.request(
-                        f"{module} add_nio_binding {vm_name} 0 {iface_idx} {nio_name}"
+                        f"vm slot_add_nio_binding {vm_name} 0 {iface_idx} {nio_name}"
                     )
                     tap_names.append(tap)
 
@@ -449,7 +478,7 @@ class DynamipsLauncher:
                 client.request(f"vm start {vm_name}")
             except Exception:
                 # Best-effort teardown of the half-built VM so a retry can succeed.
-                self._destroy_vm_locked(client, module, vm_name)
+                self._destroy_vm_locked(client, vm_name)
                 raise
 
             runtime = {
@@ -470,12 +499,10 @@ class DynamipsLauncher:
             return runtime
 
     def stop_node(self, runtime: dict[str, Any]) -> None:
-        platform = str(runtime.get("platform") or "c7200")
-        module = _PLATFORM_MODULE.get(platform, "c7200")
         vm_name = str(runtime["vm_name"])
         with self._lock:
             client = self._client_locked()
-            self._destroy_vm_locked(client, module, vm_name)
+            self._destroy_vm_locked(client, vm_name)
             self._clear_runtime(runtime)
 
     def is_alive(self, runtime: dict[str, Any]) -> bool:
@@ -486,11 +513,12 @@ class DynamipsLauncher:
             with self._lock:
                 client = self._client_locked()
                 reply = client.request(f"vm get_status {vm_name}")
-                # Dynamips returns "<code> 2" (running) / "1" (suspended) /
-                # "0" (stopped). We treat running as alive.
+                # Dynamips returns the status as the terminator payload:
+                # ``100-0`` (stopped), ``100-1`` (suspended), ``100-2``
+                # (running). We treat running as alive.
                 if reply.lines:
                     text = reply.lines[-1].strip()
-                    return text.endswith("2") or text == "2"
+                    return text == "2"
                 return False
         except DynamipsError:
             return False
@@ -535,12 +563,12 @@ class DynamipsLauncher:
 
         with self._lock:
             client = self._client_locked()
-            client.request(f"{module} create {vm_name} {vm_id} {platform}")
+            client.request(f"vm create {vm_name} {vm_id} {platform}")
             try:
-                client.request(f"{module} set_ram {vm_name} {ram}")
-                client.request(f"{module} set_image {vm_name} {image_path}")
+                client.request(f"vm set_ram {vm_name} {ram}")
+                client.request(f"vm set_ios {vm_name} {image_path}")
                 chassis = _PLATFORM_CHASSIS.get(platform)
-                if chassis:
+                if chassis and module == "c3600":
                     client.request(f"{module} set_chassis {vm_name} {chassis}")
                 if platform == "c7200":
                     client.request(
@@ -549,7 +577,7 @@ class DynamipsLauncher:
                     )
                 client.request(f"vm start {vm_name}")
             except Exception:
-                self._destroy_vm_locked(client, module, vm_name)
+                self._destroy_vm_locked(client, vm_name)
                 raise
 
         # Release the launcher lock while IOS boots — calibration is
@@ -570,7 +598,7 @@ class DynamipsLauncher:
         finally:
             with self._lock:
                 client = self._client_locked()
-                self._destroy_vm_locked(client, module, vm_name)
+                self._destroy_vm_locked(client, vm_name)
 
         if not candidates:
             raise DynamipsError(
@@ -607,12 +635,21 @@ class DynamipsLauncher:
     def _extract_idle_pc_candidates(
         client: HypervisorClient, vm_name: str
     ) -> list[str]:
-        reply = client.request(f"vm extract_idle_pc {vm_name}")
-        return [
-            line.strip()
-            for line in reply.lines
-            if line.strip().startswith("0x")
-        ]
+        """Ask dynamips for idle-PC candidates on CPU 0 of ``vm_name``.
+
+        Stock dynamips 0.2.14 has no ``vm extract_idle_pc`` command
+        (that's a GNS3-fork addition). The shipping idle-PC discovery
+        path is ``vm show_idle_pc_prop <vm> <cpu_id>`` which prints
+        candidate PCs as 101-data lines like ``0x60c09320 [12]``.
+        """
+        reply = client.request(f"vm show_idle_pc_prop {vm_name} 0")
+        candidates: list[str] = []
+        for line in reply.lines:
+            text = line.strip()
+            # Format: ``0x<hex> [<count>]`` — we only want the PC value.
+            if text.startswith("0x"):
+                candidates.append(text.split(None, 1)[0])
+        return candidates
 
     # ------------------------------------------------------------------
     # Helpers
@@ -721,20 +758,21 @@ class DynamipsLauncher:
     def _destroy_vm_locked(
         self,
         client: HypervisorClient,
-        module: str,
         vm_name: str,
     ) -> None:
-        # Stop is safe to call on a stopped VM; delete fails if the VM
-        # never existed. We swallow stop errors but bubble delete errors
-        # so an asymmetric tear-down is visible.
+        # ``vm clean_delete`` stops the VM (if running) and removes both
+        # the in-memory state and on-disk artifacts in one call — more
+        # forgiving than ``vm stop`` + ``vm delete``, which can fail
+        # 207 "unable to delete" if the VM is in a half-crashed state.
+        # We log and swallow errors here so a failed teardown never
+        # masks the original lifecycle error in the caller.
         try:
-            client.request(f"vm stop {vm_name}")
+            client.request(f"vm clean_delete {vm_name}")
         except DynamipsError as exc:
-            _logger.info(
-                "dynamips.stop.ignored",
+            _logger.warning(
+                "dynamips.destroy.failed",
                 extra={"vm_name": vm_name, "error": str(exc)},
             )
-        client.request(f"{module} delete {vm_name}")
 
     def _persist_runtime(self, runtime: dict[str, Any]) -> None:
         work_dir = Path(runtime["work_dir"])
