@@ -115,6 +115,7 @@
         position={port}
         {nodeId}
         {interfaceIndex}
+        connected={(iface.network_id ?? 0) > 0}
         highlighted={highlightedInterfaceIndex === interfaceIndex}
         on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
         on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
