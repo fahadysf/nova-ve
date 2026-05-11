@@ -105,16 +105,55 @@
   $: divergentTooltip = isDivergent
     ? `Declared in lab.json but not present in kernel. Last checked ${data?.last_checked ?? 'unknown'}.`
     : '';
+
+  let hovered = false;
+
+  // Append a wider stroke-width to the existing inline style on hover.
+  // Inline-style declarations later in the string win, so appending
+  // ``; stroke-width: Npx`` cleanly overrides whatever width
+  // canvasEdges.ts set. ``Math.max(base + 2, 4)`` guarantees a
+  // visible bump even on already-thick lines without shrinking them.
+  function boldenStyle(baseStyle: string | undefined): string {
+    const base = baseStyle ?? '';
+    const match = base.match(/stroke-width:\s*([\d.]+)px/);
+    const baseWidth = match ? parseFloat(match[1]) : 1;
+    const boldWidth = Math.max(baseWidth + 2, 4);
+    return `${base}; stroke-width: ${boldWidth}px`;
+  }
+
+  $: visibleStyle = hovered ? boldenStyle(style) : (style ?? '');
 </script>
+
+<!-- Invisible 8-unit hit area: ``pointer-events: stroke`` confines
+     hits to the ~±4px region around the line (roughly the 3px proximity
+     requested), and ``vector-effect: non-scaling-stroke`` keeps that
+     tolerance in screen pixels at any zoom level. Mouse enter/leave on
+     this path drives the hover state used to bolden the visible line.
+     Click events bubble up to svelte-flow's edge wrapper for selection. -->
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<path
+  class="nv-link-edge-hitbox"
+  d={dAttr}
+  fill="none"
+  stroke="transparent"
+  stroke-width="8"
+  vector-effect="non-scaling-stroke"
+  pointer-events="stroke"
+  aria-hidden="true"
+  on:pointerenter={() => (hovered = true)}
+  on:pointerleave={() => (hovered = false)}
+/>
 
 <path
   {id}
   class="svelte-flow__edge-path"
+  class:nv-link-edge-hovered={hovered}
   d={dAttr}
-  style={style ?? ''}
+  style={visibleStyle}
   marker-start={markerStart}
   marker-end={markerEnd}
   fill="none"
+  pointer-events="none"
 />
 
 {#if label}
@@ -144,3 +183,12 @@
     <title>{divergentTooltip}</title>
   </text>
 {/if}
+
+<style>
+  .nv-link-edge-hitbox {
+    cursor: pointer;
+  }
+  .svelte-flow__edge-path {
+    transition: stroke-width 120ms ease-out;
+  }
+</style>
