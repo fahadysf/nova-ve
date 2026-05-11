@@ -26,7 +26,9 @@ On a fresh Ubuntu 26.04 LTS x86_64 host with sudo access:
 curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | sudo bash
 ```
 
-> **Migrating from EVE-NG / UNetLab / PNETLab?** See [`docs/migrating-from-eve-ng.md`](docs/migrating-from-eve-ng.md) for the importer walk-through (default mode is non-destructive — sources preserved unless `--delete-source` is passed).
+> **Full documentation** lives at <https://fahadysf.github.io/nova-ve/> (built from `docs/`).
+>
+> **Migrating from EVE-NG / UNetLab / PNETLab?** See the [Importing from EVE-NG](docs/importing-eveng/index.md) section for the importer walk-through (default mode is non-destructive — sources preserved unless `--delete-source` is passed).
 
 That single command:
 
@@ -53,7 +55,7 @@ Override knobs (env vars):
 
 After install, open `http://<host>/` and log in with the admin credentials printed at the end of the run (also written to `nova-ve-install-summary.md`).
 
-For development workflows (running the backend with `--reload`, the frontend dev server, or a Rancher Desktop loop on macOS), see [`deploy/DEPLOYMENT_CONTRACT.md`](deploy/DEPLOYMENT_CONTRACT.md) and the helper scripts in [`deploy/scripts/`](deploy/scripts/).
+For development workflows (running the backend with `--reload`, the frontend dev server, or a Rancher Desktop loop on macOS), see the [Deployment contract](docs/development/deployment-contract.md) and the helper scripts in [`deploy/scripts/`](deploy/scripts/).
 
 ## Project Structure
 
