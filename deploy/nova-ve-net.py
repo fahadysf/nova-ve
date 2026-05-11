@@ -430,13 +430,29 @@ def _validate_port(value: str, *, label: str) -> int:
 
 
 def cmd_console_proxy_start(args: argparse.Namespace) -> int:
-    """Spawn the console TCP forwarder for a manual-veth Docker container.
+    """Spawn the console TCP forwarder for a manual-veth Docker container
+    or a dynamips loopback-only console.
 
-    Authorizes the target pid against the runtime registry, then double-forks
-    the proxy script with ``setsid`` so it survives the helper exiting.
-    Prints the daemonized PID to stdout (caller persists it for later kill).
+    Two pid shapes:
+
+      * **pid > 1** — netns-confined target (Docker --network=none). The
+        pid is authorized against the runtime registry + cgroup before
+        the proxy is allowed to setns into it.
+      * **pid == 0** — default-netns target (dynamips). No setns; the
+        proxy just republishes a host loopback port on ``0.0.0.0``. The
+        registry lookup is skipped because there's no container pid to
+        bind the proxy to. This is safe: the proxy only forwards to
+        ``127.0.0.1:<target_port>``, and the listen port allocation
+        still flows through the backend's port pool.
+
+    Double-forks the proxy script with ``setsid`` so it survives the helper
+    exiting. Prints the daemonized PID to stdout (caller persists it for
+    later kill).
     """
-    target_pid = authorize_pid(args.pid)
+    if str(args.pid).strip() == "0":
+        target_pid = 0
+    else:
+        target_pid = authorize_pid(args.pid)
     listen_port = _validate_port(args.listen_port, label="listen_port")
     target_port = _validate_port(args.target_port, label="target_port")
     if listen_port < 1024:
