@@ -20,6 +20,7 @@ Per-kind specifics:
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from dataclasses import dataclass
@@ -27,6 +28,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from ._app_owner import AppOwner
+from .adapters import NeedsManualReview, select_adapter
 from .copy_engine import CopyEngineError, CopyMode, CopyOutcome, perform_copy
 from .manifest import (
     ErrorEntry,
@@ -43,6 +45,8 @@ from .walker import (
     KIND_QEMU,
     MigrationItem,
 )
+
+
 
 _logger = logging.getLogger("nova_ve.import_eveng")
 
@@ -204,6 +208,79 @@ def migrate_docker(
     )
 
 
+def _generate_template_for_item(
+    item: MigrationItem,
+    *,
+    templates_dir: Path,
+    manifest: ImportManifest,
+) -> None:
+    """Run the EVE-NG vendor-adapter pipeline on one migrated item.
+
+    The adapter registry was previously imported but never exercised
+    outside tests (the converted templates were assumed to exist out of
+    band). This helper closes that loop: it synthesises a minimal raw
+    dict from the migration item's filename + meta, dispatches to the
+    highest-priority matching :class:`VendorAdapter`, and writes the
+    resulting nova-ve template JSON under ``USER_TEMPLATES_DIR``.
+
+    Adapters that decide the item needs operator attention raise
+    :class:`NeedsManualReview`; that becomes a ``needs-manual-review``
+    manifest entry rather than aborting the import.
+    """
+    # Synthesize the smallest raw payload the registered adapters need
+    # to dispatch on. Adapters match on ``image`` and optional ``type``.
+    raw: dict[str, object] = {
+        "image": item.image_key,
+        "name": item.image_key,
+        "type": item.kind,
+        "_eveng_raw": dict(item.meta),
+    }
+    # Carry through anything the walker stashed in meta (e.g. ram,
+    # ethernet, slot bindings if a future walker enrichment populates it).
+    for key, value in item.meta.items():
+        raw.setdefault(key, value)
+
+    adapter = select_adapter(raw)
+    if adapter is None:
+        # No adapter claimed the image. Record as a skipped template so
+        # the manifest still surfaces the gap without aborting.
+        manifest.templates.append(
+            TemplateEntry(
+                name=item.image_key,
+                status="skipped",
+                reason="no vendor adapter matched",
+            )
+        )
+        return
+
+    try:
+        template_payload = adapter.convert(raw, item.dst_dir)
+    except NeedsManualReview as exc:
+        manifest.templates.append(
+            TemplateEntry(
+                name=item.image_key,
+                status="needs-manual-review",
+                reason=str(exc),
+            )
+        )
+        return
+
+    template_type = str(template_payload.get("kind") or item.kind)
+    dest = templates_dir / template_type / f"{item.image_key}.json"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    # ``type`` is required by the template loader; write it alongside
+    # ``kind`` to satisfy both the loader and the legacy schema.
+    template_payload.setdefault("type", template_type)
+    dest.write_text(json.dumps(template_payload, indent=2, sort_keys=True))
+    manifest.templates.append(
+        TemplateEntry(
+            name=item.image_key,
+            status="generated",
+            reason=f"adapter={adapter.name}",
+        )
+    )
+
+
 # ---- top-level entry ----------------------------------------------------
 
 
@@ -215,13 +292,18 @@ def run_migration(
     owner: AppOwner | None = None,
     docker_build: DockerBuildFn | None = None,
     dest_root: Path | None = None,
+    templates_dir: Path | None = None,
 ) -> None:
     """Migrate every item; record outcomes on ``manifest``.
 
     If ``owner`` is provided, every destination dir / file gets owner+perm
     fixup applied. If ``dest_root`` is provided, the entire dest tree is
     re-walked for fixup at the end (catches the pre-existing root-owned
-    ``<dest>/qemu/`` parent dir bug).
+    ``<dest>/qemu/`` parent dir bug). If ``templates_dir`` is provided,
+    every migrated item runs through the vendor-adapter registry to
+    produce a nova-ve template JSON under that path; if it is ``None``,
+    template generation is skipped entirely (legacy mode — the importer
+    only copies images and lets the operator hand-author templates).
     """
     docker_build = docker_build or _default_docker_build
 
@@ -237,6 +319,12 @@ def run_migration(
         else:  # pragma: no cover — defensive
             manifest.errors.append(
                 ErrorEntry(path=str(item.src_dir), error=f"unknown kind: {item.kind}")
+            )
+            continue
+
+        if templates_dir is not None:
+            _generate_template_for_item(
+                item, templates_dir=templates_dir, manifest=manifest
             )
 
     if owner is not None:

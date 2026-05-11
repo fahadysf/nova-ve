@@ -59,6 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Where to write the run manifest JSON (default: {DEFAULT_MANIFEST}).",
     )
     parser.add_argument(
+        "--templates-dir",
+        type=Path,
+        default=Path("/var/lib/nova-ve/templates"),
+        help=(
+            "Destination for nova-ve template JSON produced by the "
+            "vendor-adapter pipeline. Pass an empty path or '-' to skip "
+            "template generation. Default: /var/lib/nova-ve/templates."
+        ),
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Plan the run without touching the destination filesystem.",
@@ -169,12 +179,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             },
         )
         options = MigrateOptions(mode=mode, force=args.force)
+        templates_dir = args.templates_dir
+        # Operator opt-out: pass '-' or an empty path to skip generation.
+        if templates_dir is not None and str(templates_dir) in {"", "-"}:
+            templates_dir = None
         run_migration(
             items,
             options=options,
             manifest=manifest,
             owner=owner,
             dest_root=args.dest,
+            templates_dir=templates_dir,
         )
 
     manifest.mark_finished()
