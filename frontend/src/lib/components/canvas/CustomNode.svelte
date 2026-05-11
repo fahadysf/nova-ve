@@ -4,7 +4,9 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { Handle, Position } from '@xyflow/svelte';
+  import { Info } from 'lucide-svelte';
   import PortLayer from './PortLayer.svelte';
+  import { infoPanels } from '$lib/stores/infoPanels';
   import type { NodeInterface, PortPosition } from '$lib/types';
 
   export let data: {
@@ -27,6 +29,13 @@
     'port:mouseleave': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:dragend': { nodeId: number; interfaceIndex: number; port: PortPosition };
   }>();
+
+  function openInfo(event: MouseEvent) {
+    event.stopPropagation();
+    if (typeof nodeId === 'number') {
+      infoPanels.open('node', nodeId);
+    }
+  }
 
   $: running = data.status === 2;
   $: transitioning = data.transientStatus === 'starting' || data.transientStatus === 'stopping';
@@ -93,4 +102,16 @@
     on:port:mouseleave={(e) => dispatch('port:mouseleave', e.detail)}
     on:port:dragend={(e) => dispatch('port:dragend', e.detail)}
   />
+
+  <button
+    type="button"
+    class="nodrag absolute bottom-1 right-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-700 bg-gray-900/80 text-gray-400 transition hover:border-blue-500/40 hover:text-white"
+    aria-label="Open node info panel"
+    title="Open info panel"
+    data-testid="node-info-button"
+    on:click={openInfo}
+    on:pointerdown|stopPropagation
+  >
+    <Info class="h-3 w-3" />
+  </button>
 </div>
