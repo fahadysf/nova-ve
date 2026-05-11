@@ -1106,6 +1106,25 @@
     });
   }
 
+  function nextAvailableNetworkName(): string {
+    // Lowest ``net-N`` not currently taken (case-insensitive, trimmed).
+    // Earlier ``net-${count + 1}`` collided after deletes: removing
+    // ``net-3`` from {net-1, net-2, net-3} dropped count to 2 → next
+    // create suggested ``net-2`` which already exists, and the server
+    // 409s. This walks the in-memory set to skip occupied slots.
+    const used = new Set<string>();
+    for (const id of Object.keys(localNetworks)) {
+      const record = localNetworks[id];
+      if (record && typeof record.name === 'string') {
+        const trimmed = record.name.trim().toLowerCase();
+        if (trimmed) used.add(trimmed);
+      }
+    }
+    let i = 1;
+    while (used.has(`net-${i}`)) i += 1;
+    return `net-${i}`;
+  }
+
   function addPaletteItem(item: PaletteItem) {
     const viewport = typeof window !== 'undefined'
       ? screenToFlowPosition(
@@ -1116,7 +1135,7 @@
 
     if (item.kind === 'network') {
       pendingNetworkPosition = viewport;
-      networkModalDefaultName = `net-${Object.keys(localNetworks).length + 1}`;
+      networkModalDefaultName = nextAvailableNetworkName();
       networkModalDefaultType = item.networkType;
       networkModalOpen = true;
       closeAddMenu();
