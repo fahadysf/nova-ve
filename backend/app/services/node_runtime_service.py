@@ -2075,13 +2075,16 @@ class NodeRuntimeService:
                 )
 
         # ----- Build the docker run command (no networking flags) ----------
+        # No ``--rm``: it conflicts with ``--restart`` (docker rejects with
+        # "conflicting options: cannot specify both --restart and --rm"),
+        # and stop_node already runs ``docker rm -f`` so the auto-delete
+        # behavior was redundant anyway.
         cmd = [
             docker_binary,
             "--host",
             self.settings.DOCKER_HOST,
             "run",
             "-d",
-            "--rm",
             "--name",
             container_name,
             "--cpus",
