@@ -1022,14 +1022,8 @@
   {/if}
 
   {#if loading}
-    <div class="grid flex-1 gap-3 p-4 lg:grid-cols-[15rem_1fr]">
-      <div class="animate-pulse rounded-2xl border border-gray-800 bg-gray-900 p-5">
-        <div class="h-5 w-2/3 rounded bg-gray-700"></div>
-        <div class="mt-4 h-3 w-full rounded bg-gray-800"></div>
-        <div class="mt-2 h-3 w-5/6 rounded bg-gray-800"></div>
-        <div class="mt-2 h-3 w-3/4 rounded bg-gray-800"></div>
-      </div>
-      <div class="animate-pulse rounded-2xl border border-gray-800 bg-gray-900/70 p-4">
+    <div class="flex flex-1 p-3">
+      <div class="animate-pulse flex-1 rounded-2xl border border-gray-800 bg-gray-900/70 p-4">
         <div class="h-full min-h-[26rem] rounded-xl border border-dashed border-gray-800 bg-gray-950/60"></div>
       </div>
     </div>
