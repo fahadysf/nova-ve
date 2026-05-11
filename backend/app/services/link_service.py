@@ -62,6 +62,44 @@ def _refcount(lab_data: dict, network_id: int) -> int:
     )
 
 
+def _link_references_endpoint(
+    lab_data: dict, node_id: int, interface_index: int, network_id: int
+) -> bool:
+    """True iff some link in lab.json wires ``(node_id, iface)`` to ``network_id``.
+
+    Used to distinguish a genuine in-use conflict from an orphaned
+    ``runtime.interface_attachments`` entry: if the runtime claims iface N
+    is attached to network M but no link in lab.json references that
+    pairing, the runtime is stale and can be auto-healed.
+    """
+    target_node = int(node_id)
+    target_iface = int(interface_index)
+    target_net = int(network_id)
+    for link in lab_data.get("links", []) or []:
+        if not isinstance(link, dict):
+            continue
+        has_node_match = False
+        has_network_match = False
+        for endpoint in (link.get("from"), link.get("to")):
+            if not isinstance(endpoint, dict):
+                continue
+            try:
+                if "node_id" in endpoint:
+                    if (
+                        int(endpoint["node_id"]) == target_node
+                        and int(endpoint.get("interface_index", 0)) == target_iface
+                    ):
+                        has_node_match = True
+                elif "network_id" in endpoint:
+                    if int(endpoint["network_id"]) == target_net:
+                        has_network_match = True
+            except (TypeError, ValueError):
+                continue
+        if has_node_match and has_network_match:
+            return True
+    return False
+
+
 def _next_link_id(lab_data: dict) -> str:
     max_n = 0
     for link in lab_data.get("links", []) or []:
@@ -735,6 +773,58 @@ class LinkService:
                     host_net.bridge_fingerprint_write(bridge, lab_id, network_id)
                 except host_net.HostNetError:
                     pass
+
+        # Auto-heal orphaned ``runtime.interface_attachments`` entries that
+        # would otherwise block the attach with "interface_index=N already
+        # attached to network M". An entry is orphaned when no link in
+        # lab.json wires (node, iface, M) — a crash, partial rollback, or
+        # out-of-band lab.json edit can leave runtime state ahead of the
+        # JSON. The per-(lab, node, iface) mutex held by ``create_link``
+        # also satisfies the precondition of ``_detach_*_interface_locked``.
+        for node_id, interface_index, network_id, _bridge, kind in attach_targets:
+            runtime_record = runtime_service._runtime_record(
+                lab_id, node_id, include_stopped=True
+            )
+            if runtime_record is None:
+                continue
+            orphan_nets: List[int] = []
+            for entry in runtime_record.get("interface_attachments") or []:
+                try:
+                    if int(entry.get("interface_index", -1)) != int(interface_index):
+                        continue
+                    existing_net = int(entry.get("network_id", -1))
+                except (TypeError, ValueError):
+                    continue
+                if existing_net == int(network_id):
+                    continue  # same-network re-attach: helper is idempotent
+                if _link_references_endpoint(
+                    lab_data, node_id, interface_index, existing_net
+                ):
+                    continue  # genuine in-use conflict; let the helper raise
+                orphan_nets.append(existing_net)
+            for orphan_net in orphan_nets:
+                _logger.warning(
+                    "create_link: auto-healing orphaned runtime attachment "
+                    "lab=%s node=%s iface=%s stale_network=%s (no matching link in lab.json)",
+                    lab_id, node_id, interface_index, orphan_net,
+                )
+                try:
+                    if kind == "docker":
+                        runtime_service._detach_docker_interface_locked(
+                            lab_id, node_id, interface_index
+                        )
+                    else:
+                        runtime_service._detach_qemu_interface_locked(
+                            lab_id, node_id, interface_index
+                        )
+                except (NodeRuntimeError, host_net.HostNetError) as heal_exc:
+                    # Best-effort: log and let the attach surface its own
+                    # error if the detach didn't clear the stale state.
+                    _logger.warning(
+                        "create_link: orphan auto-heal detach failed "
+                        "lab=%s node=%s iface=%s: %s",
+                        lab_id, node_id, interface_index, heal_exc,
+                    )
 
         # Attach each target. On the FIRST failure, sweep the bridges + every
         # already-attached interface so we leave no host-side leftover.
