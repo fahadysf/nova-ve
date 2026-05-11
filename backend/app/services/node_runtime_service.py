@@ -1429,6 +1429,14 @@ class NodeRuntimeService:
         if runtime.get("kind") == "docker":
             return self._is_docker_running(runtime)
 
+        if runtime.get("kind") == "dynamips":
+            # Dynamips VMs have no per-VM pid — the hypervisor is a
+            # shared per-host process that owns many VMs. Ask the
+            # launcher to query the hypervisor for this VM's status
+            # instead of treating the missing pid as "dead".
+            from app.services.runtime.dynamips import DynamipsLauncher
+            return DynamipsLauncher.instance().is_alive(runtime)
+
         pid = runtime.get("pid")
         if not pid:
             return False
