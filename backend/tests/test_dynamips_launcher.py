@@ -10,10 +10,15 @@ from __future__ import annotations
 
 import socket
 import threading
+from pathlib import Path
 
 import pytest
 
-from app.services.runtime.dynamips import DynamipsError, HypervisorClient
+from app.services.runtime.dynamips import (
+    DynamipsError,
+    DynamipsLauncher,
+    HypervisorClient,
+)
 
 
 def _serve_replies(replies: list[bytes]) -> tuple[int, threading.Event]:
@@ -125,3 +130,73 @@ def test_request_raises_on_premature_close() -> None:
             client.request("hypervisor version")
     finally:
         client.close()
+
+
+# ---- Image-path resolution -----------------------------------------------
+
+
+def test_resolve_image_path_accepts_flat_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    filename = "c7200-adventerprisek9-mz.124-24.T5.image"
+    (tmp_path / filename).write_bytes(b"FAKE")
+
+    resolved = DynamipsLauncher._resolve_image_path({"image": filename})
+    assert resolved == tmp_path / filename
+
+
+def test_resolve_image_path_accepts_eveng_subdir_layout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EVE-NG importer drops images at ``<root>/<key>/<key>.image`` —
+    one image per subdirectory, where the subdir name equals the
+    filename stem. The resolver must find images in this layout when
+    the template stores only the bare filename.
+    """
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    key = "c3725-adventerprisek9-mz.124-15.T14"
+    filename = f"{key}.image"
+    (tmp_path / key).mkdir()
+    (tmp_path / key / filename).write_bytes(b"FAKE")
+
+    resolved = DynamipsLauncher._resolve_image_path({"image": filename})
+    assert resolved == tmp_path / key / filename
+
+
+def test_resolve_image_path_prefers_flat_over_nested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the same filename exists in both layouts (rare but possible
+    after a manual ``cp``), the flat-layout copy wins — matches the
+    resolver's documented search order.
+    """
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    key = "c7200-image"
+    filename = f"{key}.image"
+    (tmp_path / filename).write_bytes(b"FLAT")
+    (tmp_path / key).mkdir()
+    (tmp_path / key / filename).write_bytes(b"NESTED")
+
+    resolved = DynamipsLauncher._resolve_image_path({"image": filename})
+    assert resolved.read_bytes() == b"FLAT"
+
+
+def test_resolve_image_path_absolute_passthrough(tmp_path: Path) -> None:
+    image = tmp_path / "absolute-c7200.image"
+    image.write_bytes(b"FAKE")
+    resolved = DynamipsLauncher._resolve_image_path({"image": str(image)})
+    assert resolved == image
+
+
+def test_resolve_image_path_missing_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
+    with pytest.raises(DynamipsError, match="not found"):
+        DynamipsLauncher._resolve_image_path({"image": "missing.image"})
+
+
+def test_resolve_image_path_no_image_field_raises() -> None:
+    with pytest.raises(DynamipsError, match="no image path"):
+        DynamipsLauncher._resolve_image_path({})

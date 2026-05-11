@@ -42,6 +42,7 @@ _logger = logging.getLogger("nova-ve.runtime.dynamips")
 
 
 _RUNTIME_ROOT = Path("/var/lib/nova-ve/runtime")
+_IMAGES_ROOT = Path("/var/lib/nova-ve/images/dynamips")
 _IDLE_PC_CACHE_PATH = _RUNTIME_ROOT / "idle_pc_cache.json"
 _HYPERVISOR_HOST = "127.0.0.1"
 _HYPERVISOR_CONNECT_TIMEOUT_S = 5.0
@@ -490,15 +491,37 @@ class DynamipsLauncher:
 
     @staticmethod
     def _resolve_image_path(template: dict[str, Any]) -> Path:
+        """Resolve a dynamips template's ``image`` field to a real path.
+
+        Two on-disk layouts are accepted:
+
+        * **Flat**: ``/var/lib/nova-ve/images/dynamips/<filename>`` — what
+          a hand-authored template typically points at.
+        * **EVE-NG-imported (per-image subdir)**:
+          ``/var/lib/nova-ve/images/dynamips/<stem>/<filename>`` — what
+          the importer produces for ``<source>/addons/dynamips/*.image``.
+
+        Templates store just the filename in ``image`` and let the
+        runtime locate it; absolute paths are honoured as-is.
+        """
         image = template.get("image")
         if not image:
             raise DynamipsError("dynamips template has no image path")
         path = Path(str(image))
-        if not path.is_absolute():
-            path = Path("/var/lib/nova-ve/images/dynamips") / path
-        if not path.is_file():
-            raise DynamipsError(f"dynamips image not found at {path}")
-        return path
+        if path.is_absolute():
+            if not path.is_file():
+                raise DynamipsError(f"dynamips image not found at {path}")
+            return path
+
+        flat = _IMAGES_ROOT / path
+        if flat.is_file():
+            return flat
+        nested = _IMAGES_ROOT / path.stem / path.name
+        if nested.is_file():
+            return nested
+        raise DynamipsError(
+            f"dynamips image {path.name!r} not found at {flat} or {nested}"
+        )
 
     def _resolve_idle_pc(self, template: dict[str, Any], image_path: Path) -> str:
         # 1. Explicit template override always wins.
