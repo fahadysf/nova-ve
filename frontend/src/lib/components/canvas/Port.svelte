@@ -338,7 +338,7 @@
   {/if}
   {#if connected && !showTooltip}
     <span
-      class="pointer-events-none absolute whitespace-nowrap rounded-sm border border-gray-700/70 bg-gray-950/85 px-1 py-px font-mono text-[9px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm"
+      class="pointer-events-none absolute whitespace-nowrap rounded-sm border border-gray-700/70 bg-gray-950/85 px-1 py-px font-mono text-[7.5px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm"
       style={pinnedLabelStyle}
       data-testid="port-pinned-label"
       aria-hidden="true"
