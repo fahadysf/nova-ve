@@ -11,6 +11,8 @@
   import { toastStore } from '$lib/stores/toasts';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
+  import InfoPanelStack from '$lib/components/canvas/InfoPanelStack.svelte';
+  import { infoPanels } from '$lib/stores/infoPanels';
   import type {
     FolderListing,
     LabDefaults,
@@ -50,7 +52,6 @@
     floating: FloatingWindowState;
   };
   type ConsoleMode = 'tabbed' | 'floating';
-  type RailSectionKey = 'summary' | 'inventory' | 'nodes' | 'networks';
   type CanvasChangeDetail = {
     reason: string;
     nodeId?: number;
@@ -97,13 +98,6 @@
   let activeConsoleTabState: ConsoleTab | null = null;
   let consoleTabCounter = 0;
   let canvasContainerEl: HTMLDivElement | null = null;
-  let railCollapsed = false;
-  let railSections: Record<RailSectionKey, boolean> = {
-    summary: true,
-    inventory: true,
-    nodes: true,
-    networks: true
-  };
   let lastLoadedRoute = '';
   let dragState:
     | { startX: number; startY: number; originX: number; originY: number; windowId: number | null }
@@ -119,13 +113,11 @@
     'inline-flex items-center rounded-md border border-gray-800 bg-gray-950/80 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.18em] text-gray-300 transition hover:border-blue-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
   const chromePillClass =
     'inline-flex items-center rounded-full border border-gray-700/80 bg-gray-950/80 px-2.5 py-1 text-[9px] uppercase tracking-[0.18em] text-gray-300';
-  const inventoryCardClass =
-    'rounded-xl border border-gray-800 bg-gray-900/80 p-2.5 transition hover:border-gray-700';
-
   $: labId = $page.params.id ?? '';
   $: isLabIndexRoute = labId === '';
   $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
   $: networkList = Object.values(networks).sort((a, b) => a.id - b.id);
+  $: totalVCpu = nodeList.reduce((total, node) => total + (node.cpu ?? 0), 0);
   $: runningConsoleNodes = nodeList.filter((node) => node.status === 2 && !node.transientStatus);
   $: runningNodeCount = runningConsoleNodes.length;
   $: currentUserLabel = $authStore.user?.name || $authStore.user?.username || 'Operator';
@@ -329,19 +321,6 @@
     if (tabId != null) {
       closeConsole(tabId);
     }
-  }
-
-  function nodeStatusLabel(node: NodeData): string {
-    if (node.transientStatus === 'starting') return 'starting';
-    if (node.transientStatus === 'stopping') return 'stopping';
-    return node.status === 2 ? 'run' : 'stop';
-  }
-
-  function nodeStatusClass(node: NodeData): string {
-    if (node.transientStatus) {
-      return 'bg-amber-300/20 text-amber-200';
-    }
-    return node.status === 2 ? 'bg-emerald-500/20 text-emerald-200' : 'bg-gray-800 text-gray-300';
   }
 
   async function refreshLabFromCanvas(
@@ -931,16 +910,6 @@
     resizeState = null;
   }
 
-  function toggleRailSection(section: RailSectionKey) {
-    railSections = {
-      ...railSections,
-      [section]: !railSections[section]
-    };
-  }
-
-  function toggleRailCollapsed() {
-    railCollapsed = !railCollapsed;
-  }
 </script>
 
 <svelte:window
@@ -972,10 +941,19 @@
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab Editor</div>
             <div class="flex flex-wrap items-center gap-[0.15rem]">
               <h1 class="truncate text-lg font-semibold tracking-tight text-gray-100">{labMeta?.name || labId}</h1>
-              <span class={`${chromePillClass} ${runningNodeCount ? 'border-emerald-500/30 text-emerald-200' : ''}`}>
-                {runningNodeCount} running
-              </span>
-              <span class={chromePillClass}>{networkList.length} networks</span>
+              <div class="ml-2 inline-flex items-center gap-1 rounded-full border border-gray-800 bg-gray-950/70 px-1 py-0.5">
+                <span class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5`}
+                  >{nodeList.length} <span class="text-gray-500">nodes</span></span>
+                <span
+                  class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5 ${
+                    runningNodeCount ? 'text-emerald-200' : ''
+                  }`}
+                  >{runningNodeCount} <span class="text-gray-500">running</span></span>
+                <span class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5`}
+                  >{networkList.length} <span class="text-gray-500">net</span></span>
+                <span class={`${chromePillClass} border-transparent bg-transparent px-2 py-0.5`}
+                  >{totalVCpu} <span class="text-gray-500">vCPU</span></span>
+              </div>
               {#if consoleMode === 'tabbed'}
                 <span class={chromePillClass}>{consoleTabCount} consoles</span>
               {/if}
@@ -1062,243 +1040,8 @@
       {/if}
     </div>
   {:else}
-    <div class="relative flex flex-1 gap-2.5 overflow-hidden p-3">
-      <aside
-        class="min-h-0 shrink-0 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/95 transition-[width] duration-200"
-        style={`width: ${railCollapsed ? '3.5rem' : '15rem'};`}
-      >
-        <div class="flex h-full flex-col">
-          <div class="flex items-center justify-between border-b border-gray-800 px-3.5 py-3">
-            {#if railCollapsed}
-              <div class="flex w-full flex-col items-center gap-2">
-                <button
-                  type="button"
-                  class={compactIconButtonClass}
-                  aria-label="Expand lab rail"
-                  title="Expand lab rail"
-                  on:click={toggleRailCollapsed}
-                >
-                  <ChevronsRight class="h-3.5 w-3.5" />
-                </button>
-                <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500 [writing-mode:vertical-rl]">
-                  Rail
-                </div>
-              </div>
-            {:else}
-              <div class="flex w-full items-center justify-between gap-2">
-                <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab Rail</div>
-                <div class="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    class={compactIconButtonClass}
-                    aria-label="Refresh lab"
-                    title="Refresh lab"
-                    on:click={refreshLabManually}
-                    disabled={labRefreshInFlight}
-                  >
-                    <RefreshCw class={`h-3.5 w-3.5 ${labRefreshInFlight ? 'animate-spin' : ''}`} />
-                  </button>
-                  <button
-                    type="button"
-                    class={compactIconButtonClass}
-                    aria-label="Collapse lab rail"
-                    title="Collapse lab rail"
-                    on:click={toggleRailCollapsed}
-                  >
-                    <ChevronsLeft class="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-            {/if}
-          </div>
-
-          {#if !railCollapsed}
-            <div class="min-h-0 space-y-3 overflow-y-auto p-3 text-xs">
-              <section class="rounded-2xl border border-gray-800 bg-gray-950/70">
-                <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3.5 py-2.5">
-                  <button
-                    type="button"
-                    class="flex min-w-0 flex-1 items-center gap-2 text-left text-gray-200"
-                    aria-label={railSections.summary ? 'Collapse summary section' : 'Expand summary section'}
-                    on:click={() => toggleRailSection('summary')}
-                  >
-                    {#if railSections.summary}
-                      <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
-                    {:else}
-                      <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
-                    {/if}
-                    <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Summary</span>
-                  </button>
-                </div>
-
-                {#if railSections.summary}
-                  <div class="space-y-3 px-3.5 py-3">
-                    <div class="grid grid-cols-2 gap-2">
-                      {#each summaryStats as stat}
-                        <div class="rounded-xl border border-gray-800 bg-gray-900/70 px-2.5 py-2">
-                          <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">{stat.label}</div>
-                          <div class="mt-1 text-[11px] font-medium text-gray-100">{stat.value}</div>
-                        </div>
-                      {/each}
-                    </div>
-                    <div>
-                      <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Owner</div>
-                      <div class="mt-1 text-[11px] text-gray-100">{labMeta?.owner || 'n/a'}</div>
-                    </div>
-                    <div>
-                      <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Author</div>
-                      <div class="mt-1 text-[11px] text-gray-100">{labMeta?.author || 'n/a'}</div>
-                    </div>
-                    <div>
-                      <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Path</div>
-                      <div class="mt-1 break-all font-mono text-[11px] text-gray-300">{labMeta?.path || labId}</div>
-                    </div>
-                    <div>
-                      <div class="text-[10px] uppercase tracking-[0.18em] text-gray-500">Description</div>
-                      <div class="mt-1 text-[11px] leading-5 text-gray-300">{labMeta?.description || 'No description set.'}</div>
-                    </div>
-                  </div>
-                {/if}
-              </section>
-
-              <section class="rounded-2xl border border-gray-800 bg-gray-950/70">
-                <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-3.5 py-2.5">
-                  <button
-                    type="button"
-                    class="flex min-w-0 flex-1 items-center gap-2 text-left text-gray-200"
-                    aria-label={railSections.inventory ? 'Collapse inventory section' : 'Expand inventory section'}
-                    on:click={() => toggleRailSection('inventory')}
-                  >
-                    {#if railSections.inventory}
-                      <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
-                    {:else}
-                      <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
-                    {/if}
-                    <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Inventory</span>
-                  </button>
-                  <div class="text-[10px] uppercase tracking-[0.18em] text-gray-600">
-                    {nodeList.length}n · {networkList.length}net
-                  </div>
-                </div>
-
-                {#if railSections.inventory}
-                  <div class="space-y-2.5 px-3.5 py-3">
-                    <div class="rounded-xl border border-gray-800 bg-gray-950/70">
-                      <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-2.5 py-2">
-                        <button
-                          type="button"
-                          class="flex min-w-0 flex-1 items-center gap-2 text-left"
-                          aria-label={railSections.nodes ? 'Collapse nodes section' : 'Expand nodes section'}
-                          on:click={() => toggleRailSection('nodes')}
-                        >
-                          {#if railSections.nodes}
-                            <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
-                          {:else}
-                            <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
-                          {/if}
-                          <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Nodes</span>
-                        </button>
-                        <span class="text-[10px] text-gray-600">{nodeList.length}</span>
-                      </div>
-
-                      {#if railSections.nodes}
-                        {#if nodeList.length === 0}
-                          <div class="px-2.5 py-2 text-[11px] text-gray-500">No nodes in this lab.</div>
-                        {:else}
-                          <div class="space-y-2 px-2.5 py-2.5">
-                            {#each nodeList as node}
-                              <div class={inventoryCardClass}>
-                                <div class="flex items-start justify-between gap-2">
-                                  <div class="min-w-0">
-                                    <div class="truncate text-[11px] font-medium text-gray-100">{node.name}</div>
-                                    <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">
-                                      {node.type} · {node.console}
-                                    </div>
-                                  </div>
-                                  <span class={`rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-[0.05em] ${nodeStatusClass(node)}`}>
-                                    {nodeStatusLabel(node)}
-                                  </span>
-                                </div>
-                                <div class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-gray-400">
-                                  <div>CPU {node.cpu}</div>
-                                  <div>RAM {node.ram}</div>
-                                  <div>NIC {node.interfaces?.length ?? 0}</div>
-                                  <div>ID {node.id}</div>
-                                </div>
-                                <div class="mt-2 flex items-center justify-between gap-2 border-t border-gray-800/80 pt-2">
-                                  <div class="font-mono text-[10px] text-gray-500">{node.template}</div>
-                                  <button
-                                    type="button"
-                                    class={compactIconButtonClass}
-                                    aria-label={`Open console for ${node.name}`}
-                                    title="Open console"
-                                    on:click={() => openConsole(node)}
-                                    disabled={node.status !== 2 || !!node.transientStatus}
-                                  >
-                                    <Monitor class="h-3.5 w-3.5" />
-                                  </button>
-                                </div>
-                              </div>
-                            {/each}
-                          </div>
-                        {/if}
-                      {/if}
-                    </div>
-
-                    <div class="rounded-xl border border-gray-800 bg-gray-950/70">
-                      <div class="flex items-center justify-between gap-2 border-b border-gray-800 px-2.5 py-2">
-                        <button
-                          type="button"
-                          class="flex min-w-0 flex-1 items-center gap-2 text-left"
-                          aria-label={railSections.networks ? 'Collapse networks section' : 'Expand networks section'}
-                          on:click={() => toggleRailSection('networks')}
-                        >
-                          {#if railSections.networks}
-                            <ChevronDown class="h-3.5 w-3.5 text-gray-500" />
-                          {:else}
-                            <ChevronRight class="h-3.5 w-3.5 text-gray-500" />
-                          {/if}
-                          <span class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Networks</span>
-                        </button>
-                        <span class="text-[10px] text-gray-600">{networkList.length}</span>
-                      </div>
-
-                      {#if railSections.networks}
-                        {#if networkList.length === 0}
-                          <div class="px-2.5 py-2 text-[11px] text-gray-500">No networks in this lab.</div>
-                        {:else}
-                          <div class="space-y-2 px-2.5 py-2.5">
-                            {#each networkList as network}
-                              <div class={inventoryCardClass}>
-                                <div class="flex items-start justify-between gap-2">
-                                  <div class="min-w-0">
-                                    <div class="truncate text-[11px] font-medium text-gray-100">{network.name}</div>
-                                    <div class="mt-1 text-[10px] uppercase tracking-[0.18em] text-gray-500">{network.type}</div>
-                                  </div>
-                                  <span class="rounded-full bg-blue-500/20 px-1.5 py-0.5 text-[9px] uppercase tracking-[0.16em] text-blue-200">
-                                    {network.count ?? 0}
-                                  </span>
-                                </div>
-                                <div class="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-gray-400">
-                                  <div>ID {network.id}</div>
-                                  <div>Links {network.count ?? 0}</div>
-                                  <div>Visible {network.visibility ? 'yes' : 'no'}</div>
-                                  <div>{network.left}, {network.top}</div>
-                                </div>
-                              </div>
-                            {/each}
-                          </div>
-                        {/if}
-                      {/if}
-                    </div>
-                  </div>
-                {/if}
-              </section>
-            </div>
-          {/if}
-        </div>
-      </aside>
-
+    <div class="relative flex flex-1 overflow-hidden p-3">
+      <InfoPanelStack nodesById={nodes} networksById={networks} />
       <div bind:this={canvasContainerEl} class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
         <SvelteFlowProvider>
           <TopologyCanvas
