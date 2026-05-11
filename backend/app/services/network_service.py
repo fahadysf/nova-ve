@@ -96,6 +96,37 @@ def _bridge_ownership_message(bridge: str, lab_id: str, network_id: int) -> str:
     )
 
 
+def _network_name_in_use(
+    networks: dict, name: str, *, exclude_id: Optional[int] = None
+) -> bool:
+    """True when a non-implicit network already carries this display name.
+
+    Comparison is case-insensitive after whitespace strip. Implicit
+    networks are excluded — their names are synthesized for node-to-node
+    link bridges and operators don't see or deconflict against them.
+    """
+    if not isinstance(name, str):
+        return False
+    target = name.strip().lower()
+    if not target:
+        return False
+    for key, network in networks.items():
+        if not isinstance(network, dict):
+            continue
+        if network.get("implicit") is True:
+            continue
+        if exclude_id is not None:
+            try:
+                if int(network.get("id", key)) == int(exclude_id):
+                    continue
+            except (TypeError, ValueError):
+                pass
+        existing = network.get("name")
+        if isinstance(existing, str) and existing.strip().lower() == target:
+            return True
+    return False
+
+
 def _network_ids_with_links(lab_data: dict) -> set:
     """Return the set of ``network_id`` values referenced by any link."""
     ids: set = set()
@@ -375,10 +406,20 @@ class NetworkService:
         if cidr_value:
             _validate_cidr(cidr_value)
 
+        raw_name = str(request.get("name") or "").strip()
+        if not raw_name:
+            raise NetworkServiceError(422, "Network name must be non-empty.")
+
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
             lab_id = str(data.get("id") or normalized)
             networks = data.setdefault("networks", {})
+            if _network_name_in_use(networks, raw_name):
+                raise NetworkServiceError(
+                    409,
+                    f"A network named {raw_name!r} already exists in this lab.",
+                    extra={"name": raw_name},
+                )
             next_id = max(
                 (int(key) for key in networks.keys() if str(key).isdigit()),
                 default=0,
@@ -386,7 +427,7 @@ class NetworkService:
             bridge = host_net.bridge_name(lab_id, next_id)
             network = {
                 "id": next_id,
-                "name": request.get("name", "Net"),
+                "name": raw_name,
                 "type": request.get("type", "linux_bridge"),
                 "left": int(request.get("left", 0)),
                 "top": int(request.get("top", 0)),
@@ -698,7 +739,15 @@ class NetworkService:
                             "cannot un-name a promoted bridge",
                         )
                 else:
-                    new_name = str(new_name)
+                    new_name = str(new_name).strip()
+                    if new_name and _network_name_in_use(
+                        networks, new_name, exclude_id=int(network_id)
+                    ):
+                        raise NetworkServiceError(
+                            409,
+                            f"A network named {new_name!r} already exists in this lab.",
+                            extra={"name": new_name},
+                        )
                     if new_name and was_implicit:
                         network["name"] = new_name
                         network["implicit"] = False

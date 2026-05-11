@@ -312,3 +312,57 @@ async def test_patch_network_name_null_on_promoted_returns_422(
     body = resp.json()
     assert body["code"] == 422
     assert "cannot un-name" in body["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_create_network_duplicate_name_returns_409(
+    patched_route_settings, auth_override, ws_recorder,
+):
+    lab_name = _seed_lab(
+        patched_route_settings.LABS_DIR,
+        networks={"5": _explicit_network(5, "lan")},
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Same name, different case + trailing whitespace — still a conflict.
+        resp = await c.post(
+            f"/api/labs/{lab_name}/networks",
+            json={"name": " LAN ", "type": "linux_bridge"},
+        )
+    assert resp.status_code == 409, resp.text
+    body = resp.json()
+    assert body["code"] == 409
+    assert "already exists" in body["message"].lower()
+
+    # Lab JSON must not have grown — the dup was rejected before write.
+    saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
+    assert list(saved["networks"].keys()) == ["5"]
+
+
+@pytest.mark.asyncio
+async def test_patch_network_rename_duplicate_returns_409(
+    patched_route_settings, auth_override, ws_recorder,
+):
+    lab_name = _seed_lab(
+        patched_route_settings.LABS_DIR,
+        networks={
+            "5": _explicit_network(5, "lan"),
+            "6": _explicit_network(6, "wan"),
+        },
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Try to rename net 6 to "lan" (already taken by net 5).
+        resp = await c.patch(
+            f"/api/labs/{lab_name}/networks/6", json={"name": "lan"},
+        )
+    assert resp.status_code == 409, resp.text
+    assert "already exists" in resp.json()["message"].lower()
+
+    # Renaming a network to its OWN current name must still succeed —
+    # exclude_id=self in the uniqueness check.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.patch(
+            f"/api/labs/{lab_name}/networks/6", json={"name": "wan"},
+        )
+    assert resp.status_code == 200, resp.text
