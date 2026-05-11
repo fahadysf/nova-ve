@@ -8,11 +8,13 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "docs-requirements.txt"
+      - ".python-version"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
+  deployments: write
   pages: write
   id-token: write
 
@@ -28,7 +30,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version-file: ".python-version"
           cache: pip
           cache-dependency-path: docs-requirements.txt
 
@@ -38,11 +40,16 @@ jobs:
       - name: Build site
         run: mkdocs build --strict
 
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mkdocs-site
+          path: site
+
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
-  deploy:
+  deploy_github_pages:
     needs: build
     runs-on: ubuntu-latest
     environment:
@@ -51,3 +58,22 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
+
+  deploy_cloudflare_pages:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_PAGES_PROJECT: nova-ve-docs
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: mkdocs-site
+          path: site
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy site --project-name=${{ env.CLOUDFLARE_PAGES_PROJECT }} --branch=main
+          gitHubToken: ${{ secrets.GITHUB_TOKEN }}
