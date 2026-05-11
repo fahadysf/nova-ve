@@ -37,6 +37,7 @@
   import LinkEdge from '$lib/components/canvas/LinkEdge.svelte';
   import LinkPreview from '$lib/components/canvas/LinkPreview.svelte';
   import LinkConfirmModal from '$lib/components/canvas/LinkConfirmModal.svelte';
+  import NetworkConfigModal from '$lib/components/canvas/NetworkConfigModal.svelte';
   import PortInfoPopover from '$lib/components/canvas/PortInfoPopover.svelte';
   import { selectedPortInfoStore, type SelectedPortInfo } from '$lib/stores/portInfo';
   import { toastStore } from '$lib/stores/toasts';
@@ -257,6 +258,11 @@
   let nodeModalNode: NodeData | null = null;
   let nodeModalSubmitting = false;
   let nodeCreateAnchor = { x: 200, y: 200 };
+
+  let networkModalOpen = false;
+  let networkModalDefaultName = '';
+  let networkModalDefaultType: NetworkType = 'linux_bridge';
+  let pendingNetworkPosition: { x: number; y: number } | null = null;
   let nodeActionSequence = 0;
   const nodeActionTokens = new Map<number, number>();
   const nodeActionPollSchedule = [0, 250, 500, 1000, 2000];
@@ -1073,12 +1079,15 @@
     });
   }
 
-  async function createNetworkAt(position: { x: number; y: number }, networkType: NetworkType = 'linux_bridge') {
+  async function createNetworkAt(
+    position: { x: number; y: number },
+    options: { name: string; type: NetworkType }
+  ) {
     const response = await apiRequest<NetworkData>(`/labs/${labId}/networks`, {
       method: 'POST',
       body: {
-        name: `net-${Object.keys(localNetworks).length + 1}`,
-        type: networkType,
+        name: options.name,
+        type: options.type,
         left: Math.round(position.x),
         top: Math.round(position.y)
       }
@@ -1097,7 +1106,7 @@
     });
   }
 
-  async function addPaletteItem(item: PaletteItem) {
+  function addPaletteItem(item: PaletteItem) {
     const viewport = typeof window !== 'undefined'
       ? screenToFlowPosition(
           { x: Math.round(window.innerWidth * 0.5), y: Math.round(window.innerHeight * 0.5) },
@@ -1106,11 +1115,33 @@
       : { x: 200, y: 200 };
 
     if (item.kind === 'network') {
-      await createNetworkAt(viewport, item.networkType);
+      pendingNetworkPosition = viewport;
+      networkModalDefaultName = `net-${Object.keys(localNetworks).length + 1}`;
+      networkModalDefaultType = item.networkType;
+      networkModalOpen = true;
+      closeAddMenu();
       return;
     }
 
     closeAddMenu();
+  }
+
+  async function onNetworkModalConfirm(
+    event: CustomEvent<{ name: string; type: NetworkType }>
+  ) {
+    const position = pendingNetworkPosition ?? { x: 200, y: 200 };
+    networkModalOpen = false;
+    pendingNetworkPosition = null;
+    try {
+      await createNetworkAt(position, event.detail);
+    } catch (_error) {
+      // apiRequest already surfaced a toast; nothing else to do here.
+    }
+  }
+
+  function onNetworkModalCancel() {
+    networkModalOpen = false;
+    pendingNetworkPosition = null;
   }
 
   setContext('nova-ve:port-position-persist', (
@@ -1865,6 +1896,13 @@
 
   <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
   <LinkConfirmModal on:confirm={handleLinkConfirm} on:cancel={handleLinkConfirmCancel} />
+  <NetworkConfigModal
+    open={networkModalOpen}
+    defaultName={networkModalDefaultName}
+    defaultType={networkModalDefaultType}
+    on:confirm={onNetworkModalConfirm}
+    on:cancel={onNetworkModalCancel}
+  />
 
   {#if selectedPortInfo}
     {#if selectedPortInfo.kind === 'interface'}
