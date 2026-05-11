@@ -88,6 +88,7 @@ nav:
       - Console access: user-guides/console-access.md
       - The lab canvas: user-guides/canvas.md
       - Lab lifecycle: user-guides/lab-lifecycle.md
+      - Dynamips nodes: user-guides/dynamips-nodes.md
   - Importing from EVE-NG:
       - importing-eveng/index.md
       - Overview: importing-eveng/overview.md

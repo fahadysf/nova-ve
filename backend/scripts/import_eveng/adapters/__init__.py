@@ -28,6 +28,7 @@ from .cisco_csr1000v import CiscoCSR1000vAdapter
 from .cisco_iol import CiscoIOLAdapter
 from .cisco_iosv_l2 import CiscoIOSvL2Adapter
 from .cisco_iosv_l3 import CiscoIOSvL3Adapter
+from .dynamips import DynamipsAdapter
 from .generic_linux import GenericLinuxAdapter
 from .juniper_vmx import JuniperVMXAdapter
 from .juniper_vqfx import JuniperVQFXAdapter
@@ -51,6 +52,7 @@ def reset_registry_for_tests() -> None:
     register(CiscoIOLAdapter())
     register(CiscoIOSvL2Adapter())
     register(CiscoIOSvL3Adapter())
+    register(DynamipsAdapter())
     register(JuniperVMXAdapter())
     register(JuniperVQFXAdapter())
     register(JuniperVSRXAdapter())
@@ -78,6 +80,7 @@ register(CiscoCSR1000vAdapter())
 register(CiscoIOLAdapter())
 register(CiscoIOSvL2Adapter())
 register(CiscoIOSvL3Adapter())
+register(DynamipsAdapter())
 register(JuniperVMXAdapter())
 register(JuniperVQFXAdapter())
 register(JuniperVSRXAdapter())
@@ -93,6 +96,7 @@ __all__ = [
     "CiscoIOLAdapter",
     "CiscoIOSvL2Adapter",
     "CiscoIOSvL3Adapter",
+    "DynamipsAdapter",
     "GenericLinuxAdapter",
     "JuniperVMXAdapter",
     "JuniperVQFXAdapter",

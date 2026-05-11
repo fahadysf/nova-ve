@@ -9,6 +9,7 @@ After image copy, the importer attempts to emit a nova-ve template per priority-
 | Cisco IOL | IOL | `cisco_iol.py` |
 | Cisco IOSv L2 | QEMU | `cisco_iosv_l2.py` |
 | Cisco IOSv L3 | QEMU | `cisco_iosv_l3.py` |
+| Cisco Dynamips (c3725, c7200) | Dynamips | `dynamips.py` — Phase 1 ships c3725 + c7200; c1700/c2600/c2691/c3620/c3640/c3745 are matched but flagged `needs-manual-review` until their runtime path lands |
 | Generic Linux | QEMU | `generic_linux.py` (catch-all for unmatched qemu images) |
 | Juniper vMX | QEMU (paired VM) | `juniper_vmx.py` |
 | Juniper vQFX | QEMU (paired VM) | `juniper_vqfx.py` |

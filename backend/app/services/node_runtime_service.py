@@ -309,6 +309,8 @@ class NodeRuntimeService:
             runtime = self._start_qemu_node(lab_data, node)
         elif node.get("type") == "docker":
             runtime = self._start_docker_node(lab_data, node)
+        elif node.get("type") == "dynamips":
+            runtime = self._start_dynamips_node(lab_data, node)
         else:
             raise NodeRuntimeError(f"Unsupported node type: {node.get('type')}")
 
@@ -666,6 +668,8 @@ class NodeRuntimeService:
             return
         if kind == "docker":
             self._stop_docker_runtime(runtime)
+        elif kind == "dynamips":
+            self._stop_dynamips_runtime(runtime)
 
         self._delete_runtime(lab_id, node_id)
 
@@ -4400,6 +4404,131 @@ class NodeRuntimeService:
         # more. ``network_names`` is retained on the runtime record only
         # for backwards-compatibility with live-MAC reads — we do NOT
         # prune any docker network here.
+
+    # ------------------------------------------------------------------
+    # Dynamips (process-runtime, hypervisor-driven)
+    # ------------------------------------------------------------------
+
+    def _start_dynamips_node(
+        self, lab_data: dict[str, Any], node: dict[str, Any]
+    ) -> dict[str, Any]:
+        from app.services.runtime.dynamips import DynamipsError, DynamipsLauncher
+
+        lab_id = self._lab_id(lab_data)
+        node_id = int(node["id"])
+
+        # Reuse the qemu attachment resolver: shape is identical
+        # ({interface_index, network_id, bridge_name}) and a single
+        # source of truth keeps the link service's invariants intact.
+        attachments = self._qemu_attachments(lab_data, node)
+        for attachment in attachments:
+            bridge = attachment["bridge_name"]
+            if not host_net.bridge_exists(bridge):
+                raise NodeRuntimeError(
+                    f"Bridge {bridge} for network_id={attachment['network_id']} "
+                    f"is not present on the host; provision it via create_network "
+                    f"before starting the node."
+                )
+
+        # Resolve the template once, then merge any per-node extras the
+        # frontend may override (idle_pc, platform, slot bindings, ...).
+        template = self._resolve_template_for_node(node)
+        template = dict(template)  # shallow copy — we may overlay extras
+        extras = _node_extras(node)
+        for key in ("platform", "image", "ram", "idlepc", "idle_pc", "slot0", "npe"):
+            value = extras.get(key)
+            if value:
+                template[key] = value
+
+        provisioned_taps: list[str] = []
+
+        def _tap_factory(interface_index: int, bridge_name: str) -> str:
+            tap = host_net.tap_name(lab_id, node_id, interface_index)
+            if not host_net.tap_exists(tap):
+                host_net.tap_add(tap)
+                provisioned_taps.append(tap)
+            host_net.link_master(tap, bridge_name)
+            host_net.link_up(tap)
+            return tap
+
+        console_port = self._allocate_console_port("telnet")
+
+        try:
+            launcher_record = DynamipsLauncher.instance().start_node(
+                lab_id=lab_id,
+                node_id=node_id,
+                template=template,
+                node=node,
+                attachments=attachments,
+                console_port=console_port,
+                tap_factory=_tap_factory,
+            )
+        except DynamipsError as exc:
+            # Sweep TAPs we just created so a retry can re-provision them.
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise NodeRuntimeError(str(exc)) from exc
+
+        # Dynamips exposes its serial console directly on the loopback
+        # via ``vm set_con_tcp_port`` — no netns-splice proxy is needed
+        # (unlike Docker, where the container netns hides the port). The
+        # Guacamole proxy can connect to 127.0.0.1:<console_port> directly.
+
+        runtime = {
+            "kind": "dynamips",
+            "lab_id": lab_id,
+            "node_id": node_id,
+            "started_at": time.time(),
+            "console_port": console_port,
+            "console_mode": "telnet",
+            "tap_names": launcher_record.get("tap_names", []),
+            "vm_name": launcher_record["vm_name"],
+            "vm_id": launcher_record["vm_id"],
+            "platform": launcher_record["platform"],
+            "hypervisor_port": launcher_record["hypervisor_port"],
+            "work_dir": launcher_record["work_dir"],
+            "image": launcher_record["image"],
+            "idle_pc": launcher_record["idle_pc"],
+        }
+        return runtime
+
+    def _stop_dynamips_runtime(self, runtime: dict[str, Any]) -> None:
+        from app.services.runtime.dynamips import DynamipsError, DynamipsLauncher
+
+        try:
+            DynamipsLauncher.instance().stop_node(runtime)
+        except DynamipsError as exc:
+            _logger.warning(
+                "dynamips.stop.failed",
+                extra={
+                    "lab_id": runtime.get("lab_id"),
+                    "node_id": runtime.get("node_id"),
+                    "vm_name": runtime.get("vm_name"),
+                    "error": str(exc),
+                },
+            )
+
+        for tap in runtime.get("tap_names", []) or []:
+            host_net.try_link_del(tap)
+
+    def _resolve_template_for_node(self, node: dict[str, Any]) -> dict[str, Any]:
+        """Return the template payload (as_response) for a node.
+
+        Raises :class:`NodeRuntimeError` if the template is missing — a
+        Dynamips node cannot boot without a template (it supplies the
+        platform, image, and idle-PC defaults).
+        """
+        from app.services.template_service import TemplateError, TemplateService
+
+        template_type = str(node.get("type") or "")
+        template_key = str(node.get("template") or "")
+        if not template_type or not template_key:
+            raise NodeRuntimeError("node has no template — required for dynamips")
+        try:
+            template = TemplateService().get_template(template_type, template_key)
+        except TemplateError as exc:
+            raise NodeRuntimeError(str(exc)) from exc
+        return template.as_response()
 
     def _ensure_qemu_overlay(self, work_dir: Path, node: dict[str, Any]) -> Path:
         overlay_path = work_dir / "virtioa.qcow2"

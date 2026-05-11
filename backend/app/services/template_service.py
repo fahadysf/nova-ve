@@ -365,6 +365,21 @@ DYNAMIPS_MIDPLANE_OPTIONS = [
     {"value": "vxr", "label": "vxr"},
 ]
 
+DYNAMIPS_PLATFORM_OPTIONS = [
+    {"value": "c3725", "label": "c3725"},
+    {"value": "c7200", "label": "c7200"},
+]
+
+DYNAMIPS_C3725_SLOT_OPTIONS = [
+    {"value": "", "label": "(empty)"},
+    {"value": "GT96100-FE", "label": "GT96100-FE (built-in 2x FE)"},
+    {"value": "NM-1FE-TX", "label": "NM-1FE-TX"},
+    {"value": "NM-4T", "label": "NM-4T (4 serial)"},
+    {"value": "NM-16ESW", "label": "NM-16ESW (16-port switch)"},
+    {"value": "NM-1E", "label": "NM-1E"},
+    {"value": "NM-4E", "label": "NM-4E"},
+]
+
 DYNAMIPS_C7200_SLOT_OPTIONS = [
     {"value": "", "label": "(empty)"},
     {"value": "C7200-IO-FE", "label": "C7200-IO-FE"},
@@ -549,46 +564,89 @@ def _iol_extras_schema() -> list[dict[str, Any]]:
     ]
 
 
-def _dynamips_c7200_extras_schema() -> list[dict[str, Any]]:
-    schema: list[dict[str, Any]] = []
-    for index in range(7):
-        schema.append(
-            {
-                "key": f"slot{index}",
-                "label": f"Slot {index}",
-                "type": "select",
-                "options": DYNAMIPS_C7200_SLOT_OPTIONS,
-                "default": "C7200-IO-FE" if index == 0 else "",
-                "stoppedOnly": True,
-                "runtime": True,
-            }
-        )
-    schema += [
+def _dynamips_extras_schema(platform: str = "c7200") -> list[dict[str, Any]]:
+    """Platform-aware Dynamips extras schema.
+
+    The first field is always the platform selector so the frontend can
+    re-render the rest of the form when the user switches platforms.
+    Slot count, slot options, NVRAM default, and the presence/absence of
+    NPE/midplane fields all depend on the platform.
+    """
+    schema: list[dict[str, Any]] = [
+        {
+            "key": "platform",
+            "label": "Platform",
+            "type": "select",
+            "options": DYNAMIPS_PLATFORM_OPTIONS,
+            "default": platform,
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+    ]
+
+    if platform == "c3725":
+        # c3725 has 2 NM slots; slot 0 is the built-in GT96100-FE.
+        for index in range(2):
+            schema.append(
+                {
+                    "key": f"slot{index}",
+                    "label": f"Slot {index}",
+                    "type": "select",
+                    "options": DYNAMIPS_C3725_SLOT_OPTIONS,
+                    "default": "GT96100-FE" if index == 0 else "",
+                    "stoppedOnly": True,
+                    "runtime": True,
+                }
+            )
+        nvram_default = 128
+    else:  # c7200
+        for index in range(7):
+            schema.append(
+                {
+                    "key": f"slot{index}",
+                    "label": f"Slot {index}",
+                    "type": "select",
+                    "options": DYNAMIPS_C7200_SLOT_OPTIONS,
+                    "default": "C7200-IO-FE" if index == 0 else "",
+                    "stoppedOnly": True,
+                    "runtime": True,
+                }
+            )
+        nvram_default = 128
+
+    schema.append(
         {
             "key": "nvram",
             "label": "NVRAM (KB)",
             "type": "number",
-            "default": 128,
+            "default": nvram_default,
             "stoppedOnly": True,
-        },
-        {
-            "key": "npe",
-            "label": "NPE",
-            "type": "select",
-            "options": DYNAMIPS_NPE_OPTIONS,
-            "default": "npe-400",
-            "stoppedOnly": True,
-            "runtime": True,
-        },
-        {
-            "key": "midplane",
-            "label": "Midplane",
-            "type": "select",
-            "options": DYNAMIPS_MIDPLANE_OPTIONS,
-            "default": "vxr",
-            "stoppedOnly": True,
-            "runtime": True,
-        },
+        }
+    )
+
+    if platform == "c7200":
+        schema += [
+            {
+                "key": "npe",
+                "label": "NPE",
+                "type": "select",
+                "options": DYNAMIPS_NPE_OPTIONS,
+                "default": "npe-400",
+                "stoppedOnly": True,
+                "runtime": True,
+            },
+            {
+                "key": "midplane",
+                "label": "Midplane",
+                "type": "select",
+                "options": DYNAMIPS_MIDPLANE_OPTIONS,
+                "default": "vxr",
+                "stoppedOnly": True,
+                "runtime": True,
+            },
+        ]
+
+    schema.append(
         {
             "key": "idlepc",
             "label": "Idle PC",
@@ -597,12 +655,14 @@ def _dynamips_c7200_extras_schema() -> list[dict[str, Any]]:
             "placeholder": "0x...",
             "stoppedOnly": True,
             "runtime": True,
-        },
-    ]
+        }
+    )
     return schema
 
 
-def _extras_schema_for(template_type: str) -> list[dict[str, Any]]:
+def _extras_schema_for(
+    template_type: str, template_extras: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
     if template_type == "qemu":
         return _qemu_extras_schema()
     if template_type == "docker":
@@ -610,7 +670,12 @@ def _extras_schema_for(template_type: str) -> list[dict[str, Any]]:
     if template_type == "iol":
         return _iol_extras_schema()
     if template_type == "dynamips":
-        return _dynamips_c7200_extras_schema()
+        platform = "c7200"
+        if template_extras:
+            raw = str(template_extras.get("platform") or "").lower()
+            if raw in {"c3725", "c7200"}:
+                platform = raw
+        return _dynamips_extras_schema(platform)
     return []
 
 
@@ -900,7 +965,7 @@ class TemplateService:
         for template in self._load_templates():
             images = list(self.list_images(template.type, template.key).values())
             default_image = images[0]["image"] if images else ""
-            extras_schema = _extras_schema_for(template.type)
+            extras_schema = _extras_schema_for(template.type, template.extras)
             defaults_extras = self._compose_extras(extras_schema, template.extras)
             templates.append(
                 {
@@ -1018,7 +1083,9 @@ class TemplateService:
     def template_extras(self, template_type: str, template_key: str) -> dict[str, Any]:
         """Return the merged default extras (schema defaults + YAML overrides) for a template."""
         template = self.get_template(template_type, template_key)
-        return self._compose_extras(_extras_schema_for(template_type), template.extras)
+        return self._compose_extras(
+            _extras_schema_for(template_type, template.extras), template.extras
+        )
 
     def interface_naming(self, template_type: str, template_key: str) -> dict[str, Any]:
         """Return the validated ``interface_naming`` block for a template, or ``{}``."""
@@ -1118,7 +1185,7 @@ class TemplateService:
             if not isinstance(yaml_extras, dict):
                 yaml_extras = {}
             yaml_extras = dict(yaml_extras)
-            for schema_field in _extras_schema_for(template_type):
+            for schema_field in _extras_schema_for(template_type, yaml_extras):
                 schema_key = schema_field["key"]
                 if schema_key in payload and schema_key not in yaml_extras:
                     yaml_extras[schema_key] = payload[schema_key]
