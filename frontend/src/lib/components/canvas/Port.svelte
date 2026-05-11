@@ -25,6 +25,10 @@
   export let highlighted = false;
   export let liveMac: LiveMacState | undefined = undefined;
   export let interfaceNamingScheme: string | null | undefined = undefined;
+  // When true, an inline label with the interface name is rendered next to the
+  // port handle without requiring hover. Used to surface link attachments at a
+  // glance (US-214: pinned labels on connected ports).
+  export let connected = false;
 
   const dispatch = createEventDispatcher<{
     'port:mousedown': { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition };
@@ -75,6 +79,20 @@
       case 'left':
       default:
         return 'left' as const;
+    }
+  })();
+
+  $: pinnedLabelStyle = (() => {
+    switch (position.side) {
+      case 'top':
+        return 'bottom: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);';
+      case 'right':
+        return 'left: calc(100% + 6px); top: 50%; transform: translate(0, -50%);';
+      case 'bottom':
+        return 'top: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);';
+      case 'left':
+      default:
+        return 'right: calc(100% + 6px); top: 50%; transform: translate(0, -50%);';
     }
   })();
 
@@ -317,6 +335,14 @@
       data-testid="port-mismatch-dot"
       aria-hidden="true"
     ></span>
+  {/if}
+  {#if connected && !showTooltip}
+    <span
+      class="pointer-events-none absolute whitespace-nowrap rounded-sm border border-gray-700/70 bg-gray-950/85 px-1 py-px font-mono text-[9px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm"
+      style={pinnedLabelStyle}
+      data-testid="port-pinned-label"
+      aria-hidden="true"
+    >{renderedInterfaceName}</span>
   {/if}
   {#if showTooltip}
     <PortTooltip
