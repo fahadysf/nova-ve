@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import copy
 import logging
 import uuid
@@ -1374,7 +1375,11 @@ async def start_node(
 ):
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
-        NodeRuntimeService().start_node(data, node_id)
+        # The runtime backends are synchronous and can block for tens
+        # of seconds (Dynamips IOS boot, QEMU image-copy at first boot,
+        # Docker image pull). Run them in a worker thread so the
+        # event loop stays free for the rest of the request mix.
+        await asyncio.to_thread(NodeRuntimeService().start_node, data, node_id)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
     except FileNotFoundError:
