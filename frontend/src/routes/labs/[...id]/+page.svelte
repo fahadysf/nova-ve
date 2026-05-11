@@ -952,41 +952,42 @@
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab Editor</div>
             <div class="flex flex-wrap items-center gap-[0.15rem]">
               <h1 class="truncate text-lg font-semibold tracking-tight text-gray-100">{labMeta?.name || labId}</h1>
-              <div class="ml-3 grid w-fit grid-cols-2 gap-1.5">
-                <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
-                  <Server class="h-3 w-3 text-gray-400" aria-hidden="true" />
-                  <span class="text-gray-500">Nodes:</span>
-                  <span class="font-mono text-gray-100">{nodeList.length}</span>
-                </span>
-                <span
-                  class={`inline-flex items-center gap-1.5 rounded-md border bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight ${
-                    runningNodeCount ? 'border-emerald-500/40 text-emerald-100' : 'border-gray-800 text-gray-300'
-                  }`}
-                >
-                  <Activity
-                    class={`h-3 w-3 ${runningNodeCount ? 'text-emerald-300' : 'text-gray-400'}`}
-                    aria-hidden="true"
-                  />
-                  <span class="text-gray-500">Running:</span>
-                  <span class="font-mono">{runningNodeCount}</span>
-                </span>
-                <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
-                  <NetworkIcon class="h-3 w-3 text-gray-400" aria-hidden="true" />
-                  <span class="text-gray-500">Networks:</span>
-                  <span class="font-mono text-gray-100">{networkList.length}</span>
-                </span>
-                <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
-                  <Cpu class="h-3 w-3 text-gray-400" aria-hidden="true" />
-                  <span class="text-gray-500">vCPU:</span>
-                  <span class="font-mono text-gray-100">{totalVCpu}</span>
-                </span>
-              </div>
               {#if consoleMode === 'tabbed'}
                 <span class={chromePillClass}>{consoleTabCount} consoles</span>
               {/if}
             </div>
             <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{labMeta?.path || labId}</div>
           </div>
+        </div>
+
+        <div class="ml-auto hidden shrink-0 grid-cols-2 gap-1.5 self-center sm:grid">
+          <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
+            <Server class="h-3 w-3 text-gray-400" aria-hidden="true" />
+            <span class="text-gray-500">Nodes:</span>
+            <span class="font-mono text-gray-100">{nodeList.length}</span>
+          </span>
+          <span
+            class={`inline-flex items-center gap-1.5 rounded-md border bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight ${
+              runningNodeCount ? 'border-emerald-500/40 text-emerald-100' : 'border-gray-800 text-gray-300'
+            }`}
+          >
+            <Activity
+              class={`h-3 w-3 ${runningNodeCount ? 'text-emerald-300' : 'text-gray-400'}`}
+              aria-hidden="true"
+            />
+            <span class="text-gray-500">Running:</span>
+            <span class="font-mono">{runningNodeCount}</span>
+          </span>
+          <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
+            <NetworkIcon class="h-3 w-3 text-gray-400" aria-hidden="true" />
+            <span class="text-gray-500">Networks:</span>
+            <span class="font-mono text-gray-100">{networkList.length}</span>
+          </span>
+          <span class="inline-flex items-center gap-1.5 rounded-md border border-gray-800 bg-gray-950/70 px-2 py-1 text-[10px] tracking-tight text-gray-300">
+            <Cpu class="h-3 w-3 text-gray-400" aria-hidden="true" />
+            <span class="text-gray-500">vCPU:</span>
+            <span class="font-mono text-gray-100">{totalVCpu}</span>
+          </span>
         </div>
 
         <div class="hidden shrink-0 items-center gap-2 md:flex">
