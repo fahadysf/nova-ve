@@ -4452,7 +4452,14 @@ class NodeRuntimeService:
         if node_image:
             template["image"] = node_image
         extras = _node_extras(node)
-        for key in ("platform", "image", "ram", "idlepc", "idle_pc", "slot0", "npe"):
+        # ``slot0..slot6`` covers both c3725 (3 bays) and c7200 (7 bays).
+        # Without forwarding slotN>0, network modules selected in the
+        # NodeConfigModal never reach the launcher and IOS doesn't see them.
+        slot_keys = tuple(f"slot{i}" for i in range(7))
+        for key in (
+            "platform", "image", "ram", "idlepc", "idle_pc", "npe", "disk0",
+            *slot_keys,
+        ):
             value = extras.get(key)
             if value:
                 template[key] = value

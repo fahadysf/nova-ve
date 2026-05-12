@@ -43,6 +43,7 @@ _logger = logging.getLogger("nova-ve.runtime.dynamips")
 
 _RUNTIME_ROOT = Path("/var/lib/nova-ve/runtime")
 _IMAGES_ROOT = Path("/var/lib/nova-ve/images/dynamips")
+_DYNAMIPS_VM_ROOT = Path("/var/lib/nova-ve/runtime/dynamips")
 _IDLE_PC_CACHE_PATH = _RUNTIME_ROOT / "idle_pc_cache.json"
 _HYPERVISOR_HOST = "127.0.0.1"
 _HYPERVISOR_CONNECT_TIMEOUT_S = 5.0
@@ -62,6 +63,37 @@ _DYNAMIPS_BINARY = os.environ.get("NOVA_VE_DYNAMIPS_BIN", "dynamips")
 _PLATFORM_MODULE = {
     "c3725": "c3725",
     "c7200": "c7200",
+}
+
+# Maximum number of slots per platform (slot indices 0 … N-1).
+_PLATFORM_MAX_SLOTS = {"c3725": 3, "c7200": 7}
+
+# Port count per port-adapter / network-module name. Used to map a
+# flat lab interface_index into (slot_idx, port_in_slot) for
+# vm slot_add_nio_binding.
+_PA_PORT_COUNT = {
+    # c3725 motherboard
+    "GT96100-FE": 2,
+    # c3725 NMs
+    "NM-1FE-TX": 1,
+    "NM-4T": 4,
+    "NM-16ESW": 16,
+    "NM-1E": 1,
+    "NM-4E": 4,
+    # c7200 slot-0 cards
+    "C7200-IO-FE": 1,
+    "C7200-IO-2FE": 2,
+    "C7200-IO-GE-E": 1,
+    # c7200 PAs
+    "PA-FE-TX": 1,
+    "PA-2FE-TX": 2,
+    "PA-GE": 1,
+    "PA-4E": 4,
+    "PA-8E": 8,
+    "PA-4T+": 4,
+    "PA-8T": 8,
+    "PA-A1": 1,
+    "PA-POS-OC3": 1,
 }
 
 # Dynamips' c3600 module requires `set_chassis` so it knows which c3600
@@ -90,6 +122,10 @@ _PLATFORM_SLOT0_DEFAULT_PA = {
 # ``vm create`` time. Re-binding fails with "unable to add binding for
 # slot 0/0", so we skip the explicit slot_add_binding for these.
 _PLATFORM_SLOT0_PREBOUND = {"c3725"}
+
+# Default flash (disk0) size in MB per platform. User can override via
+# template ``disk0`` field.
+_PLATFORM_DISK0_DEFAULT_MB = {"c3725": 16, "c7200": 64}
 
 # c7200 NPE (Network Processing Engine) selector. Templates may override.
 _PLATFORM_DEFAULT_NPE = {
@@ -427,8 +463,9 @@ class DynamipsLauncher:
             vm_name = self._vm_name(lab_id, node_id)
             vm_id = self._next_vm_id
             self._next_vm_id += 1
-            work_dir = _RUNTIME_ROOT / lab_id / str(node_id)
+            work_dir = _DYNAMIPS_VM_ROOT / vm_name
             work_dir.mkdir(parents=True, exist_ok=True)
+            client.request(f"hypervisor working_dir {_DYNAMIPS_VM_ROOT}")
 
             # 1. Create the VM under the generic ``vm`` namespace — in
             #    dynamips 0.2.14 only ``vm create`` exists; the
@@ -457,39 +494,59 @@ class DynamipsLauncher:
                 if npe and platform == "c7200":
                     client.request(f"{module} set_npe {vm_name} {npe}")
 
-                # 3. Default slot 0 binding (interfaces live here).
-                #    On c3725 (and other motherboard-FE platforms) the
-                #    builtin GT96100-FE is pre-bound at ``vm create``;
-                #    re-binding fails. We skip the call for those and
-                #    only emit slot_add_binding where it's required
-                #    (e.g. c7200 needs an explicit C7200-IO-FE).
-                if platform not in _PLATFORM_SLOT0_PREBOUND:
-                    slot0_pa = (
-                        template.get("slot0")
-                        or _PLATFORM_SLOT0_DEFAULT_PA[platform]
-                    )
+                disk0_mb = int(
+                    template.get("disk0") or _PLATFORM_DISK0_DEFAULT_MB[platform]
+                )
+                client.request(f"vm set_disk0 {vm_name} {disk0_mb}")
+
+                # 3. Slot bindings for all populated slots.
+                #    Build a slot inventory from the template, then emit
+                #    slot_add_binding for each slot that isn't pre-bound
+                #    at vm create time (c3725 slot 0 is motherboard-fixed).
+                inventory = self._build_slot_inventory(platform, template)
+                for slot_idx, pa_name in inventory:
+                    if slot_idx == 0 and platform in _PLATFORM_SLOT0_PREBOUND:
+                        # c3725 slot 0 is pre-bound at vm create; re-binding errors.
+                        continue
                     client.request(
-                        f"vm slot_add_binding {vm_name} 0 0 {slot0_pa}"
+                        f"vm slot_add_binding {vm_name} {slot_idx} 0 {pa_name}"
                     )
 
                 # 4. Per-interface TAP+NIO wiring.
+                #
+                # Sweep any stale NIO with the same name BEFORE creating it:
+                # the dynamips hypervisor is a long-lived per-host process
+                # and ``vm delete`` only frees slot bindings, NOT the
+                # named NIOs themselves. Without this sweep, a stop/start
+                # cycle on the same node hits ``206 unable to create TAP
+                # NIO`` (the dynamips error for a duplicate-name nio_create
+                # collision; the message is misleadingly generic).
                 tap_names: list[str] = []
+                nio_names: list[str] = []
                 for attachment in attachments:
                     iface_idx = int(attachment["interface_index"])
+                    slot_idx, port_in_slot = self._resolve_slot_port(
+                        inventory, iface_idx
+                    )
                     bridge_name = str(attachment["bridge_name"])
                     tap = tap_factory(iface_idx, bridge_name)
                     nio_name = self._nio_name(lab_id, node_id, iface_idx)
+                    self._delete_nio_locked(client, nio_name)
                     client.request(f"nio create_tap {nio_name} {tap}")
                     client.request(
-                        f"vm slot_add_nio_binding {vm_name} 0 {iface_idx} {nio_name}"
+                        f"vm slot_add_nio_binding {vm_name} {slot_idx} {port_in_slot} {nio_name}"
                     )
                     tap_names.append(tap)
+                    nio_names.append(nio_name)
 
                 # 5. Start the VM.
                 client.request(f"vm start {vm_name}")
             except Exception:
                 # Best-effort teardown of the half-built VM so a retry can succeed.
-                self._destroy_vm_locked(client, vm_name)
+                # Use _purge_vm_locked (clean_delete) — the partial VM has no
+                # startup-config worth keeping and leaving files behind would break
+                # the next attempt's directory layout.
+                self._purge_vm_locked(client, vm_name)
                 raise
 
             runtime = {
@@ -507,6 +564,7 @@ class DynamipsLauncher:
                 "hypervisor_port": self._hypervisor_port,
                 "work_dir": str(work_dir),
                 "tap_names": tap_names,
+                "nio_names": nio_names,
                 "idle_pc": idle_pc,
                 "image": str(image_path),
             }
@@ -515,9 +573,20 @@ class DynamipsLauncher:
 
     def stop_node(self, runtime: dict[str, Any]) -> None:
         vm_name = str(runtime["vm_name"])
+        # Older runtime records (pre-NIO-cleanup) don't carry ``nio_names``;
+        # reconstruct from the lab/node/tap layout so stop is still safe.
+        nio_names = list(runtime.get("nio_names") or [])
+        if not nio_names:
+            lab_id = str(runtime.get("lab_id") or "")
+            node_id = runtime.get("node_id")
+            if lab_id and node_id is not None:
+                nio_names = [
+                    self._nio_name(lab_id, int(node_id), idx)
+                    for idx in range(len(runtime.get("tap_names") or []))
+                ]
         with self._lock:
             client = self._client_locked()
-            self._destroy_vm_locked(client, vm_name)
+            self._destroy_vm_locked(client, vm_name, nio_names=nio_names)
             self._clear_runtime(runtime)
 
     def is_alive(self, runtime: dict[str, Any]) -> bool:
@@ -592,7 +661,7 @@ class DynamipsLauncher:
                     )
                 client.request(f"vm start {vm_name}")
             except Exception:
-                self._destroy_vm_locked(client, vm_name)
+                self._purge_vm_locked(client, vm_name)
                 raise
 
         # Release the launcher lock while IOS boots — calibration is
@@ -613,7 +682,7 @@ class DynamipsLauncher:
         finally:
             with self._lock:
                 client = self._client_locked()
-                self._destroy_vm_locked(client, vm_name)
+                self._purge_vm_locked(client, vm_name)
 
         if not candidates:
             raise DynamipsError(
@@ -679,6 +748,54 @@ class DynamipsLauncher:
     @staticmethod
     def _nio_name(lab_id: str, node_id: int, interface_index: int) -> str:
         return f"nv_{lab_id}_n{node_id}_i{interface_index}"
+
+    @staticmethod
+    def _build_slot_inventory(
+        platform: str, template: dict[str, Any]
+    ) -> list[tuple[int, str]]:
+        """Return a sorted list of ``(slot_idx, pa_name)`` for all populated
+        slots. The slot 0 default is applied from ``_PLATFORM_SLOT0_DEFAULT_PA``
+        if the template/extras don't override it. Empty/blank slot values are
+        skipped. Unknown PA names raise ``DynamipsError``.
+        """
+        max_slots = _PLATFORM_MAX_SLOTS[platform]
+        inventory: list[tuple[int, str]] = []
+        for idx in range(max_slots):
+            raw = template.get(f"slot{idx}")
+            if idx == 0 and not raw:
+                # Apply the platform default for slot 0 when unset.
+                pa: str = _PLATFORM_SLOT0_DEFAULT_PA[platform]
+            else:
+                pa = str(raw or "").strip()
+            if not pa:
+                continue
+            if pa not in _PA_PORT_COUNT:
+                raise DynamipsError(
+                    f"unknown dynamips port adapter {pa!r} in slot {idx}"
+                )
+            inventory.append((idx, pa))
+        return inventory
+
+    @staticmethod
+    def _resolve_slot_port(
+        inventory: list[tuple[int, str]], interface_index: int
+    ) -> tuple[int, int]:
+        """Map a flat ``interface_index`` to ``(slot_idx, port_in_slot)``
+        by walking the slot inventory cumulatively. Empty slots between
+        populated ones are skipped (they have no ports).
+
+        Raises ``DynamipsError`` if ``interface_index >= total_ports``.
+        """
+        total = 0
+        for slot_idx, pa_name in inventory:
+            count = _PA_PORT_COUNT[pa_name]
+            if interface_index < total + count:
+                return slot_idx, interface_index - total
+            total += count
+        raise DynamipsError(
+            f"interface_index {interface_index} exceeds total port count "
+            f"{total} from slot inventory {inventory}"
+        )
 
     @staticmethod
     def _resolve_platform(template: dict[str, Any]) -> str:
@@ -774,19 +891,65 @@ class DynamipsLauncher:
         self,
         client: HypervisorClient,
         vm_name: str,
+        *,
+        nio_names: Iterable[str] = (),
     ) -> None:
-        # ``vm clean_delete`` stops the VM (if running) and removes both
-        # the in-memory state and on-disk artifacts in one call — more
-        # forgiving than ``vm stop`` + ``vm delete``, which can fail
-        # 207 "unable to delete" if the VM is in a half-crashed state.
+        # Non-destructive stop+delete preserves NVRAM/disk0 files on disk
+        # so the next start of the same node reloads the saved startup-config
+        # and flash contents. Stop flushes config; delete frees the in-memory
+        # VM object without unlinking files.
         # We log and swallow errors here so a failed teardown never
         # masks the original lifecycle error in the caller.
+        try:
+            client.request(f"vm stop {vm_name}")
+        except DynamipsError as exc:
+            _logger.warning(
+                "dynamips.stop.failed",
+                extra={"vm_name": vm_name, "error": str(exc)},
+            )
+        try:
+            client.request(f"vm delete {vm_name}")
+        except DynamipsError as exc:
+            _logger.warning(
+                "dynamips.delete.failed",
+                extra={"vm_name": vm_name, "error": str(exc)},
+            )
+        # ``vm delete`` frees slot bindings but leaves the named NIOs in
+        # the hypervisor's global registry. Reusing the same NIO name on
+        # the next start fails with 206 "unable to create TAP NIO", so
+        # sweep them here.
+        for nio_name in nio_names:
+            self._delete_nio_locked(client, nio_name)
+
+    def _purge_vm_locked(
+        self,
+        client: HypervisorClient,
+        vm_name: str,
+    ) -> None:
+        """Destructively delete a throwaway VM using ``vm clean_delete``.
+
+        Use this for calibration VMs and partial/failed-start VMs where
+        we intentionally want dynamips to also unlink on-disk artifacts
+        (NVRAM, disk0). Do NOT use for production stop/start cycles —
+        use ``_destroy_vm_locked`` there to preserve saved config.
+        """
         try:
             client.request(f"vm clean_delete {vm_name}")
         except DynamipsError as exc:
             _logger.warning(
-                "dynamips.destroy.failed",
+                "dynamips.purge.failed",
                 extra={"vm_name": vm_name, "error": str(exc)},
+            )
+
+    def _delete_nio_locked(self, client: HypervisorClient, nio_name: str) -> None:
+        try:
+            client.request(f"nio delete {nio_name}")
+        except DynamipsError as exc:
+            # Absent NIO is the expected case on first start; only log at
+            # debug so a clean run isn't noisy.
+            _logger.debug(
+                "dynamips.nio_delete.skipped",
+                extra={"nio_name": nio_name, "error": str(exc)},
             )
 
     def _persist_runtime(self, runtime: dict[str, Any]) -> None:
