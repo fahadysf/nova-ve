@@ -109,9 +109,26 @@ class DynamipsAdapter(VendorAdapter):
 
     @staticmethod
     def _infer_ethernet_count(platform: str, extras: dict[str, Any]) -> int:
-        # Default ethernet counts when the EVE-NG template doesn't state one.
-        if platform == "c3725":
-            # GT96100-FE built-in = 2 FastEthernet; slot 1 NM may add more.
-            return 2
-        # c7200 with the default C7200-IO-FE = 1 FastEthernet on slot 0.
-        return 1
+        # Sum the port count for every populated slot. Falls back to the
+        # platform default if a non-empty slot value is unknown (e.g. an
+        # EVE-NG-only PA we haven't catalogued yet), preserving the prior
+        # behaviour of "at least show some interfaces" for older imports.
+        # NOTE: _DYNAMIPS_PA_PORT_COUNT lives in template_service — if you
+        # add a new module there, the importer picks it up automatically.
+        from app.services.template_service import _DYNAMIPS_PA_PORT_COUNT
+        total = 0
+        seen_any = False
+        for idx in range(8):  # cover both c3725 (3) and c7200 (7)
+            pa = str(extras.get(f"slot{idx}") or "").strip()
+            if not pa:
+                continue
+            seen_any = True
+            count = _DYNAMIPS_PA_PORT_COUNT.get(pa)
+            if count is None:
+                # Unknown PA — preserve old behaviour rather than blow up the import.
+                continue
+            total += count
+        if seen_any and total > 0:
+            return total
+        # No slots populated → platform default.
+        return 2 if platform == "c3725" else 1

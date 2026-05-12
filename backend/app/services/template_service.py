@@ -396,6 +396,40 @@ DYNAMIPS_C7200_SLOT_OPTIONS = [
     {"value": "PA-POS-OC3", "label": "PA-POS-OC3"},
 ]
 
+# Maximum number of slot fields exposed per platform.  Used by
+# _dynamips_extras_schema so the UI and the importer stay in sync when
+# we add a new platform or increase slot count.
+_DYNAMIPS_PLATFORM_MAX_SLOTS: dict[str, int] = {"c3725": 3, "c7200": 7}
+
+# Ethernet port count contributed by each PA/NM module.  Zero means the
+# module exists (serial, ATM, POS) but adds no Ethernet interfaces.
+# NOTE: backend/scripts/import_eveng/adapters/dynamips.py imports this dict
+# directly via ``from app.services.template_service import _DYNAMIPS_PA_PORT_COUNT``.
+# If you add a new module here, add it there too (or it will silently be
+# skipped during import — see the "Unknown PA" fallback comment).
+_DYNAMIPS_PA_PORT_COUNT: dict[str, int] = {
+    # c3725 NM modules
+    "GT96100-FE": 2,    # built-in 2× FastEthernet
+    "NM-1FE-TX": 1,
+    "NM-4T": 0,         # serial only
+    "NM-16ESW": 16,
+    "NM-1E": 1,
+    "NM-4E": 4,
+    # c7200 PA modules
+    "C7200-IO-FE": 1,
+    "C7200-IO-2FE": 2,
+    "C7200-IO-GE-E": 1,
+    "PA-FE-TX": 1,
+    "PA-2FE-TX": 2,
+    "PA-GE": 1,
+    "PA-4E": 4,
+    "PA-8E": 8,
+    "PA-4T+": 0,        # serial only
+    "PA-8T": 0,         # serial only
+    "PA-A1": 0,         # ATM
+    "PA-POS-OC3": 0,    # POS
+}
+
 
 def _qemu_extras_schema() -> list[dict[str, Any]]:
     return [
@@ -585,8 +619,9 @@ def _dynamips_extras_schema(platform: str = "c7200") -> list[dict[str, Any]]:
     ]
 
     if platform == "c3725":
-        # c3725 has 2 NM slots; slot 0 is the built-in GT96100-FE.
-        for index in range(2):
+        # c3725 exposes 3 slot fields: slot 0 (motherboard GT96100-FE),
+        # slot 1 (NM slot), and slot 2 (NM slot).
+        for index in range(_DYNAMIPS_PLATFORM_MAX_SLOTS["c3725"]):
             schema.append(
                 {
                     "key": f"slot{index}",
@@ -600,7 +635,7 @@ def _dynamips_extras_schema(platform: str = "c7200") -> list[dict[str, Any]]:
             )
         nvram_default = 128
     else:  # c7200
-        for index in range(7):
+        for index in range(_DYNAMIPS_PLATFORM_MAX_SLOTS["c7200"]):
             schema.append(
                 {
                     "key": f"slot{index}",
@@ -621,6 +656,18 @@ def _dynamips_extras_schema(platform: str = "c7200") -> list[dict[str, Any]]:
             "type": "number",
             "default": nvram_default,
             "stoppedOnly": True,
+        }
+    )
+
+    disk0_default = 16 if platform == "c3725" else 64
+    schema.append(
+        {
+            "key": "disk0",
+            "label": "Flash (disk0) MB",
+            "type": "number",
+            "default": disk0_default,
+            "stoppedOnly": True,
+            "runtime": True,
         }
     )
 

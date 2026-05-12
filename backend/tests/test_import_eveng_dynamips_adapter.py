@@ -79,6 +79,19 @@ def test_missing_image_raises_needs_manual_review(
         adapter.convert(raw, tmp_path)
 
 
+def test_infer_ethernet_count_sums_slot_inventory() -> None:
+    # 2 (GT96100-FE) + 16 (NM-16ESW) = 18
+    assert DynamipsAdapter._infer_ethernet_count(
+        "c3725",
+        {"slot0": "GT96100-FE", "slot1": "NM-16ESW"},
+    ) == 18
+
+
+def test_infer_ethernet_count_falls_back_to_default_for_empty_slots() -> None:
+    assert DynamipsAdapter._infer_ethernet_count("c3725", {}) == 2
+    assert DynamipsAdapter._infer_ethernet_count("c7200", {}) == 1
+
+
 def test_idle_pc_aliases_normalized(adapter: DynamipsAdapter, tmp_path: Path) -> None:
     # EVE-NG uses `idle` while GNS3 uses `idlepc`; the adapter accepts
     # either and writes the canonical key.
