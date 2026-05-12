@@ -1062,6 +1062,7 @@ async def create_nodes_from_paired_template(
             from app.services import host_net
             from app.services.link_service import (
                 DuplicateLinkError,
+                InterfaceAlreadyAttachedError,
                 LinkContentionError,
             )
             from app.services.node_runtime_service import NodeRuntimeError
@@ -1082,6 +1083,15 @@ async def create_nodes_from_paired_template(
                         "code": 409,
                         "status": "fail",
                         "message": f"Paired link conflicts with an existing link: {exc}",
+                    },
+                )
+            if isinstance(exc, InterfaceAlreadyAttachedError):
+                return _json_error(
+                    409,
+                    {
+                        "code": 409,
+                        "status": "fail",
+                        "message": f"Paired link iface already wired: {exc}",
                     },
                 )
             if isinstance(exc, LinkContentionError):

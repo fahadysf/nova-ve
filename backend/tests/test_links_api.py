@@ -348,9 +348,15 @@ async def test_promotion_is_one_way(
 
 
 @pytest.mark.asyncio
-async def test_implicit_bridge_gc_on_last_delete(
+async def test_implicit_bridge_gc_cascades_on_first_delete(
     patched_route_settings, auth_override, reset_idempotency, ws_recorder,
 ):
+    """Deleting either half of an implicit-bridge pair cascade-deletes the
+    other half AND the implicit network in the same op. The legacy
+    "wait until refcount==0" behaviour left orphan halves hidden in
+    lab.json — the exact corruption observed on the alpine-docker-demo
+    lab (vyos-1 eth1 → invisible net 3 with no surviving peer).
+    """
     lab_name = _seed_lab(
         patched_route_settings.LABS_DIR,
         nodes={"1": _node(1), "2": _node(2)},
@@ -370,18 +376,19 @@ async def test_implicit_bridge_gc_on_last_delete(
         assert len(saved["links"]) == 2
         link_ids = [l["id"] for l in saved["links"]]
 
-        # Delete one — implicit net stays.
+        # Delete one — cascade pulls the orphan half + the implicit bridge.
         await c.delete(f"/api/labs/{lab_name}/links/{link_ids[0]}")
         saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
-        assert len(saved["networks"]) == 1
-
-        # Delete the last — implicit net is GC'd.
-        await c.delete(f"/api/labs/{lab_name}/links/{link_ids[1]}")
-        saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
         assert saved["networks"] == {}
+        assert saved["links"] == []
 
     types = [t for _, t, _ in ws_recorder]
     assert "network_deleted" in types
+    # Both halves should produce link_deleted WS events.
+    link_deleted_ids = {
+        payload.get("link_id") for _lab, t, payload in ws_recorder if t == "link_deleted"
+    }
+    assert link_deleted_ids == set(link_ids)
 
 
 @pytest.mark.asyncio

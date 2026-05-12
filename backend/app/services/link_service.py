@@ -41,6 +41,27 @@ class DuplicateLinkError(Exception):
         self.existing_link = existing_link
 
 
+class InterfaceAlreadyAttachedError(Exception):
+    """Raised when a node interface is already wired by another link.
+
+    A single ``(node_id, interface_index)`` may participate in at most one
+    link, because the kernel can only attach one TAP/veth to one bridge at a
+    time. Allowing two declared links from the same iface produced the
+    orphan-implicit-bridge corruption observed in alpine-docker-demo
+    (lnk_009 vs lnk_012). Callers should delete the existing link first if
+    the intent is to redirect the iface to a different peer.
+    """
+
+    def __init__(self, existing_link: dict, node_id: int, interface_index: int) -> None:
+        super().__init__(
+            f"node {node_id} interface {interface_index} is already attached "
+            f"by link {existing_link.get('id')!r}"
+        )
+        self.existing_link = existing_link
+        self.node_id = node_id
+        self.interface_index = interface_index
+
+
 class LinkContentionError(Exception):
     """US-303 codex iter1 MEDIUM: raised when the per-(lab, node, iface)
     runtime mutex cannot be acquired within the bounded contention
@@ -409,6 +430,15 @@ class LinkService:
 
             # Duplicate detection (US-102): treat {a,b} and {b,a} as equivalent.
             target_key = _link_pair_key(endpoint_a, endpoint_b)
+            # Set of (node_id, iface) pairs we are about to wire. The kernel
+            # only supports one bridge attachment per iface, so a second
+            # declared link from the same iface produces orphan-bridge
+            # corruption — see ``InterfaceAlreadyAttachedError``.
+            new_iface_keys = {
+                (int(ep["node_id"]), int(ep.get("interface_index", 0)))
+                for ep in (endpoint_a, endpoint_b)
+                if "node_id" in ep
+            }
             for existing in links:
                 ex_from = existing.get("from")
                 ex_to = existing.get("to")
@@ -422,6 +452,22 @@ class LinkService:
                         continue
                     if ex_key == target_key:
                         raise DuplicateLinkError(_link_with_state(existing))
+                    for endpoint in (ex_from, ex_to):
+                        if not isinstance(endpoint, dict) or "node_id" not in endpoint:
+                            continue
+                        try:
+                            ex_iface_key = (
+                                int(endpoint["node_id"]),
+                                int(endpoint.get("interface_index", 0)),
+                            )
+                        except (TypeError, ValueError):
+                            continue
+                        if ex_iface_key in new_iface_keys:
+                            raise InterfaceAlreadyAttachedError(
+                                _link_with_state(existing),
+                                ex_iface_key[0],
+                                ex_iface_key[1],
+                            )
 
             # Snapshot pre-write state so we can roll back lab.json if
             # post-write hot-attach (US-204) fails. ``read_lab_json_static``
@@ -1376,6 +1422,53 @@ class LinkService:
             for endpoint in (removed_link.get("from"), removed_link.get("to")):
                 if isinstance(endpoint, dict) and "network_id" in endpoint:
                     referenced_network_ids.append(int(endpoint["network_id"]))
+
+            # Cascade-delete orphaned implicit-bridge halves. An implicit
+            # bridge is paired (refcount==2) by construction; promotion only
+            # happens at refcount==3 (see ``_create_link_locked``). If
+            # removing this link drops an implicit network's refcount to 1,
+            # the surviving link is an orphan pointing at a now-dangling
+            # bridge — drop it too and let the network GC below remove the
+            # bridge in the same write. Kernel-side cleanup for the orphan
+            # half lands via the post-delete reconcile pass (QEMU) or the
+            # discovery loop (Docker).
+            for net_id in list(referenced_network_ids):
+                network_record = networks.get(str(net_id))
+                if not isinstance(network_record, dict):
+                    continue
+                if network_record.get("implicit") is not True:
+                    continue
+                if _refcount(data, net_id) != 1:
+                    continue
+                orphan_index: Optional[int] = None
+                orphan_link: Optional[dict] = None
+                for index, candidate in enumerate(data["links"]):
+                    if not isinstance(candidate, dict):
+                        continue
+                    for ep in (candidate.get("from"), candidate.get("to")):
+                        if (
+                            isinstance(ep, dict)
+                            and "network_id" in ep
+                            and int(ep["network_id"]) == int(net_id)
+                        ):
+                            orphan_index = index
+                            orphan_link = candidate
+                            break
+                    if orphan_link is not None:
+                        break
+                if orphan_link is not None and orphan_index is not None:
+                    data["links"].pop(orphan_index)
+                    ws_events.append(
+                        ("link_deleted", {"link_id": str(orphan_link.get("id"))})
+                    )
+                    _logger.info(
+                        "delete_link: cascade-removed orphan implicit-bridge half "
+                        "link=%s net=%s (primary=%s lab=%s)",
+                        orphan_link.get("id"),
+                        net_id,
+                        link_id,
+                        normalized,
+                    )
 
             for net_id in referenced_network_ids:
                 network_record = networks.get(str(net_id))
