@@ -420,6 +420,117 @@ describe('canvasEdges.deriveEdges (discovered overlay)', () => {
   });
 });
 
+describe('canvasEdges.deriveEdges — implicit-bridge collapse and orphan', () => {
+  function implicitNetwork(id: number, overrides: Partial<import('$lib/types').Network> = {}) {
+    return {
+      id,
+      name: '',
+      type: 'linux_bridge' as const,
+      left: 0,
+      top: 0,
+      icon: '01-Cloud-Default.svg',
+      width: 0,
+      style: 'Solid',
+      linkstyle: 'Straight',
+      color: '',
+      label: '',
+      visibility: false,
+      implicit: true,
+      smart: -1,
+      config: {},
+      ...overrides,
+    };
+  }
+
+  it('collapses a healthy 2-half implicit bridge into a single node-to-node edge', () => {
+    const links: Link[] = [
+      {
+        id: 'lnk_pair_a',
+        from: { node_id: 3, interface_index: 1 },
+        to: { network_id: 7 },
+        style_override: null,
+        label: '',
+        color: '',
+        width: '1',
+      },
+      {
+        id: 'lnk_pair_b',
+        from: { node_id: 6, interface_index: 0 },
+        to: { network_id: 7 },
+        style_override: null,
+        label: '',
+        color: '',
+        width: '1',
+      },
+    ];
+    const networks = { '7': implicitNetwork(7) };
+    const edges = deriveEdges(links, { link_style: 'orthogonal' }, null, null, networks);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].id).toBe('pair:net7');
+    // Lower (node_id, iface) wins source side — node 3 / iface 1 vs node 6 / iface 0.
+    expect(edges[0].source).toBe('node3');
+    expect(edges[0].target).toBe('node6');
+    expect(edges[0].sourceHandle).toBe('iface-1');
+    expect(edges[0].targetHandle).toBe('iface-0');
+    const data = edges[0].data as { implicit_bridge_network_id?: number; implicit_bridge_link_ids?: string[] };
+    expect(data.implicit_bridge_network_id).toBe(7);
+    expect(data.implicit_bridge_link_ids?.sort()).toEqual(['lnk_pair_a', 'lnk_pair_b']);
+  });
+
+  it('renders an orphan implicit-bridge half as an amber dashed edge to the (force-shown) network', () => {
+    const links: Link[] = [
+      {
+        id: 'lnk_orphan',
+        from: { node_id: 3, interface_index: 1 },
+        to: { network_id: 7 },
+        style_override: null,
+        label: '',
+        color: '',
+        width: '1',
+      },
+    ];
+    const networks = { '7': implicitNetwork(7) };
+    const edges = deriveEdges(links, { link_style: 'orthogonal' }, null, null, networks);
+    expect(edges).toHaveLength(1);
+    expect(edges[0].id).toBe('link:lnk_orphan');
+    expect(edges[0].target).toBe('network7');
+    expect(edges[0].style).toContain('#fbbf24');
+    expect(edges[0].style).toContain('stroke-dasharray');
+    const data = edges[0].data as { orphan_implicit?: boolean };
+    expect(data.orphan_implicit).toBe(true);
+  });
+
+  it('does not collapse when the network is not implicit (regular paired-via-explicit-bridge stays as two edges)', () => {
+    const links: Link[] = [
+      {
+        id: 'lnk_a',
+        from: { node_id: 3, interface_index: 1 },
+        to: { network_id: 7 },
+        style_override: null,
+        label: '',
+        color: '',
+        width: '1',
+      },
+      {
+        id: 'lnk_b',
+        from: { node_id: 6, interface_index: 0 },
+        to: { network_id: 7 },
+        style_override: null,
+        label: '',
+        color: '',
+        width: '1',
+      },
+    ];
+    const networks = { '7': implicitNetwork(7, { implicit: false, visibility: true }) };
+    const edges = deriveEdges(links, { link_style: 'orthogonal' }, null, null, networks);
+    expect(edges).toHaveLength(2);
+    expect(edges.map((e) => e.id).sort()).toEqual(['link:lnk_a', 'link:lnk_b']);
+    for (const edge of edges) {
+      expect(edge.target).toBe('network7');
+    }
+  });
+});
+
 describe('canvasEdges.parseIfaceInterfaceIndex', () => {
   it('decodes the interface index from nve{hash}d{node}i{iface}h', () => {
     expect(parseIfaceInterfaceIndex('nve12abd7i2h')).toBe(2);

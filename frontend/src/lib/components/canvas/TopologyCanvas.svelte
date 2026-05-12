@@ -498,7 +498,16 @@
     }
 
     for (const network of Object.values(localNetworks)) {
-      if (!network.visibility) continue;
+      // Implicit bridges normally render as paired collapsed edges (handled
+      // in canvasEdges.ts) and the bridge node itself stays hidden. But an
+      // implicit network with refcount != 2 is in a broken state — orphan
+      // half left over after the peer was repointed. Force-show those so
+      // the orphan edge has a target node to land on; otherwise the link
+      // disappears from the canvas and the corruption is invisible.
+      const networkLinkIds = linkIdsByNetwork.get(network.id) ?? [];
+      const isBrokenImplicit =
+        network.implicit === true && networkLinkIds.length !== 2;
+      if (!network.visibility && !isBrokenImplicit) continue;
       flowNodes.push({
         id: `network${network.id}`,
         type: 'network',
@@ -509,7 +518,8 @@
           type: 'network',
           count: network.count ?? 0,
           networkId: network.id,
-          linkIds: linkIdsByNetwork.get(network.id) ?? []
+          linkIds: networkLinkIds,
+          brokenImplicit: isBrokenImplicit
         },
         style: `width: ${network.width ? network.width + 40 : 110}px;`
       });
@@ -549,7 +559,7 @@
       }
     }
 
-    return deriveEdges(localLinks, localDefaults, discoveredList, divergentByLinkId);
+    return deriveEdges(localLinks, localDefaults, discoveredList, divergentByLinkId, localNetworks);
   }
 
   $: {

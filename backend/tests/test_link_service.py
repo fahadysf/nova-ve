@@ -590,3 +590,127 @@ async def test_delete_link_calls_set_qemu_nic_link_down_before_detach(
     # set_link MUST run before detach — otherwise the device is gone
     # and there is nothing to flip the carrier off on.
     assert detach_order == ["set_link", "detach"]
+
+
+@pytest.mark.asyncio
+async def test_create_link_rejects_when_iface_already_attached(
+    link_settings, monkeypatch,
+):
+    """A second ``create_link`` from the same ``(node, iface)`` to a
+    different network must surface ``InterfaceAlreadyAttachedError``.
+
+    Without this guard, the lab.json ends up with two declared links from
+    a single iface — but the kernel can only attach one bridge at a time,
+    so one of them becomes a permanent zombie pointing at a now-orphaned
+    bridge (this is the alpine-docker-demo corruption that turned vyos-1
+    eth1 into a dangling implicit-bridge half).
+    """
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": _node(1)},
+        networks={
+            "5": _explicit_network(5, "lan-1"),
+            "6": _explicit_network(6, "lan-2"),
+        },
+    )
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    from app.services.link_service import InterfaceAlreadyAttachedError
+
+    service = LinkService()
+    first, _net, _replayed = await service.create_link(
+        lab_name,
+        {"node_id": 1, "interface_index": 0},
+        {"network_id": 5},
+    )
+    assert first["id"]
+
+    with pytest.raises(InterfaceAlreadyAttachedError) as excinfo:
+        await service.create_link(
+            lab_name,
+            {"node_id": 1, "interface_index": 0},
+            {"network_id": 6},
+        )
+    err = excinfo.value
+    assert err.node_id == 1
+    assert err.interface_index == 0
+    assert err.existing_link["id"] == first["id"]
+
+
+@pytest.mark.asyncio
+async def test_delete_link_cascades_orphan_implicit_bridge_half(
+    link_settings, monkeypatch,
+):
+    """Deleting one half of an implicit-bridge pair must cascade-delete
+    the other half AND drop the implicit network. Otherwise the surviving
+    half is a zombie link pointing at a now-empty hidden bridge — the
+    exact state that hid the vyos-1 eth1 → net3 link from the canvas.
+    """
+    # Two nodes wired via an implicit bridge (network_id=2 below).
+    implicit_net = {
+        "id": 2,
+        "name": "",
+        "type": "linux_bridge",
+        "left": 0,
+        "top": 0,
+        "icon": "01-Cloud-Default.svg",
+        "width": 0,
+        "style": "Solid",
+        "linkstyle": "Straight",
+        "color": "",
+        "label": "",
+        "visibility": False,
+        "implicit": True,
+        "smart": -1,
+        "config": {},
+    }
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": _node(1), "3": _node(3)},
+        networks={"2": implicit_net},
+        links=[
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 2},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            },
+            {
+                "id": "lnk_002",
+                "from": {"node_id": 3, "interface_index": 0},
+                "to": {"network_id": 2},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            },
+        ],
+    )
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    service = LinkService()
+    already_noop, deleted_implicit = await service.delete_link(lab_name, "lnk_001")
+    assert already_noop is False
+    # Implicit network was GC'd after cascade.
+    assert deleted_implicit is not None
+    assert deleted_implicit["id"] == 2
+
+    # lab.json now has no links and no networks.
+    data = json.loads((link_settings.LABS_DIR / lab_name).read_text())
+    assert data.get("links") == []
+    assert data.get("networks") == {}
