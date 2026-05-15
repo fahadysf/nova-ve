@@ -8,6 +8,7 @@ NetworkType = Literal[
     "linux_bridge",
     "ovs_bridge",
     "nat",
+    "nat_cloud",
     "cloud",
     "management",
     "pnet0", "pnet1", "pnet2", "pnet3", "pnet4",
@@ -30,6 +31,9 @@ class NetworkConfig(BaseModel):
     cidr: Optional[str] = None
     gateway: Optional[str] = None
     dhcp: bool = False
+    dhcp_start: Optional[str] = None
+    dhcp_end: Optional[str] = None
+    egress_interface: Optional[str] = None
 
 
 class NetworkRuntime(BaseModel):

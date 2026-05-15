@@ -38,6 +38,10 @@ logger = logging.getLogger("nova-ve")
 # and .1 (conventional gateway reservation). The broadcast address is
 # excluded explicitly inside ``_allocate_ip``.
 DEFAULT_FIRST_OFFSET = 2
+NAT_CLOUD_TYPE = "nat_cloud"
+NAT_CLOUD_STATIC_FIRST_OFFSET = 2
+NAT_CLOUD_STATIC_LAST_OFFSET = 99
+NAT_CLOUD_DHCP_FIRST_OFFSET = 100
 
 
 class NetworkServiceError(Exception):
@@ -79,6 +83,123 @@ def _validate_cidr(cidr: Any) -> ipaddress.IPv4Network:
             "IPv6 CIDR not yet supported (see plan §5 deferred-IPv6)",
         )
     return net
+
+
+def _validate_ipv4(value: Any, field: str) -> ipaddress.IPv4Address:
+    if not isinstance(value, str) or not value.strip():
+        raise NetworkServiceError(422, f"{field} must be a non-empty IPv4 address")
+    try:
+        return ipaddress.IPv4Address(value.strip())
+    except ValueError as exc:
+        raise NetworkServiceError(422, f"{field} is not a valid IPv4 address: {exc}") from exc
+
+
+def _settings_nat_cloud_pool() -> ipaddress.IPv4Network:
+    raw = getattr(get_settings(), "NAT_CLOUD_POOL", "10.255.0.0/16")
+    try:
+        pool = ipaddress.ip_network(str(raw).strip(), strict=True)
+    except ValueError as exc:
+        raise NetworkServiceError(500, f"NAT-Cloud pool is invalid: {exc}") from exc
+    if isinstance(pool, ipaddress.IPv6Network):
+        raise NetworkServiceError(500, "NAT-Cloud pool must be IPv4")
+    if pool.prefixlen > 24:
+        raise NetworkServiceError(
+            500,
+            "NAT-Cloud pool must be at least large enough to allocate /24 networks",
+        )
+    return pool
+
+
+def _existing_network_cidrs(networks: dict) -> list[ipaddress.IPv4Network]:
+    out: list[ipaddress.IPv4Network] = []
+    for network in networks.values():
+        if not isinstance(network, dict):
+            continue
+        config = network.get("config") or {}
+        if not isinstance(config, dict) or not config.get("cidr"):
+            continue
+        try:
+            out.append(_validate_cidr(config["cidr"]))
+        except NetworkServiceError:
+            continue
+    return out
+
+
+def _allocate_nat_cloud_cidr(networks: dict) -> ipaddress.IPv4Network:
+    used = _existing_network_cidrs(networks)
+    for candidate in _settings_nat_cloud_pool().subnets(new_prefix=24):
+        if any(candidate.overlaps(existing) for existing in used):
+            continue
+        return candidate
+    raise NetworkServiceError(
+        409,
+        "NAT-Cloud subnet pool exhausted; configure a larger NOVA_VE_NAT_CLOUD_POOL.",
+    )
+
+
+def _normalize_nat_cloud_config(raw_config: dict, networks: dict) -> dict:
+    cidr = _validate_cidr(raw_config["cidr"]) if raw_config.get("cidr") else _allocate_nat_cloud_cidr(networks)
+    if cidr.prefixlen > 24:
+        raise NetworkServiceError(422, "NAT-Cloud CIDR must be /24 or larger")
+    for existing in _existing_network_cidrs(networks):
+        if cidr.overlaps(existing):
+            raise NetworkServiceError(
+                409,
+                f"NAT-Cloud CIDR {cidr} overlaps existing network CIDR {existing}.",
+            )
+
+    gateway = (
+        _validate_ipv4(raw_config["gateway"], "config.gateway")
+        if raw_config.get("gateway")
+        else ipaddress.IPv4Address(int(cidr.network_address) + 1)
+    )
+    if gateway not in cidr:
+        raise NetworkServiceError(422, "config.gateway must be inside config.cidr")
+    if gateway in (cidr.network_address, cidr.broadcast_address):
+        raise NetworkServiceError(422, "config.gateway cannot be the network or broadcast address")
+
+    default_start = ipaddress.IPv4Address(int(cidr.network_address) + NAT_CLOUD_DHCP_FIRST_OFFSET)
+    default_end = ipaddress.IPv4Address(int(cidr.broadcast_address) - 1)
+    dhcp_start = (
+        _validate_ipv4(raw_config["dhcp_start"], "config.dhcp_start")
+        if raw_config.get("dhcp_start")
+        else default_start
+    )
+    dhcp_end = (
+        _validate_ipv4(raw_config["dhcp_end"], "config.dhcp_end")
+        if raw_config.get("dhcp_end")
+        else default_end
+    )
+    if dhcp_start not in cidr or dhcp_end not in cidr:
+        raise NetworkServiceError(422, "DHCP range must be inside config.cidr")
+    if int(dhcp_start) > int(dhcp_end):
+        raise NetworkServiceError(422, "config.dhcp_start must be <= config.dhcp_end")
+    static_last = ipaddress.IPv4Address(int(cidr.network_address) + NAT_CLOUD_STATIC_LAST_OFFSET)
+    if int(dhcp_start) <= int(static_last):
+        raise NetworkServiceError(
+            422,
+            "NAT-Cloud DHCP range must start after the reserved static range ending at offset .99",
+        )
+
+    config = dict(raw_config)
+    config.update(
+        {
+            "cidr": str(cidr),
+            "gateway": str(gateway),
+            "dhcp": bool(raw_config.get("dhcp", True)),
+            "dhcp_start": str(dhcp_start),
+            "dhcp_end": str(dhcp_end),
+        }
+    )
+    if raw_config.get("egress_interface"):
+        config["egress_interface"] = str(raw_config["egress_interface"]).strip()
+    return config
+
+
+def _bridge_gateway_cidr(config: dict) -> str:
+    cidr = _validate_cidr(config.get("cidr"))
+    gateway = _validate_ipv4(config.get("gateway"), "config.gateway")
+    return f"{gateway}/{cidr.prefixlen}"
 
 
 def _serialize_network(network: dict, count: int) -> dict:
@@ -238,6 +359,69 @@ def _reconcile_qemu_nic_link_state(
 
 
 class NetworkService:
+    def _ensure_nat_cloud_runtime(self, network: dict, bridge: str) -> bool:
+        """Ensure host L3/NAT/DHCP state for a ``nat_cloud`` network.
+
+        Returns True when persisted runtime fields changed.
+        """
+        config = network.get("config") or {}
+        if not isinstance(config, dict):
+            raise NetworkServiceError(422, "NAT-Cloud config must be an object.")
+
+        gateway_cidr = _bridge_gateway_cidr(config)
+        runtime = network.setdefault("runtime", {})
+        egress = str(config.get("egress_interface") or "").strip()
+        if not egress:
+            egress = host_net.default_egress_iface()
+        if not egress:
+            raise NetworkServiceError(409, "Host has no default-route interface for NAT-Cloud egress.")
+
+        host_net.bridge_addr_add(bridge, gateway_cidr)
+        host_net.link_up(bridge)
+        host_net.ipv4_forward_enable()
+        host_net.nat_apply(bridge, str(config["cidr"]), egress)
+
+        dhcp_pid = 0
+        if bool(config.get("dhcp", True)):
+            dhcp_pid = host_net.dnsmasq_start(
+                bridge,
+                str(config["gateway"]),
+                str(config["dhcp_start"]),
+                str(config["dhcp_end"]),
+            )
+        else:
+            host_net.dnsmasq_stop(bridge)
+
+        desired = {
+            "bridge_name": bridge,
+            "driver": NAT_CLOUD_TYPE,
+            "gateway": str(config["gateway"]),
+            "egress_interface": egress,
+            "dhcp": bool(config.get("dhcp", True)),
+            "dhcp_start": str(config["dhcp_start"]),
+            "dhcp_end": str(config["dhcp_end"]),
+            "dhcp_pid": dhcp_pid,
+            "nat": "nftables",
+        }
+        changed = False
+        for key, value in desired.items():
+            if runtime.get(key) != value:
+                runtime[key] = value
+                changed = True
+        return changed
+
+    def _cleanup_nat_cloud_runtime(self, bridge: Optional[str]) -> None:
+        if not bridge:
+            return
+        try:
+            host_net.dnsmasq_stop(bridge)
+        except host_net.HostNetError:
+            logger.warning("cleanup_nat_cloud: dnsmasq_stop(%s) failed", bridge)
+        try:
+            host_net.nat_remove(bridge)
+        except host_net.HostNetError:
+            logger.warning("cleanup_nat_cloud: nat_remove(%s) failed", bridge)
+
     def list_networks(self, lab_path: str, *, include_hidden: bool = False) -> Dict[str, dict]:
         """Return networks keyed by string id, mirroring legacy router shape.
 
@@ -298,6 +482,7 @@ class NetworkService:
         created: List[str] = []
         skipped: List[Dict[str, Any]] = []
         raised: List[str] = []
+        nat_cloud: List[Dict[str, Any]] = []
         nic_link_state: List[Dict[str, Any]] = []
 
         with lab_lock(normalized, labs_dir):
@@ -376,6 +561,25 @@ class NetworkService:
                 if existing_runtime.get("bridge_name") != bridge:
                     existing_runtime["bridge_name"] = bridge
                     dirty = True
+                if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+                    try:
+                        if self._ensure_nat_cloud_runtime(network, bridge):
+                            dirty = True
+                        nat_cloud.append(
+                            {
+                                "network_id": network_id,
+                                "bridge": bridge,
+                                "egress_interface": network.get("runtime", {}).get("egress_interface"),
+                            }
+                        )
+                    except (NetworkServiceError, host_net.HostNetError, OSError) as exc:
+                        skipped.append(
+                            {
+                                "bridge": bridge,
+                                "network_id": network_id,
+                                "reason": str(exc),
+                            }
+                        )
 
             if dirty:
                 LabService.write_lab_json_static(normalized, data)
@@ -389,6 +593,7 @@ class NetworkService:
             "created": created,
             "skipped": skipped,
             "raised": raised,
+            "nat_cloud": nat_cloud,
             "nic_link_state": nic_link_state,
         }
 
@@ -402,8 +607,9 @@ class NetworkService:
         raw_config = request.get("config") or {}
         if not isinstance(raw_config, dict):
             raw_config = {}
+        network_type = str(request.get("type", "linux_bridge") or "linux_bridge")
         cidr_value = raw_config.get("cidr")
-        if cidr_value:
+        if cidr_value and network_type != NAT_CLOUD_TYPE:
             _validate_cidr(cidr_value)
 
         raw_name = str(request.get("name") or "").strip()
@@ -420,6 +626,11 @@ class NetworkService:
                     f"A network named {raw_name!r} already exists in this lab.",
                     extra={"name": raw_name},
                 )
+            normalized_config = (
+                _normalize_nat_cloud_config(raw_config, networks)
+                if network_type == NAT_CLOUD_TYPE
+                else dict(raw_config)
+            )
             next_id = max(
                 (int(key) for key in networks.keys() if str(key).isdigit()),
                 default=0,
@@ -428,7 +639,7 @@ class NetworkService:
             network = {
                 "id": next_id,
                 "name": raw_name,
-                "type": request.get("type", "linux_bridge"),
+                "type": network_type,
                 "left": int(request.get("left", 0)),
                 "top": int(request.get("top", 0)),
                 "icon": "01-Cloud-Default.svg",
@@ -440,22 +651,35 @@ class NetworkService:
                 "visibility": True,
                 "implicit": False,
                 "smart": -1,
-                "config": dict(raw_config),
+                "config": normalized_config,
                 "runtime": {
                     "bridge_name": bridge,
                     # US-401: provisioning-backend metadata for the
                     # reconciliation loop (US-402). ``driver`` mirrors
                     # the network's ``type`` vocabulary; ``created_at``
                     # is an ISO-8601 UTC timestamp.
-                    "driver": "linux_bridge",
+                    "driver": network_type if network_type == NAT_CLOUD_TYPE else "linux_bridge",
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     # US-204c: seed an empty free-list. Counter-based
                     # allocation would exhaust a /24 in 250 cycles even
                     # with one container; the free-list does not.
                     "used_ips": [],
-                    "first_offset": DEFAULT_FIRST_OFFSET,
+                    "first_offset": (
+                        NAT_CLOUD_STATIC_FIRST_OFFSET
+                        if network_type == NAT_CLOUD_TYPE
+                        else DEFAULT_FIRST_OFFSET
+                    ),
                 },
             }
+            if network_type == NAT_CLOUD_TYPE:
+                network["runtime"].update(
+                    {
+                        "gateway": normalized_config["gateway"],
+                        "dhcp": normalized_config.get("dhcp", True),
+                        "dhcp_start": normalized_config["dhcp_start"],
+                        "dhcp_end": normalized_config["dhcp_end"],
+                    }
+                )
             networks[str(next_id)] = network
             data.pop("topology", None)
             # Persist BEFORE provisioning so on-disk state never leads the
@@ -482,16 +706,27 @@ class NetworkService:
                                 rollback_exc,
                             )
                         raise
+                if network_type == NAT_CLOUD_TYPE:
+                    self._ensure_nat_cloud_runtime(network, bridge)
             except host_net.HostNetBridgeOwnershipError:
                 networks.pop(str(next_id), None)
                 data["networks"] = networks
                 LabService.write_lab_json_static(normalized, data)
+                raise
+            except NetworkServiceError:
+                networks.pop(str(next_id), None)
+                data["networks"] = networks
+                LabService.write_lab_json_static(normalized, data)
+                if network_type == NAT_CLOUD_TYPE:
+                    self._cleanup_nat_cloud_runtime(bridge)
                 raise
             except (host_net.HostNetError, OSError) as exc:
                 # Roll back the JSON write — never leave inconsistent state.
                 networks.pop(str(next_id), None)
                 data["networks"] = networks
                 LabService.write_lab_json_static(normalized, data)
+                if network_type == NAT_CLOUD_TYPE:
+                    self._cleanup_nat_cloud_runtime(bridge)
                 logger.error(
                     "create_network: bridge provisioning failed for %s (%s); rolled back lab.json",
                     bridge,
@@ -502,6 +737,8 @@ class NetworkService:
                     f"Failed to provision bridge {bridge}: {exc}",
                     extra={"bridge": bridge},
                 ) from exc
+            if network_type == NAT_CLOUD_TYPE:
+                LabService.write_lab_json_static(normalized, data)
             _recompute_mac_registry(normalized, data)
             payload = _serialize_network(network, 0)
 
@@ -547,6 +784,8 @@ class NetworkService:
                 except Exception:  # noqa: BLE001 — defensive
                     bridge = None
             if bridge:
+                if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+                    self._cleanup_nat_cloud_runtime(bridge)
                 try:
                     host_net.bridge_del(bridge)
                 except host_net.HostNetEINVAL:
@@ -627,6 +866,8 @@ class NetworkService:
             broadcast_addr = net.broadcast_address
             start_int = int(network_addr) + first_offset
             end_int = int(broadcast_addr) - 1  # exclusive of broadcast
+            if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+                end_int = min(end_int, int(network_addr) + NAT_CLOUD_STATIC_LAST_OFFSET)
 
             chosen: Optional[ipaddress.IPv4Address] = None
             for candidate_int in range(start_int, end_int + 1):

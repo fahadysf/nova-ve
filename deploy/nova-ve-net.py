@@ -35,6 +35,7 @@ import ipaddress
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,10 @@ PROC_ROOT = Path(os.environ.get("NOVA_VE_PROC_ROOT", "/proc"))
 # leaves these as None so we use $PATH.
 IP_BIN = os.environ.get("NOVA_VE_IP_BIN") or "ip"
 NSENTER_BIN = os.environ.get("NOVA_VE_NSENTER_BIN") or "nsenter"
+NFT_BIN = os.environ.get("NOVA_VE_NFT_BIN") or "nft"
+DNSMASQ_BIN = os.environ.get("NOVA_VE_DNSMASQ_BIN") or "dnsmasq"
+RUNTIME_ROOT = Path(os.environ.get("NOVA_VE_RUNTIME_ROOT", "/var/lib/nova-ve"))
+IP_FORWARD_PATH = Path(os.environ.get("NOVA_VE_IP_FORWARD_PATH", "/proc/sys/net/ipv4/ip_forward"))
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +89,7 @@ RE_PID = re.compile(r"^[0-9]{1,7}$")
 
 # TCP port (numeric, 1-65535).
 RE_PORT = re.compile(r"^[0-9]{1,5}$")
+RE_HOST_IFACE = re.compile(r"^[A-Za-z0-9_.:-]{1,15}$")
 
 # Path to the bundled console TCP forwarder.  Test override via env var.
 CONSOLE_PROXY_BIN = os.environ.get(
@@ -165,6 +171,25 @@ def validate_cidr(value: str) -> str:
     if iface.network.prefixlen < 0 or iface.network.prefixlen > 32:
         raise _ValidationError("cidr")
     return f"{iface.ip}/{iface.network.prefixlen}"
+
+
+def validate_network_cidr(value: str) -> str:
+    try:
+        network = ipaddress.IPv4Network(value, strict=True)
+    except (ValueError, ipaddress.AddressValueError, ipaddress.NetmaskValueError):
+        raise _ValidationError("network_cidr")
+    return str(network)
+
+
+def validate_ipv4(value: str, *, label: str = "ipv4") -> str:
+    try:
+        return str(ipaddress.IPv4Address(value))
+    except (ValueError, ipaddress.AddressValueError):
+        raise _ValidationError(label)
+
+
+def validate_host_iface(value: str) -> str:
+    return _check_regex(value, RE_HOST_IFACE, "host_iface")
 
 
 # ---------------------------------------------------------------------------
@@ -305,8 +330,25 @@ def _run(argv: Sequence[str]) -> int:
     return proc.returncode
 
 
+def _run_capture(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
+    for piece in argv:
+        if not isinstance(piece, str):
+            raise TypeError(f"argv element not a str: {piece!r}")
+    return subprocess.run(
+        list(argv),
+        shell=False,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def _ip(*args: str) -> int:
     return _run([IP_BIN, *args])
+
+
+def _nft(*args: str) -> int:
+    return _run([NFT_BIN, *args])
 
 
 def _nsenter_ip_netns(pid: int, *args: str) -> int:
@@ -386,6 +428,160 @@ def cmd_link_netns(args: argparse.Namespace) -> int:
 def cmd_link_up(args: argparse.Namespace) -> int:
     iface = validate_iface_name(args.iface)
     return _ip("link", "set", iface, "up")
+
+
+def cmd_bridge_addr_add(args: argparse.Namespace) -> int:
+    bridge = validate_bridge_name(args.bridge)
+    cidr = validate_cidr(args.cidr)
+    return _ip("addr", "replace", cidr, "dev", bridge)
+
+
+def cmd_default_egress(args: argparse.Namespace) -> int:
+    proc = _run_capture([IP_BIN, "route", "show", "default"])
+    if proc.returncode != 0:
+        if proc.stderr:
+            print(proc.stderr, file=sys.stderr, end="")
+        return proc.returncode
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if not parts or parts[0] != "default":
+            continue
+        if "dev" not in parts:
+            continue
+        iface = parts[parts.index("dev") + 1]
+        validate_host_iface(iface)
+        print(iface)
+        return 0
+    print("default route has no dev", file=sys.stderr)
+    return 1
+
+
+def cmd_ipv4_forward_enable(args: argparse.Namespace) -> int:
+    try:
+        IP_FORWARD_PATH.write_text("1\n")
+    except OSError as exc:
+        print(f"failed to enable IPv4 forwarding: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _nat_chain_name(bridge: str) -> str:
+    return f"nvc_{bridge}"
+
+
+def cmd_nat_apply(args: argparse.Namespace) -> int:
+    bridge = validate_bridge_name(args.bridge)
+    cidr = validate_network_cidr(args.cidr)
+    egress = validate_host_iface(args.egress_iface)
+    chain = _nat_chain_name(bridge)
+    _nft("add", "table", "ip", "nova_ve")
+    _nft("flush", "chain", "ip", "nova_ve", chain)
+    _nft("delete", "chain", "ip", "nova_ve", chain)
+    rc = _nft(
+        "add",
+        "chain",
+        "ip",
+        "nova_ve",
+        chain,
+        "{ type nat hook postrouting priority srcnat; policy accept; }",
+    )
+    if rc != 0:
+        return rc
+    return _nft(
+        "add",
+        "rule",
+        "ip",
+        "nova_ve",
+        chain,
+        "ip",
+        "saddr",
+        cidr,
+        "oifname",
+        egress,
+        "masquerade",
+        "comment",
+        f"nova-ve {bridge}",
+    )
+
+
+def cmd_nat_remove(args: argparse.Namespace) -> int:
+    bridge = validate_bridge_name(args.bridge)
+    chain = _nat_chain_name(bridge)
+    _nft("flush", "chain", "ip", "nova_ve", chain)
+    _nft("delete", "chain", "ip", "nova_ve", chain)
+    return 0
+
+
+def _dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
+    root = RUNTIME_ROOT / "nat-cloud" / bridge
+    return root / "dnsmasq.conf", root / "dnsmasq.pid", root / "leases"
+
+
+def _dnsmasq_stop_bridge(bridge: str) -> None:
+    _conf, pidfile, _leases = _dnsmasq_paths(bridge)
+    try:
+        raw = pidfile.read_text().strip()
+        pid = int(raw)
+    except (FileNotFoundError, ValueError, OSError):
+        return
+    try:
+        cmdline = (PROC_ROOT / str(pid) / "cmdline").read_bytes().split(b"\x00")
+    except OSError:
+        cmdline = []
+    if cmdline and not any(b"dnsmasq" in arg for arg in cmdline):
+        print(f"pid {pid} does not look like dnsmasq; refusing to kill", file=sys.stderr)
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    pidfile.unlink(missing_ok=True)
+
+
+def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
+    bridge = validate_bridge_name(args.bridge)
+    gateway = validate_ipv4(args.gateway, label="gateway")
+    dhcp_start = validate_ipv4(args.dhcp_start, label="dhcp_start")
+    dhcp_end = validate_ipv4(args.dhcp_end, label="dhcp_end")
+    if int(ipaddress.IPv4Address(dhcp_start)) > int(ipaddress.IPv4Address(dhcp_end)):
+        raise _ValidationError("dhcp_start>dhcp_end")
+
+    _dnsmasq_stop_bridge(bridge)
+    conf, pidfile, leases = _dnsmasq_paths(bridge)
+    conf.parent.mkdir(parents=True, exist_ok=True)
+    conf.write_text(
+        "\n".join(
+            [
+                "bind-interfaces",
+                f"interface={bridge}",
+                f"listen-address={gateway}",
+                "dhcp-authoritative",
+                f"dhcp-range={dhcp_start},{dhcp_end},12h",
+                f"dhcp-option=option:router,{gateway}",
+                f"dhcp-option=option:dns-server,{gateway}",
+                f"dhcp-leasefile={leases}",
+                f"pid-file={pidfile}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    rc = _run([DNSMASQ_BIN, "--conf-file", str(conf)])
+    if rc != 0:
+        return rc
+    try:
+        pid_text = pidfile.read_text().strip()
+    except OSError:
+        pid_text = ""
+    if pid_text:
+        print(pid_text)
+    return 0
+
+
+def cmd_dnsmasq_stop(args: argparse.Namespace) -> int:
+    bridge = validate_bridge_name(args.bridge)
+    _dnsmasq_stop_bridge(bridge)
+    return 0
 
 
 def cmd_link_set_name_in_netns(args: argparse.Namespace) -> int:
@@ -579,6 +775,13 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "link-set-nomaster": cmd_link_set_nomaster,
     "link-netns": cmd_link_netns,
     "link-up": cmd_link_up,
+    "bridge-addr-add": cmd_bridge_addr_add,
+    "default-egress": cmd_default_egress,
+    "ipv4-forward-enable": cmd_ipv4_forward_enable,
+    "nat-apply": cmd_nat_apply,
+    "nat-remove": cmd_nat_remove,
+    "dnsmasq-start": cmd_dnsmasq_start,
+    "dnsmasq-stop": cmd_dnsmasq_stop,
     "link-set-name-in-netns": cmd_link_set_name_in_netns,
     "addr-add-in-netns": cmd_addr_add_in_netns,
     "addr-up-in-netns": cmd_addr_up_in_netns,
@@ -633,6 +836,31 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("link-up", help="ip link set <iface> up")
     p.add_argument("iface")
+
+    p = sub.add_parser("bridge-addr-add", help="ip addr replace <cidr> dev <bridge>")
+    p.add_argument("bridge")
+    p.add_argument("cidr")
+
+    sub.add_parser("default-egress", help="print the host default-route interface")
+
+    sub.add_parser("ipv4-forward-enable", help="enable /proc/sys/net/ipv4/ip_forward")
+
+    p = sub.add_parser("nat-apply", help="install nova-ve nftables masquerade")
+    p.add_argument("bridge")
+    p.add_argument("cidr")
+    p.add_argument("egress_iface")
+
+    p = sub.add_parser("nat-remove", help="remove nova-ve nftables masquerade")
+    p.add_argument("bridge")
+
+    p = sub.add_parser("dnsmasq-start", help="start per-bridge dnsmasq DHCP/DNS")
+    p.add_argument("bridge")
+    p.add_argument("gateway")
+    p.add_argument("dhcp_start")
+    p.add_argument("dhcp_end")
+
+    p = sub.add_parser("dnsmasq-stop", help="stop per-bridge dnsmasq DHCP/DNS")
+    p.add_argument("bridge")
 
     p = sub.add_parser(
         "link-set-name-in-netns",

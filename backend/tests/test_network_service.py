@@ -83,7 +83,18 @@ def stub_publish(monkeypatch):
 @pytest.fixture()
 def helper_mocks(monkeypatch):
     """Capture every host_net call and disable real subprocess invocation."""
-    calls = {"bridge_add": [], "bridge_del": [], "bridge_exists": []}
+    calls = {
+        "bridge_add": [],
+        "bridge_del": [],
+        "bridge_exists": [],
+        "bridge_addr_add": [],
+        "link_up": [],
+        "ipv4_forward_enable": [],
+        "nat_apply": [],
+        "nat_remove": [],
+        "dnsmasq_start": [],
+        "dnsmasq_stop": [],
+    }
 
     def fake_add(name: str) -> None:
         calls["bridge_add"].append(name)
@@ -98,6 +109,14 @@ def helper_mocks(monkeypatch):
     monkeypatch.setattr(host_net, "bridge_add", fake_add)
     monkeypatch.setattr(host_net, "bridge_del", fake_del)
     monkeypatch.setattr(host_net, "bridge_exists", fake_exists)
+    monkeypatch.setattr(host_net, "bridge_addr_add", lambda name, cidr: calls["bridge_addr_add"].append((name, cidr)))
+    monkeypatch.setattr(host_net, "link_up", lambda iface: calls["link_up"].append(iface))
+    monkeypatch.setattr(host_net, "default_egress_iface", lambda: "eth0")
+    monkeypatch.setattr(host_net, "ipv4_forward_enable", lambda: calls["ipv4_forward_enable"].append(True))
+    monkeypatch.setattr(host_net, "nat_apply", lambda bridge, cidr, egress: calls["nat_apply"].append((bridge, cidr, egress)))
+    monkeypatch.setattr(host_net, "nat_remove", lambda bridge: calls["nat_remove"].append(bridge))
+    monkeypatch.setattr(host_net, "dnsmasq_start", lambda bridge, gateway, start, end: calls["dnsmasq_start"].append((bridge, gateway, start, end)) or 1234)
+    monkeypatch.setattr(host_net, "dnsmasq_stop", lambda bridge: calls["dnsmasq_stop"].append(bridge))
     return calls
 
 
@@ -196,6 +215,89 @@ async def test_create_network_stamps_runtime_driver_and_created_at(
     saved_runtime = saved["networks"]["1"]["runtime"]
     assert saved_runtime["driver"] == "linux_bridge"
     assert saved_runtime["created_at"] == created_at
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_allocates_subnet_and_provisions_l3(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-cloud")
+    expected_bridge = host_net.bridge_name("lab-nat-cloud", 1)
+
+    payload = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+
+    assert payload["type"] == "nat_cloud"
+    assert payload["config"] == {
+        "cidr": "10.255.0.0/24",
+        "gateway": "10.255.0.1",
+        "dhcp": True,
+        "dhcp_start": "10.255.0.100",
+        "dhcp_end": "10.255.0.254",
+    }
+    assert helper_mocks["bridge_addr_add"] == [(expected_bridge, "10.255.0.1/24")]
+    assert helper_mocks["ipv4_forward_enable"] == [True]
+    assert helper_mocks["nat_apply"] == [(expected_bridge, "10.255.0.0/24", "eth0")]
+    assert helper_mocks["dnsmasq_start"] == [
+        (expected_bridge, "10.255.0.1", "10.255.0.100", "10.255.0.254")
+    ]
+    assert payload["runtime"]["driver"] == "nat_cloud"
+    assert payload["runtime"]["egress_interface"] == "eth0"
+    assert payload["runtime"]["dhcp_pid"] == 1234
+
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["nat"] == "nftables"
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_skips_overlapping_existing_cidr(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-cloud-overlap")
+    saved_path = labs_dir / lab_name
+    data = json.loads(saved_path.read_text())
+    data["networks"] = {
+        "1": {
+            "id": 1,
+            "name": "existing",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.255.0.0/24"},
+            "runtime": {},
+            "implicit": False,
+            "visibility": True,
+        }
+    }
+    saved_path.write_text(json.dumps(data))
+
+    payload = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet-2", "type": "nat_cloud", "config": {}},
+    )
+
+    assert payload["id"] == 2
+    assert payload["config"]["cidr"] == "10.255.1.0/24"
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_rejects_dhcp_overlap_with_static_range(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-cloud-bad-dhcp")
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().create_network(
+            lab_name,
+            {
+                "name": "internet",
+                "type": "nat_cloud",
+                "config": {"cidr": "10.44.0.0/24", "dhcp_start": "10.44.0.50"},
+            },
+        )
+
+    assert exc.value.code == 422
+    assert "static range" in exc.value.message
 
 
 # ---------------------------------------------------------------------------

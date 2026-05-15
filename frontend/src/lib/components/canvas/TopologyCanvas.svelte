@@ -58,6 +58,7 @@
     LinkReconciliation,
     LinkStyle,
     LiveMacState,
+    NetworkCreateConfig,
     NetworkData,
     NetworkType,
     NodeBatchCreateResult,
@@ -91,7 +92,8 @@
   // more network types ship; ``networkType`` is the wire value posted to
   // ``POST /api/labs/{path}/networks`` and must match ``NetworkType``.
   const NETWORK_PALETTE: PaletteNetworkItem[] = [
-    { kind: 'network', title: 'Bridge Network', subtitle: 'linux_bridge', networkType: 'linux_bridge' }
+    { kind: 'network', title: 'Bridge Network', subtitle: 'linux_bridge', networkType: 'linux_bridge' },
+    { kind: 'network', title: 'NAT-Cloud', subtitle: 'DHCP + outbound NAT', networkType: 'nat_cloud' }
   ];
   type ConsoleSelectorWindow = {
     id: number;
@@ -1091,16 +1093,26 @@
 
   async function createNetworkAt(
     position: { x: number; y: number },
-    options: { name: string; type: NetworkType }
+    options: { name: string; type: NetworkType; config?: NetworkCreateConfig }
   ) {
+    const body: {
+      name: string;
+      type: NetworkType;
+      left: number;
+      top: number;
+      config?: NetworkCreateConfig;
+    } = {
+      name: options.name,
+      type: options.type,
+      left: Math.round(position.x),
+      top: Math.round(position.y)
+    };
+    if (options.config && Object.keys(options.config).length > 0) {
+      body.config = options.config;
+    }
     const response = await apiRequest<NetworkData>(`/labs/${labId}/networks`, {
       method: 'POST',
-      body: {
-        name: options.name,
-        type: options.type,
-        left: Math.round(position.x),
-        top: Math.round(position.y)
-      }
+      body
     });
     // POST /networks (US-063/US-064) returns ``{...,"network": <record>}`` — the
     // single-record envelope chosen for write routes. List routes still use
@@ -1156,7 +1168,7 @@
   }
 
   async function onNetworkModalConfirm(
-    event: CustomEvent<{ name: string; type: NetworkType }>
+    event: CustomEvent<{ name: string; type: NetworkType; config?: NetworkCreateConfig }>
   ) {
     const position = pendingNetworkPosition ?? { x: 200, y: 200 };
     networkModalOpen = false;

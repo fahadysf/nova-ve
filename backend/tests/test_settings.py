@@ -23,6 +23,7 @@ def test_discovery_cadence_default_is_30(monkeypatch):
     monkeypatch.delenv("DISCOVERY_CADENCE_SECONDS", raising=False)
     settings = Settings()
     assert settings.DISCOVERY_CADENCE_SECONDS == 30
+    assert settings.NAT_CLOUD_POOL == "10.255.0.0/16"
 
 
 def test_discovery_cadence_env_override(monkeypatch):
@@ -67,3 +68,15 @@ def test_get_settings_reload_picks_up_env_change(monkeypatch):
     assert get_settings().DISCOVERY_CADENCE_SECONDS == 30
     get_settings.cache_clear()
     assert get_settings().DISCOVERY_CADENCE_SECONDS == 45
+
+
+def test_nat_cloud_pool_env_override(monkeypatch):
+    monkeypatch.setenv("NOVA_VE_NAT_CLOUD_POOL", "10.88.0.0/16")
+    assert Settings().NAT_CLOUD_POOL == "10.88.0.0/16"
+
+
+def test_nat_cloud_pool_too_small_raises(monkeypatch):
+    monkeypatch.setenv("NOVA_VE_NAT_CLOUD_POOL", "10.88.0.0/25")
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "NAT_CLOUD_POOL" in str(exc.value)
