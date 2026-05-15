@@ -87,6 +87,7 @@ nav:
       - Connecting nodes: user-guides/connecting-nodes.md
       - Console access: user-guides/console-access.md
       - The lab canvas: user-guides/canvas.md
+      - NAT-Cloud networks: user-guides/nat-cloud-networks.md
       - Lab lifecycle: user-guides/lab-lifecycle.md
       - Dynamips nodes: user-guides/dynamips-nodes.md
   - Importing from EVE-NG:
@@ -111,6 +112,7 @@ nav:
       - Backend: development/backend.md
       - Frontend: development/frontend.md
       - Node add/edit workflow: development/node-add-edit-workflow.md
+      - NAT-Cloud network internals: development/nat-cloud-network.md
       - Design system adoption: development/design-system.md
       - Deployment contract: development/deployment-contract.md
       - CI — self-hosted runner: development/ci/self-hosted-runner.md

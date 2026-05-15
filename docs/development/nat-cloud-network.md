@@ -31,7 +31,7 @@ is reserved for backend/static allocation, and `.100+` is DHCP.
 
 ## Host Lifecycle
 
-Create and reconcile are idempotent:
+Create, backend reconcile, and installer upgrade reconcile are idempotent:
 
 1. Ensure the nova-ve bridge exists and has a matching ownership fingerprint.
 2. Assign `gateway/prefix` to the bridge and bring it up.
@@ -76,3 +76,26 @@ The canvas network palette exposes NAT-Cloud as a network type. Its create
 modal provides advanced fields for CIDR, gateway, DHCP range, and optional
 egress interface. Blank fields use backend defaults so operators can create
 a working NAT-Cloud without knowing the host route table.
+
+## Installer Upgrade Contract
+
+`install.sh` must make both fresh hosts and older running hosts converge on
+the current NAT-Cloud contract. The provisioner therefore:
+
+1. installs `dnsmasq` and `nftables`;
+2. reinstalls `/opt/nova-ve/bin/nova-ve-net.py` and the matching sudoers
+   fragment on every run;
+3. restarts Docker and the backend before reconciliation; and
+4. scans existing lab JSON for `nat_cloud` networks whose bridges already
+   exist, then reapplies IPv4 forwarding, NAT, Docker `DOCKER-USER`
+   forwarding rules, and per-bridge dnsmasq state.
+
+The installer intentionally does not create missing bridges or rewrite lab
+JSON. Bridge lifecycle remains owned by the lab/network runtime, while the
+installer handles host package/helper drift and runtime firewall/DHCP state
+that can be lost during Docker or service restarts.
+
+Forwarding cleanup uses nft rule handles selected by nova-ve comments. Do not
+switch this back to expression deletion: deployment validation showed that
+expression-based deletion did not reliably remove duplicate `DOCKER-USER`
+rules on the target host.
