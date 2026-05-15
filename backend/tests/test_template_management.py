@@ -11,6 +11,9 @@ from app.services.lab_service import LabService
 from app.services.template_service import TemplateService
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
@@ -104,6 +107,39 @@ async def test_list_templates_images_and_upload(prepared_template_data):
     catalog = TemplateService().build_node_catalog()
     assert catalog["templates"][0]["defaults"]["icon"] == "Router.png"
     assert "Router.png" in catalog["icon_options"]
+
+
+def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(
+    monkeypatch, template_settings
+):
+    template_settings.TEMPLATES_DIR = REPO_ROOT / "backend" / "templates"
+    monkeypatch.setattr("app.services.template_service.get_settings", lambda: template_settings)
+
+    image_dir = template_settings.IMAGES_DIR / "qemu" / "paloalto-10.1.1"
+    image_dir.mkdir(parents=True)
+    (image_dir / "virtioa.qcow2").write_text("image")
+
+    service = TemplateService()
+    templates = service.list_templates("qemu")
+    paloalto = templates["paloalto"]
+
+    assert paloalto["name"] == "PaloAlto"
+    assert paloalto["icon"] == "Firewall.png"
+    assert paloalto["cpu"] == 4
+    assert paloalto["ram"] == 8192
+    assert paloalto["ethernet"] == 4
+    assert paloalto["console_type"] == "telnet"
+    assert paloalto["extras"]["qemu_nic"] == "e1000"
+    assert paloalto["extras"]["qemu_version"] == "2.12.0"
+    assert paloalto["capabilities"] == {
+        "hotplug": False,
+        "max_nics": 8,
+        "machine": "pc",
+    }
+    assert service.interface_naming("qemu", "paloalto") == {
+        "format": "mgmt,ethernet1/{port}"
+    }
+    assert "paloalto-10.1.1" in service.list_images("qemu", "paloalto")
 
 
 @pytest.mark.asyncio
