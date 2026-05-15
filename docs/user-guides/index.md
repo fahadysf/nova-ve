@@ -7,4 +7,5 @@ Hands-on workflows for the things you will do most often as an operator.
 3. [Connecting nodes](connecting-nodes.md)
 4. [Console access](console-access.md)
 5. [The lab canvas](canvas.md) — info panels, top-bar metrics, link boldening, pinned port labels
-6. [Lab lifecycle](lab-lifecycle.md) — start, stop, save, fork
+6. [NAT-Cloud networks](nat-cloud-networks.md) — DHCP and outbound NAT for lab clients
+7. [Lab lifecycle](lab-lifecycle.md) — start, stop, save, fork

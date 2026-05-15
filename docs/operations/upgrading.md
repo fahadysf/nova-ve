@@ -54,6 +54,8 @@ sudo rsync -a --delete build/ /var/lib/nova-ve/www/
 sudo systemctl restart nova-ve-backend
 ```
 
+The manual path above is enough for application code, migrations, and the static frontend. It does not reinstall `/opt/nova-ve/bin/nova-ve-net.py`, refresh `/etc/sudoers.d/nova-ve`, or run the installer-side NAT-Cloud bridge reconciliation. Use the full installer path when upgrading across host-networking changes such as NAT-Cloud DHCP/NAT/forwarding or Docker runtime reconciliation.
+
 The Caddy unit reloads itself on file changes and does not need restarting after a frontend rebuild.
 
 ## What can go wrong
@@ -61,5 +63,7 @@ The Caddy unit reloads itself on file changes and does not need restarting after
 - **Alembic migration fails** — investigate with `journalctl -u nova-ve-backend -n 100`. Common cause: out-of-order migration heads after a long detour. The contract is that `nova-ve-backend` does **not** self-migrate; you must `alembic upgrade head` manually before restarting.
 - **Frontend build fails** — usually a Node version drift. The provisioner installs Node 22.x from NodeSource; if you bumped Node manually, ensure it still satisfies `package.json`'s `engines` field.
 - **Caddy refuses to start** — port 80 / 443 already in use. `sudo ss -ltnp | grep -E ':(80|443) '` finds the offender.
+- **NAT-Cloud clients get DHCP but no internet** — re-run the installer so the current helper is installed and NAT-Cloud reconciliation reapplies IPv4 forwarding, masquerade NAT, Docker `DOCKER-USER` forwarding rules, and `dnsmasq` state for existing bridges.
+- **Docker node start fails with a container-name conflict** — make sure the backend is upgraded and restarted. The current runtime path adopts a running same-name nova-ve container or removes a stopped stale same-name container before starting the node.
 
 When in doubt, [Troubleshooting](troubleshooting.md) has the recipes.

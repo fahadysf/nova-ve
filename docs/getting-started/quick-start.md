@@ -8,17 +8,18 @@ curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | 
 
 That single command:
 
-1. Installs git, Docker, PostgreSQL, Caddy, Node.js, Python 3 + venv, build tooling, and other OS deps.
+1. Installs git, Docker, PostgreSQL, Caddy, Node.js, Python 3 + venv, `dnsmasq`, `nftables`, build tooling, and other OS deps.
 2. Clones this repo to `~${SUDO_USER}/nova-ve-git`.
 3. Bootstraps the host PostgreSQL role/db (`nova` / `novadb`) and the dockerized Guacamole stack (`guacdb` / `guacd` / `guacamole`).
 4. Builds the FastAPI backend (Python venv + Alembic migrations + initial seed).
 5. Builds the SvelteKit frontend (`npm ci` + `vite build`) into `/var/lib/nova-ve/www`.
-6. Installs the privileged network helper at `/opt/nova-ve/bin/` plus its `visudo`-validated sudoers fragment.
+6. Installs the privileged network helper at `/opt/nova-ve/bin/` plus its `visudo`-validated sudoers fragment, including NAT-Cloud DHCP, NAT, and forwarding verbs.
 7. Drops systemd units (`nova-ve-backend`, `caddy`) and starts them.
-8. Runs the in-tree smoke check.
-9. Writes `nova-ve-install-summary.md` (mode `0600`) into the directory you launched the installer from. It contains the bootstrapped admin password, the location of every critical config file, and a map of the env vars in `/etc/nova-ve/backend.env`.
+8. Reconciles existing NAT-Cloud bridge state on upgraded hosts.
+9. Runs the in-tree smoke check.
+10. Writes `nova-ve-install-summary.md` (mode `0600`) into the directory you launched the installer from. It contains the bootstrapped admin password, the location of every critical config file, and a map of the env vars in `/etc/nova-ve/backend.env`.
 
-The script is idempotent: re-running it fast-forwards the repo, reapplies templates, and restarts services without rotating existing secrets.
+The script is idempotent: re-running it fast-forwards the repo, reapplies templates, reinstalls the helper, reconciles NAT-Cloud runtime state for existing bridges, and restarts services without rotating existing secrets.
 
 ## Override knobs
 
