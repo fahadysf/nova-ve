@@ -259,6 +259,52 @@ def test_nat_apply_uses_nftables_chain(helper):
     ]
 
 
+def test_forward_apply_uses_docker_user_when_available(helper):
+    rc = helper.main(["forward-apply", "novec0den1", "10.255.0.0/24", "ens18"])
+    assert rc == 0
+    assert helper._test_capture_calls[0][1:] == [
+        "list",
+        "chain",
+        "ip",
+        "filter",
+        "DOCKER-USER",
+    ]
+    assert [call[1:5] for call in helper._test_capture_calls[1:]] == [
+        ["delete", "rule", "ip", "filter"],
+        ["delete", "rule", "ip", "filter"],
+    ]
+    assert [call[1:5] for call in helper._test_calls] == [
+        ["insert", "rule", "ip", "filter"],
+        ["insert", "rule", "ip", "filter"],
+    ]
+    assert helper._test_calls[-1][1:] == [
+        "insert",
+        "rule",
+        "ip",
+        "filter",
+        "DOCKER-USER",
+        "iifname",
+        "novec0den1",
+        "oifname",
+        "ens18",
+        "ip",
+        "saddr",
+        "10.255.0.0/24",
+        "accept",
+        "comment",
+        '"nova-ve novec0den1 forward-out"',
+    ]
+
+
+def test_forward_remove_deletes_docker_user_rules_when_rule_shape_available(helper):
+    rc = helper.main(["forward-remove", "novec0den1", "10.255.0.0/24", "ens18"])
+    assert rc == 0
+    assert [call[1:6] for call in helper._test_capture_calls[:2]] == [
+        ["delete", "rule", "ip", "filter", "DOCKER-USER"],
+        ["delete", "rule", "ip", "filter", "DOCKER-USER"],
+    ]
+
+
 def test_dnsmasq_start_writes_bridge_config(helper):
     rc = helper.main(
         ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]

@@ -92,6 +92,8 @@ def helper_mocks(monkeypatch):
         "ipv4_forward_enable": [],
         "nat_apply": [],
         "nat_remove": [],
+        "forward_apply": [],
+        "forward_remove": [],
         "dnsmasq_start": [],
         "dnsmasq_stop": [],
     }
@@ -115,6 +117,8 @@ def helper_mocks(monkeypatch):
     monkeypatch.setattr(host_net, "ipv4_forward_enable", lambda: calls["ipv4_forward_enable"].append(True))
     monkeypatch.setattr(host_net, "nat_apply", lambda bridge, cidr, egress: calls["nat_apply"].append((bridge, cidr, egress)))
     monkeypatch.setattr(host_net, "nat_remove", lambda bridge: calls["nat_remove"].append(bridge))
+    monkeypatch.setattr(host_net, "forward_apply", lambda bridge, cidr, egress: calls["forward_apply"].append((bridge, cidr, egress)))
+    monkeypatch.setattr(host_net, "forward_remove", lambda bridge, cidr=None, egress_iface=None: calls["forward_remove"].append((bridge, cidr, egress_iface)))
     monkeypatch.setattr(host_net, "dnsmasq_start", lambda bridge, gateway, start, end: calls["dnsmasq_start"].append((bridge, gateway, start, end)) or 1234)
     monkeypatch.setattr(host_net, "dnsmasq_stop", lambda bridge: calls["dnsmasq_stop"].append(bridge))
     return calls
@@ -240,6 +244,7 @@ async def test_create_nat_cloud_allocates_subnet_and_provisions_l3(
     assert helper_mocks["bridge_addr_add"] == [(expected_bridge, "10.255.0.1/24")]
     assert helper_mocks["ipv4_forward_enable"] == [True]
     assert helper_mocks["nat_apply"] == [(expected_bridge, "10.255.0.0/24", "eth0")]
+    assert helper_mocks["forward_apply"] == [(expected_bridge, "10.255.0.0/24", "eth0")]
     assert helper_mocks["dnsmasq_start"] == [
         (expected_bridge, "10.255.0.1", "10.255.0.100", "10.255.0.254")
     ]

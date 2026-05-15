@@ -375,11 +375,13 @@ class NetworkService:
             egress = host_net.default_egress_iface()
         if not egress:
             raise NetworkServiceError(409, "Host has no default-route interface for NAT-Cloud egress.")
+        runtime["egress_interface"] = egress
 
         host_net.bridge_addr_add(bridge, gateway_cidr)
         host_net.link_up(bridge)
         host_net.ipv4_forward_enable()
         host_net.nat_apply(bridge, str(config["cidr"]), egress)
+        host_net.forward_apply(bridge, str(config["cidr"]), egress)
 
         dhcp_pid = 0
         if bool(config.get("dhcp", True)):
@@ -410,13 +412,22 @@ class NetworkService:
                 changed = True
         return changed
 
-    def _cleanup_nat_cloud_runtime(self, bridge: Optional[str]) -> None:
+    def _cleanup_nat_cloud_runtime(
+        self,
+        bridge: Optional[str],
+        cidr: Optional[str] = None,
+        egress: Optional[str] = None,
+    ) -> None:
         if not bridge:
             return
         try:
             host_net.dnsmasq_stop(bridge)
         except host_net.HostNetError:
             logger.warning("cleanup_nat_cloud: dnsmasq_stop(%s) failed", bridge)
+        try:
+            host_net.forward_remove(bridge, cidr, egress)
+        except host_net.HostNetError:
+            logger.warning("cleanup_nat_cloud: forward_remove(%s) failed", bridge)
         try:
             host_net.nat_remove(bridge)
         except host_net.HostNetError:
@@ -718,7 +729,13 @@ class NetworkService:
                 data["networks"] = networks
                 LabService.write_lab_json_static(normalized, data)
                 if network_type == NAT_CLOUD_TYPE:
-                    self._cleanup_nat_cloud_runtime(bridge)
+                    config = network.get("config") or {}
+                    runtime = network.get("runtime") or {}
+                    self._cleanup_nat_cloud_runtime(
+                        bridge,
+                        str(config.get("cidr") or ""),
+                        str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
+                    )
                 raise
             except (host_net.HostNetError, OSError) as exc:
                 # Roll back the JSON write — never leave inconsistent state.
@@ -726,7 +743,13 @@ class NetworkService:
                 data["networks"] = networks
                 LabService.write_lab_json_static(normalized, data)
                 if network_type == NAT_CLOUD_TYPE:
-                    self._cleanup_nat_cloud_runtime(bridge)
+                    config = network.get("config") or {}
+                    runtime = network.get("runtime") or {}
+                    self._cleanup_nat_cloud_runtime(
+                        bridge,
+                        str(config.get("cidr") or ""),
+                        str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
+                    )
                 logger.error(
                     "create_network: bridge provisioning failed for %s (%s); rolled back lab.json",
                     bridge,
@@ -785,7 +808,12 @@ class NetworkService:
                     bridge = None
             if bridge:
                 if str(network.get("type", "")) == NAT_CLOUD_TYPE:
-                    self._cleanup_nat_cloud_runtime(bridge)
+                    config = network.get("config") or {}
+                    self._cleanup_nat_cloud_runtime(
+                        bridge,
+                        str(config.get("cidr") or ""),
+                        str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
+                    )
                 try:
                     host_net.bridge_del(bridge)
                 except host_net.HostNetEINVAL:
