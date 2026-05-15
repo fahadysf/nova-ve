@@ -355,24 +355,6 @@ def _nft_quiet(*args: str) -> int:
     return _run_capture([NFT_BIN, *args]).returncode
 
 
-def _nft_delete_rule_all(family: str, table: str, chain: str, spec: Sequence[str]) -> int:
-    """Delete every matching nft rule expression.
-
-    ``nft delete rule ... <expr>`` removes one matching rule at a time.  The
-    helper's apply/remove verbs are idempotent only if repeated upgrades clear
-    all stale duplicates before inserting the canonical rule pair.
-    """
-
-    for _ in range(256):
-        if _nft_quiet("delete", "rule", family, table, chain, *spec) != 0:
-            return 0
-    print(
-        f"too many duplicate nft rules while deleting from {family} {table} {chain}",
-        file=sys.stderr,
-    )
-    return 1
-
-
 def _nsenter_ip_netns(pid: int, *args: str) -> int:
     """``nsenter -t <pid> -n ip <args>`` with shell=False."""
     return _run([NSENTER_BIN, "-t", str(pid), "-n", IP_BIN, *args])
@@ -531,6 +513,34 @@ def _forward_rule_specs(bridge: str, cidr: str, egress: str) -> list[list[str]]:
     ]
 
 
+def _forward_rule_comments(bridge: str) -> list[str]:
+    return [
+        f"nova-ve {bridge} forward-out",
+        f"nova-ve {bridge} forward-in",
+    ]
+
+
+def _nft_delete_rules_by_comment(
+    family: str, table: str, chain: str, comments: Sequence[str]
+) -> int:
+    proc = _run_capture([NFT_BIN, "-a", "list", "chain", family, table, chain])
+    if proc.returncode != 0:
+        return proc.returncode
+
+    handles: list[str] = []
+    for line in proc.stdout.splitlines():
+        if not any(f'comment "{comment}"' in line for comment in comments):
+            continue
+        match = re.search(r"# handle ([0-9]+)\s*$", line)
+        if match:
+            handles.append(match.group(1))
+    for handle in handles:
+        rc = _nft("delete", "rule", family, table, chain, "handle", handle)
+        if rc != 0:
+            return rc
+    return 0
+
+
 def cmd_nat_apply(args: argparse.Namespace) -> int:
     bridge = validate_bridge_name(args.bridge)
     cidr = validate_network_cidr(args.cidr)
@@ -581,10 +591,11 @@ def cmd_forward_apply(args: argparse.Namespace) -> int:
     specs = _forward_rule_specs(bridge, cidr, egress)
 
     if _docker_user_chain_exists():
-        for spec in specs:
-            rc = _nft_delete_rule_all("ip", "filter", "DOCKER-USER", spec)
-            if rc != 0:
-                return rc
+        rc = _nft_delete_rules_by_comment(
+            "ip", "filter", "DOCKER-USER", _forward_rule_comments(bridge)
+        )
+        if rc != 0:
+            return rc
         for spec in reversed(specs):
             rc = _nft("insert", "rule", "ip", "filter", "DOCKER-USER", *spec)
             if rc != 0:
@@ -618,11 +629,13 @@ def cmd_forward_remove(args: argparse.Namespace) -> int:
     egress = getattr(args, "egress_iface", None)
     if cidr and egress:
         cidr = validate_network_cidr(cidr)
-        egress = validate_host_iface(egress)
-        for spec in _forward_rule_specs(bridge, cidr, egress):
-            rc = _nft_delete_rule_all("ip", "filter", "DOCKER-USER", spec)
-            if rc != 0:
-                return rc
+        validate_host_iface(egress)
+    if _docker_user_chain_exists():
+        rc = _nft_delete_rules_by_comment(
+            "ip", "filter", "DOCKER-USER", _forward_rule_comments(bridge)
+        )
+        if rc != 0:
+            return rc
 
     chain = _forward_chain_name(bridge)
     _nft_quiet("flush", "chain", "ip", "nova_ve_filter", chain)
