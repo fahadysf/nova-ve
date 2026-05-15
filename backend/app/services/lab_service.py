@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from pathlib import Path
 
@@ -7,9 +8,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.models.lab import LabMeta
+from app.services import host_net
 
 
 SCHEMA_VERSION = 2
+NAT_CLOUD_TYPE = "nat_cloud"
+logger = logging.getLogger(__name__)
 
 LEGACY_SCHEMA_ERROR = "Lab uses legacy schema; run scripts/migrate_lab_v1_to_v2.py"
 
@@ -206,6 +210,55 @@ def _derive_network_counts(data: dict) -> None:
             except (TypeError, ValueError):
                 network_id = 0
             network["count"] = counts.get(network_id, 0)
+
+
+def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
+    networks = data.get("networks", {}) or {}
+    if not isinstance(networks, dict):
+        return
+
+    lab_id = str(data.get("id") or lab_filename)
+    for raw_network_id, network in networks.items():
+        if not isinstance(network, dict):
+            continue
+        runtime = network.get("runtime") or {}
+        bridge = runtime.get("bridge_name") if isinstance(runtime, dict) else None
+        if not bridge:
+            try:
+                bridge = host_net.bridge_name(lab_id, int(raw_network_id))
+            except Exception:  # noqa: BLE001 - best-effort cleanup path
+                bridge = None
+        if not bridge:
+            continue
+
+        if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+            try:
+                host_net.dnsmasq_stop(bridge)
+            except host_net.HostNetError as exc:
+                logger.warning(
+                    "delete_lab: dnsmasq_stop(%s) failed during lab cleanup (%s)",
+                    bridge,
+                    exc,
+                )
+            try:
+                host_net.nat_remove(bridge)
+            except host_net.HostNetError as exc:
+                logger.warning(
+                    "delete_lab: nat_remove(%s) failed during lab cleanup (%s)",
+                    bridge,
+                    exc,
+                )
+
+        try:
+            host_net.bridge_del(bridge)
+        except host_net.HostNetEINVAL:
+            logger.info("delete_lab: bridge %s already absent", bridge)
+        except host_net.HostNetError as exc:
+            logger.warning(
+                "delete_lab: bridge_del(%s) failed during lab cleanup (%s)",
+                bridge,
+                exc,
+            )
 
 
 def _legacy_topology_to_links(data: dict) -> list[dict]:
@@ -424,6 +477,16 @@ class LabService:
     async def delete_lab(self, lab: LabMeta) -> None:
         filepath = _lab_file_path(lab.filename)
         if filepath.exists():
+            try:
+                data = LabService.read_lab_json_static(lab.filename)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                logger.warning(
+                    "delete_lab: could not read %s for network cleanup (%s)",
+                    lab.filename,
+                    exc,
+                )
+            else:
+                _cleanup_lab_network_runtime(data, lab.filename)
             filepath.unlink()
         await self.db.delete(lab)
         await self.db.commit()
