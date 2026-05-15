@@ -570,7 +570,7 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
         ),
         encoding="utf-8",
     )
-    rc = _run([DNSMASQ_BIN, "--conf-file", str(conf)])
+    rc = _run([DNSMASQ_BIN, f"--conf-file={conf}"])
     if rc != 0:
         return rc
     try:
