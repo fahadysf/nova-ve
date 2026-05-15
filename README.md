@@ -6,6 +6,11 @@
 
 A clean-room network virtualization environment built with modern tooling.
 
+## Community
+
+Official Telegram channel for Nova-VE updates and discussion:
+<https://t.me/+-xHf0vpsUHI1MmY0>
+
 ## Stack
 
 | Layer | Technology |

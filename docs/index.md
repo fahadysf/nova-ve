@@ -28,6 +28,11 @@ Docs are published at `docs.nova-ve.com` and mirrored to GitHub Pages.
 [Full quick-start walk-through →](getting-started/quick-start.md){ .md-button .md-button--primary }
 [Migrating from EVE-NG? →](importing-eveng/index.md){ .md-button }
 
+## Community
+
+Join the official Telegram channel for Nova-VE updates and discussion:
+[t.me/+-xHf0vpsUHI1MmY0](https://t.me/+-xHf0vpsUHI1MmY0).
+
 ## What is nova-ve?
 
 nova-ve emulates a network of virtual devices (routers, switches, firewalls, hosts) on a single Linux host. Devices run as QEMU/KVM VMs or Docker containers. Networks between devices are Linux bridges or OVS bridges. The web UI gives you a topology editor that wires devices together, plus HTML5 consoles for each running device.
