@@ -54,6 +54,8 @@ def helper(monkeypatch, tmp_path):
 
     def fake_run_capture(argv):
         capture_calls.append(list(argv))
+        if argv[1:3] == ["delete", "rule"]:
+            return mod.subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
         return mod.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(mod, "_run", fake_run, raising=True)
@@ -293,6 +295,32 @@ def test_forward_apply_uses_docker_user_when_available(helper):
         "accept",
         "comment",
         '"nova-ve novec0den1 forward-out"',
+    ]
+
+
+def test_forward_apply_removes_duplicate_docker_user_rules_before_insert(helper, monkeypatch):
+    delete_attempts = {"forward-out": 0, "forward-in": 0}
+
+    def fake_run_capture(argv):
+        helper._test_capture_calls.append(list(argv))
+        if argv[1:6] == ["list", "chain", "ip", "filter", "DOCKER-USER"]:
+            return helper.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        if argv[1:6] == ["delete", "rule", "ip", "filter", "DOCKER-USER"]:
+            key = "forward-out" if "forward-out" in argv[-1] else "forward-in"
+            delete_attempts[key] += 1
+            rc = 0 if delete_attempts[key] <= 2 else 1
+            return helper.subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+        return helper.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(helper, "_run_capture", fake_run_capture, raising=True)
+
+    rc = helper.main(["forward-apply", "novec0den1", "10.255.0.0/24", "ens18"])
+
+    assert rc == 0
+    assert delete_attempts == {"forward-out": 3, "forward-in": 3}
+    assert [call[1:5] for call in helper._test_calls] == [
+        ["insert", "rule", "ip", "filter"],
+        ["insert", "rule", "ip", "filter"],
     ]
 
 

@@ -355,6 +355,24 @@ def _nft_quiet(*args: str) -> int:
     return _run_capture([NFT_BIN, *args]).returncode
 
 
+def _nft_delete_rule_all(family: str, table: str, chain: str, spec: Sequence[str]) -> int:
+    """Delete every matching nft rule expression.
+
+    ``nft delete rule ... <expr>`` removes one matching rule at a time.  The
+    helper's apply/remove verbs are idempotent only if repeated upgrades clear
+    all stale duplicates before inserting the canonical rule pair.
+    """
+
+    for _ in range(256):
+        if _nft_quiet("delete", "rule", family, table, chain, *spec) != 0:
+            return 0
+    print(
+        f"too many duplicate nft rules while deleting from {family} {table} {chain}",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def _nsenter_ip_netns(pid: int, *args: str) -> int:
     """``nsenter -t <pid> -n ip <args>`` with shell=False."""
     return _run([NSENTER_BIN, "-t", str(pid), "-n", IP_BIN, *args])
@@ -564,7 +582,9 @@ def cmd_forward_apply(args: argparse.Namespace) -> int:
 
     if _docker_user_chain_exists():
         for spec in specs:
-            _nft_quiet("delete", "rule", "ip", "filter", "DOCKER-USER", *spec)
+            rc = _nft_delete_rule_all("ip", "filter", "DOCKER-USER", spec)
+            if rc != 0:
+                return rc
         for spec in reversed(specs):
             rc = _nft("insert", "rule", "ip", "filter", "DOCKER-USER", *spec)
             if rc != 0:
@@ -600,7 +620,9 @@ def cmd_forward_remove(args: argparse.Namespace) -> int:
         cidr = validate_network_cidr(cidr)
         egress = validate_host_iface(egress)
         for spec in _forward_rule_specs(bridge, cidr, egress):
-            _nft_quiet("delete", "rule", "ip", "filter", "DOCKER-USER", *spec)
+            rc = _nft_delete_rule_all("ip", "filter", "DOCKER-USER", spec)
+            if rc != 0:
+                return rc
 
     chain = _forward_chain_name(bridge)
     _nft_quiet("flush", "chain", "ip", "nova_ve_filter", chain)
