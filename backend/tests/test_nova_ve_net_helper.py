@@ -271,9 +271,8 @@ def test_forward_apply_uses_docker_user_when_available(helper):
         "filter",
         "DOCKER-USER",
     ]
-    assert [call[1:5] for call in helper._test_capture_calls[1:]] == [
-        ["delete", "rule", "ip", "filter"],
-        ["delete", "rule", "ip", "filter"],
+    assert [call[1:6] for call in helper._test_capture_calls[1:]] == [
+        ["-a", "list", "chain", "ip", "filter"],
     ]
     assert [call[1:5] for call in helper._test_calls] == [
         ["insert", "rule", "ip", "filter"],
@@ -298,18 +297,24 @@ def test_forward_apply_uses_docker_user_when_available(helper):
     ]
 
 
-def test_forward_apply_removes_duplicate_docker_user_rules_before_insert(helper, monkeypatch):
-    delete_attempts = {"forward-out": 0, "forward-in": 0}
+def test_forward_apply_removes_duplicate_docker_user_rules_before_insert(
+    helper, monkeypatch
+):
+    rules = "\n".join(
+        [
+            'iifname "novec0den1" oifname "ens18" ip saddr 10.255.0.0/24 accept comment "nova-ve novec0den1 forward-out" # handle 31',
+            'iifname "ens18" oifname "novec0den1" ip daddr 10.255.0.0/24 ct state established,related accept comment "nova-ve novec0den1 forward-in" # handle 32',
+            'iifname "novec0den1" oifname "ens18" ip saddr 10.255.0.0/24 accept comment "nova-ve novec0den1 forward-out" # handle 41',
+            'iifname "ens18" oifname "novec0den1" ip daddr 10.255.0.0/24 ct state established,related accept comment "nova-ve novec0den1 forward-in" # handle 42',
+        ]
+    )
 
     def fake_run_capture(argv):
         helper._test_capture_calls.append(list(argv))
         if argv[1:6] == ["list", "chain", "ip", "filter", "DOCKER-USER"]:
             return helper.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
-        if argv[1:6] == ["delete", "rule", "ip", "filter", "DOCKER-USER"]:
-            key = "forward-out" if "forward-out" in argv[-1] else "forward-in"
-            delete_attempts[key] += 1
-            rc = 0 if delete_attempts[key] <= 2 else 1
-            return helper.subprocess.CompletedProcess(argv, rc, stdout="", stderr="")
+        if argv[1:7] == ["-a", "list", "chain", "ip", "filter", "DOCKER-USER"]:
+            return helper.subprocess.CompletedProcess(argv, 0, stdout=rules, stderr="")
         return helper.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
     monkeypatch.setattr(helper, "_run_capture", fake_run_capture, raising=True)
@@ -317,19 +322,23 @@ def test_forward_apply_removes_duplicate_docker_user_rules_before_insert(helper,
     rc = helper.main(["forward-apply", "novec0den1", "10.255.0.0/24", "ens18"])
 
     assert rc == 0
-    assert delete_attempts == {"forward-out": 3, "forward-in": 3}
     assert [call[1:5] for call in helper._test_calls] == [
+        ["delete", "rule", "ip", "filter"],
+        ["delete", "rule", "ip", "filter"],
+        ["delete", "rule", "ip", "filter"],
+        ["delete", "rule", "ip", "filter"],
         ["insert", "rule", "ip", "filter"],
         ["insert", "rule", "ip", "filter"],
     ]
+    assert [call[-1] for call in helper._test_calls[:4]] == ["31", "32", "41", "42"]
 
 
 def test_forward_remove_deletes_docker_user_rules_when_rule_shape_available(helper):
     rc = helper.main(["forward-remove", "novec0den1", "10.255.0.0/24", "ens18"])
     assert rc == 0
     assert [call[1:6] for call in helper._test_capture_calls[:2]] == [
-        ["delete", "rule", "ip", "filter", "DOCKER-USER"],
-        ["delete", "rule", "ip", "filter", "DOCKER-USER"],
+        ["list", "chain", "ip", "filter", "DOCKER-USER"],
+        ["-a", "list", "chain", "ip", "filter"],
     ]
 
 
