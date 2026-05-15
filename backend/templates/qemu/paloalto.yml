@@ -1,0 +1,24 @@
+type: qemu
+name: PaloAlto
+description: >
+  Palo Alto Networks VM-Series firewall. Based on EVE-NG/PNETLab paloalto-*
+  images using virtioa.qcow2, telnet console, and a modern PAN-OS 9.x+
+  resource baseline.
+cpulimit: 1
+icon_type: firewall
+cpu: 4
+ram: 8192
+ethernet: 4
+console_type: telnet
+architecture: x86_64
+qemu_nic: e1000
+qemu_version: "2.12.0"
+qemu_options: "-rtc base=utc -cpu host"
+capabilities:
+  hotplug: false
+  max_nics: 8
+  machine: pc
+interface_naming:
+  format:
+    - mgmt
+    - "ethernet1/{port}"
