@@ -1,8 +1,8 @@
 # nova-ve
 
 > [!WARNING]
-> Pre-Alpha Development Version: this project is not fit for actual lab use yet.
-> Expect incomplete features, broken workflows, and data/runtime instability.
+> Alpha Development Version: Nova-VE is usable for early testing and feedback,
+> but still expect incomplete features, workflow changes, and runtime instability.
 
 A clean-room network virtualization environment built with modern tooling.
 
