@@ -41,6 +41,8 @@ def helper(monkeypatch, tmp_path):
     proc_root.mkdir()
     monkeypatch.setattr(mod, "PIDS_JSON_PATH", pids_path, raising=True)
     monkeypatch.setattr(mod, "PROC_ROOT", proc_root, raising=True)
+    monkeypatch.setattr(mod, "RUNTIME_ROOT", tmp_path / "runtime", raising=True)
+    monkeypatch.setattr(mod, "IP_FORWARD_PATH", tmp_path / "ip_forward", raising=True)
 
     # Capture the argv that WOULD have been run — never actually fork.
     calls: list[list[str]] = []
@@ -139,6 +141,10 @@ def _seed_pid(mod, pid: int, *, kind: str = "docker", cgroup: str | None = None)
             ["link-up", "nvec0ded1i2h"],
             ["link", "set", "nvec0ded1i2h", "up"],
         ),
+        (
+            ["bridge-addr-add", "novec0den1", "10.255.0.1/24"],
+            ["addr", "replace", "10.255.0.1/24", "dev", "novec0den1"],
+        ),
     ],
 )
 def test_non_pid_verbs_emit_correct_argv(helper, argv, expected_argv_tail):
@@ -201,6 +207,60 @@ def test_read_iface_mac_for_qemu_pid(helper):
     _seed_pid(helper, 5555, kind="qemu")
     rc = helper.main(["read-iface-mac", "5555", "eth0"])
     assert rc == 0
+
+
+def test_default_egress_prints_default_route_iface(helper, monkeypatch, capsys):
+    def fake_capture(argv):
+        return helper.subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout="default via 192.0.2.1 dev ens18 proto dhcp\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(helper, "_run_capture", fake_capture, raising=True)
+    rc = helper.main(["default-egress"])
+    assert rc == 0
+    assert capsys.readouterr().out.strip() == "ens18"
+
+
+def test_ipv4_forward_enable_writes_one(helper):
+    rc = helper.main(["ipv4-forward-enable"])
+    assert rc == 0
+    assert helper.IP_FORWARD_PATH.read_text() == "1\n"
+
+
+def test_nat_apply_uses_nftables_chain(helper):
+    rc = helper.main(["nat-apply", "novec0den1", "10.255.0.0/24", "ens18"])
+    assert rc == 0
+    assert [call[0] for call in helper._test_calls] == [helper.NFT_BIN] * 5
+    assert helper._test_calls[-1][1:] == [
+        "add",
+        "rule",
+        "ip",
+        "nova_ve",
+        "nvc_novec0den1",
+        "ip",
+        "saddr",
+        "10.255.0.0/24",
+        "oifname",
+        "ens18",
+        "masquerade",
+        "comment",
+        "nova-ve novec0den1",
+    ]
+
+
+def test_dnsmasq_start_writes_bridge_config(helper):
+    rc = helper.main(
+        ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
+    )
+    assert rc == 0
+    conf = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1" / "dnsmasq.conf"
+    text = conf.read_text()
+    assert "interface=novec0den1" in text
+    assert "dhcp-range=10.255.0.100,10.255.0.254,12h" in text
+    assert helper._test_calls[-1][0] == helper.DNSMASQ_BIN
 
 
 # ---------------------------------------------------------------------------

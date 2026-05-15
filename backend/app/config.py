@@ -81,6 +81,10 @@ class Settings(BaseSettings):
             "NOVA_VE_DISCOVERY_CADENCE_SECONDS",
         ),
     )
+    NAT_CLOUD_POOL: str = Field(
+        default="10.255.0.0/16",
+        validation_alias=AliasChoices("NAT_CLOUD_POOL", "NOVA_VE_NAT_CLOUD_POOL"),
+    )
 
     @field_validator("DISCOVERY_CADENCE_SECONDS")
     @classmethod
@@ -91,6 +95,21 @@ class Settings(BaseSettings):
                 f"(got {value})"
             )
         return value
+
+    @field_validator("NAT_CLOUD_POOL")
+    @classmethod
+    def _validate_nat_cloud_pool(cls, value: str) -> str:
+        import ipaddress
+
+        try:
+            network = ipaddress.ip_network(str(value).strip(), strict=True)
+        except ValueError as exc:
+            raise ValueError(f"NAT_CLOUD_POOL must be a valid IPv4 CIDR: {exc}") from exc
+        if isinstance(network, ipaddress.IPv6Network):
+            raise ValueError("NAT_CLOUD_POOL must be IPv4")
+        if network.prefixlen > 24:
+            raise ValueError("NAT_CLOUD_POOL must be at least large enough to allocate /24 networks")
+        return str(network)
 
     class Config:
         env_file = ".env"

@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
-  import type { NetworkType } from '$lib/types';
+  import type { NetworkCreateConfig, NetworkType } from '$lib/types';
 
   export let open = false;
   export let defaultName = '';
@@ -12,16 +12,23 @@
   // Add new entries as more network types are productized; the wire value
   // must be a member of ``NetworkType`` so the backend POST accepts it.
   const TYPE_OPTIONS: { value: NetworkType; label: string }[] = [
-    { value: 'linux_bridge', label: 'Bridge (linux_bridge)' }
+    { value: 'linux_bridge', label: 'Bridge (linux_bridge)' },
+    { value: 'nat_cloud', label: 'NAT-Cloud (nat_cloud)' }
   ];
 
   const dispatch = createEventDispatcher<{
-    confirm: { name: string; type: NetworkType };
+    confirm: { name: string; type: NetworkType; config?: NetworkCreateConfig };
     cancel: void;
   }>();
 
   let name = defaultName;
   let type: NetworkType = defaultType;
+  let cidr = '';
+  let gateway = '';
+  let dhcp = true;
+  let dhcpStart = '';
+  let dhcpEnd = '';
+  let egressInterface = '';
   let modalEl: HTMLDivElement | null = null;
   let nameInputEl: HTMLInputElement | null = null;
   let wasOpen = false;
@@ -34,6 +41,12 @@
     if (open && !wasOpen) {
       name = defaultName;
       type = defaultType;
+      cidr = '';
+      gateway = '';
+      dhcp = true;
+      dhcpStart = '';
+      dhcpEnd = '';
+      egressInterface = '';
       void focusName();
     }
     wasOpen = open;
@@ -54,7 +67,16 @@
 
   function confirm() {
     if (!canSubmit) return;
-    dispatch('confirm', { name: trimmedName, type });
+    const config: NetworkCreateConfig = {};
+    if (type === 'nat_cloud') {
+      if (cidr.trim()) config.cidr = cidr.trim();
+      if (gateway.trim()) config.gateway = gateway.trim();
+      config.dhcp = dhcp;
+      if (dhcpStart.trim()) config.dhcp_start = dhcpStart.trim();
+      if (dhcpEnd.trim()) config.dhcp_end = dhcpEnd.trim();
+      if (egressInterface.trim()) config.egress_interface = egressInterface.trim();
+    }
+    dispatch('confirm', { name: trimmedName, type, config });
   }
 
   function onKey(event: KeyboardEvent) {
@@ -143,6 +165,62 @@
             {/each}
           </select>
         </label>
+
+        {#if type === 'nat_cloud'}
+          <div class="grid gap-3 rounded-xl border border-slate-800 bg-slate-900/30 p-3 sm:grid-cols-2">
+            <label class="block space-y-1.5 sm:col-span-2">
+              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">CIDR</span>
+              <input
+                bind:value={cidr}
+                type="text"
+                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                placeholder="Auto from NAT-Cloud pool"
+              />
+            </label>
+            <label class="block space-y-1.5">
+              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Gateway</span>
+              <input
+                bind:value={gateway}
+                type="text"
+                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                placeholder=".1"
+              />
+            </label>
+            <label class="block space-y-1.5">
+              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Egress</span>
+              <input
+                bind:value={egressInterface}
+                type="text"
+                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                placeholder="Default route"
+              />
+            </label>
+            <label class="flex items-center gap-2 sm:col-span-2">
+              <input bind:checked={dhcp} type="checkbox" class="h-4 w-4 rounded border-slate-700 bg-slate-900" />
+              <span class="text-xs text-slate-300">Enable DHCP</span>
+            </label>
+            <label class="block space-y-1.5">
+              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">DHCP start</span>
+              <input
+                bind:value={dhcpStart}
+                type="text"
+                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                placeholder=".100"
+                disabled={!dhcp}
+              />
+            </label>
+            <label class="block space-y-1.5">
+              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">DHCP end</span>
+              <input
+                bind:value={dhcpEnd}
+                type="text"
+                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                placeholder=".254"
+                disabled={!dhcp}
+              />
+            </label>
+          </div>
+        {/if}
       </div>
 
       <div class="flex justify-end gap-3 border-t border-slate-800 bg-slate-950/80 px-5 py-4">

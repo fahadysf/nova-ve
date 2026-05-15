@@ -106,6 +106,7 @@ def route_settings(tmp_path):
         GUACAMOLE_JSON_EXPIRE_SECONDS=300,
         GUACAMOLE_TERMINAL_FONT_NAME="Roboto Mono",
         GUACAMOLE_TERMINAL_FONT_SIZE=10,
+        NAT_CLOUD_POOL="10.255.0.0/16",
     )
 
 
@@ -131,6 +132,14 @@ def patched_route_settings(monkeypatch, tmp_path, route_settings):
     monkeypatch.setattr("app.services.host_net.bridge_add", lambda name: None)
     monkeypatch.setattr("app.services.host_net.bridge_del", lambda name: None)
     monkeypatch.setattr("app.services.host_net.bridge_exists", lambda name: False)
+    monkeypatch.setattr("app.services.host_net.bridge_addr_add", lambda name, cidr: None)
+    monkeypatch.setattr("app.services.host_net.link_up", lambda iface: None)
+    monkeypatch.setattr("app.services.host_net.default_egress_iface", lambda: "eth0")
+    monkeypatch.setattr("app.services.host_net.ipv4_forward_enable", lambda: None)
+    monkeypatch.setattr("app.services.host_net.nat_apply", lambda bridge, cidr, egress: None)
+    monkeypatch.setattr("app.services.host_net.nat_remove", lambda bridge: None)
+    monkeypatch.setattr("app.services.host_net.dnsmasq_start", lambda bridge, gateway, start, end: 4321)
+    monkeypatch.setattr("app.services.host_net.dnsmasq_stop", lambda bridge: None)
     return route_settings
 
 
@@ -173,6 +182,33 @@ async def test_create_network_explicit(
 
     saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
     assert len(saved["networks"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_network(
+    patched_route_settings, auth_override, ws_recorder,
+):
+    lab_name = _seed_lab(patched_route_settings.LABS_DIR)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/labs/{lab_name}/networks",
+            json={
+                "name": "internet",
+                "type": "nat_cloud",
+                "config": {"dhcp": True},
+            },
+        )
+    assert resp.status_code == 201, resp.text
+    network = resp.json()["network"]
+    assert network["type"] == "nat_cloud"
+    assert network["config"]["cidr"] == "10.255.0.0/24"
+    assert network["config"]["gateway"] == "10.255.0.1"
+    assert network["runtime"]["egress_interface"] == "eth0"
+    assert network["runtime"]["nat"] == "nftables"
+
+    saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["dhcp_pid"] == 4321
 
 
 @pytest.mark.asyncio

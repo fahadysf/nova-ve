@@ -89,6 +89,7 @@ export type NetworkType =
   | 'linux_bridge'
   | 'ovs_bridge'
   | 'nat'
+  | 'nat_cloud'
   | 'cloud'
   | 'management'
   | 'pnet0' | 'pnet1' | 'pnet2' | 'pnet3' | 'pnet4'
@@ -176,6 +177,15 @@ export interface Network {
   config: Record<string, unknown>;
   /** Derived from links[] on read; never persisted. */
   count?: number;
+}
+
+export interface NetworkCreateConfig {
+  cidr?: string;
+  gateway?: string;
+  dhcp?: boolean;
+  dhcp_start?: string;
+  dhcp_end?: string;
+  egress_interface?: string;
 }
 
 export interface LabViewport {

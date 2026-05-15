@@ -479,6 +479,44 @@ def link_up(iface: str) -> None:
     _invoke_helper("link-up", iface)
 
 
+def bridge_addr_add(name: str, cidr: str) -> None:
+    """Idempotently assign ``cidr`` to host bridge ``name``."""
+    _invoke_helper("bridge-addr-add", name, cidr)
+
+
+def default_egress_iface() -> str:
+    """Return the interface used by the host's current default route."""
+    proc = _invoke_helper("default-egress")
+    return (proc.stdout or "").strip()
+
+
+def ipv4_forward_enable() -> None:
+    """Enable host IPv4 forwarding via the privileged helper."""
+    _invoke_helper("ipv4-forward-enable")
+
+
+def nat_apply(bridge: str, cidr: str, egress_iface: str) -> None:
+    """Apply nova-ve-owned nftables masquerade for a NAT-Cloud network."""
+    _invoke_helper("nat-apply", bridge, cidr, egress_iface)
+
+
+def nat_remove(bridge: str) -> None:
+    """Remove nova-ve-owned nftables NAT state for ``bridge``."""
+    _invoke_helper("nat-remove", bridge)
+
+
+def dnsmasq_start(bridge: str, gateway: str, dhcp_start: str, dhcp_end: str) -> int:
+    """Start the per-NAT-Cloud dnsmasq instance and return its pid if known."""
+    proc = _invoke_helper("dnsmasq-start", bridge, gateway, dhcp_start, dhcp_end)
+    text = (proc.stdout or "").strip()
+    return int(text) if text.isdigit() else 0
+
+
+def dnsmasq_stop(bridge: str) -> None:
+    """Stop the per-NAT-Cloud dnsmasq instance for ``bridge``."""
+    _invoke_helper("dnsmasq-stop", bridge)
+
+
 def link_set_name_in_netns(pid: int, oldname: str, newname: str) -> None:
     """Rename ``oldname`` to ``newname`` inside ``pid``'s netns.
 

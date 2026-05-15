@@ -11,6 +11,7 @@ Contributor and architecture content. If you are an operator running labs, the r
 ## Specific subsystems
 
 - [Node add/edit workflow](node-add-edit-workflow.md) — modal + backend contract for creating and editing nodes.
+- [NAT-Cloud network](nat-cloud-network.md) — routed lab network design with DHCP and outbound NAT.
 - [Design system adoption](design-system.md) — how the bundled design tokens propagated through the app.
 - [Deployment contract](deployment-contract.md) — what every host-side install must satisfy, what may not change without a contract bump.
 

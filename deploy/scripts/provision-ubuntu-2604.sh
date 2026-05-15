@@ -262,6 +262,8 @@ run apt-get install -y --no-install-recommends \
   caddy \
   docker.io \
   docker-compose-v2 \
+  dnsmasq \
+  nftables \
   python3 \
   python3-venv \
   nodejs \
