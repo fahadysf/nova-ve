@@ -293,7 +293,7 @@ install_dynamips() {
   if [[ -x "${src}/build/nvram_export/nvram_export" ]]; then
     run install -m 0755 "${src}/build/nvram_export/nvram_export" /usr/local/bin/nvram_export
   fi
-  "${target}" --version 2>&1 | sed -n '1p'
+  "${target}" --version 2>&1 | sed -n '1p' || true
 }
 install_dynamips
 
