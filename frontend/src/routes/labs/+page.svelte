@@ -130,7 +130,7 @@
           description: ''
         }
       });
-      toastStore.push('Lab created.');
+      toastStore.push('Lab created.', 'success');
       await goto(`/labs${response.data.path}`);
     } catch (_error) {
       // toast already handled by api layer
