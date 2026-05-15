@@ -108,6 +108,57 @@ async def test_lab_service_preserves_nested_relative_paths(patched_settings):
 
 
 @pytest.mark.asyncio
+async def test_delete_lab_cleans_nat_cloud_runtime(monkeypatch, patched_settings):
+    db = FakeDB()
+    service = LabService(db)
+    lab_path = patched_settings.LABS_DIR / "nat-cleanup.json"
+    lab_path.write_text(
+        """{
+            "schema": 2,
+            "id": "lab-nat-cleanup",
+            "meta": {"name": "nat-cleanup"},
+            "nodes": {},
+            "links": [],
+            "networks": {
+                "1": {
+                    "id": 1,
+                    "name": "NAT Cloud",
+                    "type": "nat_cloud",
+                    "runtime": {"bridge_name": "novec0den1"}
+                }
+            }
+        }"""
+    )
+
+    calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        "app.services.lab_service.host_net.dnsmasq_stop",
+        lambda bridge: calls.append(("dnsmasq_stop", bridge)),
+    )
+    monkeypatch.setattr(
+        "app.services.lab_service.host_net.nat_remove",
+        lambda bridge: calls.append(("nat_remove", bridge)),
+    )
+    monkeypatch.setattr(
+        "app.services.lab_service.host_net.bridge_del",
+        lambda bridge: calls.append(("bridge_del", bridge)),
+    )
+
+    lab = SimpleNamespace(filename="nat-cleanup.json")
+    await service.delete_lab(lab)
+
+    assert calls == [
+        ("dnsmasq_stop", "novec0den1"),
+        ("nat_remove", "novec0den1"),
+        ("bridge_del", "novec0den1"),
+    ]
+    assert not lab_path.exists()
+    assert db.deleted == [lab]
+    assert db.commit_count == 1
+
+
+@pytest.mark.asyncio
 async def test_lab_router_supports_node_network_and_topology_mutations(patched_settings):
     lab_path = patched_settings.LABS_DIR / "nested" / "lab.json"
     _write_lab(
