@@ -46,14 +46,21 @@ def helper(monkeypatch, tmp_path):
 
     # Capture the argv that WOULD have been run — never actually fork.
     calls: list[list[str]] = []
+    capture_calls: list[list[str]] = []
 
     def fake_run(argv):
         calls.append(list(argv))
         return 0
 
+    def fake_run_capture(argv):
+        capture_calls.append(list(argv))
+        return mod.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
     monkeypatch.setattr(mod, "_run", fake_run, raising=True)
+    monkeypatch.setattr(mod, "_run_capture", fake_run_capture, raising=True)
 
     mod._test_calls = calls  # type: ignore[attr-defined]
+    mod._test_capture_calls = capture_calls  # type: ignore[attr-defined]
     mod._test_pids_path = pids_path  # type: ignore[attr-defined]
     mod._test_proc_root = proc_root  # type: ignore[attr-defined]
     return mod
@@ -233,7 +240,8 @@ def test_ipv4_forward_enable_writes_one(helper):
 def test_nat_apply_uses_nftables_chain(helper):
     rc = helper.main(["nat-apply", "novec0den1", "10.255.0.0/24", "ens18"])
     assert rc == 0
-    assert [call[0] for call in helper._test_calls] == [helper.NFT_BIN] * 5
+    assert [call[0] for call in helper._test_capture_calls] == [helper.NFT_BIN] * 3
+    assert [call[0] for call in helper._test_calls] == [helper.NFT_BIN] * 2
     assert helper._test_calls[-1][1:] == [
         "add",
         "rule",
@@ -247,7 +255,7 @@ def test_nat_apply_uses_nftables_chain(helper):
         "ens18",
         "masquerade",
         "comment",
-        "nova-ve novec0den1",
+        '"nova-ve novec0den1"',
     ]
 
 
