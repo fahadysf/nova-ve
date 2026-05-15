@@ -16,7 +16,8 @@
 #   3. Runs deploy/scripts/provision-ubuntu-2604.sh which:
 #        - installs all OS packages: docker.io, docker-compose-v2, postgresql,
 #          caddy, nodejs+npm, python3+venv, build-essential, libpq-dev, jq,
-#          openssl, qemu/kvm tooling (pulled in transitively by the helper);
+#          openssl, dnsmasq, nftables, qemu/kvm tooling (pulled in
+#          transitively by the helper);
 #        - creates /var/lib/nova-ve/{labs,images,tmp,guacamole,runtime,www};
 #        - generates random secrets into /etc/nova-ve/backend.env;
 #        - bootstraps the host postgres role/db (nova/nova/novadb);
@@ -25,8 +26,14 @@
 #        - builds the SvelteKit frontend (npm ci + vite build) into
 #          /var/lib/nova-ve/www;
 #        - installs the privileged network helper at /opt/nova-ve/bin/ and
-#          the matching /etc/sudoers.d/nova-ve fragment (visudo-validated);
+#          the matching /etc/sudoers.d/nova-ve fragment (visudo-validated),
+#          including NAT-Cloud forwarding/NAT/DHCP verbs;
 #        - drops systemd units (nova-ve-backend, caddy) and starts them;
+#        - reconciles existing NAT-Cloud bridge state after Docker restarts
+#          so upgraded hosts regain DHCP, NAT, and host forwarding rules;
+#        - deploys backend Docker runtime reconciliation, which adopts a
+#          running same-name container or removes a stopped stale same-name
+#          container before starting a Docker node;
 #        - runs deploy/scripts/smoke-check.sh.
 #   4. Writes nova-ve-install-summary.md into the launch directory with the
 #      bootstrapped admin credentials and a map of every critical file +
