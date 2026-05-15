@@ -12,9 +12,13 @@ What re-running does:
 2. Re-runs `provision-ubuntu-2604.sh` to top up OS-level packages.
 3. Reapplies the backend venv (`pip install -r requirements.txt`) and Alembic migrations.
 4. Rebuilds the frontend (`npm ci && vite build`) and rsyncs it into `/var/lib/nova-ve/www`.
-5. Restarts `nova-ve-backend` and `caddy`.
+5. Reinstalls the privileged network helper and sudoers fragment, including NAT-Cloud DHCP, NAT, and forwarding verbs.
+6. Restarts Docker, `nova-ve-backend`, and `caddy`.
+7. Reconciles existing NAT-Cloud bridges from lab JSON files, re-applying IPv4 forwarding, NAT, DOCKER-USER forwarding rules, and dnsmasq leases where the bridge already exists.
 
-It does **not** rotate existing secrets, drop the database, or touch lab JSON files. The smoke check at the end exits non-zero if anything broke.
+It does **not** rotate existing secrets, drop the database, or touch lab JSON files. The upgraded backend also reconciles deterministic Docker node names at start time: a running same-name nova-ve container is adopted into runtime state, while a stopped stale same-name container is removed before `docker run`.
+
+The smoke check at the end exits non-zero if anything broke.
 
 ## Pinning to a specific release
 

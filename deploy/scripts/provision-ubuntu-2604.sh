@@ -222,6 +222,107 @@ install_nova_ve_net_helper() {
   install -m 0440 -o root -g root "${sudoers_src}" "${sudoers_dst}"
 }
 
+reconcile_nat_cloud_runtime() {
+  local helper="/opt/nova-ve/bin/nova-ve-net.py"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "+ reconcile existing NAT-Cloud runtime state from ${ENV_FILE}"
+    return 0
+  fi
+
+  if [[ ! -x "${helper}" ]]; then
+    echo "WARN: ${helper} is not installed; skipping NAT-Cloud runtime reconciliation." >&2
+    return 0
+  fi
+  if [[ ! -f "${ENV_FILE}" ]]; then
+    echo "WARN: ${ENV_FILE} is missing; skipping NAT-Cloud runtime reconciliation." >&2
+    return 0
+  fi
+
+  # shellcheck disable=SC1090
+  set -a; source "${ENV_FILE}"; set +a
+
+  local labs_dir="${LABS_DIR:-/var/lib/nova-ve/labs}"
+  if [[ ! -d "${labs_dir}" ]]; then
+    echo "NAT-Cloud runtime reconciliation: no labs dir at ${labs_dir}; skipping."
+    return 0
+  fi
+
+  local applied=0
+  local skipped=0
+  local failed=0
+  local lab_file
+  while IFS= read -r -d '' lab_file; do
+    local rows
+    rows="$(
+      jq -r '
+        .networks // {}
+        | to_entries[]
+        | select(.value.type == "nat_cloud")
+        | [
+            (.value.runtime.bridge_name // ""),
+            (.value.config.cidr // ""),
+            (.value.config.gateway // ""),
+            ((.value.config.dhcp // true) | tostring),
+            (.value.config.dhcp_start // ""),
+            (.value.config.dhcp_end // ""),
+            (.value.runtime.egress_interface // .value.config.egress_interface // "")
+          ]
+        | @tsv
+      ' "${lab_file}" 2>/dev/null || true
+    )"
+    if [[ -z "${rows}" ]]; then
+      continue
+    fi
+
+    while IFS=$'\t' read -r bridge cidr gateway dhcp_enabled dhcp_start dhcp_end egress; do
+      if [[ -z "${bridge}" || -z "${cidr}" ]]; then
+        skipped=$((skipped + 1))
+        continue
+      fi
+      if ! ip link show "${bridge}" >/dev/null 2>&1; then
+        skipped=$((skipped + 1))
+        continue
+      fi
+      if [[ -z "${egress}" ]]; then
+        egress="$("${helper}" default-egress 2>/dev/null || true)"
+      fi
+      if [[ -z "${egress}" ]]; then
+        echo "WARN: no default egress interface found for NAT-Cloud bridge ${bridge}; skipping." >&2
+        skipped=$((skipped + 1))
+        continue
+      fi
+
+      if ! "${helper}" ipv4-forward-enable; then
+        echo "WARN: failed to enable IPv4 forwarding for NAT-Cloud bridge ${bridge}." >&2
+        failed=$((failed + 1))
+        continue
+      fi
+      if ! "${helper}" nat-apply "${bridge}" "${cidr}" "${egress}"; then
+        echo "WARN: failed to apply NAT for NAT-Cloud bridge ${bridge} via ${egress}." >&2
+        failed=$((failed + 1))
+        continue
+      fi
+      if ! "${helper}" forward-apply "${bridge}" "${cidr}" "${egress}"; then
+        echo "WARN: failed to apply forwarding for NAT-Cloud bridge ${bridge} via ${egress}." >&2
+        failed=$((failed + 1))
+        continue
+      fi
+      if [[ "${dhcp_enabled}" == "true" && -n "${gateway}" && -n "${dhcp_start}" && -n "${dhcp_end}" ]]; then
+        if ! "${helper}" dnsmasq-start "${bridge}" "${gateway}" "${dhcp_start}" "${dhcp_end}"; then
+          echo "WARN: failed to restart dnsmasq for NAT-Cloud bridge ${bridge}." >&2
+          failed=$((failed + 1))
+          continue
+        fi
+      fi
+      applied=$((applied + 1))
+    done <<< "${rows}"
+  done < <(find "${labs_dir}" -type f -name '*.json' -print0)
+
+  echo "NAT-Cloud runtime reconciliation: applied=${applied} skipped=${skipped} failed=${failed}."
+  return 0
+}
+
 ensure_instance_id() {
   local id_dir="/etc/nova-ve"
   local id_file="${id_dir}/instance_id"
@@ -353,6 +454,8 @@ run systemctl restart docker
 run systemctl restart postgresql
 run systemctl restart nova-ve-backend
 run systemctl restart caddy
+
+reconcile_nat_cloud_runtime
 
 run "${REPO_ROOT}/deploy/scripts/smoke-check.sh"
 
