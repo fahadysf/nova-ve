@@ -505,6 +505,23 @@ def nat_remove(bridge: str) -> None:
     _invoke_helper("nat-remove", bridge)
 
 
+def forward_apply(bridge: str, cidr: str, egress_iface: str) -> None:
+    """Apply nova-ve-owned forwarding allow rules for a NAT-Cloud network."""
+    _invoke_helper("forward-apply", bridge, cidr, egress_iface)
+
+
+def forward_remove(
+    bridge: str,
+    cidr: str | None = None,
+    egress_iface: str | None = None,
+) -> None:
+    """Remove nova-ve-owned forwarding allow rules for ``bridge``."""
+    args = ["forward-remove", bridge]
+    if cidr and egress_iface:
+        args.extend([cidr, egress_iface])
+    _invoke_helper(*args)
+
+
 def dnsmasq_start(bridge: str, gateway: str, dhcp_start: str, dhcp_end: str) -> int:
     """Start the per-NAT-Cloud dnsmasq instance and return its pid if known."""
     proc = _invoke_helper("dnsmasq-start", bridge, gateway, dhcp_start, dhcp_end)

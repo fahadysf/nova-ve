@@ -138,6 +138,8 @@ def patched_route_settings(monkeypatch, tmp_path, route_settings):
     monkeypatch.setattr("app.services.host_net.ipv4_forward_enable", lambda: None)
     monkeypatch.setattr("app.services.host_net.nat_apply", lambda bridge, cidr, egress: None)
     monkeypatch.setattr("app.services.host_net.nat_remove", lambda bridge: None)
+    monkeypatch.setattr("app.services.host_net.forward_apply", lambda bridge, cidr, egress: None)
+    monkeypatch.setattr("app.services.host_net.forward_remove", lambda bridge, cidr=None, egress_iface=None: None)
     monkeypatch.setattr("app.services.host_net.dnsmasq_start", lambda bridge, gateway, start, end: 4321)
     monkeypatch.setattr("app.services.host_net.dnsmasq_stop", lambda bridge: None)
     return route_settings

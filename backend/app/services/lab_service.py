@@ -232,11 +232,26 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
             continue
 
         if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+            config = network.get("config") or {}
+            cidr = str(config.get("cidr") or "")
+            egress = str(
+                runtime.get("egress_interface")
+                or config.get("egress_interface")
+                or ""
+            )
             try:
                 host_net.dnsmasq_stop(bridge)
             except host_net.HostNetError as exc:
                 logger.warning(
                     "delete_lab: dnsmasq_stop(%s) failed during lab cleanup (%s)",
+                    bridge,
+                    exc,
+                )
+            try:
+                host_net.forward_remove(bridge, cidr, egress)
+            except host_net.HostNetError as exc:
+                logger.warning(
+                    "delete_lab: forward_remove(%s) failed during lab cleanup (%s)",
                     bridge,
                     exc,
                 )

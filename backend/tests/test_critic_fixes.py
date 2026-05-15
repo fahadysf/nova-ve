@@ -124,7 +124,8 @@ async def test_delete_lab_cleans_nat_cloud_runtime(monkeypatch, patched_settings
                     "id": 1,
                     "name": "NAT Cloud",
                     "type": "nat_cloud",
-                    "runtime": {"bridge_name": "novec0den1"}
+                    "config": {"cidr": "10.255.0.0/24"},
+                    "runtime": {"bridge_name": "novec0den1", "egress_interface": "ens18"}
                 }
             }
         }"""
@@ -141,6 +142,12 @@ async def test_delete_lab_cleans_nat_cloud_runtime(monkeypatch, patched_settings
         lambda bridge: calls.append(("nat_remove", bridge)),
     )
     monkeypatch.setattr(
+        "app.services.lab_service.host_net.forward_remove",
+        lambda bridge, cidr=None, egress_iface=None: calls.append(
+            ("forward_remove", bridge, cidr, egress_iface)
+        ),
+    )
+    monkeypatch.setattr(
         "app.services.lab_service.host_net.bridge_del",
         lambda bridge: calls.append(("bridge_del", bridge)),
     )
@@ -150,6 +157,7 @@ async def test_delete_lab_cleans_nat_cloud_runtime(monkeypatch, patched_settings
 
     assert calls == [
         ("dnsmasq_stop", "novec0den1"),
+        ("forward_remove", "novec0den1", "10.255.0.0/24", "ens18"),
         ("nat_remove", "novec0den1"),
         ("bridge_del", "novec0den1"),
     ]

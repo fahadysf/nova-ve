@@ -39,13 +39,17 @@ Create and reconcile are idempotent:
 4. Resolve the egress interface from the live default route unless
    `config.egress_interface` is set.
 5. Apply an nftables masquerade rule for `config.cidr` out that interface.
-6. Start the per-bridge dnsmasq process when DHCP is enabled, with DNS
+6. Apply forwarding allow rules for outbound NAT-Cloud traffic and
+   established return traffic. On Docker hosts, these rules go in
+   `DOCKER-USER` because Docker's `FORWARD` chain commonly has policy
+   `drop` and evaluates `DOCKER-USER` before Docker-managed bridge rules.
+7. Start the per-bridge dnsmasq process when DHCP is enabled, with DNS
    serving disabled so it does not conflict with host DNS, or stop it when
    DHCP is disabled.
 
 Delete removes the lab JSON record first, then best-effort stops dnsmasq,
-removes nftables state, and deletes the bridge. A cleanup failure must not
-resurrect the deleted network record.
+removes forwarding/NAT nftables state, and deletes the bridge. A cleanup
+failure must not resurrect the deleted network record.
 
 ## Privilege Boundary
 
@@ -58,6 +62,8 @@ verbs with regex/shape validation:
 - `ipv4-forward-enable`
 - `nat-apply`
 - `nat-remove`
+- `forward-apply`
+- `forward-remove`
 - `dnsmasq-start`
 - `dnsmasq-stop`
 

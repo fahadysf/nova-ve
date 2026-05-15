@@ -473,6 +473,46 @@ def _nat_chain_name(bridge: str) -> str:
     return f"nvc_{bridge}"
 
 
+def _forward_chain_name(bridge: str) -> str:
+    return f"nvf_{bridge}"
+
+
+def _docker_user_chain_exists() -> bool:
+    return _nft_quiet("list", "chain", "ip", "filter", "DOCKER-USER") == 0
+
+
+def _forward_rule_specs(bridge: str, cidr: str, egress: str) -> list[list[str]]:
+    return [
+        [
+            "iifname",
+            bridge,
+            "oifname",
+            egress,
+            "ip",
+            "saddr",
+            cidr,
+            "accept",
+            "comment",
+            f'"nova-ve {bridge} forward-out"',
+        ],
+        [
+            "iifname",
+            egress,
+            "oifname",
+            bridge,
+            "ip",
+            "daddr",
+            cidr,
+            "ct",
+            "state",
+            "established,related",
+            "accept",
+            "comment",
+            f'"nova-ve {bridge} forward-in"',
+        ],
+    ]
+
+
 def cmd_nat_apply(args: argparse.Namespace) -> int:
     bridge = validate_bridge_name(args.bridge)
     cidr = validate_network_cidr(args.cidr)
@@ -513,6 +553,58 @@ def cmd_nat_remove(args: argparse.Namespace) -> int:
     chain = _nat_chain_name(bridge)
     _nft_quiet("flush", "chain", "ip", "nova_ve", chain)
     _nft_quiet("delete", "chain", "ip", "nova_ve", chain)
+    return 0
+
+
+def cmd_forward_apply(args: argparse.Namespace) -> int:
+    bridge = validate_bridge_name(args.bridge)
+    cidr = validate_network_cidr(args.cidr)
+    egress = validate_host_iface(args.egress_iface)
+    specs = _forward_rule_specs(bridge, cidr, egress)
+
+    if _docker_user_chain_exists():
+        for spec in specs:
+            _nft_quiet("delete", "rule", "ip", "filter", "DOCKER-USER", *spec)
+        for spec in reversed(specs):
+            rc = _nft("insert", "rule", "ip", "filter", "DOCKER-USER", *spec)
+            if rc != 0:
+                return rc
+        return 0
+
+    chain = _forward_chain_name(bridge)
+    _nft_quiet("add", "table", "ip", "nova_ve_filter")
+    _nft_quiet("flush", "chain", "ip", "nova_ve_filter", chain)
+    _nft_quiet("delete", "chain", "ip", "nova_ve_filter", chain)
+    rc = _nft(
+        "add",
+        "chain",
+        "ip",
+        "nova_ve_filter",
+        chain,
+        "{ type filter hook forward priority filter; policy accept; }",
+    )
+    if rc != 0:
+        return rc
+    for spec in specs:
+        rc = _nft("add", "rule", "ip", "nova_ve_filter", chain, *spec)
+        if rc != 0:
+            return rc
+    return 0
+
+
+def cmd_forward_remove(args: argparse.Namespace) -> int:
+    bridge = validate_bridge_name(args.bridge)
+    cidr = getattr(args, "cidr", None)
+    egress = getattr(args, "egress_iface", None)
+    if cidr and egress:
+        cidr = validate_network_cidr(cidr)
+        egress = validate_host_iface(egress)
+        for spec in _forward_rule_specs(bridge, cidr, egress):
+            _nft_quiet("delete", "rule", "ip", "filter", "DOCKER-USER", *spec)
+
+    chain = _forward_chain_name(bridge)
+    _nft_quiet("flush", "chain", "ip", "nova_ve_filter", chain)
+    _nft_quiet("delete", "chain", "ip", "nova_ve_filter", chain)
     return 0
 
 
@@ -784,6 +876,8 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "ipv4-forward-enable": cmd_ipv4_forward_enable,
     "nat-apply": cmd_nat_apply,
     "nat-remove": cmd_nat_remove,
+    "forward-apply": cmd_forward_apply,
+    "forward-remove": cmd_forward_remove,
     "dnsmasq-start": cmd_dnsmasq_start,
     "dnsmasq-stop": cmd_dnsmasq_stop,
     "link-set-name-in-netns": cmd_link_set_name_in_netns,
@@ -856,6 +950,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("nat-remove", help="remove nova-ve nftables masquerade")
     p.add_argument("bridge")
+
+    p = sub.add_parser("forward-apply", help="install nova-ve NAT-Cloud forwarding rules")
+    p.add_argument("bridge")
+    p.add_argument("cidr")
+    p.add_argument("egress_iface")
+
+    p = sub.add_parser("forward-remove", help="remove nova-ve NAT-Cloud forwarding rules")
+    p.add_argument("bridge")
+    p.add_argument("cidr", nargs="?")
+    p.add_argument("egress_iface", nargs="?")
 
     p = sub.add_parser("dnsmasq-start", help="start per-bridge dnsmasq DHCP/DNS")
     p.add_argument("bridge")
