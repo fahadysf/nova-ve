@@ -302,6 +302,8 @@ class NodeRuntimeService:
         node = self._node_data(lab_data, node_id)
         key = self._key(lab_id, node_id)
         runtime = self._runtime_record(lab_id, node_id)
+        if not runtime and node.get("type") == "docker":
+            runtime = self._reconcile_docker_node_runtime(lab_data, node)
         if runtime:
             return runtime
 
@@ -2151,6 +2153,7 @@ class NodeRuntimeService:
             raise NodeRuntimeError("extras.command must be a string or list of strings")
 
         # ----- Step 2: docker run -d --network=none ------------------------
+        self._remove_stale_docker_container_before_start(docker_binary, container_name)
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             raise NodeRuntimeError(
@@ -4230,6 +4233,177 @@ class NodeRuntimeService:
             text=True,
         )
 
+    def _reconcile_docker_node_runtime(
+        self,
+        lab_data: dict[str, Any],
+        node: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Reconcile Docker host state for a deterministic nova-ve container.
+
+        The app registry can be missing after a backend restart/deploy while
+        Docker still has the container. Running containers are adopted back
+        into nova-ve runtime state; stopped containers are stale and removed so
+        a subsequent start can reuse the deterministic name.
+        """
+        docker_binary = self._resolve_binary("docker")
+        if not docker_binary:
+            return None
+
+        lab_id = self._lab_id(lab_data)
+        node_id = int(node["id"])
+        container_name = self._container_name(lab_id, node_id)
+        running = self._docker_container_running_by_name(docker_binary, container_name)
+        if running is None:
+            return None
+        if not running:
+            self._remove_stale_docker_container_before_start(docker_binary, container_name)
+            host_net.sweep_node_host_ifaces(lab_id, node_id)
+            return None
+
+        pid = self._docker_container_pid(docker_binary, container_name)
+        if not pid:
+            return None
+
+        try:
+            runtime_pids.register(pid, "docker", lab_id, node_id)
+        except Exception as exc:
+            raise NodeRuntimeError(
+                f"Failed to register reconciled container PID in runtime registry: {exc}"
+            ) from exc
+
+        pid_create_time: float | None = None
+        try:
+            pid_create_time = psutil.Process(pid).create_time()
+        except psutil.Error:
+            pid_create_time = None
+
+        console_mode = node.get("console", "rdp")
+        console_port = self._allocate_console_port(console_mode)
+        console_proxy_pid: int | None = None
+        try:
+            console_proxy_pid = host_net.console_proxy_start(
+                node_pid=pid,
+                listen_port=int(console_port),
+                target_port=int(self._container_console_port(console_mode)),
+            )
+        except Exception as exc:
+            _logger.warning(
+                "console proxy failed to start while reconciling lab=%s node=%s: %s",
+                lab_id,
+                node_id,
+                exc,
+            )
+
+        attachments = self._docker_attachments(lab_data, node)
+        network_specs = self._docker_network_specs(lab_data, node)
+        work_dir = self._work_dir(lab_id, node_id)
+        work_dir.mkdir(parents=True, exist_ok=True)
+        runtime = {
+            "lab_id": lab_id,
+            "node_id": node_id,
+            "kind": "docker",
+            "name": node.get("name"),
+            "console": console_mode,
+            "console_port": console_port,
+            "container_name": container_name,
+            "container_id": self._docker_container_id(docker_binary, container_name)
+            or container_name,
+            "pid": pid,
+            "pid_create_time": pid_create_time,
+            "console_proxy_pid": console_proxy_pid,
+            "work_dir": str(work_dir),
+            "stdout_log": str(work_dir / "stdout.log"),
+            "stderr_log": str(work_dir / "stderr.log"),
+            "command": [],
+            "network_names": [spec["name"] for spec in network_specs],
+            "veth_host_ends": [
+                host_net.veth_host_name(lab_id, node_id, a["interface_index"])
+                for a in attachments
+            ],
+            "interface_attachments": [
+                {
+                    "interface_index": a["interface_index"],
+                    "network_id": a["network_id"],
+                    "bridge_name": a["bridge_name"],
+                    "host_end": host_net.veth_host_name(
+                        lab_id, node_id, a["interface_index"]
+                    ),
+                }
+                for a in attachments
+            ],
+            "reconciled_from_host": True,
+            "started_at": time.time(),
+        }
+        with self._lock:
+            self._registry[self._key(lab_id, node_id)] = runtime
+        self._persist_runtime(runtime)
+        return runtime
+
+    def _remove_stale_docker_container_before_start(
+        self,
+        docker_binary: str,
+        container_name: str,
+    ) -> None:
+        """Remove an exited same-name container before a fresh docker start.
+
+        nova-ve container names are deterministic by lab/node. If the backend
+        runtime registry is lost during deploy/restart but Docker still has an
+        exited container with that name, a fresh ``docker run --name`` fails
+        with a duplicate-name conflict. Removing only non-running containers
+        restores the invariant without deleting active work.
+        """
+        running = self._docker_container_running_by_name(docker_binary, container_name)
+        if running is None:
+            return
+
+        if running:
+            raise NodeRuntimeError(
+                f"Docker container {container_name} already exists and is running, "
+                "but nova-ve has no runtime record for this node. Stop or remove "
+                "that container before starting the node."
+            )
+
+        remove = subprocess.run(
+            [
+                docker_binary,
+                "--host",
+                self.settings.DOCKER_HOST,
+                "rm",
+                "-f",
+                container_name,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if remove.returncode != 0:
+            raise NodeRuntimeError(
+                remove.stderr.strip()
+                or remove.stdout.strip()
+                or f"Failed to remove stale Docker container {container_name}"
+            )
+
+    def _docker_container_running_by_name(
+        self,
+        docker_binary: str,
+        container_name: str,
+    ) -> bool | None:
+        result = subprocess.run(
+            [
+                docker_binary,
+                "--host",
+                self.settings.DOCKER_HOST,
+                "inspect",
+                "-f",
+                "{{.State.Running}}",
+                container_name,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() == "true"
+
     def _docker_attachments(
         self, lab_data: dict[str, Any], node: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -4779,6 +4953,24 @@ class NodeRuntimeService:
         except ValueError:
             return None
         return pid or None
+
+    def _docker_container_id(self, docker_binary: str, container_name: str) -> str | None:
+        result = subprocess.run(
+            [
+                docker_binary,
+                "--host",
+                self.settings.DOCKER_HOST,
+                "inspect",
+                "-f",
+                "{{.Id}}",
+                container_name,
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
 
     def _console_url(self, runtime: dict[str, Any] | None) -> str:
         if not runtime:

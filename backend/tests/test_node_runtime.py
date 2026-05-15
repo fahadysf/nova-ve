@@ -722,6 +722,12 @@ async def test_start_stop_docker_nodes_attach_to_shared_lab_network(monkeypatch,
                     stdout=("true" if container["running"] else "false") + "\n",
                     stderr="",
                 )
+            if template == "{{.Id}}":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"{container_name}-cid\n",
+                    stderr="",
+                )
 
         if args[0] == "stop":
             container_name = args[-1]
@@ -1667,6 +1673,12 @@ def _us204_docker_run_factory(containers: dict[str, dict[str, object]]):
                     stdout=("true" if container["running"] else "false") + "\n",
                     stderr="",
                 )
+            if template == "{{.Id}}":
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=f"{container_name}-cid\n",
+                    stderr="",
+                )
         if args[0] == "stop":
             container_name = args[-1]
             if container_name in containers:
@@ -1679,6 +1691,94 @@ def _us204_docker_run_factory(containers: dict[str, dict[str, object]]):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     return fake_run
+
+
+def test_docker_start_removes_stale_exited_same_name_container(
+    monkeypatch,
+    patched_settings,
+    _us203_instance_id,
+):
+    lab = _us204_lab_data()
+    container_name = "nova-ve-lab204-1"
+    containers: dict[str, dict[str, object]] = {
+        container_name: {"running": False, "pid": 7000}
+    }
+    recorded: list[list[str]] = []
+    fake_run = _us204_docker_run_factory(containers)
+
+    def recording_run(cmd, capture_output=False, text=False, **kwargs):
+        recorded.append(list(cmd))
+        return fake_run(cmd, capture_output=capture_output, text=text, **kwargs)
+
+    _mock_runtime_binaries(monkeypatch)
+    _us203_helper_mock(
+        monkeypatch,
+        present_bridges={lab["networks"]["1"]["runtime"]["bridge_name"]},
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.sweep_node_host_ifaces",
+        lambda _lab_id, _node_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start",
+        lambda **_kwargs: 8123,
+    )
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", recording_run)
+
+    runtime = NodeRuntimeService().start_node(lab, 1)
+
+    docker_ops = [
+        call[3] for call in recorded
+        if len(call) > 3 and call[0] == "docker" and call[1] == "--host"
+    ]
+    assert "rm" in docker_ops
+    assert "run" in docker_ops
+    assert docker_ops.index("rm") < docker_ops.index("run")
+    assert containers[container_name]["running"] is True
+    assert runtime["container_name"] == container_name
+
+
+def test_docker_start_reconciles_running_same_name_container(
+    monkeypatch,
+    patched_settings,
+    _us203_instance_id,
+):
+    lab = _us204_lab_data()
+    container_name = "nova-ve-lab204-1"
+    containers: dict[str, dict[str, object]] = {
+        container_name: {"running": True, "pid": 7000}
+    }
+    recorded: list[list[str]] = []
+    fake_run = _us204_docker_run_factory(containers)
+
+    def recording_run(cmd, capture_output=False, text=False, **kwargs):
+        recorded.append(list(cmd))
+        return fake_run(cmd, capture_output=capture_output, text=text, **kwargs)
+
+    _mock_runtime_binaries(monkeypatch)
+    _us203_helper_mock(
+        monkeypatch,
+        present_bridges={lab["networks"]["1"]["runtime"]["bridge_name"]},
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start",
+        lambda **_kwargs: 8123,
+    )
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", recording_run)
+
+    runtime = NodeRuntimeService().start_node(lab, 1)
+
+    docker_ops = [
+        call[3] for call in recorded
+        if len(call) > 3 and call[0] == "docker" and call[1] == "--host"
+    ]
+    assert "run" not in docker_ops
+    assert runtime["container_name"] == container_name
+    assert runtime["pid"] == 7000
+    assert runtime["container_id"] == f"{container_name}-cid"
+    assert runtime["console_proxy_pid"] == 8123
+    assert runtime["reconciled_from_host"] is True
+    assert NodeRuntimeService().start_node(lab, 1)["container_name"] == container_name
 
 
 def _us204_start_alpine_a(
