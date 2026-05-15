@@ -351,6 +351,10 @@ def _nft(*args: str) -> int:
     return _run([NFT_BIN, *args])
 
 
+def _nft_quiet(*args: str) -> int:
+    return _run_capture([NFT_BIN, *args]).returncode
+
+
 def _nsenter_ip_netns(pid: int, *args: str) -> int:
     """``nsenter -t <pid> -n ip <args>`` with shell=False."""
     return _run([NSENTER_BIN, "-t", str(pid), "-n", IP_BIN, *args])
@@ -474,9 +478,9 @@ def cmd_nat_apply(args: argparse.Namespace) -> int:
     cidr = validate_network_cidr(args.cidr)
     egress = validate_host_iface(args.egress_iface)
     chain = _nat_chain_name(bridge)
-    _nft("add", "table", "ip", "nova_ve")
-    _nft("flush", "chain", "ip", "nova_ve", chain)
-    _nft("delete", "chain", "ip", "nova_ve", chain)
+    _nft_quiet("add", "table", "ip", "nova_ve")
+    _nft_quiet("flush", "chain", "ip", "nova_ve", chain)
+    _nft_quiet("delete", "chain", "ip", "nova_ve", chain)
     rc = _nft(
         "add",
         "chain",
@@ -500,15 +504,15 @@ def cmd_nat_apply(args: argparse.Namespace) -> int:
         egress,
         "masquerade",
         "comment",
-        f"nova-ve {bridge}",
+        f'"nova-ve {bridge}"',
     )
 
 
 def cmd_nat_remove(args: argparse.Namespace) -> int:
     bridge = validate_bridge_name(args.bridge)
     chain = _nat_chain_name(bridge)
-    _nft("flush", "chain", "ip", "nova_ve", chain)
-    _nft("delete", "chain", "ip", "nova_ve", chain)
+    _nft_quiet("flush", "chain", "ip", "nova_ve", chain)
+    _nft_quiet("delete", "chain", "ip", "nova_ve", chain)
     return 0
 
 
