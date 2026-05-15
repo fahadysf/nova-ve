@@ -267,6 +267,7 @@ def test_dnsmasq_start_writes_bridge_config(helper):
     conf = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1" / "dnsmasq.conf"
     text = conf.read_text()
     assert "interface=novec0den1" in text
+    assert "port=0" in text
     assert "dhcp-range=10.255.0.100,10.255.0.254,12h" in text
     assert helper._test_calls[-1][0] == helper.DNSMASQ_BIN
     assert helper._test_calls[-1][1] == f"--conf-file={conf}"

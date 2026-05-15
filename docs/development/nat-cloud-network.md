@@ -18,7 +18,7 @@ currently owns the default route.
 | --- | --- |
 | `cidr` | IPv4 subnet for the bridge. If omitted, nova-ve allocates one `/24` from `NOVA_VE_NAT_CLOUD_POOL` (`10.255.0.0/16` by default). |
 | `gateway` | Host bridge IP. Defaults to the first usable address in `cidr` (`.1` for `/24`). |
-| `dhcp` | Whether to run DHCP/DNS for the bridge. Defaults to `true`. |
+| `dhcp` | Whether to run DHCP for the bridge. Defaults to `true`. |
 | `dhcp_start` / `dhcp_end` | DHCP lease range. Defaults to `.100` through the last usable address. |
 | `egress_interface` | Optional host interface override. If omitted, nova-ve resolves the live default-route interface during create/reconcile. |
 
@@ -39,8 +39,9 @@ Create and reconcile are idempotent:
 4. Resolve the egress interface from the live default route unless
    `config.egress_interface` is set.
 5. Apply an nftables masquerade rule for `config.cidr` out that interface.
-6. Start the per-bridge dnsmasq process when DHCP is enabled, or stop it
-   when disabled.
+6. Start the per-bridge dnsmasq process when DHCP is enabled, with DNS
+   serving disabled so it does not conflict with host DNS, or stop it when
+   DHCP is disabled.
 
 Delete removes the lab JSON record first, then best-effort stops dnsmasq,
 removes nftables state, and deletes the bridge. A cleanup failure must not
