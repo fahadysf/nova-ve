@@ -9,6 +9,7 @@ RUN apk add --no-cache \
       fluxbox \
       iproute2 \
       iputils \
+      xdpyinfo \
       x11vnc \
       xterm \
       xvfb \

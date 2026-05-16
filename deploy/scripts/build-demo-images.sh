@@ -20,10 +20,10 @@
 #                               uses this for re-deploys where the operator
 #                               does not need the demo images rebuilt.
 #
-# Idempotency: each image is built only when not already present locally
-# (`docker images -q <tag>` is empty), and each marker tag is applied only
-# when the corresponding ``nova-ve-lab/...`` tag is missing. Re-running the
-# provisioner on a host that already has everything is a no-op.
+# Idempotency: external base images are pulled only when missing. Bundled demo
+# images are rebuilt from the checked-out repo so stale local tags do not mask
+# entrypoint/package fixes. Marker tags are refreshed when their source image
+# id changes.
 #
 # Failure semantics: this script exits non-zero on docker-build/pull failure.
 # The provisioner wraps the call so a build failure does not abort install.sh;
@@ -43,6 +43,10 @@ MARKER_NS="nova-ve-lab"
 
 image_present() {
   [[ -n "$(docker images -q "$1" 2>/dev/null)" ]]
+}
+
+image_id() {
+  docker images -q "$1" 2>/dev/null | head -n1
 }
 
 # Mirror app.services.docker_image_service._sanitize_repo_for_marker so the
@@ -72,14 +76,18 @@ mark_for_lab() {
   local marker
   marker="$(marker_for "$reference")"
   if image_present "$marker"; then
-    echo "build-demo-images: marker ${marker} already present; skipping." >&2
-    return 0
+    if [[ "$(image_id "$marker")" == "$(image_id "$reference")" ]]; then
+      echo "build-demo-images: marker ${marker} already current; skipping." >&2
+      return 0
+    fi
+    echo "build-demo-images: refreshing marker ${marker} -> ${reference}" >&2
+  else
+    echo "build-demo-images: tagging ${reference} -> ${marker}" >&2
   fi
   if ! image_present "$reference"; then
     echo "build-demo-images: source image ${reference} missing; cannot mark." >&2
     return 1
   fi
-  echo "build-demo-images: tagging ${reference} -> ${marker}" >&2
   docker tag "$reference" "$marker"
 }
 
@@ -93,13 +101,9 @@ pull_if_missing() {
   docker pull "$reference"
 }
 
-build_if_missing() {
+build_demo_image() {
   local tag="$1"
   local context="$2"
-  if image_present "$tag"; then
-    echo "build-demo-images: ${tag} already present; skipping build." >&2
-    return 0
-  fi
   echo "build-demo-images: building ${tag} from ${context}" >&2
   docker build -t "$tag" "$context"
 }
@@ -108,8 +112,8 @@ build_if_missing() {
 pull_if_missing "alpine:3.22"
 
 # 2. Demo images.
-build_if_missing "nova-ve/alpine-telnet:latest" "${REPO_ROOT}/deploy/demo-images/alpine-telnet"
-build_if_missing "nova-ve/alpine-vnc:latest"    "${REPO_ROOT}/deploy/demo-images/alpine-vnc"
+build_demo_image "nova-ve/alpine-telnet:latest" "${REPO_ROOT}/deploy/demo-images/alpine-telnet"
+build_demo_image "nova-ve/alpine-vnc:latest"    "${REPO_ROOT}/deploy/demo-images/alpine-vnc"
 
 # 3. Mark everything for lab availability so the add-node modal sees them by
 # default. Operators can ``Unmark`` from the admin UI if they want a cleaner
