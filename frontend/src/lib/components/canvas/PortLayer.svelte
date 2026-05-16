@@ -101,7 +101,7 @@
   }) {
     dispatch('port:mousedown', detail);
 
-    if (!detail.event.shiftKey) {
+    if (!detail.event.ctrlKey) {
       return;
     }
 

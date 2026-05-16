@@ -220,15 +220,13 @@
   function handleMouseDown(event: MouseEvent) {
     if (event.button !== 0) return;
 
-    if (!event.shiftKey) {
-      event.stopPropagation();
-      event.preventDefault();
-    }
+    event.stopPropagation();
+    event.preventDefault();
 
     clearHoverTimer();
     showTooltip = false;
 
-    if (!event.shiftKey) {
+    if (!event.ctrlKey) {
       clickStartTs = Date.now();
       clickStartCoords = { x: event.clientX, y: event.clientY };
       dragLinkStore.start({

@@ -10,7 +10,7 @@
  *   2. Drive ``dragLinkStore.start(...)`` directly with the source endpoint —
  *      the legacy ``createEventDispatcher`` chain never bubbled through
  *      SvelteFlow's component-prop renderer.
- *   3. Skip both behaviours for shift-modified mousedown (port repositioning)
+ *   3. Skip drag-link start for ctrl-modified mousedown (port repositioning)
  *      and right-button (or other non-zero) mousedown.
  */
 
@@ -45,14 +45,14 @@ function findPortRoot(): HTMLElement {
  * ``preventDefault`` we can spy on. JSDOM's ``MouseEvent`` exposes both as
  * regular instance methods, so vi.spyOn works directly.
  */
-function makeMouseDown(opts: { button?: number; shiftKey?: boolean } = {}): {
+function makeMouseDown(opts: { button?: number; ctrlKey?: boolean } = {}): {
   event: MouseEvent;
   stopSpy: ReturnType<typeof vi.spyOn>;
   preventSpy: ReturnType<typeof vi.spyOn>;
 } {
   const event = new MouseEvent('mousedown', {
     button: opts.button ?? 0,
-    shiftKey: opts.shiftKey ?? false,
+    ctrlKey: opts.ctrlKey ?? false,
     bubbles: true,
     cancelable: true,
     clientX: 100,
@@ -132,7 +132,7 @@ describe('Port (US-080)', () => {
     expect(call.pointer).toEqual({ x: 100, y: 200 });
   });
 
-  it('shift+mousedown does NOT call dragLinkStore.start (port-reposition flow)', () => {
+  it('ctrl+mousedown does NOT call dragLinkStore.start and does suppress node drag', () => {
     render(Port, {
       props: {
         interfaceData: baseInterface,
@@ -143,14 +143,12 @@ describe('Port (US-080)', () => {
     });
 
     const root = findPortRoot();
-    const { event, stopSpy, preventSpy } = makeMouseDown({ shiftKey: true });
+    const { event, stopSpy, preventSpy } = makeMouseDown({ ctrlKey: true });
     root.dispatchEvent(event);
 
     expect(startSpy).not.toHaveBeenCalled();
-    // Shift drags are reserved for PortLayer's perimeter clamp; we must NOT
-    // suppress propagation/default — those are SvelteFlow's domain there.
-    expect(stopSpy).not.toHaveBeenCalled();
-    expect(preventSpy).not.toHaveBeenCalled();
+    expect(stopSpy).toHaveBeenCalled();
+    expect(preventSpy).toHaveBeenCalled();
   });
 
   it('right-click (button !== 0) does NOT call dragLinkStore.start', () => {
