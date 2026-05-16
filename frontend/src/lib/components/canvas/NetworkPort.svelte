@@ -16,6 +16,7 @@
   export let offset = 0.5;
   export let slotIndex: number;
   export let linkId: string | null = null;
+  export let endpointKey: 'from' | 'to' | undefined = undefined;
   export let isOpen = false;
 
   const CLICK_MAX_MS = 200;
@@ -39,11 +40,11 @@
   let draggingPosition: PortPosition | null = null;
 
   type PersistConnectionPointPosition = (
-    target: { kind: 'network'; networkId: number; linkId: string },
+    target: { kind: 'network'; networkId: number; linkId: string; endpointKey?: 'from' | 'to' },
     port: PortPosition
   ) => void;
   type ConnectionPointContextMenu = (
-    target: { kind: 'network'; networkId: number; linkId: string },
+    target: { kind: 'network'; networkId: number; linkId: string; endpointKey?: 'from' | 'to' },
     event: MouseEvent
   ) => void;
   const persistConnectionPointPosition = getContext<PersistConnectionPointPosition | undefined>(
@@ -109,7 +110,7 @@
         window.removeEventListener('mouseup', onUp);
         if (draggingPosition) {
           persistConnectionPointPosition?.(
-            { kind: 'network', networkId, linkId },
+            { kind: 'network', networkId, linkId, endpointKey },
             draggingPosition
           );
         }
@@ -233,7 +234,7 @@
     if (isOpen || !linkId) return;
     event.preventDefault();
     event.stopPropagation();
-    openConnectionPointMenu?.({ kind: 'network', networkId, linkId }, event);
+    openConnectionPointMenu?.({ kind: 'network', networkId, linkId, endpointKey }, event);
   }
 </script>
 
@@ -241,6 +242,8 @@
   class="absolute z-10"
   style={stylePosition}
   data-network-port-id={networkId}
+  data-network-port-link-id={linkId ?? ''}
+  data-network-port-endpoint-key={endpointKey ?? ''}
   data-network-port-side={effectiveSide}
   data-network-port-offset={effectiveOffset.toFixed(4)}
   data-network-port-slot={slotIndex}

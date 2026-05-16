@@ -7,6 +7,8 @@
   import { assignNetworkSlots, slotPosition } from '$lib/services/canvasEdges';
   import { infoPanels } from '$lib/stores/infoPanels';
 
+  type NetworkConnectionPointRef = { endpointKey: 'from' | 'to' };
+
   export let id: string | undefined = undefined;
   export let data: {
     label: string;
@@ -15,6 +17,7 @@
     networkId?: number;
     linkIds?: string[];
     portPositionsByLinkId?: Record<string, { side: 'top' | 'right' | 'bottom' | 'left'; offset: number }>;
+    portRefsByLinkId?: Record<string, NetworkConnectionPointRef>;
   };
 
   function openInfo(event: MouseEvent) {
@@ -69,6 +72,7 @@
       offset={slot.placement.offset}
       slotIndex={slot.idx}
       linkId={slot.linkId}
+      endpointKey={slot.linkId ? data.portRefsByLinkId?.[slot.linkId]?.endpointKey : undefined}
       isOpen={slot.isOpen}
     />
   {/each}

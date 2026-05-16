@@ -26,6 +26,9 @@
   export let liveMac: LiveMacState | undefined = undefined;
   export let interfaceNamingScheme: string | null | undefined = undefined;
   export let nodeName: string | undefined = undefined;
+  export let connectionPointRef:
+    | { linkId: string; endpointKey: 'from' | 'to' }
+    | undefined = undefined;
   // When true, an inline label with the interface name is rendered next to the
   // port handle without requiring hover. Used to surface link attachments at a
   // glance (US-214: pinned labels on connected ports).
@@ -42,7 +45,13 @@
   }>();
 
   type ConnectionPointContextMenu = (
-    target: { kind: 'node'; nodeId: number; interfaceIndex: number },
+    target: {
+      kind: 'node';
+      nodeId: number;
+      interfaceIndex: number;
+      linkId?: string;
+      endpointKey?: 'from' | 'to';
+    },
     event: MouseEvent
   ) => void;
   const openConnectionPointMenu = getContext<ConnectionPointContextMenu | undefined>(
@@ -249,7 +258,16 @@
     if (newConnectionSlot) return;
     event.preventDefault();
     event.stopPropagation();
-    openConnectionPointMenu?.({ kind: 'node', nodeId, interfaceIndex }, event);
+    openConnectionPointMenu?.(
+      {
+        kind: 'node',
+        nodeId,
+        interfaceIndex,
+        linkId: connectionPointRef?.linkId,
+        endpointKey: connectionPointRef?.endpointKey,
+      },
+      event
+    );
   }
 
   function handleMouseUp(event: MouseEvent) {
@@ -335,6 +353,8 @@
   style={stylePosition}
   data-port-node-id={nodeId}
   data-port-interface-index={interfaceIndex}
+  data-port-link-id={connectionPointRef?.linkId ?? ''}
+  data-port-endpoint-key={connectionPointRef?.endpointKey ?? ''}
   data-port-new-connection={newConnectionSlot ? 'true' : 'false'}
   data-port-side={position.side}
   data-port-offset={position.offset.toFixed(4)}
