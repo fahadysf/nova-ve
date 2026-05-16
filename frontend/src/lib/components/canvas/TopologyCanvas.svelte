@@ -43,7 +43,7 @@
   import { toastStore } from '$lib/stores/toasts';
   import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
-  import { createLabWsStores, type LabWsStores } from '$lib/stores/labWs';
+  import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
   import { deriveEdges, parseIfaceInterfaceIndex, type DiscoveredLink } from '$lib/services/canvasEdges';
   import {
     dragLinkStore,
@@ -120,6 +120,10 @@
       networks?: Record<string, NetworkData>;
       topology?: TopologyLink[];
     };
+    // #153: per-link mutation arriving via WS so the page can splice
+    // links[] without a full loadLab(). Cascade deletes (e.g. orphan
+    // implicit-bridge halves) deliver one event per link_id.
+    'link-change': LinkChangeEvent;
   }>();
 
   const nodeTypes = {
@@ -465,6 +469,12 @@
     (item): item is PaletteNetworkItem => item.kind === 'network'
   );
 
+  function nodeCardWidth(node: NodeData): number {
+    const savedWidth = node.width ? Number.parseInt(node.width, 10) : 0;
+    const hostnameWidth = Math.min(Math.max(node.name.length * 5.5 + 44, 152), 220);
+    return Math.max(Number.isFinite(savedWidth) ? savedWidth + 48 : 0, hostnameWidth);
+  }
+
   function buildFlowNodes(): Node[] {
     const flowNodes: Node[] = [];
 
@@ -486,7 +496,7 @@
           highlightedInterfaceIndex: highlightedTargetForNode(node.id),
           interface_naming_scheme: node.interface_naming_scheme ?? null
         },
-        style: `width: ${node.width ? parseInt(node.width, 10) + 60 : 104}px;`
+        style: `width: ${nodeCardWidth(node)}px;`
       });
     }
 
@@ -523,7 +533,7 @@
           linkIds: networkLinkIds,
           brokenImplicit: isBrokenImplicit
         },
-        style: `width: ${network.width ? network.width + 40 : 110}px;`
+        style: `width: ${network.width ? network.width + 40 : 130}px;`
       });
     }
 
@@ -1359,6 +1369,8 @@
   let labWsStores: LabWsStores | null = null;
   /** Unsubscribe handle for the unified linkReconciliation store (US-403/404). */
   let reconUnsub: (() => void) | null = null;
+  /** #153: unsubscribe handle for the per-link mutation forwarder. */
+  let linkChangeUnsub: (() => void) | null = null;
 
   onMount(() => {
     if (typeof window !== 'undefined') {
@@ -1389,6 +1401,12 @@
         }
         publishFlowState();
       });
+      // #153: forward per-link mutation events up to the page so it can
+      // splice links[] reactively. The page is the source of truth for
+      // links[]; the canvas just relays.
+      linkChangeUnsub = labWsStores.onLinkChange((event) => {
+        dispatch('link-change', event);
+      });
       if (import.meta.env.DEV) {
         (window as unknown as { __novaWsClient?: WsClient }).__novaWsClient = client;
       }
@@ -1405,6 +1423,10 @@
       if (reconUnsub) {
         reconUnsub();
         reconUnsub = null;
+      }
+      if (linkChangeUnsub) {
+        linkChangeUnsub();
+        linkChangeUnsub = null;
       }
       if (wsClient) {
         wsClient.close();
