@@ -125,6 +125,11 @@ class ImageRecord:
         }
 
 
+@dataclass(frozen=True)
+class ImageConsoleHints:
+    vnc_port: int | None = None
+
+
 class DockerImageService:
     """Read/mutate the Docker image registry for lab availability."""
 
@@ -195,6 +200,25 @@ class DockerImageService:
                 out.extend(record.marker_tags)
         # Stable sort: case-insensitive by name.
         return sorted(set(out), key=str.lower)
+
+    def console_hints(self, reference: str) -> ImageConsoleHints:
+        """Return console defaults inferred from a local image's config."""
+        cmd = _resolve_docker()
+        if cmd is None or not reference:
+            return ImageConsoleHints()
+        proc = _run(cmd, ["image", "inspect", reference], check=False)
+        if proc.returncode != 0:
+            return ImageConsoleHints()
+        try:
+            payload = json.loads(proc.stdout or "[]")
+        except json.JSONDecodeError:
+            return ImageConsoleHints()
+        if not payload or not isinstance(payload[0], dict):
+            return ImageConsoleHints()
+        config = payload[0].get("Config") or {}
+        if not isinstance(config, dict):
+            return ImageConsoleHints()
+        return ImageConsoleHints(vnc_port=_infer_vnc_port(config))
 
     def mark(self, reference: str) -> str:
         """Apply the marker tag for ``reference``. Returns the marker tag."""
@@ -285,3 +309,40 @@ def _parse_size(raw: str) -> int:
     value = float(match.group(1))
     unit = match.group(2).upper()
     return int(value * _SIZE_UNITS.get(unit, 1))
+
+
+def _parse_port(value: Any) -> int | None:
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _infer_vnc_port(config: dict[str, Any]) -> int | None:
+    env = config.get("Env") or []
+    if isinstance(env, list):
+        for key in ("VNC_PORT", "NOVA_VE_VNC_PORT"):
+            prefix = f"{key}="
+            for entry in env:
+                if isinstance(entry, str) and entry.startswith(prefix):
+                    port = _parse_port(entry[len(prefix):])
+                    if port is not None:
+                        return port
+
+    exposed = config.get("ExposedPorts") or {}
+    candidates: list[int] = []
+    if isinstance(exposed, dict):
+        for raw in exposed.keys():
+            port = _parse_port(str(raw).split("/", 1)[0])
+            if port is not None:
+                candidates.append(port)
+    for preferred in (5900, 5901):
+        if preferred in candidates:
+            return preferred
+    for port in sorted(candidates):
+        if 5900 <= port < 6900:
+            return port
+    return None

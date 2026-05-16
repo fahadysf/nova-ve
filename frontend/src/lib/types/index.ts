@@ -262,6 +262,7 @@ export interface NodeCatalogImage {
   files?: string[];
   path?: string;
   source?: string;
+  vnc_port?: number;
 }
 
 export interface NodeCatalogDefaults {

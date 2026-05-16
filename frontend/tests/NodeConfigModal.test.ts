@@ -53,9 +53,51 @@ function makeTemplate(caps?: TemplateCapabilities): NodeCatalogTemplate {
   };
 }
 
-function makeCatalog(template: NodeCatalogTemplate): NodeCatalog {
+function makeDockerTemplate(): NodeCatalogTemplate {
   return {
-    templates: [template],
+    key: 'docker',
+    type: 'docker',
+    name: 'Docker',
+    description: 'Docker container',
+    defaults: {
+      type: 'docker',
+      template: 'docker',
+      image: 'accetto/ubuntu-vnc-xfce-firefox-g3:latest',
+      icon_type: 'server',
+      icon: 'Server.png',
+      cpu: 1,
+      ram: 1024,
+      ethernet: 1,
+      console_type: 'vnc',
+      delay: 0,
+      cpulimit: 1,
+      extras: { vnc_port: 5900 },
+    },
+    images: [
+      {
+        image: 'accetto/ubuntu-vnc-xfce-firefox-g3:latest',
+        source: 'docker',
+        vnc_port: 5901,
+      },
+    ],
+    icon_options: ['Server.png'],
+    extras_schema: [
+      {
+        key: 'vnc_port',
+        label: 'VNC port',
+        type: 'number',
+        default: 5900,
+        stoppedOnly: true,
+        runtime: true,
+      },
+    ],
+    capabilities: { hotplug: true, max_nics: 99, machine: null },
+  };
+}
+
+function makeCatalog(...templates: NodeCatalogTemplate[]): NodeCatalog {
+  return {
+    templates,
     icon_options: ['Router.png'],
     create_fields: [],
     edit_fields: [],
@@ -228,6 +270,59 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
         mode: 'edit',
         payload: expect.objectContaining({
           interface_naming_scheme: 'mgmt0,eth{n}',
+        }),
+      }),
+    );
+  });
+
+  it('uses the selected Docker image VNC port as the default extra', async () => {
+    const catalog = makeCatalog(makeTemplate(), makeDockerTemplate());
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'create', catalog, node: null },
+    });
+
+    await tick();
+    await fireEvent.click(screen.getByRole('button', { name: /docker/i }));
+    await tick();
+    const createForm = screen.getByRole('dialog').querySelector('form');
+    expect(createForm).not.toBeNull();
+    await fireEvent.submit(createForm as HTMLFormElement);
+    await tick();
+
+    expect(JSON.parse(screen.getByTestId('submit-payload').textContent ?? 'null')).toEqual(
+      expect.objectContaining({
+        mode: 'create',
+        payload: expect.objectContaining({
+          image: 'accetto/ubuntu-vnc-xfce-firefox-g3:latest',
+          console: 'vnc',
+          extras: expect.objectContaining({ vnc_port: 5901 }),
+        }),
+      }),
+    );
+  });
+
+  it('lets the operator override the Docker VNC port in the modal', async () => {
+    const catalog = makeCatalog(makeTemplate(), makeDockerTemplate());
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'create', catalog, node: null },
+    });
+
+    await tick();
+    await fireEvent.click(screen.getByRole('button', { name: /docker/i }));
+    await tick();
+    await tick();
+    const vncPortInput = screen.getByDisplayValue('5901') as HTMLInputElement;
+    await fireEvent.input(vncPortInput, { target: { value: '5902' } });
+    const createForm = screen.getByRole('dialog').querySelector('form');
+    expect(createForm).not.toBeNull();
+    await fireEvent.submit(createForm as HTMLFormElement);
+    await tick();
+
+    expect(JSON.parse(screen.getByTestId('submit-payload').textContent ?? 'null')).toEqual(
+      expect.objectContaining({
+        mode: 'create',
+        payload: expect.objectContaining({
+          extras: expect.objectContaining({ vnc_port: 5902 }),
         }),
       }),
     );

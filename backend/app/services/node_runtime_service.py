@@ -93,6 +93,26 @@ def _extra_str(extras: dict[str, Any], key: str, default: str = "") -> str:
     return "" if value is None else str(value).strip()
 
 
+def _extra_int(
+    extras: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    value = extras.get(key, default)
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+    if min_value is not None and parsed < min_value:
+        return default
+    if max_value is not None and parsed > max_value:
+        return default
+    return parsed
+
+
 def _parse_qemu_tokens(tokens: list[str]) -> list[tuple[str, list[str]]]:
     """Group a QEMU argv list into [(flag, [value_tokens...]), ...].
 
@@ -2070,6 +2090,7 @@ class NodeRuntimeService:
         container_name = self._container_name(lab_id, node["id"])
         network_specs = self._docker_network_specs(lab_data, node)
         extras = _node_extras(node)
+        container_console_port = self._docker_container_console_port(console_mode, extras)
         node_id = int(node["id"])
 
         # ----- Step 1: pre-flight bridge presence check ---------------------
@@ -2111,7 +2132,7 @@ class NodeRuntimeService:
             "none",
             "--privileged",
             "-p",
-            f"{console_port}:{self._container_console_port(console_mode)}",
+            f"{console_port}:{container_console_port}",
         ]
 
         restart_policy = _extra_str(extras, "restart_policy")
@@ -2223,7 +2244,7 @@ class NodeRuntimeService:
             console_proxy_pid = host_net.console_proxy_start(
                 node_pid=pid,
                 listen_port=int(console_port),
-                target_port=int(self._container_console_port(console_mode)),
+                target_port=int(container_console_port),
             )
         except Exception as exc:
             _logger.warning(
@@ -5025,6 +5046,12 @@ class NodeRuntimeService:
         if console_mode == "vnc":
             return 5900
         return 23
+
+    @staticmethod
+    def _docker_container_console_port(console_mode: str, extras: dict[str, Any]) -> int:
+        if console_mode == "vnc":
+            return _extra_int(extras, "vnc_port", 5900, min_value=1, max_value=65535)
+        return NodeRuntimeService._container_console_port(console_mode)
 
     @staticmethod
     def _container_name(lab_id: str, node_id: int) -> str:
