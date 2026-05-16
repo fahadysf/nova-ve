@@ -38,6 +38,7 @@
   let clickStartTs = 0;
   let clickStartCoords: { x: number; y: number } | null = null;
   let draggingPosition: PortPosition | null = null;
+  let manualOpenPosition: PortPosition | null = null;
 
   type PersistConnectionPointPosition = (
     target: { kind: 'network'; networkId: number; linkId: string; endpointKey?: 'from' | 'to' },
@@ -56,7 +57,10 @@
 
   $: handleId = slotHandleId(networkId, slotIndex);
 
-  $: effectivePosition = draggingPosition ?? ({ side, offset } as PortPosition);
+  $: if (!isOpen) {
+    manualOpenPosition = null;
+  }
+  $: effectivePosition = draggingPosition ?? manualOpenPosition ?? ({ side, offset } as PortPosition);
   $: effectiveSide = effectivePosition.side;
   $: effectiveOffset = effectivePosition.offset;
 
@@ -92,7 +96,7 @@
   function handleMouseDown(event: MouseEvent) {
     if (event.button !== 0) return;
 
-    if (event.ctrlKey && !isOpen && linkId) {
+    if (event.ctrlKey && (isOpen || linkId)) {
       const root = portHandle?.closest('[data-testid="network-node"]');
       const rect = root?.getBoundingClientRect();
       if (!rect) return;
@@ -109,10 +113,14 @@
         window.removeEventListener('mousemove', onMove);
         window.removeEventListener('mouseup', onUp);
         if (draggingPosition) {
-          persistConnectionPointPosition?.(
-            { kind: 'network', networkId, linkId, endpointKey },
-            draggingPosition
-          );
+          if (isOpen) {
+            manualOpenPosition = draggingPosition;
+          } else if (linkId) {
+            persistConnectionPointPosition?.(
+              { kind: 'network', networkId, linkId, endpointKey },
+              draggingPosition
+            );
+          }
         }
         draggingPosition = null;
       };
