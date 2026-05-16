@@ -205,4 +205,20 @@ describe('portLayout.separatePortPositions', () => {
 
     expect(separated.map((position) => position.offset)).toEqual([0, 0.5, 1]);
   });
+
+  it('separates handles that collide across a shared corner', () => {
+    const box = { x: 0, y: 0, w: 100, h: 100 };
+
+    const separated = separatePortPositions(
+      [
+        { side: 'top', offset: 0 },
+        { side: 'left', offset: 0 },
+      ],
+      box
+    );
+    const points = separated.map((position) => portPositionToPoint(position, box));
+    const centerGapPx = Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
+
+    expect(centerGapPx).toBeGreaterThanOrEqual(PORT_HANDLE_MIN_CENTER_GAP_PX);
+  });
 });

@@ -188,6 +188,81 @@ function sideLengthPx(side: PortSide, nodeBox: NodeBox): number {
   return nodeBox.h > 0 ? nodeBox.h : 1;
 }
 
+function moveAwayFromCorner(
+  position: PortPosition,
+  corner: 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left',
+  deltaPx: number,
+  nodeBox: NodeBox
+): PortPosition {
+  const sideLength = sideLengthPx(position.side, nodeBox);
+  const delta = deltaPx / sideLength;
+  if (delta <= 0) return position;
+
+  if (
+    (corner === 'top-left' && (position.side === 'top' || position.side === 'left')) ||
+    (corner === 'bottom-left' && position.side === 'bottom')
+  ) {
+    return { ...position, offset: clamp01(position.offset + delta) };
+  }
+
+  if (corner === 'top-right' && position.side === 'right') {
+    return { ...position, offset: clamp01(position.offset + delta) };
+  }
+
+  return { ...position, offset: clamp01(position.offset - delta) };
+}
+
+function cornerPairs(
+  positions: readonly PortPosition[],
+  corner: 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left'
+): Array<[number, number]> {
+  const sidePair: readonly [PortSide, PortSide] =
+    corner === 'top-left'
+      ? ['top', 'left']
+      : corner === 'top-right'
+        ? ['top', 'right']
+        : corner === 'bottom-right'
+          ? ['bottom', 'right']
+          : ['bottom', 'left'];
+  const a = positions
+    .map((position, index) => ({ position, index }))
+    .filter((entry) => entry.position.side === sidePair[0]);
+  const b = positions
+    .map((position, index) => ({ position, index }))
+    .filter((entry) => entry.position.side === sidePair[1]);
+  return a.flatMap((left) => b.map((right) => [left.index, right.index] as [number, number]));
+}
+
+function separateCornerCollisions(
+  positions: PortPosition[],
+  nodeBox: NodeBox,
+  minCenterGapPx: number
+): PortPosition[] {
+  const result = positions.map((position) => ({ ...position }));
+  const corners = ['top-left', 'top-right', 'bottom-right', 'bottom-left'] as const;
+  const maxPasses = 6;
+
+  for (let pass = 0; pass < maxPasses; pass += 1) {
+    let changed = false;
+    for (const corner of corners) {
+      for (const [aIndex, bIndex] of cornerPairs(result, corner)) {
+        const a = portPositionToPoint(result[aIndex], nodeBox);
+        const b = portPositionToPoint(result[bIndex], nodeBox);
+        const distance = Math.hypot(a.x - b.x, a.y - b.y);
+        if (distance + 1e-6 >= minCenterGapPx) continue;
+
+        const pushPx = minCenterGapPx - distance + 1e-3;
+        result[aIndex] = moveAwayFromCorner(result[aIndex], corner, pushPx, nodeBox);
+        result[bIndex] = moveAwayFromCorner(result[bIndex], corner, pushPx, nodeBox);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  return result;
+}
+
 /**
  * Spread ports that share one box side far enough that their circular handles
  * keep at least ``minCenterGapPx`` between centers. For the default 10px
@@ -249,5 +324,5 @@ export function separatePortPositions(
     }
   }
 
-  return result;
+  return separateCornerCollisions(result, nodeBox, minCenterGapPx);
 }

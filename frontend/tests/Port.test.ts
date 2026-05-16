@@ -63,6 +63,24 @@ function makeMouseDown(opts: { button?: number; ctrlKey?: boolean } = {}): {
   return { event, stopSpy, preventSpy };
 }
 
+function makeContextMenu(opts: { button?: number; ctrlKey?: boolean } = {}): {
+  event: MouseEvent;
+  stopSpy: ReturnType<typeof vi.spyOn>;
+  preventSpy: ReturnType<typeof vi.spyOn>;
+} {
+  const event = new MouseEvent('contextmenu', {
+    button: opts.button ?? 0,
+    ctrlKey: opts.ctrlKey ?? false,
+    bubbles: true,
+    cancelable: true,
+    clientX: 100,
+    clientY: 200,
+  });
+  const stopSpy = vi.spyOn(event, 'stopPropagation');
+  const preventSpy = vi.spyOn(event, 'preventDefault');
+  return { event, stopSpy, preventSpy };
+}
+
 describe('Port (US-080)', () => {
   let startSpy: ReturnType<typeof vi.spyOn>;
 
@@ -168,6 +186,82 @@ describe('Port (US-080)', () => {
     expect(startSpy).not.toHaveBeenCalled();
     expect(stopSpy).not.toHaveBeenCalled();
     expect(preventSpy).not.toHaveBeenCalled();
+  });
+
+  it('ctrl+left contextmenu is consumed but does not open the connection-point menu', () => {
+    const menuSpy = vi.fn();
+    render(Port, {
+      props: {
+        interfaceData: baseInterface,
+        position: basePosition,
+        nodeId: 7,
+        interfaceIndex: 0,
+        connectionPointRef: { linkId: 'link-1', endpointKey: 'from' },
+      },
+      context: new Map([['nova-ve:connection-point-context-menu', menuSpy]]),
+    });
+
+    const root = findPortRoot();
+    const { event, stopSpy, preventSpy } = makeContextMenu({ ctrlKey: true });
+    root.dispatchEvent(event);
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(preventSpy).toHaveBeenCalledTimes(1);
+    expect(menuSpy).not.toHaveBeenCalled();
+  });
+
+  it('left-button contextmenu is consumed but does not open the connection-point menu', () => {
+    const menuSpy = vi.fn();
+    render(Port, {
+      props: {
+        interfaceData: baseInterface,
+        position: basePosition,
+        nodeId: 7,
+        interfaceIndex: 0,
+        connectionPointRef: { linkId: 'link-1', endpointKey: 'from' },
+      },
+      context: new Map([['nova-ve:connection-point-context-menu', menuSpy]]),
+    });
+
+    const root = findPortRoot();
+    const { event, stopSpy, preventSpy } = makeContextMenu({ button: 0 });
+    root.dispatchEvent(event);
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(preventSpy).toHaveBeenCalledTimes(1);
+    expect(menuSpy).not.toHaveBeenCalled();
+  });
+
+  it('right-button contextmenu opens the connection-point menu', () => {
+    const menuSpy = vi.fn();
+    render(Port, {
+      props: {
+        interfaceData: baseInterface,
+        position: basePosition,
+        nodeId: 7,
+        interfaceIndex: 0,
+        connectionPointRef: { linkId: 'link-1', endpointKey: 'from' },
+      },
+      context: new Map([['nova-ve:connection-point-context-menu', menuSpy]]),
+    });
+
+    const root = findPortRoot();
+    const { event, stopSpy, preventSpy } = makeContextMenu({ button: 2 });
+    root.dispatchEvent(event);
+
+    expect(stopSpy).toHaveBeenCalledTimes(1);
+    expect(preventSpy).toHaveBeenCalledTimes(1);
+    expect(menuSpy).toHaveBeenCalledTimes(1);
+    expect(menuSpy).toHaveBeenCalledWith(
+      {
+        kind: 'node',
+        nodeId: 7,
+        interfaceIndex: 0,
+        linkId: 'link-1',
+        endpointKey: 'from',
+      },
+      event
+    );
   });
 });
 
