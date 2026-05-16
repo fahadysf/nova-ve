@@ -47,6 +47,18 @@ secrets/
 *.swo
 *~
 
+# Local AI/editor tooling artifacts
+**/.claude/
+**/.cursorrules
+**/.kiro/
+**/.mcp.*
+**/.omc/
+**/.opencode.json
+**/.windsurfrules
+**/.wrangler/
+**/CLAUDE.md
+**/GEMINI.md
+
 # OS
 .DS_Store
 Thumbs.db
