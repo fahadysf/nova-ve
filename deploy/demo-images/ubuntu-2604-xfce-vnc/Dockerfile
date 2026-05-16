@@ -19,8 +19,11 @@ RUN set -eux; \
       iproute2 \
       iputils-ping \
       less \
+      mate-polkit \
       net-tools \
       network-manager \
+      network-manager-applet \
+      nm-connection-editor \
       procps \
       sudo \
       tini \
@@ -32,7 +35,9 @@ RUN set -eux; \
       xterm \
       xvfb \
       xfce4 \
-      xfce4-terminal; \
+      xfce4-goodies \
+      xfce4-terminal \
+      xubuntu-desktop-minimal; \
     rm -f /usr/sbin/policy-rc.d; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*
@@ -46,6 +51,7 @@ COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV DISPLAY=:0 \
+    XDG_CURRENT_DESKTOP=XFCE \
     NOVA_VE_VNC_GEOMETRY=1360x768x24 \
     NOVA_VE_VNC_PORT=5900 \
     VNC_PORT=5900

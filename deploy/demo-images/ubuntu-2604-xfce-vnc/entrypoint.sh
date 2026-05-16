@@ -58,6 +58,8 @@ start_display() {
 start_desktop() {
   dbus-launch --exit-with-session startxfce4 >/var/log/nova-ve-xfce.log 2>&1 &
   PIDS+=("$!")
+  nm-applet >/var/log/nova-ve-nm-applet.log 2>&1 &
+  PIDS+=("$!")
   xterm -display "${DISPLAY_NAME}" -geometry 120x34 -fa Monospace -fs 11 -bg black -fg green -e /bin/bash -li &
   PIDS+=("$!")
 }
