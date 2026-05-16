@@ -11,6 +11,7 @@
   export let nodeName: string | undefined = undefined;
   export let interfaces: NodeInterface[] = [];
   export let connectedInterfaceIndexes: number[] = [];
+  export let portPositionsByInterfaceIndex: Record<string, PortPosition> = {};
   export let highlightedInterfaceIndex: number | null = null;
   export let highlightedNewConnection = false;
 
@@ -40,6 +41,9 @@
   $: defaults = placeInterfaces(interfaces.length);
   $: connectedSet = new Set(connectedInterfaceIndexes);
   $: resolvedPorts = interfaces.map((iface, index) => {
+    const interfaceIndex = iface.index ?? index;
+    const linkPosition = portPositionsByInterfaceIndex[String(interfaceIndex)];
+    if (linkPosition) return linkPosition;
     const persisted = iface.port_position ?? null;
     return persisted ?? defaults[index] ?? ({ side: 'top', offset: 0 } as PortPosition);
   });

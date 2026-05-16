@@ -20,6 +20,7 @@
     nodeId?: number;
     interfaces?: NodeInterface[];
     connectedInterfaceIndexes?: number[];
+    portPositionsByInterfaceIndex?: Record<string, PortPosition>;
     highlightedInterfaceIndex?: number | null;
     highlightedNewConnection?: boolean;
   };
@@ -80,6 +81,7 @@
     nodeName={data.label}
     {interfaces}
     connectedInterfaceIndexes={data.connectedInterfaceIndexes ?? []}
+    portPositionsByInterfaceIndex={data.portPositionsByInterfaceIndex ?? {}}
     highlightedInterfaceIndex={data.highlightedInterfaceIndex ?? null}
     highlightedNewConnection={data.highlightedNewConnection ?? false}
     on:port:mousedown={(e) => dispatch('port:mousedown', e.detail)}

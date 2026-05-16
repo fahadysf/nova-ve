@@ -112,6 +112,16 @@ export interface LinkEndpoint {
   network_id?: number;
 }
 
+export interface LinkEndpointPosition {
+  mode: 'auto' | 'manual';
+  position?: PortPosition | null;
+}
+
+export interface LinkEndpointPositions {
+  from?: LinkEndpointPosition;
+  to?: LinkEndpointPosition;
+}
+
 export interface LinkMetrics {
   delay_ms?: number;
   loss_pct?: number;
@@ -124,6 +134,7 @@ export interface Link {
   from: LinkEndpoint;
   to: LinkEndpoint;
   style_override?: LinkStyle | null;
+  endpoint_positions?: LinkEndpointPositions;
   label?: string;
   color?: string;
   width?: string;

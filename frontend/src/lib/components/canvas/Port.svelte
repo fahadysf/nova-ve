@@ -41,6 +41,14 @@
     'port:click': { nodeId: number; interfaceIndex: number; anchorRect: DOMRect | null };
   }>();
 
+  type ConnectionPointContextMenu = (
+    target: { kind: 'node'; nodeId: number; interfaceIndex: number },
+    event: MouseEvent
+  ) => void;
+  const openConnectionPointMenu = getContext<ConnectionPointContextMenu | undefined>(
+    'nova-ve:connection-point-context-menu'
+  );
+
   let hoverTimer: ReturnType<typeof setTimeout> | null = null;
   let showTooltip = false;
   let portHandle: HTMLSpanElement | null = null;
@@ -237,6 +245,13 @@
     dispatch('port:mousedown', { event, nodeId, interfaceIndex, port: position });
   }
 
+  function handleContextMenu(event: MouseEvent) {
+    if (newConnectionSlot) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openConnectionPointMenu?.({ kind: 'node', nodeId, interfaceIndex }, event);
+  }
+
   function handleMouseUp(event: MouseEvent) {
     dispatch('port:mouseup', { event, nodeId, interfaceIndex, port: position });
 
@@ -329,6 +344,7 @@
   aria-label={newConnectionSlot ? `New connection for ${nodeName ?? `node ${nodeId}`}` : `Port ${renderedInterfaceName}`}
   on:mousedown={handleMouseDown}
   on:mouseup={handleMouseUp}
+  on:contextmenu={handleContextMenu}
   on:mouseenter={handleMouseEnter}
   on:mouseleave={handleMouseLeave}
 >

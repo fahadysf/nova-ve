@@ -1,6 +1,7 @@
 from typing import Annotated, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Discriminator, Field, Tag
+from app.schemas.port import PortPosition
 
 LinkStyleOverride = Optional[Literal["orthogonal", "bezier", "straight"]]
 
@@ -48,6 +49,16 @@ class LinkMetrics(BaseModel):
     jitter_ms: int = 0
 
 
+class LinkEndpointPosition(BaseModel):
+    mode: Literal["auto", "manual"] = "auto"
+    position: Optional[PortPosition] = None
+
+
+class LinkEndpointPositions(BaseModel):
+    from_: Optional[LinkEndpointPosition] = Field(default=None, alias="from")
+    to: Optional[LinkEndpointPosition] = None
+
+
 class LinkRuntime(BaseModel):
     """US-204b: per-link runtime state stamped at hot-attach time.
 
@@ -71,6 +82,7 @@ class Link(BaseModel):
     from_: LinkEndpoint = Field(alias="from")
     to: LinkEndpoint
     style_override: LinkStyleOverride = None
+    endpoint_positions: LinkEndpointPositions = Field(default_factory=LinkEndpointPositions)
     label: str = ""
     color: str = ""
     width: str = "1"

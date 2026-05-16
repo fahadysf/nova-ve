@@ -42,6 +42,11 @@
   import { selectedPortInfoStore, type SelectedPortInfo } from '$lib/stores/portInfo';
   import { toastStore } from '$lib/stores/toasts';
   import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
+  import {
+    closestPortPositionToBox,
+    separatePortPositions,
+    type NodeBox,
+  } from '$lib/services/portLayout';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
   import { deriveEdges, parseIfaceInterfaceIndex, type DiscoveredLink } from '$lib/services/canvasEdges';
@@ -55,6 +60,7 @@
     LabDefaults,
     LabViewport,
     Link,
+    LinkEndpointPositions,
     LinkReconciliation,
     LinkStyle,
     LiveMacState,
@@ -105,6 +111,10 @@
     id: number;
     nodeName: string;
   };
+  type LinkEndpointKey = 'from' | 'to';
+  type ConnectionPointTarget =
+    | { kind: 'node'; nodeId: number; interfaceIndex: number }
+    | { kind: 'network'; networkId: number; linkId: string };
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData };
@@ -147,6 +157,8 @@
     max_nics: 8,
     machine: 'q35',
   };
+  const NODE_CARD_HEIGHT = 58;
+  const NETWORK_CARD_HEIGHT = 50;
   let topologyChangeBanner:
     | {
         message: string;
@@ -277,9 +289,10 @@
         x: number;
         y: number;
         targetId: string;
-        targetType: 'node' | 'network' | 'edge';
+        targetType: 'node' | 'network' | 'edge' | 'port';
       }
     | null = null;
+  let portMenuTarget: ConnectionPointTarget | null = null;
 
   const nodeColor = (node: Node) => {
     if (node.type === 'network') return '#3b82f6';
@@ -475,8 +488,162 @@
     return Math.max(Number.isFinite(savedWidth) ? savedWidth + 48 : 0, hostnameWidth);
   }
 
+  function networkCardWidth(network: NetworkData): number {
+    return network.width ? network.width + 40 : 130;
+  }
+
+  function nodeBox(nodeId: number): NodeBox | null {
+    const node = localNodes[String(nodeId)];
+    if (!node) return null;
+    return {
+      x: node.left,
+      y: node.top,
+      w: nodeCardWidth(node),
+      h: NODE_CARD_HEIGHT,
+    };
+  }
+
+  function networkBox(networkId: number): NodeBox | null {
+    const network = localNetworks[String(networkId)];
+    if (!network) return null;
+    return {
+      x: network.left || 100,
+      y: network.top || 100,
+      w: networkCardWidth(network),
+      h: NETWORK_CARD_HEIGHT,
+    };
+  }
+
+  function endpointBox(endpoint: Link['from'] | Link['to'] | null | undefined): NodeBox | null {
+    if (!endpoint) return null;
+    if (typeof endpoint.node_id === 'number') return nodeBox(endpoint.node_id);
+    if (typeof endpoint.network_id === 'number') return networkBox(endpoint.network_id);
+    return null;
+  }
+
+  function isPortPosition(value: unknown): value is PortPosition {
+    if (!value || typeof value !== 'object') return false;
+    const candidate = value as PortPosition;
+    return (
+      (candidate.side === 'top' ||
+        candidate.side === 'right' ||
+        candidate.side === 'bottom' ||
+        candidate.side === 'left') &&
+      typeof candidate.offset === 'number' &&
+      Number.isFinite(candidate.offset) &&
+      candidate.offset >= 0 &&
+      candidate.offset <= 1
+    );
+  }
+
+  function implicitLinkPairsByNetwork(): Map<number, Link[]> {
+    const pairs = new Map<number, Link[]>();
+    for (const link of localLinks) {
+      const networkId = link.to?.network_id;
+      if (typeof networkId !== 'number') continue;
+      const network = localNetworks[String(networkId)];
+      if (!network || network.implicit !== true || network.visibility) continue;
+      if (!pairs.has(networkId)) pairs.set(networkId, []);
+      pairs.get(networkId)!.push(link);
+    }
+    return pairs;
+  }
+
+  function autoPeerEndpointFor(
+    link: Link,
+    key: LinkEndpointKey,
+    implicitPairs: Map<number, Link[]>
+  ): Link['from'] | Link['to'] | null {
+    const otherKey: LinkEndpointKey = key === 'from' ? 'to' : 'from';
+    const ownEndpoint = link[key];
+    const otherEndpoint = link[otherKey];
+
+    if (key === 'from' && typeof ownEndpoint?.node_id === 'number') {
+      const networkId = otherEndpoint?.network_id;
+      if (typeof networkId === 'number') {
+        const pair = implicitPairs.get(networkId);
+        if (pair?.length === 2) {
+          const peer = pair.find((candidate) => candidate.id !== link.id);
+          if (peer?.from && typeof peer.from.node_id === 'number') {
+            return peer.from;
+          }
+        }
+      }
+    }
+
+    return otherEndpoint ?? null;
+  }
+
+  function endpointPortPosition(
+    link: Link,
+    key: LinkEndpointKey,
+    implicitPairs: Map<number, Link[]>
+  ): PortPosition | null {
+    const saved = link.endpoint_positions?.[key];
+    if (saved?.mode === 'manual' && isPortPosition(saved.position)) {
+      return saved.position;
+    }
+
+    const ownBox = endpointBox(link[key]);
+    const peerBox = endpointBox(autoPeerEndpointFor(link, key, implicitPairs));
+    if (!ownBox || !peerBox) return null;
+    return closestPortPositionToBox(ownBox, peerBox);
+  }
+
+  function buildConnectionPointPositions(): {
+    node: Map<number, Record<string, PortPosition>>;
+    network: Map<number, Record<string, PortPosition>>;
+  } {
+    const node = new Map<number, Record<string, PortPosition>>();
+    const network = new Map<number, Record<string, PortPosition>>();
+    const implicitPairs = implicitLinkPairsByNetwork();
+
+    for (const link of localLinks) {
+      for (const key of ['from', 'to'] as const) {
+        const endpoint = link[key];
+        const port = endpointPortPosition(link, key, implicitPairs);
+        if (!endpoint || !port) continue;
+
+        if (typeof endpoint.node_id === 'number' && typeof endpoint.interface_index === 'number') {
+          const perNode = node.get(endpoint.node_id) ?? {};
+          perNode[String(endpoint.interface_index)] = port;
+          node.set(endpoint.node_id, perNode);
+        } else if (typeof endpoint.network_id === 'number') {
+          const perNetwork = network.get(endpoint.network_id) ?? {};
+          perNetwork[link.id] = port;
+          network.set(endpoint.network_id, perNetwork);
+        }
+      }
+    }
+
+    for (const [nodeId, positions] of node.entries()) {
+      const box = nodeBox(nodeId);
+      if (box) node.set(nodeId, separatePositionRecord(positions, box));
+    }
+
+    for (const [networkId, positions] of network.entries()) {
+      const box = networkBox(networkId);
+      if (box) network.set(networkId, separatePositionRecord(positions, box));
+    }
+
+    return { node, network };
+  }
+
+  function separatePositionRecord(
+    positionsByKey: Record<string, PortPosition>,
+    box: NodeBox
+  ): Record<string, PortPosition> {
+    const keys = Object.keys(positionsByKey);
+    const separated = separatePortPositions(
+      keys.map((key) => positionsByKey[key]),
+      box
+    );
+    return Object.fromEntries(keys.map((key, index) => [key, separated[index]]));
+  }
+
   function buildFlowNodes(): Node[] {
     const flowNodes: Node[] = [];
+    const connectionPointPositions = buildConnectionPointPositions();
 
     for (const node of Object.values(localNodes)) {
       flowNodes.push({
@@ -494,6 +661,7 @@
           nodeId: node.id,
           interfaces: node.interfaces ?? [],
           connectedInterfaceIndexes: connectedInterfaceIndexesForNode(node),
+          portPositionsByInterfaceIndex: connectionPointPositions.node.get(node.id) ?? {},
           highlightedInterfaceIndex: highlightedTargetForNode(node.id),
           highlightedNewConnection: highlightedNewConnectionForNode(node.id),
           interface_naming_scheme: node.interface_naming_scheme ?? null
@@ -533,9 +701,10 @@
           count: network.count ?? 0,
           networkId: network.id,
           linkIds: networkLinkIds,
+          portPositionsByLinkId: connectionPointPositions.network.get(network.id) ?? {},
           brokenImplicit: isBrokenImplicit
         },
-        style: `width: ${network.width ? network.width + 40 : 130}px;`
+        style: `width: ${networkCardWidth(network)}px;`
       });
     }
 
@@ -582,6 +751,7 @@
 
   function closeMenu() {
     menu = null;
+    portMenuTarget = null;
   }
 
   function closeAddMenu() {
@@ -1001,6 +1171,13 @@
     }
   }
 
+  function autoPositionConnectionPoint() {
+    const target = portMenuTarget;
+    if (!target) return;
+    void persistConnectionPointPosition(target, 'auto', null);
+    closeMenu();
+  }
+
   async function handleNodeAction(action: 'start' | 'stop' | 'wipe' | 'delete' | 'console', targetId: string) {
     closeMenu();
     const decoded = decodeId(targetId);
@@ -1227,11 +1404,124 @@
     void persistPortPosition(nodeId, interfaceIndex, port);
   });
 
+  setContext('nova-ve:connection-point-position-persist', (
+    target: ConnectionPointTarget,
+    port: PortPosition
+  ) => {
+    void persistConnectionPointPosition(target, 'manual', port);
+  });
+
+  setContext('nova-ve:connection-point-context-menu', (
+    target: ConnectionPointTarget,
+    event: MouseEvent
+  ) => {
+    const point = eventPoint(event);
+    closeAddMenu();
+    portMenuTarget = target;
+    menu = {
+      x: point.x,
+      y: point.y,
+      targetId:
+        target.kind === 'node'
+          ? `node-port:${target.nodeId}:${target.interfaceIndex}`
+          : `network-port:${target.networkId}:${target.linkId}`,
+      targetType: 'port',
+    };
+  });
+
+  function findLinkEndpointForConnectionPoint(
+    target: ConnectionPointTarget
+  ): { linkIndex: number; key: LinkEndpointKey } | null {
+    if (target.kind === 'network') {
+      const linkIndex = localLinks.findIndex((link) => link.id === target.linkId);
+      if (linkIndex < 0) return null;
+      const link = localLinks[linkIndex];
+      if (link.from?.network_id === target.networkId) return { linkIndex, key: 'from' };
+      if (link.to?.network_id === target.networkId) return { linkIndex, key: 'to' };
+      return null;
+    }
+
+    for (const [linkIndex, link] of localLinks.entries()) {
+      if (
+        link.from?.node_id === target.nodeId &&
+        link.from?.interface_index === target.interfaceIndex
+      ) {
+        return { linkIndex, key: 'from' };
+      }
+      if (
+        link.to?.node_id === target.nodeId &&
+        link.to?.interface_index === target.interfaceIndex
+      ) {
+        return { linkIndex, key: 'to' };
+      }
+    }
+    return null;
+  }
+
+  function withEndpointPosition(
+    positions: LinkEndpointPositions | undefined,
+    key: LinkEndpointKey,
+    mode: 'auto' | 'manual',
+    port: PortPosition | null
+  ): LinkEndpointPositions {
+    return {
+      ...(positions ?? {}),
+      [key]: mode === 'manual' ? { mode, position: port } : { mode: 'auto' },
+    };
+  }
+
+  async function persistConnectionPointPosition(
+    target: ConnectionPointTarget,
+    mode: 'auto' | 'manual',
+    port: PortPosition | null
+  ) {
+    const ref = findLinkEndpointForConnectionPoint(target);
+    if (!ref) {
+      toastStore.push('No connected link found for this connection point.', 'error');
+      return;
+    }
+
+    const link = localLinks[ref.linkIndex];
+    if (!link || String(link.id).startsWith('tmp_')) return;
+
+    const previousLinks = localLinks;
+    const endpoint_positions = withEndpointPosition(
+      link.endpoint_positions,
+      ref.key,
+      mode,
+      port
+    );
+    localLinks = localLinks.map((entry, index) =>
+      index === ref.linkIndex ? { ...entry, endpoint_positions } : entry
+    );
+    publishFlowState();
+
+    try {
+      await apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
+        method: 'PATCH',
+        body: { endpoint_positions },
+        suppressToast: true,
+      });
+    } catch (error) {
+      localLinks = previousLinks;
+      publishFlowState();
+      const message =
+        error instanceof Error ? error.message : 'Failed to persist connection point position';
+      toastStore.push(message, 'error');
+    }
+  }
+
   async function persistPortPosition(
     nodeId: number,
     interfaceIndex: number,
     port: PortPosition
   ) {
+    const connectedTarget: ConnectionPointTarget = { kind: 'node', nodeId, interfaceIndex };
+    if (findLinkEndpointForConnectionPoint(connectedTarget)) {
+      await persistConnectionPointPosition(connectedTarget, 'manual', port);
+      return;
+    }
+
     const node = localNodes[String(nodeId)];
     if (!node) return;
     const iface = node.interfaces[interfaceIndex];
@@ -1931,7 +2221,7 @@
       on:click|stopPropagation
     >
       <div class="px-1.5 py-0.5 text-[9px] uppercase tracking-[0.22em] text-gray-500">
-        {menu.targetType === 'node' ? 'Node actions' : menu.targetType === 'network' ? 'Network actions' : 'Link actions'}
+        {menu.targetType === 'node' ? 'Node actions' : menu.targetType === 'network' ? 'Network actions' : menu.targetType === 'port' ? 'Connection point' : 'Link actions'}
       </div>
       {#if menu?.targetType === 'node'}
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('start', menu?.targetId ?? '')}>
@@ -1955,6 +2245,14 @@
       {:else if menu?.targetType === 'network'}
         <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNetworkDelete(menu?.targetId ?? '')}>
           <span>Delete Network</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
+        </button>
+      {:else if menu?.targetType === 'port'}
+        <button
+          type="button"
+          class="menu-item"
+          on:click|preventDefault|stopPropagation={autoPositionConnectionPoint}
+        >
+          <span>Auto-position</span><LocateFixed class="h-3.5 w-3.5 text-gray-400" />
         </button>
       {:else}
         {#if menu && isDiscoveredEdgeId(menu.targetId)}

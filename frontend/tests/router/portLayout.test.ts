@@ -4,8 +4,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   clampToPerimeter,
+  closestPortPositionToBox,
+  PORT_HANDLE_MIN_CENTER_GAP_PX,
   placeInterfaces,
   portPositionToPoint,
+  separatePortPositions,
   tToPortPosition,
 } from '$lib/services/portLayout';
 
@@ -137,5 +140,69 @@ describe('portLayout.clampToPerimeter', () => {
     const reproduced = portPositionToPoint(pos, box);
     expect(reproduced.x).toBeCloseTo(200, 5);
     expect(reproduced.y).toBeCloseTo(100, 5);
+  });
+});
+
+describe('portLayout.closestPortPositionToBox', () => {
+  it('places the endpoint on the side facing the counterpart box', () => {
+    const source = { x: 100, y: 100, w: 120, h: 60 };
+    const target = { x: 300, y: 110, w: 80, h: 40 };
+
+    const pos = closestPortPositionToBox(source, target);
+
+    expect(pos.side).toBe('right');
+    expect(pos.offset).toBeCloseTo(0.5, 5);
+  });
+
+  it('uses the closest outline point when the counterpart is below the box', () => {
+    const source = { x: 100, y: 100, w: 120, h: 60 };
+    const target = { x: 150, y: 165, w: 40, h: 20 };
+
+    const pos = closestPortPositionToBox(source, target);
+
+    expect(pos.side).toBe('bottom');
+    expect(pos.offset).toBeCloseTo(0.58333, 4);
+  });
+});
+
+describe('portLayout.separatePortPositions', () => {
+  it('keeps same-side handle edges at least 1px apart', () => {
+    const box = { x: 0, y: 0, w: 100, h: 100 };
+
+    const separated = separatePortPositions(
+      [
+        { side: 'right', offset: 0.5 },
+        { side: 'right', offset: 0.5 },
+      ],
+      box
+    );
+
+    const centerGapPx = Math.abs(separated[1].offset - separated[0].offset) * box.h;
+    expect(centerGapPx).toBeGreaterThanOrEqual(PORT_HANDLE_MIN_CENTER_GAP_PX);
+  });
+
+  it('does not move ports on different sides', () => {
+    const box = { x: 0, y: 0, w: 100, h: 100 };
+    const positions = [
+      { side: 'right', offset: 0.5 },
+      { side: 'left', offset: 0.5 },
+    ] as const;
+
+    expect(separatePortPositions(positions, box)).toEqual(positions);
+  });
+
+  it('spreads crowded side ports within the boundary when exact spacing is impossible', () => {
+    const box = { x: 0, y: 0, w: 100, h: 20 };
+
+    const separated = separatePortPositions(
+      [
+        { side: 'right', offset: 0.5 },
+        { side: 'right', offset: 0.5 },
+        { side: 'right', offset: 0.5 },
+      ],
+      box
+    );
+
+    expect(separated.map((position) => position.offset)).toEqual([0, 0.5, 1]);
   });
 });

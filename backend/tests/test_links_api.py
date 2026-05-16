@@ -441,6 +441,43 @@ async def test_patch_link_style_override(
 
 
 @pytest.mark.asyncio
+async def test_patch_link_endpoint_positions(
+    patched_route_settings, auth_override, reset_idempotency, ws_recorder,
+):
+    lab_name = _seed_lab(
+        patched_route_settings.LABS_DIR,
+        nodes={"1": _node(1)},
+        networks={"5": _explicit_network(5, "lan")},
+        links=[
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 1, "interface_index": 0},
+                "to": {"network_id": 5},
+                "style_override": None, "label": "", "color": "", "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            }
+        ],
+    )
+
+    endpoint_positions = {
+        "from": {"mode": "manual", "position": {"side": "bottom", "offset": 0.75}},
+        "to": {"mode": "auto"},
+    }
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.patch(
+            f"/api/labs/{lab_name}/links/lnk_001",
+            json={"endpoint_positions": endpoint_positions},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["link"]["endpoint_positions"] == endpoint_positions
+
+    saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
+    assert saved["links"][0]["endpoint_positions"] == endpoint_positions
+
+
+@pytest.mark.asyncio
 async def test_get_links_returns_state_field(
     patched_route_settings, auth_override, reset_idempotency, ws_recorder,
 ):

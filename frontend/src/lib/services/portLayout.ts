@@ -32,6 +32,10 @@ export interface NodeBox {
 }
 
 const SIDES: readonly PortSide[] = ['top', 'right', 'bottom', 'left'];
+export const PORT_HANDLE_DIAMETER_PX = 10;
+export const PORT_HANDLE_MIN_EDGE_GAP_PX = 1;
+export const PORT_HANDLE_MIN_CENTER_GAP_PX =
+  PORT_HANDLE_DIAMETER_PX + PORT_HANDLE_MIN_EDGE_GAP_PX;
 
 function clamp01(value: number): number {
   if (Number.isNaN(value)) return 0;
@@ -132,4 +136,118 @@ export function clampToPerimeter(point: PointLike, nodeBox: NodeBox): PortPositi
     return { side: bestSide, offset: clamp01((point.x - nodeBox.x) / w) };
   }
   return { side: bestSide, offset: clamp01((point.y - nodeBox.y) / h) };
+}
+
+/**
+ * Return the perimeter position on ``sourceBox`` closest to ``targetBox``.
+ *
+ * This gives connected endpoints their shortest default path by choosing the
+ * facing side from the gap between the two boxes, then projecting the
+ * counterpart's center onto that side.
+ */
+export function closestPortPositionToBox(sourceBox: NodeBox, targetBox: NodeBox): PortPosition {
+  const w = sourceBox.w > 0 ? sourceBox.w : 1;
+  const h = sourceBox.h > 0 ? sourceBox.h : 1;
+  const sourceRight = sourceBox.x + w;
+  const sourceBottom = sourceBox.y + h;
+  const targetRight = targetBox.x + Math.max(targetBox.w, 1);
+  const targetBottom = targetBox.y + Math.max(targetBox.h, 1);
+  const targetCenter = {
+    x: targetBox.x + Math.max(targetBox.w, 1) / 2,
+    y: targetBox.y + Math.max(targetBox.h, 1) / 2,
+  };
+
+  const gapRight = Math.max(0, targetBox.x - sourceRight);
+  const gapLeft = Math.max(0, sourceBox.x - targetRight);
+  const gapBottom = Math.max(0, targetBox.y - sourceBottom);
+  const gapTop = Math.max(0, sourceBox.y - targetBottom);
+  const horizontalGap = Math.max(gapRight, gapLeft);
+  const verticalGap = Math.max(gapBottom, gapTop);
+
+  if (horizontalGap === 0 && verticalGap === 0) {
+    return clampToPerimeter(targetCenter, sourceBox);
+  }
+
+  if (horizontalGap >= verticalGap) {
+    return {
+      side: gapLeft > gapRight ? 'left' : 'right',
+      offset: clamp01((targetCenter.y - sourceBox.y) / h),
+    };
+  }
+
+  return {
+    side: gapTop > gapBottom ? 'top' : 'bottom',
+    offset: clamp01((targetCenter.x - sourceBox.x) / w),
+  };
+}
+
+function sideLengthPx(side: PortSide, nodeBox: NodeBox): number {
+  if (side === 'top' || side === 'bottom') {
+    return nodeBox.w > 0 ? nodeBox.w : 1;
+  }
+  return nodeBox.h > 0 ? nodeBox.h : 1;
+}
+
+/**
+ * Spread ports that share one box side far enough that their circular handles
+ * keep at least ``minCenterGapPx`` between centers. For the default 10px
+ * handles this preserves a 1px visual gap between handle edges.
+ */
+export function separatePortPositions(
+  positions: readonly PortPosition[],
+  nodeBox: NodeBox,
+  minCenterGapPx = PORT_HANDLE_MIN_CENTER_GAP_PX
+): PortPosition[] {
+  const result = positions.map((position) => ({
+    side: position.side,
+    offset: clamp01(position.offset),
+  }));
+
+  for (const side of SIDES) {
+    const entries = result
+      .map((position, index) => ({ position, index }))
+      .filter((entry) => entry.position.side === side)
+      .sort((a, b) => {
+        const offsetDelta = a.position.offset - b.position.offset;
+        return offsetDelta === 0 ? a.index - b.index : offsetDelta;
+      });
+
+    if (entries.length <= 1) continue;
+
+    const minDelta = (minCenterGapPx + 1e-6) / sideLengthPx(side, nodeBox);
+    const effectiveDelta =
+      minDelta * (entries.length - 1) > 1 ? 1 / (entries.length - 1) : minDelta;
+
+    const adjusted = entries.map((entry) => entry.position.offset);
+    for (let index = 1; index < adjusted.length; index += 1) {
+      adjusted[index] = Math.max(adjusted[index], adjusted[index - 1] + effectiveDelta);
+    }
+
+    const overflow = adjusted[adjusted.length - 1] - 1;
+    if (overflow > 0) {
+      for (let index = 0; index < adjusted.length; index += 1) {
+        adjusted[index] -= overflow;
+      }
+    }
+
+    for (let index = adjusted.length - 2; index >= 0; index -= 1) {
+      adjusted[index] = Math.min(adjusted[index], adjusted[index + 1] - effectiveDelta);
+    }
+
+    const underflow = 0 - adjusted[0];
+    if (underflow > 0) {
+      for (let index = 0; index < adjusted.length; index += 1) {
+        adjusted[index] += underflow;
+      }
+    }
+
+    for (const [entryIndex, entry] of entries.entries()) {
+      result[entry.index] = {
+        side,
+        offset: clamp01(adjusted[entryIndex]),
+      };
+    }
+  }
+
+  return result;
 }
