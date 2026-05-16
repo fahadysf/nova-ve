@@ -14,6 +14,7 @@
     count?: number;
     networkId?: number;
     linkIds?: string[];
+    portPositionsByLinkId?: Record<string, { side: 'top' | 'right' | 'bottom' | 'left'; offset: number }>;
   };
 
   function openInfo(event: MouseEvent) {
@@ -37,11 +38,16 @@
   // concern — the backend stores no slot info on links.
   $: linkIds = data.linkIds ?? [];
   $: slotAssignments = assignNetworkSlots(linkIds);
+  $: linkIdBySlot = new Map(Array.from(slotAssignments.entries()).map(([linkId, idx]) => [idx, linkId]));
   $: slotCount = linkIds.length + 1;
   $: openSlotIdx = linkIds.length;
   $: slots = Array.from({ length: slotCount }, (_, idx) => ({
     idx,
-    placement: slotPosition(idx, slotCount),
+    linkId: linkIdBySlot.get(idx) ?? null,
+    placement:
+      linkIdBySlot.get(idx) && data.portPositionsByLinkId?.[linkIdBySlot.get(idx)!]
+        ? data.portPositionsByLinkId[linkIdBySlot.get(idx)!]
+        : slotPosition(idx, slotCount),
     isOpen: idx === openSlotIdx,
   }));
   // slotAssignments is consumed by canvasEdges.deriveEdges — referenced here
@@ -62,6 +68,7 @@
       side={slot.placement.side}
       offset={slot.placement.offset}
       slotIndex={slot.idx}
+      linkId={slot.linkId}
       isOpen={slot.isOpen}
     />
   {/each}

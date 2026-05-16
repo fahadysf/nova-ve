@@ -2,17 +2,20 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, getContext } from 'svelte';
   import { Handle, Position } from '@xyflow/svelte';
   import { dragLinkStore, getDragLinkSnapshot, type Side } from '$lib/stores/dragLink';
   import { togglePortInfo } from '$lib/stores/portInfo';
   import { slotHandleId } from '$lib/services/canvasEdges';
+  import { clampToPerimeter } from '$lib/services/portLayout';
+  import type { PortPosition } from '$lib/types';
 
   export let networkId: number;
   export let networkName: string | undefined = undefined;
   export let side: Side;
   export let offset = 0.5;
   export let slotIndex: number;
+  export let linkId: string | null = null;
   export let isOpen = false;
 
   const CLICK_MAX_MS = 200;
@@ -33,11 +36,31 @@
   let portHandle: HTMLSpanElement | null = null;
   let clickStartTs = 0;
   let clickStartCoords: { x: number; y: number } | null = null;
+  let draggingPosition: PortPosition | null = null;
+
+  type PersistConnectionPointPosition = (
+    target: { kind: 'network'; networkId: number; linkId: string },
+    port: PortPosition
+  ) => void;
+  type ConnectionPointContextMenu = (
+    target: { kind: 'network'; networkId: number; linkId: string },
+    event: MouseEvent
+  ) => void;
+  const persistConnectionPointPosition = getContext<PersistConnectionPointPosition | undefined>(
+    'nova-ve:connection-point-position-persist'
+  );
+  const openConnectionPointMenu = getContext<ConnectionPointContextMenu | undefined>(
+    'nova-ve:connection-point-context-menu'
+  );
 
   $: handleId = slotHandleId(networkId, slotIndex);
 
+  $: effectivePosition = draggingPosition ?? ({ side, offset } as PortPosition);
+  $: effectiveSide = effectivePosition.side;
+  $: effectiveOffset = effectivePosition.offset;
+
   $: xyPosition = (() => {
-    switch (side) {
+    switch (effectiveSide) {
       case 'top':
         return Position.Top;
       case 'right':
@@ -51,8 +74,8 @@
   })();
 
   $: stylePosition = (() => {
-    const offsetPct = `${(offset * 100).toFixed(2)}%`;
-    switch (side) {
+    const offsetPct = `${(effectiveOffset * 100).toFixed(2)}%`;
+    switch (effectiveSide) {
       case 'top':
         return `top: 0; left: ${offsetPct}; transform: translate(-50%, -50%);`;
       case 'right':
@@ -68,6 +91,35 @@
   function handleMouseDown(event: MouseEvent) {
     if (event.button !== 0) return;
 
+    if (event.shiftKey && !isOpen && linkId) {
+      const root = portHandle?.closest('[data-testid="network-node"]');
+      const rect = root?.getBoundingClientRect();
+      if (!rect) return;
+      event.stopPropagation();
+      event.preventDefault();
+
+      const onMove = (moveEvent: MouseEvent) => {
+        draggingPosition = clampToPerimeter(
+          { x: moveEvent.clientX, y: moveEvent.clientY },
+          { x: rect.left, y: rect.top, w: rect.width, h: rect.height }
+        );
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        if (draggingPosition) {
+          persistConnectionPointPosition?.(
+            { kind: 'network', networkId, linkId },
+            draggingPosition
+          );
+        }
+        draggingPosition = null;
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+      return;
+    }
+
     if (!event.shiftKey) {
       event.stopPropagation();
       event.preventDefault();
@@ -77,8 +129,8 @@
         source: {
           kind: 'network',
           networkId,
-          side,
-          offset,
+          side: effectiveSide,
+          offset: effectiveOffset,
           networkName,
         },
         pointer: { x: event.clientX, y: event.clientY },
@@ -98,8 +150,8 @@
       target: {
         kind: 'network',
         networkId,
-        side,
-        offset,
+        side: effectiveSide,
+        offset: effectiveOffset,
         networkName,
       },
       nearTarget: true,
@@ -128,12 +180,12 @@
           dragLinkStore.cancel();
         }
         const rect = portHandle ? portHandle.getBoundingClientRect() : null;
-        dispatch('port:click', { kind: 'network', networkId, side, offset, slotIndex, anchorRect: rect });
+        dispatch('port:click', { kind: 'network', networkId, side: effectiveSide, offset: effectiveOffset, slotIndex, anchorRect: rect });
         togglePortInfo({
           kind: 'network',
           networkId,
-          side,
-          offset,
+          side: effectiveSide,
+          offset: effectiveOffset,
           anchorRect: rect,
           networkName: networkName ?? null,
         });
@@ -158,8 +210,8 @@
       target: {
         kind: 'network',
         networkId,
-        side,
-        offset,
+        side: effectiveSide,
+        offset: effectiveOffset,
         networkName,
       },
       nearTarget: true,
@@ -174,16 +226,23 @@
   $: highlighted = (() => {
     const target = snapshot.target;
     if (!target || target.kind !== 'network') return false;
-    return target.networkId === networkId && target.side === side;
+    return target.networkId === networkId && target.side === effectiveSide;
   })();
+
+  function handleContextMenu(event: MouseEvent) {
+    if (isOpen || !linkId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openConnectionPointMenu?.({ kind: 'network', networkId, linkId }, event);
+  }
 </script>
 
 <div
   class="absolute z-10"
   style={stylePosition}
   data-network-port-id={networkId}
-  data-network-port-side={side}
-  data-network-port-offset={offset.toFixed(4)}
+  data-network-port-side={effectiveSide}
+  data-network-port-offset={effectiveOffset.toFixed(4)}
   data-network-port-slot={slotIndex}
   data-network-port-open={isOpen ? 'true' : 'false'}
   role="button"
@@ -191,6 +250,7 @@
   aria-label={`Network ${networkName ?? networkId} slot ${slotIndex}${isOpen ? ' (open)' : ''}`}
   on:mousedown={handleMouseDown}
   on:mouseup={handleMouseUp}
+  on:contextmenu={handleContextMenu}
   on:mouseenter={handleMouseEnter}
   on:mouseleave={handleMouseLeave}
 >

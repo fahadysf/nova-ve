@@ -172,6 +172,7 @@ def _build_link(
         "from": endpoint_a,
         "to": endpoint_b,
         "style_override": style_override,
+        "endpoint_positions": {},
         "label": label,
         "color": color,
         "width": width,
@@ -210,6 +211,7 @@ def _serialize_link(link: dict) -> dict:
         "from": link.get("from"),
         "to": link.get("to"),
         "style_override": link.get("style_override"),
+        "endpoint_positions": link.get("endpoint_positions", {}),
         "label": link.get("label", ""),
         "color": link.get("color", ""),
         "width": link.get("width", "1"),
@@ -1538,7 +1540,7 @@ class LinkService:
             if target is None:
                 return None
 
-            allowed = {"style_override", "label", "color", "width", "metrics"}
+            allowed = {"style_override", "endpoint_positions", "label", "color", "width", "metrics"}
             for field, value in patch.items():
                 if field not in allowed:
                     continue
