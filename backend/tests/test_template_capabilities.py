@@ -89,9 +89,14 @@ def test_validate_capabilities_machine_on_docker_raises():
         _validate_capabilities({"machine": "q35"}, "docker", "test.yml")
 
 
+def test_validate_capabilities_accepts_qemu_hard_cap():
+    caps = _validate_capabilities({"max_nics": 25}, "qemu", "test.yml")
+    assert caps["max_nics"] == 25
+
+
 def test_validate_capabilities_max_nics_over_cap_raises():
     with pytest.raises(TemplateError, match="exceeds the hard cap"):
-        _validate_capabilities({"max_nics": 9}, "qemu", "test.yml")
+        _validate_capabilities({"max_nics": 26}, "qemu", "test.yml")
 
 
 def test_validate_capabilities_max_nics_over_cap_docker_allowed():
