@@ -34,6 +34,7 @@
     NodeData,
     TopologyLink
   } from '$lib/types';
+  import type { LinkChangeEvent } from '$lib/stores/labWs';
 
   let labId = '';
   let labMeta: LabMeta | null = null;
@@ -411,6 +412,30 @@
 
   async function refreshLabManually() {
     await loadLab();
+  }
+
+  // #153: react to per-link WS mutations forwarded by TopologyCanvas so the
+  // canvas updates without a manual reload. The canvas already reacts to
+  // ``links`` prop changes, so reassigning the array is enough to trigger
+  // edge re-derivation. Cascade deletes (orphan implicit-bridge halves) fire
+  // one event per link_id; both splices land in the same microtask.
+  function handleLinkChange(event: CustomEvent<LinkChangeEvent>) {
+    const change = event.detail;
+    if (change.kind === 'deleted') {
+      const targetId = change.link_id;
+      links = links.filter((l) => String(l.id) !== targetId);
+      return;
+    }
+    const incoming = change.link;
+    const incomingId = String(incoming.id);
+    const idx = links.findIndex((l) => String(l.id) === incomingId);
+    if (idx === -1) {
+      links = [...links, incoming];
+    } else {
+      const next = links.slice();
+      next[idx] = incoming;
+      links = next;
+    }
   }
 
   function openLabFromIndex(lab: LabListItem) {
@@ -1086,6 +1111,7 @@
             on:console-close={(event) => handleConsoleClose(event.detail.tabId)}
             on:console-maximize={(event) => handleConsoleMaximizeFromBar(event.detail.tabId)}
             on:changed={refreshLabFromCanvas}
+            on:link-change={handleLinkChange}
           />
         </SvelteFlowProvider>
       </div>

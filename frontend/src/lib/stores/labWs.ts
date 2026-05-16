@@ -30,9 +30,22 @@ import { readable, writable, type Readable } from 'svelte/store';
 
 import type { WsClient, WsMessage } from '$lib/services/wsClient';
 import { parseIfaceInterfaceIndex } from '$lib/services/canvasEdges';
-import type { LinkReconciliation, LiveMacState } from '$lib/types';
+import type { Link, LinkReconciliation, LiveMacState } from '$lib/types';
 
 export type { LinkReconciliation };
+
+/**
+ * #153: granular link-mutation event surfaced from the WS hub so the page can
+ * react to single link create/delete/patch without a full ``loadLab()``.
+ *
+ * The backend currently only emits ``link_created`` and ``link_deleted``;
+ * ``patched`` is reserved for a future link-edit flow so subscribers can be
+ * exhaustive on ``kind`` from day one without churn.
+ */
+export type LinkChangeEvent =
+  | { kind: 'created'; link: Link }
+  | { kind: 'deleted'; link_id: string }
+  | { kind: 'patched'; link: Link };
 
 export type LabWsStores = {
   liveMacs: Readable<Record<string, LiveMacState>>;
@@ -47,6 +60,13 @@ export type LabWsStores = {
    * the next discovery cycle (HIGH-1 fix).
    */
   deleteReconciliation: (key: string) => void;
+  /**
+   * #153: subscribe to per-link mutation events. Returns an unsubscribe fn.
+   * The callback fires once per matching WS event in arrival order — no
+   * coalescing, so cascade deletes (one ``link_deleted`` per half) deliver
+   * both events to the subscriber.
+   */
+  onLinkChange: (cb: (event: LinkChangeEvent) => void) => () => void;
   connected: Readable<boolean>;
 };
 
@@ -165,6 +185,47 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     }));
   });
 
+  // #153: per-link mutation events. The backend emits ``link_created`` /
+  // ``link_deleted`` from link_service.py whenever a link is added or removed
+  // (including cascade deletes of orphan implicit-bridge halves, which fire
+  // one ``link_deleted`` per half). Subscribers register via ``onLinkChange``
+  // below; we keep the listener list local rather than going through a
+  // Svelte store so cascade deletes aren't coalesced into a single notification
+  // — the page needs to splice both link_ids out of its links[] array.
+  const linkChangeListeners = new Set<(event: LinkChangeEvent) => void>();
+  const emitLinkChange = (event: LinkChangeEvent) => {
+    for (const listener of linkChangeListeners) {
+      try {
+        listener(event);
+      } catch (err) {
+        // A buggy subscriber must not break the WS hub for every other store.
+        // eslint-disable-next-line no-console
+        console.error('labWs.onLinkChange listener threw', err);
+      }
+    }
+  };
+
+  client.on('link_created', (msg: WsMessage) => {
+    if (!isObject(msg.payload)) return;
+    const link = (msg.payload as { link?: unknown }).link;
+    if (!isObject(link)) return;
+    emitLinkChange({ kind: 'created', link: link as unknown as Link });
+  });
+
+  client.on('link_deleted', (msg: WsMessage) => {
+    if (!isObject(msg.payload)) return;
+    const rawId = (msg.payload as { link_id?: unknown }).link_id;
+    if (rawId === undefined || rawId === null) return;
+    emitLinkChange({ kind: 'deleted', link_id: String(rawId) });
+  });
+
+  client.on('link_patched', (msg: WsMessage) => {
+    if (!isObject(msg.payload)) return;
+    const link = (msg.payload as { link?: unknown }).link;
+    if (!isObject(link)) return;
+    emitLinkChange({ kind: 'patched', link: link as unknown as Link });
+  });
+
   client.on('node_state', (msg: WsMessage) => {
     if (!isObject(msg.payload)) return;
     const payload = msg.payload as Partial<NodeStatePayload>;
@@ -262,6 +323,12 @@ export function createLabWsStores(client: WsClient): LabWsStores {
         delete next[key];
         return next;
       });
+    },
+    onLinkChange(cb: (event: LinkChangeEvent) => void) {
+      linkChangeListeners.add(cb);
+      return () => {
+        linkChangeListeners.delete(cb);
+      };
     },
     connected,
   };

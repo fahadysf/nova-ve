@@ -451,4 +451,94 @@ describe('labWs.createLabWsStores — linkReconciliation (US-403 / US-404)', () 
     const entry = get(stores.linkReconciliation)['iface:veth1234'];
     expect(entry.peer_interface_index).toBeNull();
   });
+
+  // #153: per-link mutation events.
+  it('onLinkChange fires on link_created with the full link payload', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+    const events: unknown[] = [];
+    stores.onLinkChange((event) => events.push(event));
+
+    client.emit('link_created', {
+      type: 'link_created',
+      payload: { link: { id: 'lnk_001', from: { node_id: 1, interface_index: 0 }, to: { network_id: 7 } } },
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ kind: 'created', link: { id: 'lnk_001' } });
+  });
+
+  it('onLinkChange fires on link_deleted with the link_id stringified', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+    const events: unknown[] = [];
+    stores.onLinkChange((event) => events.push(event));
+
+    // Backend may send numeric or string link_id depending on the event source;
+    // the contract is that subscribers receive a string.
+    client.emit('link_deleted', { type: 'link_deleted', payload: { link_id: 42 } });
+    client.emit('link_deleted', { type: 'link_deleted', payload: { link_id: 'lnk_009' } });
+
+    expect(events).toEqual([
+      { kind: 'deleted', link_id: '42' },
+      { kind: 'deleted', link_id: 'lnk_009' },
+    ]);
+  });
+
+  it('onLinkChange delivers cascade deletes (one event per link_id, no coalescing)', () => {
+    // Mirrors the orphan implicit-bridge cascade: deleting one half fires
+    // link_deleted for both halves in the same WS batch.
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+    const events: unknown[] = [];
+    stores.onLinkChange((event) => events.push(event));
+
+    client.emit('link_deleted', { type: 'link_deleted', payload: { link_id: 'lnk_008' } });
+    client.emit('link_deleted', { type: 'link_deleted', payload: { link_id: 'lnk_009' } });
+
+    expect(events).toEqual([
+      { kind: 'deleted', link_id: 'lnk_008' },
+      { kind: 'deleted', link_id: 'lnk_009' },
+    ]);
+  });
+
+  it('onLinkChange unsubscribe stops further events', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+    const events: unknown[] = [];
+    const unsub = stores.onLinkChange((event) => events.push(event));
+
+    client.emit('link_deleted', { type: 'link_deleted', payload: { link_id: '1' } });
+    unsub();
+    client.emit('link_deleted', { type: 'link_deleted', payload: { link_id: '2' } });
+
+    expect(events).toEqual([{ kind: 'deleted', link_id: '1' }]);
+  });
+
+  it('onLinkChange ignores malformed payloads (missing link / link_id)', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+    const events: unknown[] = [];
+    stores.onLinkChange((event) => events.push(event));
+
+    client.emit('link_created', { type: 'link_created', payload: {} });
+    client.emit('link_deleted', { type: 'link_deleted', payload: {} });
+    client.emit('link_created', { type: 'link_created', payload: { link: 'not-an-object' } });
+
+    expect(events).toEqual([]);
+  });
+
+  it('a throwing subscriber does not break other subscribers', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+    const collected: unknown[] = [];
+    stores.onLinkChange(() => {
+      throw new Error('boom');
+    });
+    stores.onLinkChange((event) => collected.push(event));
+
+    client.emit('link_deleted', { type: 'link_deleted', payload: { link_id: 'lnk_001' } });
+
+    expect(collected).toEqual([{ kind: 'deleted', link_id: 'lnk_001' }]);
+  });
 });
