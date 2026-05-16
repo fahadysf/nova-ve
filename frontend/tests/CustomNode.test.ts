@@ -39,4 +39,48 @@ describe('CustomNode', () => {
     expect(screen.queryByText('running')).toBeNull();
     expect(screen.queryByTestId('node-status-indicator')).toBeNull();
   });
+
+  it('renders connected interfaces plus one dotted new-connection handle', () => {
+    render(CustomNode, {
+      props: {
+        data: {
+          label: 'edge-router-core-01',
+          status: 2,
+          nodeId: 1,
+          connectedInterfaceIndexes: [1],
+          interfaces: [
+            { index: 0, name: 'eth0', network_id: 0 },
+            { index: 1, name: 'eth1', network_id: 9 },
+            { index: 2, name: 'eth2', network_id: 0 },
+          ],
+        },
+      },
+    });
+
+    expect(screen.getAllByTestId('port-handle')).toHaveLength(1);
+    expect(screen.getAllByTestId('port-new-connection-handle')).toHaveLength(1);
+    expect(screen.getByText('eth1')).toBeInTheDocument();
+    expect(screen.queryByText('eth0')).toBeNull();
+    expect(screen.queryByText('eth2')).toBeNull();
+  });
+
+  it('hides the dotted new-connection handle when no unused interface remains', () => {
+    render(CustomNode, {
+      props: {
+        data: {
+          label: 'edge-router-core-01',
+          status: 2,
+          nodeId: 1,
+          connectedInterfaceIndexes: [0, 1],
+          interfaces: [
+            { index: 0, name: 'eth0', network_id: 9 },
+            { index: 1, name: 'eth1', network_id: 10 },
+          ],
+        },
+      },
+    });
+
+    expect(screen.getAllByTestId('port-handle')).toHaveLength(2);
+    expect(screen.queryByTestId('port-new-connection-handle')).toBeNull();
+  });
 });

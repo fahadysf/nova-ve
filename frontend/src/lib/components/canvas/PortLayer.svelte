@@ -8,8 +8,11 @@
   import Port from './Port.svelte';
 
   export let nodeId: number;
+  export let nodeName: string | undefined = undefined;
   export let interfaces: NodeInterface[] = [];
+  export let connectedInterfaceIndexes: number[] = [];
   export let highlightedInterfaceIndex: number | null = null;
+  export let highlightedNewConnection = false;
 
   type PortPositionPersist = (
     nodeId: number,
@@ -35,10 +38,28 @@
   const PUSH_DEBOUNCE_MS = 250;
 
   $: defaults = placeInterfaces(interfaces.length);
+  $: connectedSet = new Set(connectedInterfaceIndexes);
   $: resolvedPorts = interfaces.map((iface, index) => {
     const persisted = iface.port_position ?? null;
     return persisted ?? defaults[index] ?? ({ side: 'top', offset: 0 } as PortPosition);
   });
+  $: visibleInterfaceEntries = interfaces
+    .map((iface, index) => ({
+      iface,
+      index,
+      interfaceIndex: iface.index ?? index,
+      connected: connectedSet.has(iface.index ?? index) || (iface.network_id ?? 0) > 0,
+    }))
+    .filter((entry) => entry.connected);
+  $: firstAvailableEntry =
+    interfaces
+      .map((iface, index) => ({
+        iface,
+        index,
+        interfaceIndex: iface.index ?? index,
+        connected: connectedSet.has(iface.index ?? index) || (iface.network_id ?? 0) > 0,
+      }))
+      .find((entry) => !entry.connected) ?? null;
 
   function nodeBox(): { x: number; y: number; w: number; h: number } | null {
     if (!layerEl) return null;
@@ -106,17 +127,17 @@
 </script>
 
 <div bind:this={layerEl} class="pointer-events-none absolute inset-0">
-  {#each interfaces as iface, index (iface.index ?? index)}
-    {@const port = effectivePort(index)}
-    {@const interfaceIndex = iface.index ?? index}
+  {#each visibleInterfaceEntries as entry (entry.interfaceIndex)}
+    {@const port = effectivePort(entry.index)}
     <div class="pointer-events-auto absolute inset-0">
       <Port
-        interfaceData={iface}
+        interfaceData={entry.iface}
         position={port}
         {nodeId}
-        {interfaceIndex}
-        connected={(iface.network_id ?? 0) > 0}
-        highlighted={highlightedInterfaceIndex === interfaceIndex}
+        {nodeName}
+        interfaceIndex={entry.interfaceIndex}
+        connected={true}
+        highlighted={highlightedInterfaceIndex === entry.interfaceIndex}
         on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
         on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
         on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}
@@ -124,4 +145,23 @@
       />
     </div>
   {/each}
+  {#if firstAvailableEntry}
+    {@const port = effectivePort(firstAvailableEntry.index)}
+    <div class="pointer-events-auto absolute inset-0">
+      <Port
+        interfaceData={firstAvailableEntry.iface}
+        position={port}
+        {nodeId}
+        {nodeName}
+        interfaceIndex={firstAvailableEntry.interfaceIndex}
+        connected={false}
+        newConnectionSlot={true}
+        highlighted={highlightedNewConnection}
+        on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
+        on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
+        on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}
+        on:port:mouseleave={(e) => dispatch('port:mouseleave', e.detail)}
+      />
+    </div>
+  {/if}
 </div>

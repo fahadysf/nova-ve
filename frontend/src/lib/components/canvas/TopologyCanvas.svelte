@@ -328,7 +328,7 @@
   }
 
   function resolveEndpointNode(endpoint: DragEndpoint | null): NodeData | null {
-    if (endpoint?.kind !== 'interface') {
+    if (endpoint?.kind !== 'interface' && endpoint?.kind !== 'node-slot') {
       return null;
     }
     return localNodes[String(endpoint.nodeId)] ?? null;
@@ -493,7 +493,9 @@
           console: node.console,
           nodeId: node.id,
           interfaces: node.interfaces ?? [],
+          connectedInterfaceIndexes: connectedInterfaceIndexesForNode(node),
           highlightedInterfaceIndex: highlightedTargetForNode(node.id),
+          highlightedNewConnection: highlightedNewConnectionForNode(node.id),
           interface_naming_scheme: node.interface_naming_scheme ?? null
         },
         style: `width: ${nodeCardWidth(node)}px;`
@@ -776,13 +778,23 @@
     layoutDebouncer.pushViewport(viewport);
   }
 
-  function getEdgeIndex(edgeId: string): number {
+  function getLinkIndexesForEdge(edgeId: string): number[] {
     const prefix = 'link:';
     if (edgeId.startsWith(prefix)) {
       const linkId = edgeId.slice(prefix.length);
-      return localLinks.findIndex((entry) => entry.id === linkId);
+      const index = localLinks.findIndex((entry) => entry.id === linkId);
+      return index >= 0 ? [index] : [];
     }
-    return buildFlowEdges().findIndex((edge) => edge.id === edgeId);
+
+    const edge = buildFlowEdges().find((entry) => entry.id === edgeId);
+    const implicitLinkIds = (edge?.data as { implicit_bridge_link_ids?: unknown } | undefined)
+      ?.implicit_bridge_link_ids;
+    if (!Array.isArray(implicitLinkIds)) return [];
+
+    const ids = new Set(implicitLinkIds.map((id) => String(id)));
+    return localLinks
+      .map((entry, index) => (entry?.id && ids.has(String(entry.id)) ? index : -1))
+      .filter((index) => index >= 0);
   }
 
   function isDiscoveredEdgeId(edgeId: string | null | undefined): boolean {
@@ -863,20 +875,22 @@
   }
 
   async function deleteLink(edgeId: string) {
-    const index = getEdgeIndex(edgeId);
-    if (index < 0) {
+    const indexes = getLinkIndexesForEdge(edgeId);
+    if (indexes.length === 0) {
       return;
     }
 
-    const v2Link = localLinks[index];
+    const deleteIndexes = new Set(indexes);
+    const linksToDelete = indexes
+      .map((index) => localLinks[index])
+      .filter((link): link is Link => !!link?.id);
     // Capture pre-mutation snapshot for rollback on API failure.
     const previousLinks = localLinks;
     const previousNodes = localNodes;
     const previousNetworks = localNetworks;
     const previousTopology = localTopology;
-    const linkId = v2Link?.id ?? null;
 
-    if (v2Link) {
+    for (const v2Link of linksToDelete) {
       if (
         typeof v2Link.from?.node_id === 'number' &&
         typeof v2Link.from.interface_index === 'number'
@@ -896,10 +910,8 @@
     }
 
     localNodes = { ...localNodes };
-    if (index < localTopology.length) {
-      localTopology = localTopology.filter((_, currentIndex) => currentIndex !== index);
-    }
-    localLinks = localLinks.filter((_, currentIndex) => currentIndex !== index);
+    localTopology = localTopology.filter((_, currentIndex) => !deleteIndexes.has(currentIndex));
+    localLinks = localLinks.filter((_, currentIndex) => !deleteIndexes.has(currentIndex));
     recalculateNetworks();
     publishFlowState();
     dispatchCanvasChange('topology', {
@@ -915,15 +927,18 @@
     // delete trimmed an entry from a localTopology that was already empty
     // (v2-only labs). tmp_ ids are placeholders for in-flight POST /links;
     // skip the DELETE because there's no server-side link yet.
-    if (!linkId || linkId.startsWith('tmp_')) {
-      return;
-    }
+    const persistedLinks = linksToDelete.filter((link) => !String(link.id).startsWith('tmp_'));
+    if (persistedLinks.length === 0) return;
 
     try {
-      await apiRequest(`/labs/${labId}/links/${encodeURIComponent(linkId)}`, {
-        method: 'DELETE',
-        suppressToast: true,
-      });
+      await Promise.all(
+        persistedLinks.map((link) =>
+          apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
+            method: 'DELETE',
+            suppressToast: true,
+          })
+        )
+      );
     } catch (error) {
       localLinks = previousLinks;
       localNodes = previousNodes;
@@ -946,30 +961,39 @@
   }
 
   async function setLinkStyle(edgeId: string, style: LinkStyle | null) {
-    const index = getEdgeIndex(edgeId);
-    if (index < 0) return;
-    const target = localLinks[index];
-    if (!target?.id) return;
+    const indexes = getLinkIndexesForEdge(edgeId);
+    if (indexes.length === 0) return;
 
-    const previousStyle = target.style_override ?? null;
+    const updateIndexes = new Set(indexes);
+    const targets = indexes
+      .map((index) => localLinks[index])
+      .filter((link): link is Link => !!link?.id);
+    if (targets.length === 0) return;
+
+    const previousStyles = new Map(targets.map((link) => [link.id, link.style_override ?? null]));
     localLinks = localLinks.map((link, i) =>
-      i === index ? { ...link, style_override: style } : link
+      updateIndexes.has(i) ? { ...link, style_override: style } : link
     );
     publishFlowState();
 
     // tmp_ ids are placeholders for in-flight POST /links; the eventual
     // server response will carry the override, so skip the PATCH.
-    if (target.id.startsWith('tmp_')) return;
+    const persistedTargets = targets.filter((link) => !String(link.id).startsWith('tmp_'));
+    if (persistedTargets.length === 0) return;
 
     try {
-      await apiRequest(`/labs/${labId}/links/${encodeURIComponent(target.id)}`, {
-        method: 'PATCH',
-        body: { style_override: style },
-        suppressToast: true,
-      });
+      await Promise.all(
+        persistedTargets.map((link) =>
+          apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
+            method: 'PATCH',
+            body: { style_override: style },
+            suppressToast: true,
+          })
+        )
+      );
     } catch (error) {
       localLinks = localLinks.map((link, i) =>
-        i === index ? { ...link, style_override: previousStyle } : link
+        updateIndexes.has(i) ? { ...link, style_override: previousStyles.get(link.id) ?? null } : link
       );
       publishFlowState();
       const message = error instanceof Error ? error.message : 'Failed to update link style';
@@ -1242,6 +1266,29 @@
     return null;
   }
 
+  function highlightedNewConnectionForNode(candidateNodeId: number): boolean {
+    const snap = getDragLinkSnapshot();
+    const target = snap.target;
+    return target?.kind === 'node-slot' && target.nodeId === candidateNodeId;
+  }
+
+  function connectedInterfaceIndexesForNode(node: NodeData): number[] {
+    const indexes = new Set<number>();
+    for (const [index, iface] of node.interfaces.entries()) {
+      if ((iface.network_id ?? 0) > 0) {
+        indexes.add(iface.index ?? index);
+      }
+    }
+    for (const link of localLinks) {
+      for (const endpoint of [link.from, link.to]) {
+        if (endpoint?.node_id === node.id && typeof endpoint.interface_index === 'number') {
+          indexes.add(endpoint.interface_index);
+        }
+      }
+    }
+    return [...indexes];
+  }
+
   function handleWindowMouseMove(event: MouseEvent) {
     const snap = getDragLinkSnapshot();
     if (snap.state === 'idle' || snap.state === 'confirming') return;
@@ -1275,7 +1322,13 @@
     }
   }
 
-  async function handleLinkConfirm(event: CustomEvent<{ styleOverride: LinkStyle }>) {
+  async function handleLinkConfirm(
+    event: CustomEvent<{
+      styleOverride: LinkStyle;
+      sourceInterfaceIndex?: number;
+      targetInterfaceIndex?: number;
+    }>
+  ) {
     const snap = getDragLinkSnapshot();
     if (!snap.source || !snap.target || !snap.idempotencyKey) {
       dragLinkStore.cancel();
@@ -1286,14 +1339,28 @@
     const styleOverride = event.detail.styleOverride;
     const tempId = `tmp_${idempotencyKey}`;
 
-    const fromEndpoint =
-      snap.source.kind === 'interface'
-        ? { node_id: snap.source.nodeId, interface_index: snap.source.interfaceIndex }
-        : { network_id: snap.source.networkId };
-    const toEndpoint =
-      snap.target.kind === 'interface'
-        ? { node_id: snap.target.nodeId, interface_index: snap.target.interfaceIndex }
-        : { network_id: snap.target.networkId };
+    function endpointForPost(
+      endpoint: NonNullable<DragLinkSnapshot['source']>,
+      selectedInterfaceIndex: number | undefined
+    ) {
+      if (endpoint.kind === 'network') {
+        return { network_id: endpoint.networkId };
+      }
+      if (endpoint.kind === 'interface') {
+        return { node_id: endpoint.nodeId, interface_index: endpoint.interfaceIndex };
+      }
+      if (typeof selectedInterfaceIndex !== 'number') {
+        return null;
+      }
+      return { node_id: endpoint.nodeId, interface_index: selectedInterfaceIndex };
+    }
+
+    const fromEndpoint = endpointForPost(snap.source, event.detail.sourceInterfaceIndex);
+    const toEndpoint = endpointForPost(snap.target, event.detail.targetInterfaceIndex);
+    if (!fromEndpoint || !toEndpoint) {
+      toastStore.push('Choose an unused interface for the new link.', 'error');
+      return;
+    }
 
     // The wire contract requires the node-side endpoint as ``from`` whenever
     // exactly one side is a node; flip the orientation if the user dragged
@@ -1302,9 +1369,9 @@
     let postTo = toEndpoint;
     if (
       snap.source.kind === 'network' &&
-      snap.target.kind === 'interface'
+      (snap.target.kind === 'interface' || snap.target.kind === 'node-slot')
     ) {
-      postFrom = { node_id: snap.target.nodeId, interface_index: snap.target.interfaceIndex };
+      postFrom = toEndpoint;
       postTo = { network_id: snap.source.networkId };
     }
 
@@ -1958,7 +2025,12 @@
   {/if}
 
   <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
-  <LinkConfirmModal on:confirm={handleLinkConfirm} on:cancel={handleLinkConfirmCancel} />
+  <LinkConfirmModal
+    nodes={localNodes}
+    links={localLinks}
+    on:confirm={handleLinkConfirm}
+    on:cancel={handleLinkConfirmCancel}
+  />
   <NetworkConfigModal
     open={networkModalOpen}
     defaultName={networkModalDefaultName}
