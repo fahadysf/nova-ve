@@ -52,4 +52,28 @@ describe('NetworkNode', () => {
 
     expect(screen.getByTestId('network-info-button')).toHaveClass('absolute', 'bottom-1', 'left-1');
   });
+
+  it('binds connected network handles to their persisted link endpoint', () => {
+    render(NetworkNode, {
+      props: {
+        id: 'network7',
+        data: {
+          label: 'edge-transport-bridge-01',
+          count: 1,
+          networkId: 7,
+          linkIds: ['lnk_001'],
+          portRefsByLinkId: {
+            lnk_001: { endpointKey: 'to' },
+          },
+        },
+      },
+    });
+
+    const connectedPort = screen
+      .getAllByTestId('network-port-handle')
+      .map((handle) => handle.closest('[data-network-port-link-id]'))
+      .find((wrapper) => wrapper?.getAttribute('data-network-port-link-id') === 'lnk_001');
+
+    expect(connectedPort).toHaveAttribute('data-network-port-endpoint-key', 'to');
+  });
 });

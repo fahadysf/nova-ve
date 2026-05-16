@@ -64,6 +64,29 @@ describe('CustomNode', () => {
     expect(screen.queryByText('eth2')).toBeNull();
   });
 
+  it('binds connected node handles to their persisted link endpoint', () => {
+    render(CustomNode, {
+      props: {
+        data: {
+          label: 'edge-router-core-01',
+          status: 2,
+          nodeId: 1,
+          connectedInterfaceIndexes: [1],
+          portRefsByInterfaceIndex: {
+            '1': { linkId: 'lnk_004', endpointKey: 'from' },
+          },
+          interfaces: [
+            { index: 1, name: 'eth1', network_id: 9 },
+          ],
+        },
+      },
+    });
+
+    const portWrapper = screen.getByTestId('port-handle').closest('[data-port-link-id]');
+    expect(portWrapper).toHaveAttribute('data-port-link-id', 'lnk_004');
+    expect(portWrapper).toHaveAttribute('data-port-endpoint-key', 'from');
+  });
+
   it('hides the dotted new-connection handle when no unused interface remains', () => {
     render(CustomNode, {
       props: {

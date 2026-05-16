@@ -112,9 +112,16 @@
     nodeName: string;
   };
   type LinkEndpointKey = 'from' | 'to';
+  type ConnectionPointRef = { linkId: string; endpointKey: LinkEndpointKey };
   type ConnectionPointTarget =
-    | { kind: 'node'; nodeId: number; interfaceIndex: number }
-    | { kind: 'network'; networkId: number; linkId: string };
+    | {
+        kind: 'node';
+        nodeId: number;
+        interfaceIndex: number;
+        linkId?: string;
+        endpointKey?: LinkEndpointKey;
+      }
+    | { kind: 'network'; networkId: number; linkId: string; endpointKey?: LinkEndpointKey };
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData };
@@ -592,10 +599,14 @@
 
   function buildConnectionPointPositions(): {
     node: Map<number, Record<string, PortPosition>>;
+    nodeRefs: Map<number, Record<string, ConnectionPointRef>>;
     network: Map<number, Record<string, PortPosition>>;
+    networkRefs: Map<number, Record<string, ConnectionPointRef>>;
   } {
     const node = new Map<number, Record<string, PortPosition>>();
+    const nodeRefs = new Map<number, Record<string, ConnectionPointRef>>();
     const network = new Map<number, Record<string, PortPosition>>();
+    const networkRefs = new Map<number, Record<string, ConnectionPointRef>>();
     const implicitPairs = implicitLinkPairsByNetwork();
 
     for (const link of localLinks) {
@@ -608,10 +619,18 @@
           const perNode = node.get(endpoint.node_id) ?? {};
           perNode[String(endpoint.interface_index)] = port;
           node.set(endpoint.node_id, perNode);
+
+          const refs = nodeRefs.get(endpoint.node_id) ?? {};
+          refs[String(endpoint.interface_index)] = { linkId: link.id, endpointKey: key };
+          nodeRefs.set(endpoint.node_id, refs);
         } else if (typeof endpoint.network_id === 'number') {
           const perNetwork = network.get(endpoint.network_id) ?? {};
           perNetwork[link.id] = port;
           network.set(endpoint.network_id, perNetwork);
+
+          const refs = networkRefs.get(endpoint.network_id) ?? {};
+          refs[link.id] = { linkId: link.id, endpointKey: key };
+          networkRefs.set(endpoint.network_id, refs);
         }
       }
     }
@@ -626,7 +645,7 @@
       if (box) network.set(networkId, separatePositionRecord(positions, box));
     }
 
-    return { node, network };
+    return { node, nodeRefs, network, networkRefs };
   }
 
   function separatePositionRecord(
@@ -662,6 +681,7 @@
           interfaces: node.interfaces ?? [],
           connectedInterfaceIndexes: connectedInterfaceIndexesForNode(node),
           portPositionsByInterfaceIndex: connectionPointPositions.node.get(node.id) ?? {},
+          portRefsByInterfaceIndex: connectionPointPositions.nodeRefs.get(node.id) ?? {},
           highlightedInterfaceIndex: highlightedTargetForNode(node.id),
           highlightedNewConnection: highlightedNewConnectionForNode(node.id),
           interface_naming_scheme: node.interface_naming_scheme ?? null
@@ -702,6 +722,7 @@
           networkId: network.id,
           linkIds: networkLinkIds,
           portPositionsByLinkId: connectionPointPositions.network.get(network.id) ?? {},
+          portRefsByLinkId: connectionPointPositions.networkRefs.get(network.id) ?? {},
           brokenImplicit: isBrokenImplicit
         },
         style: `width: ${networkCardWidth(network)}px;`
@@ -1421,10 +1442,10 @@
     menu = {
       x: point.x,
       y: point.y,
-      targetId:
-        target.kind === 'node'
-          ? `node-port:${target.nodeId}:${target.interfaceIndex}`
-          : `network-port:${target.networkId}:${target.linkId}`,
+        targetId:
+          target.kind === 'node'
+          ? `node-port:${target.nodeId}:${target.interfaceIndex}:${target.linkId ?? ''}:${target.endpointKey ?? ''}`
+          : `network-port:${target.networkId}:${target.linkId}:${target.endpointKey ?? ''}`,
       targetType: 'port',
     };
   });
@@ -1433,11 +1454,36 @@
     target: ConnectionPointTarget
   ): { linkIndex: number; key: LinkEndpointKey } | null {
     if (target.kind === 'network') {
+      if (target.endpointKey) {
+        const linkIndex = localLinks.findIndex((link) => link.id === target.linkId);
+        if (linkIndex < 0) return null;
+        const link = localLinks[linkIndex];
+        const endpoint = link[target.endpointKey];
+        if (endpoint?.network_id === target.networkId) {
+          return { linkIndex, key: target.endpointKey };
+        }
+        return null;
+      }
+
       const linkIndex = localLinks.findIndex((link) => link.id === target.linkId);
       if (linkIndex < 0) return null;
       const link = localLinks[linkIndex];
       if (link.from?.network_id === target.networkId) return { linkIndex, key: 'from' };
       if (link.to?.network_id === target.networkId) return { linkIndex, key: 'to' };
+      return null;
+    }
+
+    if (target.linkId && target.endpointKey) {
+      const linkIndex = localLinks.findIndex((link) => link.id === target.linkId);
+      if (linkIndex < 0) return null;
+      const link = localLinks[linkIndex];
+      const endpoint = link[target.endpointKey];
+      if (
+        endpoint?.node_id === target.nodeId &&
+        endpoint?.interface_index === target.interfaceIndex
+      ) {
+        return { linkIndex, key: target.endpointKey };
+      }
       return null;
     }
 
@@ -1514,9 +1560,16 @@
   async function persistPortPosition(
     nodeId: number,
     interfaceIndex: number,
-    port: PortPosition
+    port: PortPosition,
+    ref?: ConnectionPointRef
   ) {
-    const connectedTarget: ConnectionPointTarget = { kind: 'node', nodeId, interfaceIndex };
+    const connectedTarget: ConnectionPointTarget = {
+      kind: 'node',
+      nodeId,
+      interfaceIndex,
+      linkId: ref?.linkId,
+      endpointKey: ref?.endpointKey,
+    };
     if (findLinkEndpointForConnectionPoint(connectedTarget)) {
       await persistConnectionPointPosition(connectedTarget, 'manual', port);
       return;

@@ -9,6 +9,8 @@
   import { infoPanels } from '$lib/stores/infoPanels';
   import type { NodeInterface, PortPosition } from '$lib/types';
 
+  type NodeConnectionPointRef = { linkId: string; endpointKey: 'from' | 'to' };
+
   export let data: {
     label: string;
     icon?: string;
@@ -21,6 +23,7 @@
     interfaces?: NodeInterface[];
     connectedInterfaceIndexes?: number[];
     portPositionsByInterfaceIndex?: Record<string, PortPosition>;
+    portRefsByInterfaceIndex?: Record<string, NodeConnectionPointRef>;
     highlightedInterfaceIndex?: number | null;
     highlightedNewConnection?: boolean;
   };
@@ -82,6 +85,7 @@
     {interfaces}
     connectedInterfaceIndexes={data.connectedInterfaceIndexes ?? []}
     portPositionsByInterfaceIndex={data.portPositionsByInterfaceIndex ?? {}}
+    portRefsByInterfaceIndex={data.portRefsByInterfaceIndex ?? {}}
     highlightedInterfaceIndex={data.highlightedInterfaceIndex ?? null}
     highlightedNewConnection={data.highlightedNewConnection ?? false}
     on:port:mousedown={(e) => dispatch('port:mousedown', e.detail)}

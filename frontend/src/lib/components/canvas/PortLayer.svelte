@@ -7,18 +7,22 @@
   import type { NodeInterface, PortPosition } from '$lib/types';
   import Port from './Port.svelte';
 
+  type NodeConnectionPointRef = { linkId: string; endpointKey: 'from' | 'to' };
+
   export let nodeId: number;
   export let nodeName: string | undefined = undefined;
   export let interfaces: NodeInterface[] = [];
   export let connectedInterfaceIndexes: number[] = [];
   export let portPositionsByInterfaceIndex: Record<string, PortPosition> = {};
+  export let portRefsByInterfaceIndex: Record<string, NodeConnectionPointRef> = {};
   export let highlightedInterfaceIndex: number | null = null;
   export let highlightedNewConnection = false;
 
   type PortPositionPersist = (
     nodeId: number,
     interfaceIndex: number,
-    port: PortPosition
+    port: PortPosition,
+    ref?: NodeConnectionPointRef
   ) => void;
   const persistFromContext = getContext<PortPositionPersist | undefined>(
     'nova-ve:port-position-persist'
@@ -77,7 +81,12 @@
     const timer = setTimeout(() => {
       pendingPushTimers.delete(interfaceIndex);
       if (persistFromContext) {
-        persistFromContext(nodeId, interfaceIndex, port);
+        persistFromContext(
+          nodeId,
+          interfaceIndex,
+          port,
+          portRefsByInterfaceIndex[String(interfaceIndex)]
+        );
       }
       dispatch('port:dragend', { nodeId, interfaceIndex, port });
     }, PUSH_DEBOUNCE_MS);
@@ -140,6 +149,7 @@
         {nodeId}
         {nodeName}
         interfaceIndex={entry.interfaceIndex}
+        connectionPointRef={portRefsByInterfaceIndex[String(entry.interfaceIndex)]}
         connected={true}
         highlighted={highlightedInterfaceIndex === entry.interfaceIndex}
         on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
