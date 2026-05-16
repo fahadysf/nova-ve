@@ -9,6 +9,9 @@
 #                                     lab option once marked)
 #   - nova-ve/alpine-telnet:latest   (telnet console demo, see #181)
 #   - nova-ve/alpine-vnc:latest      (VNC desktop demo)
+#   - nova-ve/ubuntu-2604-xfce-vnc:latest
+#                                    (Ubuntu 26.04 XFCE/VNC demo with
+#                                     NetworkManager for lab links)
 #
 # Marker convention: every image listed above also gets a
 # ``nova-ve-lab/<sanitized>:<tag>`` reverse tag. The backend's image catalog
@@ -108,12 +111,14 @@ build_demo_image() {
   docker build -t "$tag" "$context"
 }
 
-# 1. Base image (also the FROM for the two demos below).
+# 1. Base images.
 pull_if_missing "alpine:3.22"
+pull_if_missing "ubuntu:26.04"
 
 # 2. Demo images.
 build_demo_image "nova-ve/alpine-telnet:latest" "${REPO_ROOT}/deploy/demo-images/alpine-telnet"
 build_demo_image "nova-ve/alpine-vnc:latest"    "${REPO_ROOT}/deploy/demo-images/alpine-vnc"
+build_demo_image "nova-ve/ubuntu-2604-xfce-vnc:latest" "${REPO_ROOT}/deploy/demo-images/ubuntu-2604-xfce-vnc"
 
 # 3. Mark everything for lab availability so the add-node modal sees them by
 # default. Operators can ``Unmark`` from the admin UI if they want a cleaner
@@ -121,5 +126,6 @@ build_demo_image "nova-ve/alpine-vnc:latest"    "${REPO_ROOT}/deploy/demo-images
 mark_for_lab "alpine:3.22"
 mark_for_lab "nova-ve/alpine-telnet:latest"
 mark_for_lab "nova-ve/alpine-vnc:latest"
+mark_for_lab "nova-ve/ubuntu-2604-xfce-vnc:latest"
 
 echo "build-demo-images: done." >&2
