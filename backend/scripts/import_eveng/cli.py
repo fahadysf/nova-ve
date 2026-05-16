@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("/var/lib/nova-ve/templates"),
         help=(
-            "Destination for nova-ve template JSON produced by the "
+            "Destination for nova-ve template YAML produced by the "
             "vendor-adapter pipeline. Pass an empty path or '-' to skip "
             "template generation. Default: /var/lib/nova-ve/templates."
         ),

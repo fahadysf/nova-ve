@@ -207,6 +207,7 @@ def test_main_dry_run_against_empty_source_writes_no_manifest(
     src.mkdir()
     dst = tmp_path / "dst"
     mf = tmp_path / "import-manifest.json"
+    templates = tmp_path / "templates"
 
     rc = main(
         [
@@ -237,6 +238,7 @@ def test_main_real_run_writes_manifest_with_empty_arrays(
     src.mkdir()
     dst = tmp_path / "dst"
     mf = tmp_path / "import-manifest.json"
+    templates = tmp_path / "templates"
 
     # Pretend we are root so the root-check does not bail.
     monkeypatch.setattr("scripts.import_eveng.cli._is_root", lambda: True)
@@ -256,6 +258,8 @@ def test_main_real_run_writes_manifest_with_empty_arrays(
             str(dst),
             "--manifest",
             str(mf),
+            "--templates-dir",
+            str(templates),
         ]
     )
     assert rc == 0

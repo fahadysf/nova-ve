@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable
 
+import yaml
+
 from ._app_owner import AppOwner
 from .adapters import NeedsManualReview, select_adapter
 from .copy_engine import CopyEngineError, CopyMode, CopyOutcome, perform_copy
@@ -73,6 +75,11 @@ DockerBuildFn = Callable[[Path, str], None]
 
 
 # ---- core --------------------------------------------------------------
+
+
+def _write_template_yaml(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(payload, sort_keys=False))
 
 
 def _record_imported_files(
@@ -221,7 +228,7 @@ def _generate_template_for_item(
     band). This helper closes that loop: it synthesises a minimal raw
     dict from the migration item's filename + meta, dispatches to the
     highest-priority matching :class:`VendorAdapter`, and writes the
-    resulting nova-ve template JSON under ``USER_TEMPLATES_DIR``.
+    resulting nova-ve template YAML under ``USER_TEMPLATES_DIR``.
 
     Adapters that decide the item needs operator attention raise
     :class:`NeedsManualReview`; that becomes a ``needs-manual-review``
@@ -266,12 +273,11 @@ def _generate_template_for_item(
         return
 
     template_type = str(template_payload.get("kind") or item.kind)
-    dest = templates_dir / template_type / f"{item.image_key}.json"
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest = templates_dir / template_type / f"{item.image_key}.yml"
     # ``type`` is required by the template loader; write it alongside
     # ``kind`` to satisfy both the loader and the legacy schema.
     template_payload.setdefault("type", template_type)
-    dest.write_text(json.dumps(template_payload, indent=2, sort_keys=True))
+    _write_template_yaml(dest, template_payload)
     manifest.templates.append(
         TemplateEntry(
             name=item.image_key,
@@ -279,6 +285,82 @@ def _generate_template_for_item(
             reason=f"adapter={adapter.name}",
         )
     )
+
+
+def _yaml_equivalent(path: Path, payload: dict[str, object]) -> bool:
+    try:
+        existing = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError):
+        return False
+    return existing == payload
+
+
+def _convert_template_json_to_yaml(
+    json_path: Path,
+    *,
+    manifest: ImportManifest,
+) -> None:
+    yaml_path = json_path.with_suffix(".yml")
+    try:
+        payload = json.loads(json_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        manifest.errors.append(
+            ErrorEntry(
+                path=str(json_path),
+                error=f"template JSON conversion failed: {exc}",
+            )
+        )
+        return
+
+    if not isinstance(payload, dict):
+        manifest.errors.append(
+            ErrorEntry(
+                path=str(json_path),
+                error="template JSON conversion failed: top-level value is not an object",
+            )
+        )
+        return
+
+    if yaml_path.exists() and not _yaml_equivalent(yaml_path, payload):
+        manifest.errors.append(
+            ErrorEntry(
+                path=str(json_path),
+                error=f"template YAML already exists with different content: {yaml_path}",
+            )
+        )
+        return
+
+    try:
+        if not yaml_path.exists():
+            _write_template_yaml(yaml_path, payload)
+        json_path.unlink()
+    except OSError as exc:
+        manifest.errors.append(
+            ErrorEntry(
+                path=str(json_path),
+                error=f"template JSON conversion failed: {exc}",
+            )
+        )
+        return
+    manifest.templates.append(
+        TemplateEntry(
+            name=json_path.stem,
+            status="converted",
+            reason=f"{json_path} -> {yaml_path}",
+        )
+    )
+
+
+def _convert_existing_template_json_to_yaml(
+    templates_dir: Path,
+    *,
+    manifest: ImportManifest,
+) -> None:
+    """Convert imported user template JSON files under ``templates/*/*.json``."""
+    if not templates_dir.exists():
+        return
+    for json_path in sorted(templates_dir.glob("*/*.json")):
+        _convert_template_json_to_yaml(json_path, manifest=manifest)
 
 
 # ---- top-level entry ----------------------------------------------------
@@ -300,12 +382,15 @@ def run_migration(
     fixup applied. If ``dest_root`` is provided, the entire dest tree is
     re-walked for fixup at the end (catches the pre-existing root-owned
     ``<dest>/qemu/`` parent dir bug). If ``templates_dir`` is provided,
-    every migrated item runs through the vendor-adapter registry to
-    produce a nova-ve template JSON under that path; if it is ``None``,
-    template generation is skipped entirely (legacy mode — the importer
-    only copies images and lets the operator hand-author templates).
+    pre-existing imported template JSON files are converted to YAML, and every
+    migrated item runs through the vendor-adapter registry to produce a nova-ve
+    template YAML under that path; if it is ``None``, template generation and
+    conversion are skipped entirely (legacy mode — the importer only copies
+    images and lets the operator hand-author templates).
     """
     docker_build = docker_build or _default_docker_build
+    if templates_dir is not None:
+        _convert_existing_template_json_to_yaml(templates_dir, manifest=manifest)
 
     for item in items:
         if item.kind == KIND_QEMU:
@@ -334,3 +419,5 @@ def run_migration(
             for item in items:
                 if item.dst_dir.exists():
                     fixup_tree(item.dst_dir, owner)
+        if templates_dir is not None and templates_dir.exists():
+            fixup_tree(templates_dir, owner)

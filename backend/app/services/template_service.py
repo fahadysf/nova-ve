@@ -921,7 +921,7 @@ class TemplateService:
         raise TemplateError(f"Template {key} does not exist for type {template_type}.")
 
     def _iter_paired_user_templates(self) -> Iterator[tuple[Path, dict[str, Any]]]:
-        """Yield (path, payload) for every well-formed ``kind="paired"`` JSON
+        """Yield (path, payload) for every well-formed ``kind="paired"`` template
         under ``USER_TEMPLATES_DIR``. Tolerates I/O + parse errors, skips
         non-paired files, and enforces the minimal structural invariant
         (non-empty ``nodes`` list + ``links`` list). Shared by the loader,
@@ -929,7 +929,11 @@ class TemplateService:
         """
         if self.user_templates_dir is None or not self.user_templates_dir.exists():
             return
-        for path in sorted(self.user_templates_dir.rglob("*.json")):
+        paths = [
+            *self.user_templates_dir.rglob("*.yml"),
+            *self.user_templates_dir.rglob("*.json"),
+        ]
+        for path in sorted(paths):
             try:
                 data = yaml.safe_load(path.read_text()) or {}
             except (OSError, yaml.YAMLError):
@@ -949,7 +953,7 @@ class TemplateService:
         validated as lists) or ``None`` when no matching paired template exists.
         Used by ``POST /api/labs/.../nodes/from-paired-template`` (#202) to
         instantiate multi-node templates atomically. Read-only; tolerant of
-        malformed JSON.
+        malformed templates.
         """
         for path, data in self._iter_paired_user_templates():
             if path.stem == template_key:
@@ -1070,7 +1074,7 @@ class TemplateService:
     def _build_paired_catalog(self) -> list[dict[str, Any]]:
         """Enumerate paired user-templates (#202) for the node catalog response.
 
-        Paired templates live as JSON files at the root of ``USER_TEMPLATES_DIR``
+        Paired templates live as YAML or legacy JSON files under ``USER_TEMPLATES_DIR``
         with ``kind="paired"`` and sibling ``nodes:[...]`` + ``links:[...]``
         arrays (see :class:`scripts.import_eveng.adapters.juniper_vmx.JuniperVMXAdapter`).
         Each entry is a self-contained multi-node instantiation directive — the
@@ -1289,7 +1293,7 @@ class TemplateService:
 
     def _load_synthetic_paired_child_templates(self) -> list[TemplateDefinition]:
         """Synthesize per-child :class:`TemplateDefinition` entries from paired
-        user templates (``USER_TEMPLATES_DIR/*.json`` with ``kind="paired"``).
+        user templates (``USER_TEMPLATES_DIR`` files with ``kind="paired"``).
 
         Each child becomes a first-class catalog entry keyed
         ``<paired_key>__<child_id>``. Capability/interface_naming blocks on the
