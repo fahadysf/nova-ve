@@ -17,7 +17,8 @@ _logger = logging.getLogger("nova-ve.template_service")
 SUPPORTED_TEMPLATE_TYPES = {"qemu", "docker", "iol", "dynamips"}
 
 QEMU_MACHINE_OPTIONS = {"q35", "pc"}
-_QEMU_MAX_NICS_HARD_CAP = 8
+_QEMU_MAX_NICS_DEFAULT = 8
+_QEMU_MAX_NICS_HARD_CAP = 25
 _DOCKER_MAX_NICS_DEFAULT = 99
 
 # #206 — synthetic per-child template key separator. A paired template's child
@@ -233,7 +234,7 @@ def _default_capabilities(template_type: str) -> dict[str, Any]:
     if template_type == "docker":
         return {"hotplug": True, "max_nics": _DOCKER_MAX_NICS_DEFAULT, "machine": None}
     # qemu, iol, dynamips default to the runtime-capable q35 profile
-    return {"hotplug": True, "max_nics": _QEMU_MAX_NICS_HARD_CAP, "machine": "q35"}
+    return {"hotplug": True, "max_nics": _QEMU_MAX_NICS_DEFAULT, "machine": "q35"}
 
 
 def _validate_capabilities(payload: Any, template_type: str, source: str) -> dict[str, Any]:
@@ -964,7 +965,13 @@ class TemplateService:
         images: dict[str, dict[str, Any]] = {}
 
         if template_type == "docker":
+            # Docker images live in the docker daemon, not the filesystem --
+            # the marker-tag catalog is authoritative for the picker. Skip the
+            # ``/var/lib/nova-ve/images/docker/`` walk entirely so legacy
+            # placeholder directories cannot leak un-curated entries into the
+            # add-node modal.
             images.update(self._docker_image_catalog())
+            return images
 
         image_root = self.images_dir / template_type
         if image_root.exists():
@@ -1372,30 +1379,16 @@ class TemplateService:
         return None
 
     def _docker_image_catalog(self) -> dict[str, dict[str, Any]]:
-        docker_binary = shutil.which("docker")
-        if not docker_binary:
-            return {}
+        """Surface only docker images that have been marked for lab use.
 
-        env = os.environ.copy()
-        if getattr(self.settings, "DOCKER_HOST", ""):
-            env["DOCKER_HOST"] = self.settings.DOCKER_HOST
-
-        command = [
-            docker_binary,
-            "image",
-            "ls",
-            "--format",
-            "{{.Repository}}:{{.Tag}}",
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, check=False, env=env)
-        if result.returncode != 0:
-            return {}
+        See ``app.services.docker_image_service`` for the marker-tag
+        convention. Returning the curated subset here is what filters the
+        node-creation modal so guacamole/system images never appear.
+        """
+        from app.services.docker_image_service import DockerImageService
 
         images: dict[str, dict[str, Any]] = {}
-        for line in result.stdout.splitlines():
-            image_name = line.strip()
-            if not image_name or image_name.endswith(":<none>") or image_name.startswith("<none>:"):
-                continue
+        for image_name in DockerImageService().list_marked_image_names():
             images[image_name] = {
                 "image": image_name,
                 "files": [],

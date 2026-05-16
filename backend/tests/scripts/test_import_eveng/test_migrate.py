@@ -167,9 +167,9 @@ def test_docker_invokes_build_and_writes_marker(tmp_path: Path) -> None:
     )
 
     assert len(invocations) == 1
-    assert invocations[0][1] == "nova-ve-alpine-telnet:latest"
+    assert invocations[0][1] == "nova-ve/alpine-telnet:latest"
     marker = dst / "docker" / "alpine-telnet" / "image.txt"
-    assert marker.read_text().strip() == "nova-ve-alpine-telnet:latest"
+    assert marker.read_text().strip() == "nova-ve/alpine-telnet:latest"
 
 
 def test_docker_build_failure_records_error_without_aborting(tmp_path: Path) -> None:

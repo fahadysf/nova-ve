@@ -27,7 +27,7 @@ If the UI does not load, jump straight to [Troubleshooting](../operations/troubl
 - **Admin credentials** — bootstrapped username + password.
 - **Critical config files** — `/etc/nova-ve/backend.env`, sudoers fragments, Caddy site config, systemd units.
 - **Service map** — what systemd unit runs what, and how to restart each.
-- **Demo images** — status of the bundled `nova-ve-alpine-telnet:latest` build.
+- **Demo images** — status of the bundled `nova-ve/alpine-telnet:latest` build.
 - **Env var reference** — every variable in `/etc/nova-ve/backend.env` with its purpose.
 
 Treat this file as a runbook. If you ever forget where something lives, the summary almost certainly tells you.

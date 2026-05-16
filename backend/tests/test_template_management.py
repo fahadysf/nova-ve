@@ -133,7 +133,7 @@ def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(
     assert paloalto["extras"]["qemu_version"] == "2.12.0"
     assert paloalto["capabilities"] == {
         "hotplug": False,
-        "max_nics": 8,
+        "max_nics": 25,
         "machine": "pc",
     }
     assert service.interface_naming("qemu", "paloalto") == {
@@ -208,7 +208,15 @@ async def test_batch_create_uses_prefix_positions_and_optional_icon(prepared_tem
 
 
 @pytest.mark.asyncio
-async def test_list_images_includes_local_docker_images(monkeypatch, patched_template_settings):
+async def test_list_images_includes_only_marked_docker_images(
+    monkeypatch, patched_template_settings
+):
+    """The node-creation modal only sees images carrying a marker tag.
+
+    Unmarked system images (e.g. ``postgres``) must not appear so the modal
+    is not polluted by guacamole/system containers; the only thing that
+    qualifies is an image with a ``nova-ve-lab/`` reverse tag.
+    """
     _write_text(
         patched_template_settings.TEMPLATES_DIR / "docker" / "docker.yml",
         """type: docker
@@ -222,13 +230,19 @@ cpulimit: 1
 """,
     )
 
+    # Two rows share an image ID — one is the original tag, one is the marker.
+    docker_ls_stdout = "\n".join(
+        [
+            '{"ID":"sha256:a1","Repository":"nova-ve/alpine-telnet","Tag":"latest","Size":"5MB","CreatedAt":"t1"}',
+            '{"ID":"sha256:a1","Repository":"nova-ve-lab/nova-ve/alpine-telnet","Tag":"latest","Size":"5MB","CreatedAt":"t1"}',
+            # Unmarked image must not surface.
+            '{"ID":"sha256:b2","Repository":"postgres","Tag":"16-alpine","Size":"80MB","CreatedAt":"t2"}',
+        ]
+    )
+
     def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
         assert "docker" in cmd[0]
-        return SimpleNamespace(
-            returncode=0,
-            stdout="nova-ve-alpine-telnet:latest\npostgres:16-alpine\n<none>:<none>\n",
-            stderr="",
-        )
+        return SimpleNamespace(returncode=0, stdout=docker_ls_stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -236,5 +250,6 @@ cpulimit: 1
     images_response = await listing.list_images("docker", "docker", current_user=current_user)
 
     assert images_response["code"] == 200
-    assert "nova-ve-alpine-telnet:latest" in images_response["data"]
-    assert images_response["data"]["nova-ve-alpine-telnet:latest"]["source"] == "docker"
+    assert "nova-ve/alpine-telnet:latest" in images_response["data"]
+    assert images_response["data"]["nova-ve/alpine-telnet:latest"]["source"] == "docker"
+    assert "postgres:16-alpine" not in images_response["data"]

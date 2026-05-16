@@ -4,7 +4,19 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from app.routers import auth, dynamips, folders, labs, links, listing, networks, system, users, ws
+from app.routers import (
+    auth,
+    docker_images,
+    dynamips,
+    folders,
+    labs,
+    links,
+    listing,
+    networks,
+    system,
+    users,
+    ws,
+)
 from app.database import engine
 from app.config import get_settings
 from app.services.lab_lock import LabLockTimeout
@@ -34,6 +46,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(docker_images.router)
 app.include_router(dynamips.router)
 app.include_router(folders.router)
 # v2 per-resource routers must be included BEFORE labs.router so they take

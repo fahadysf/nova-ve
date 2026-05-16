@@ -23,7 +23,7 @@ You can flip modes any time — existing consoles re-flow into the new layout.
 
 | Runtime | Default console | Notes |
 |---|---|---|
-| Docker | Telnet (via `nova-ve-alpine-telnet:latest` or equivalent) | Container must run a telnet server on the configured port. The bundled alpine-telnet image does this for you. |
+| Docker | Telnet (via `nova-ve/alpine-telnet:latest` or equivalent) | Container must run a telnet server on the configured port. The bundled alpine-telnet image does this for you. |
 | QEMU/KVM | VNC (default) or SPICE | The boot disk's display is wired to a Guacamole-reachable VNC server. SPICE is preferred for higher-quality bitmap traffic when supported by the guest. |
 | IOL / Dynamips | Telnet | Vendor IOL and Dynamips images speak telnet on a per-node port. |
 

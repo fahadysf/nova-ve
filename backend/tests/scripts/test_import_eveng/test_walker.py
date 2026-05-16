@@ -138,7 +138,7 @@ def test_docker_walker_only_takes_dirs_with_dockerfile(tmp_path: Path) -> None:
     item = items[0]
     assert item.kind == KIND_DOCKER
     assert item.image_key == "alpine-telnet"
-    assert item.meta["image_tag"] == "nova-ve-alpine-telnet:latest"
+    assert item.meta["image_tag"] == "nova-ve/alpine-telnet:latest"
     assert item.files == []  # docker copier builds + writes image.txt; no file copies
 
 

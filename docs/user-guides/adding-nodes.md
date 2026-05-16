@@ -4,7 +4,7 @@ nova-ve nodes come in two flavours:
 
 | Runtime | Backed by | Used for |
 |---|---|---|
-| **Docker** | A pre-built Docker image (e.g. `nova-ve-alpine-telnet:latest`) | Lightweight Linux endpoints, traffic generators, host emulators |
+| **Docker** | A pre-built Docker image (e.g. `nova-ve/alpine-telnet:latest`) | Lightweight Linux endpoints, traffic generators, host emulators |
 | **QEMU** | A `.qcow2` boot disk under `/var/lib/nova-ve/images/qemu/` | Full network OSes — vendor routers, switches, firewalls |
 
 Both runtimes can be added from the editor palette.

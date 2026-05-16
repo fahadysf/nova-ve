@@ -423,7 +423,7 @@ if run "${DEMO_BUILD_CMD[@]}"; then
   fi
 else
   run bash -c "echo failed > ${DEMO_IMAGES_STATUS_FILE}"
-  echo "WARN: demo-image build failed; nova-ve-alpine-telnet may not be available locally." >&2
+  echo "WARN: demo-image build failed; alpine:3.22 / nova-ve/alpine-telnet / nova-ve/alpine-vnc may not be available locally for labs." >&2
 fi
 run chown "${APP_OWNER}:${APP_GROUP}" "${DEMO_IMAGES_STATUS_FILE}" || true
 

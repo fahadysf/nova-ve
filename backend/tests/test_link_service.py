@@ -88,7 +88,7 @@ def _node(node_id: int, *, ethernet: int = 2) -> dict:
         "name": f"n{node_id}",
         "type": "docker",
         "template": "docker",
-        "image": "nova-ve-alpine-telnet:latest",
+        "image": "nova-ve/alpine-telnet:latest",
         "console": "telnet",
         "status": 0,
         "cpu": 1,
