@@ -237,9 +237,9 @@
   })();
 
   function handleContextMenu(event: MouseEvent) {
-    if (isOpen || !linkId) return;
     event.preventDefault();
     event.stopPropagation();
+    if (event.ctrlKey || event.button !== 2 || isOpen || !linkId) return;
     openConnectionPointMenu?.({ kind: 'network', networkId, linkId, endpointKey }, event);
   }
 </script>

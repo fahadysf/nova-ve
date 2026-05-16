@@ -253,9 +253,9 @@
   }
 
   function handleContextMenu(event: MouseEvent) {
-    if (newConnectionSlot) return;
     event.preventDefault();
     event.stopPropagation();
+    if (event.ctrlKey || event.button !== 2 || newConnectionSlot) return;
     openConnectionPointMenu?.(
       {
         kind: 'node',
