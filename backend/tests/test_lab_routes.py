@@ -53,10 +53,10 @@ async def test_delete_node_route_is_not_shadowed_by_delete_lab(monkeypatch, patc
     monkeypatch.setattr(
         "app.services.template_service.TemplateService._docker_image_catalog",
         lambda _self: {
-            "nova-ve-alpine-telnet:latest": {
-                "image": "nova-ve-alpine-telnet:latest",
+            "nova-ve/alpine-telnet:latest": {
+                "image": "nova-ve/alpine-telnet:latest",
                 "files": [],
-                "path": "nova-ve-alpine-telnet:latest",
+                "path": "nova-ve/alpine-telnet:latest",
                 "source": "docker",
             }
         },
@@ -74,7 +74,7 @@ icon_type: server
 cpulimit: 1
 """
     )
-    docker_image_dir = patched_route_settings.IMAGES_DIR / "docker" / "nova-ve-alpine-telnet:latest"
+    docker_image_dir = patched_route_settings.IMAGES_DIR / "docker" / "nova-ve/alpine-telnet:latest"
     docker_image_dir.mkdir(parents=True, exist_ok=True)
 
     lab_path = patched_route_settings.LABS_DIR / "delete-probe.json"
@@ -106,7 +106,7 @@ cpulimit: 1
                 "name": "probe-node",
                 "type": "docker",
                 "template": "docker",
-                "image": "nova-ve-alpine-telnet:latest",
+                "image": "nova-ve/alpine-telnet:latest",
                 "left": 100,
                 "top": 100,
             },
@@ -138,7 +138,7 @@ async def test_update_topology_route_is_not_shadowed_by_update_lab(monkeypatch, 
       "name": "node-1",
       "type": "docker",
       "template": "docker",
-      "image": "nova-ve-alpine-telnet:latest",
+      "image": "nova-ve/alpine-telnet:latest",
       "console": "telnet",
       "status": 0,
       "cpu": 1,
@@ -185,10 +185,10 @@ async def test_node_catalog_and_batch_routes_are_available(monkeypatch, patched_
     monkeypatch.setattr(
         "app.services.template_service.TemplateService._docker_image_catalog",
         lambda _self: {
-            "nova-ve-alpine-telnet:latest": {
-                "image": "nova-ve-alpine-telnet:latest",
+            "nova-ve/alpine-telnet:latest": {
+                "image": "nova-ve/alpine-telnet:latest",
                 "files": [],
-                "path": "nova-ve-alpine-telnet:latest",
+                "path": "nova-ve/alpine-telnet:latest",
                 "source": "docker",
             }
         },
@@ -244,7 +244,7 @@ cpulimit: 1
                 "count": 2,
                 "type": "docker",
                 "template": "docker",
-                "image": "nova-ve-alpine-telnet:latest",
+                "image": "nova-ve/alpine-telnet:latest",
                 "left": 100,
                 "top": 200,
             },

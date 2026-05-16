@@ -163,7 +163,7 @@ This summary is mode 0600, owned by \`${APP_OWNER}\`.
 
 Status: \`${DEMO_IMAGES_STATUS}\` (one of: \`ok\`, \`skipped\`, \`failed\`, \`unknown\`)
 
-The \`nova-ve-alpine-telnet:latest\` image is built during provisioning so a docker node with
+The \`nova-ve/alpine-telnet:latest\` image is built during provisioning so a docker node with
 \`image: alpine:latest\` and \`extras.command: "sleep infinity"\` (#181) works out of the box.
 
 Re-build manually:

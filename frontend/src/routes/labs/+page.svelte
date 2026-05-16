@@ -216,6 +216,13 @@
   <header class="flex h-14 items-center justify-between border-b border-gray-700 bg-gray-800 px-4">
     <div class="text-lg font-bold tracking-tight text-gray-100">nova-ve</div>
     <div class="flex items-center gap-4">
+      {#if $authStore.user?.role === 'admin'}
+        <button
+          on:click={() => goto('/admin/docker-images')}
+          class="text-sm text-gray-300 transition hover:text-white"
+          title="Curate the docker images available in lab Add Node"
+        >Docker images</button>
+      {/if}
       <span class="text-sm text-gray-400">{currentUserLabel}</span>
       <button on:click={handleLogout} class="text-sm text-red-400 transition hover:text-red-300">Logout</button>
     </div>

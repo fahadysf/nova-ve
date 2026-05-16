@@ -31,7 +31,7 @@ Set any of these as env vars before piping into `sudo bash`:
 | `NOVA_VE_REPO_REF` | `main` | Branch / tag / SHA to check out |
 | `NOVA_VE_REPO_DIR` | `~${SUDO_USER}/nova-ve-git` | Clone destination |
 | `NOVA_VE_OWNER` | `${SUDO_USER:-ubuntu}` | UNIX user that owns the repo and runs the backend |
-| `NOVA_VE_SKIP_DEMO_IMAGES` | (unset) | Set to `1` to skip building the bundled `nova-ve-alpine-telnet:latest` demo image |
+| `NOVA_VE_SKIP_DEMO_IMAGES` | (unset) | Set to `1` to skip building the bundled `nova-ve/alpine-telnet:latest` demo image |
 
 ## After install
 

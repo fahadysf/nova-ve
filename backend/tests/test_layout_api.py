@@ -24,7 +24,7 @@ def _seed_lab(lab_dir, name: str = "lab.json") -> str:
         "nodes": {
             "1": {
                 "id": 1, "name": "n1", "type": "docker", "template": "docker",
-                "image": "nova-ve-alpine-telnet:latest", "console": "telnet",
+                "image": "nova-ve/alpine-telnet:latest", "console": "telnet",
                 "status": 0, "cpu": 1, "ram": 256, "ethernet": 1,
                 "left": 100, "top": 100, "icon": "Server.png",
                 "interfaces": [
