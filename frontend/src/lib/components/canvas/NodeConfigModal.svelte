@@ -115,6 +115,7 @@
   let interfaceNamingScheme = DEFAULT_INTERFACE_NAMING;
   let dirty: Record<string, boolean> = {};
   let lastSignature = '';
+  let lastImageConsoleDefaultsSignature = '';
 
   function templateId(template: NodeCatalogTemplate): string {
     return `${template.type}:${template.key}`;
@@ -165,6 +166,10 @@
 
   function extrasSchemaFor(template: NodeCatalogTemplate | undefined): NodeCatalogExtraField[] {
     return template?.extras_schema ?? [];
+  }
+
+  function imageOptionFor(template: NodeCatalogTemplate | undefined, imageName: string) {
+    return template?.images.find((entry) => entry.image === imageName);
   }
 
   function interfaceNamingErrorFor(value: string, type: NodeTypeKey): string | null {
@@ -242,6 +247,9 @@
       const persistedExtras = ((node as unknown as { extras?: ExtrasMap }).extras ?? {}) as ExtrasMap;
       extras = { ...baseExtras, ...persistedExtras };
       resetDirty();
+      applyImageConsoleDefaults(matchingTemplate, {
+        overrideExisting: !Object.prototype.hasOwnProperty.call(persistedExtras, 'vnc_port'),
+      });
       return;
     }
 
@@ -303,6 +311,7 @@
       }
     }
     extras = nextExtras;
+    applyImageConsoleDefaults(template, { overrideExisting: true });
   }
 
   function isStoppedOnly(field: string): boolean {
@@ -316,6 +325,21 @@
   function setExtra(key: string, value: unknown) {
     extras = { ...extras, [key]: value };
     markDirty(`extras.${key}`);
+  }
+
+  function applyImageConsoleDefaults(
+    template: NodeCatalogTemplate | undefined = selectedTemplate,
+    options: { overrideExisting?: boolean } = {}
+  ) {
+    if (template?.type !== 'docker') return;
+    if (!options.overrideExisting && extras.vnc_port !== undefined && extras.vnc_port !== null && extras.vnc_port !== '') {
+      return;
+    }
+    const imageOption = imageOptionFor(template, image);
+    const vncPort = imageOption?.vnc_port;
+    if (typeof vncPort !== 'number' || !Number.isFinite(vncPort)) return;
+    if (dirty['extras.vnc_port']) return;
+    extras = { ...extras, vnc_port: vncPort };
   }
 
   function envEntries(value: unknown): Array<{ key: string; value: string }> {
@@ -441,6 +465,7 @@
   }
 
   $: selectedTemplate = templateForId(selectedTemplateId);
+  $: selectedImageOption = imageOptionFor(selectedTemplate, image);
   $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
   $: visiblePairedTemplates = catalog ? pairedTemplates() : [];
   $: selectedPairedTemplate = pairedTemplateKey ? pairedTemplateForKey(pairedTemplateKey) : undefined;
@@ -450,7 +475,13 @@
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
   $: if (open && catalog && signature !== lastSignature) {
     lastSignature = signature;
+    lastImageConsoleDefaultsSignature = '';
     initializeForm();
+  }
+  $: imageConsoleDefaultsSignature = `${open}:${selectedTemplate?.type ?? ''}:${selectedTemplate?.key ?? ''}:${image}:${selectedImageOption?.vnc_port ?? ''}`;
+  $: if (open && catalog && imageConsoleDefaultsSignature !== lastImageConsoleDefaultsSignature) {
+    lastImageConsoleDefaultsSignature = imageConsoleDefaultsSignature;
+    applyImageConsoleDefaults(undefined, { overrideExisting: mode === 'create' || dirty.image === true });
   }
 
   // ── QEMU computed command preview ────────────────────────────────────────
@@ -862,6 +893,7 @@
                             value={String(extras[field.key] ?? '')}
                             on:input={(event) => setExtra(field.key, (event.target as HTMLTextAreaElement).value)}
                             placeholder={field.placeholder ?? ''}
+                            aria-label={field.label}
                             disabled={isExtraDisabled(field)}
                             rows="3"
                             class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
@@ -874,6 +906,7 @@
                                   value={entry.key}
                                   on:input={(event) => envUpdate(field.key, index, 'key', (event.target as HTMLInputElement).value)}
                                   placeholder="KEY"
+                                  aria-label={`${field.label} key ${index + 1}`}
                                   disabled={isExtraDisabled(field)}
                                   class="w-1/3 rounded-lg border border-slate-800 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 disabled:text-slate-500"
                                 />
@@ -881,6 +914,7 @@
                                   value={entry.value}
                                   on:input={(event) => envUpdate(field.key, index, 'value', (event.target as HTMLInputElement).value)}
                                   placeholder="value"
+                                  aria-label={`${field.label} value ${index + 1}`}
                                   disabled={isExtraDisabled(field)}
                                   class="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-2 py-1.5 text-xs text-slate-100 disabled:text-slate-500"
                                 />
@@ -915,6 +949,7 @@
                           <select
                             value={String(extras[field.key] ?? '')}
                             on:change={(event) => setExtra(field.key, (event.target as HTMLSelectElement).value)}
+                            aria-label={field.label}
                             disabled={isExtraDisabled(field)}
                             class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                           >
@@ -927,6 +962,7 @@
                             type="number"
                             value={Number(extras[field.key] ?? 0)}
                             on:input={(event) => setExtra(field.key, Number((event.target as HTMLInputElement).value))}
+                            aria-label={field.label}
                             disabled={isExtraDisabled(field)}
                             placeholder={field.placeholder ?? ''}
                             class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
@@ -935,12 +971,14 @@
                           <input
                             value={String(extras[field.key] ?? '')}
                             disabled
+                            aria-label={field.label}
                             class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-400"
                           />
                         {:else}
                           <input
                             value={String(extras[field.key] ?? '')}
                             on:input={(event) => setExtra(field.key, (event.target as HTMLInputElement).value)}
+                            aria-label={field.label}
                             disabled={isExtraDisabled(field)}
                             placeholder={field.placeholder ?? ''}
                             class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"

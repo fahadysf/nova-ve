@@ -410,6 +410,60 @@ async def test_docker_runtime_honors_env_restart_and_extra_args(monkeypatch, pop
     assert "--cap-add=NET_ADMIN" in run_cmd
 
 
+@pytest.mark.asyncio
+async def test_docker_vnc_runtime_uses_configured_container_port(monkeypatch, populated_templates):
+    lab_data = {
+        "schema": 2,
+        "id": "lab-docker",
+        "meta": {"name": "docker"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "firefox-vnc",
+                "type": "docker",
+                "image": "accetto/ubuntu-vnc-xfce-firefox-g3:latest",
+                "console": "vnc",
+                "cpu": 1,
+                "ram": 1024,
+                "ethernet": 1,
+                "interfaces": [],
+                "extras": {"vnc_port": 5901},
+            }
+        },
+        "networks": {},
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }
+    (populated_templates.LABS_DIR / "docker.json").write_text(json.dumps(lab_data))
+
+    recorded: list[list[str]] = []
+    containers: dict[str, dict] = {}
+    _stub_docker_subprocess(monkeypatch, recorded, containers)
+
+    proxy_calls: list[dict[str, int]] = []
+
+    def fake_console_proxy_start(*, node_pid: int, listen_port: int, target_port: int) -> int:
+        proxy_calls.append(
+            {"node_pid": int(node_pid), "listen_port": int(listen_port), "target_port": int(target_port)}
+        )
+        return 4321
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start",
+        fake_console_proxy_start,
+    )
+
+    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    assert response["code"] == 200
+
+    run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
+    published = run_cmd[run_cmd.index("-p") + 1]
+    assert published.endswith(":5901")
+    assert proxy_calls
+    assert proxy_calls[0]["target_port"] == 5901
+
+
 def _docker_lab_with_command(command_value):
     return {
         "schema": 2,

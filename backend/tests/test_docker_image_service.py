@@ -116,6 +116,40 @@ def test_list_all_images_returns_empty_when_docker_missing(monkeypatch):
     assert svc.DockerImageService().list_marked_image_names() == []
 
 
+def test_console_hints_prefers_vnc_port_env(monkeypatch):
+    monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker" if b == "docker" else None)
+
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+        if cmd[1:3] == ["image", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='[{"Config":{"Env":["VNC_PORT=5901"],"ExposedPorts":{"6901/tcp":{}}}}]',
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(svc.subprocess, "run", fake_run)
+
+    assert svc.DockerImageService().console_hints("accetto/ubuntu-vnc:latest").vnc_port == 5901
+
+
+def test_console_hints_uses_exposed_vnc_port(monkeypatch):
+    monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker" if b == "docker" else None)
+
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+        if cmd[1:3] == ["image", "inspect"]:
+            return SimpleNamespace(
+                returncode=0,
+                stdout='[{"Config":{"Env":[],"ExposedPorts":{"5900/tcp":{},"6901/tcp":{}}}}]',
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(svc.subprocess, "run", fake_run)
+
+    assert svc.DockerImageService().console_hints("nova-ve/alpine-vnc:latest").vnc_port == 5900
+
+
 # ------------------------------------------------------------------ mutate
 
 

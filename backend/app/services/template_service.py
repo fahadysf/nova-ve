@@ -529,6 +529,16 @@ def _docker_extras_schema() -> list[dict[str, Any]]:
             "runtime": True,
         },
         {
+            "key": "vnc_port",
+            "label": "VNC port",
+            "type": "number",
+            "default": 5900,
+            "placeholder": "5900",
+            "description": "Container-side VNC port used by the HTML5 console when console mode is vnc.",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
             "key": "environment",
             "label": "Environment variables",
             "type": "env",
@@ -1388,13 +1398,17 @@ class TemplateService:
         from app.services.docker_image_service import DockerImageService
 
         images: dict[str, dict[str, Any]] = {}
-        for image_name in DockerImageService().list_marked_image_names():
+        service = DockerImageService()
+        for image_name in service.list_marked_image_names():
+            hints = service.console_hints(image_name)
             images[image_name] = {
                 "image": image_name,
                 "files": [],
                 "path": image_name,
                 "source": "docker",
             }
+            if hints.vnc_port is not None:
+                images[image_name]["vnc_port"] = hints.vnc_port
         return images
 
     @staticmethod
