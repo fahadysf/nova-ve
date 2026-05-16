@@ -92,7 +92,7 @@
   function handleMouseDown(event: MouseEvent) {
     if (event.button !== 0) return;
 
-    if (event.shiftKey && !isOpen && linkId) {
+    if (event.ctrlKey && !isOpen && linkId) {
       const root = portHandle?.closest('[data-testid="network-node"]');
       const rect = root?.getBoundingClientRect();
       if (!rect) return;
@@ -121,7 +121,13 @@
       return;
     }
 
-    if (!event.shiftKey) {
+    if (event.ctrlKey) {
+      event.stopPropagation();
+      event.preventDefault();
+      return;
+    }
+
+    if (!event.ctrlKey) {
       event.stopPropagation();
       event.preventDefault();
       clickStartTs = Date.now();

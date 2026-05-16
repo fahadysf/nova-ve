@@ -135,20 +135,20 @@ test.describe('US-068 — port_position drag persists & survives reload', () => 
       const beforeBox = await port.boundingBox();
       expect(beforeBox).not.toBeNull();
 
-      // US-080: plain (non-shift) drag from a port now starts a link-create
-      // flow rather than repositioning the port. Hold Shift across the drag
+      // US-080: plain drag from a port now starts a link-create flow rather
+      // than repositioning the port. Hold Control across the drag
       // to engage the perimeter-clamp port reposition path that fires the
       // PATCH /interfaces/{idx} request.
-      await page.keyboard.down('Shift');
+      await page.keyboard.down('Control');
       try {
-        await port.dispatchEvent('mousedown', { button: 0, shiftKey: true });
+        await port.dispatchEvent('mousedown', { button: 0, ctrlKey: true });
         await page.mouse.move(
           (beforeBox?.x ?? 0) + 50,
           (beforeBox?.y ?? 0) + 80
         );
         await page.mouse.up();
       } finally {
-        await page.keyboard.up('Shift');
+        await page.keyboard.up('Control');
       }
 
       // Wait for the 250ms debounce inside PortLayer to flush the PATCH.
