@@ -50,7 +50,7 @@
 </script>
 
 <div
-  class="relative min-w-[7.5rem] rounded-full border border-blue-500 bg-blue-500/15 px-3 py-1.5 text-blue-100 shadow-lg shadow-black/20"
+  class="relative min-w-[7.5rem] rounded-xl border border-blue-500 bg-blue-500/15 px-3 py-2 text-blue-100 shadow-lg shadow-black/20"
   data-testid="network-node"
   data-network-id={networkId}
   data-network-slot-count={slotCount}
@@ -66,26 +66,28 @@
     />
   {/each}
 
-  <div class="flex items-center justify-between gap-2">
-    <div class="min-w-0">
-      <div class="text-[8px] uppercase tracking-[0.18em] text-blue-200/80">Network</div>
-      <div class="truncate text-[10px] font-semibold tracking-tight">{data.label}</div>
+  <div class="flex items-start justify-between gap-2">
+    <div class="min-w-0 flex-1 pb-3 pl-4 pr-1">
+      <div class="break-words text-[10px] font-semibold leading-snug text-blue-100" title={data.label}>
+        {data.label}
+      </div>
     </div>
-    <div class="flex items-center gap-1">
+    <div class="flex shrink-0 items-center gap-1">
       <span class="rounded-full bg-blue-950/80 px-1.5 py-0.5 font-mono text-[9px] text-blue-100">
         {data.count ?? 0}
       </span>
-      <button
-        type="button"
-        class="nodrag inline-flex h-4 w-4 items-center justify-center rounded-full border border-blue-500/40 bg-blue-950/80 text-blue-200 transition hover:border-blue-300/70 hover:text-white"
-        aria-label="Open network info panel"
-        title="Open info panel"
-        data-testid="network-info-button"
-        on:click={openInfo}
-        on:pointerdown|stopPropagation
-      >
-        <Info class="h-2.5 w-2.5" />
-      </button>
     </div>
   </div>
+
+  <button
+    type="button"
+    class="nodrag absolute bottom-1 left-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-blue-500/40 bg-blue-950/80 text-blue-200 transition hover:border-blue-300/70 hover:text-white"
+    aria-label="Open network info panel"
+    title="Open info panel"
+    data-testid="network-info-button"
+    on:click={openInfo}
+    on:pointerdown|stopPropagation
+  >
+    <Info class="h-2.5 w-2.5" />
+  </button>
 </div>

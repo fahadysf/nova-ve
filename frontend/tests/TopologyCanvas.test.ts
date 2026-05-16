@@ -72,6 +72,7 @@ vi.mock('$lib/stores/labWs', () => ({
     nodeStates: writable({}),
     linkReconciliation: writable({}),
     connected: writable(false),
+    onLinkChange: vi.fn(() => vi.fn()),
   }),
 }));
 

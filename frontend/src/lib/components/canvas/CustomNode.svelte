@@ -39,14 +39,12 @@
 
   $: running = data.status === 2;
   $: transitioning = data.transientStatus === 'starting' || data.transientStatus === 'stopping';
-  $: statusLabel = data.transientStatus ?? (running ? 'running' : 'stopped');
-  $: typeLabel = (data.type || 'node').toUpperCase();
   $: interfaces = data.interfaces ?? [];
   $: nodeId = data.nodeId ?? 0;
 </script>
 
 <div
-  class={`relative min-w-[9.5rem] rounded-xl border px-3 py-2 text-gray-100 shadow-lg shadow-black/20 ${
+  class={`relative min-w-[9.5rem] rounded-xl border px-3 py-2.5 text-gray-100 shadow-lg shadow-black/20 ${
     transitioning
       ? 'border-amber-300/80 bg-gray-900'
       : running
@@ -66,29 +64,12 @@
     id="default"
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
-  <div class="flex items-start gap-2">
-    <span
-      class={`mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ${
-        transitioning ? 'bg-amber-300' : running ? 'bg-emerald-500' : 'bg-gray-500'
-      }`}
-    ></span>
-    <div class="min-w-0 flex-1">
-      <div class="text-[9px] uppercase tracking-[0.05em] text-gray-500">{typeLabel}</div>
-      <div class="mt-1 truncate text-[11px] font-semibold tracking-tight text-gray-100">{data.label}</div>
-      <div class="mt-1 flex items-center justify-between gap-2">
-        <span class="truncate font-mono text-[10px] text-gray-400">{data.template || data.console || 'template'}</span>
-        <span
-          class={`rounded-full px-1.5 py-0.5 text-[9px] uppercase tracking-[0.05em] ${
-            transitioning
-              ? 'bg-amber-300/20 text-amber-200'
-              : running
-                ? 'bg-emerald-500/20 text-emerald-200'
-                : 'bg-gray-900 text-gray-300'
-          }`}
-        >
-          {statusLabel}
-        </span>
-      </div>
+  <div class="pb-3 pl-4 pr-1">
+    <div
+      class="min-w-0 flex-1 break-words text-[10px] font-semibold leading-snug text-gray-100"
+      title={data.label}
+    >
+      {data.label}
     </div>
   </div>
 

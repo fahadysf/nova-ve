@@ -16,7 +16,7 @@ qemu_version: "2.12.0"
 qemu_options: "-rtc base=utc -cpu host"
 capabilities:
   hotplug: false
-  max_nics: 8
+  max_nics: 25
   machine: pc
 interface_naming:
   format:
