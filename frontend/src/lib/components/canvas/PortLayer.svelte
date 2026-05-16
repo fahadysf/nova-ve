@@ -128,11 +128,6 @@
     window.addEventListener('mouseup', onUp);
   }
 
-  function effectivePort(index: number): PortPosition {
-    if (dragging && dragging.interfaceIndex === index) return dragging.previewPort;
-    return resolvedPorts[index];
-  }
-
   onDestroy(() => {
     for (const timer of pendingPushTimers.values()) clearTimeout(timer);
     pendingPushTimers.clear();
@@ -141,7 +136,10 @@
 
 <div bind:this={layerEl} class="pointer-events-none absolute inset-0">
   {#each visibleInterfaceEntries as entry (entry.interfaceIndex)}
-    {@const port = effectivePort(entry.index)}
+    {@const port =
+      dragging && dragging.interfaceIndex === entry.interfaceIndex
+        ? dragging.previewPort
+        : resolvedPorts[entry.index]}
     <div class="pointer-events-auto absolute inset-0">
       <Port
         interfaceData={entry.iface}
@@ -152,6 +150,7 @@
         connectionPointRef={portRefsByInterfaceIndex[String(entry.interfaceIndex)]}
         connected={true}
         highlighted={highlightedInterfaceIndex === entry.interfaceIndex}
+        manualRepositionStart={handlePortMouseDown}
         on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
         on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
         on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}
@@ -160,7 +159,10 @@
     </div>
   {/each}
   {#if firstAvailableEntry}
-    {@const port = effectivePort(firstAvailableEntry.index)}
+    {@const port =
+      dragging && dragging.interfaceIndex === firstAvailableEntry.interfaceIndex
+        ? dragging.previewPort
+        : resolvedPorts[firstAvailableEntry.index]}
     <div class="pointer-events-auto absolute inset-0">
       <Port
         interfaceData={firstAvailableEntry.iface}
@@ -171,6 +173,7 @@
         connected={false}
         newConnectionSlot={true}
         highlighted={highlightedNewConnection}
+        manualRepositionStart={handlePortMouseDown}
         on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
         on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
         on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}

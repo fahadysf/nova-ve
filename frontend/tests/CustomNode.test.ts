@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { render, screen } from '@testing-library/svelte';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { tick } from 'svelte';
 
 vi.mock('@xyflow/svelte', async () => {
   const LeafStub = (await import('./mocks/LeafStub.svelte')).default;
@@ -16,6 +17,10 @@ vi.mock('@xyflow/svelte', async () => {
 });
 
 import CustomNode from '$lib/components/canvas/CustomNode.svelte';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('CustomNode', () => {
   it('shows hostname only on the node face without template metadata', () => {
@@ -105,5 +110,68 @@ describe('CustomNode', () => {
 
     expect(screen.getAllByTestId('port-handle')).toHaveLength(2);
     expect(screen.queryByTestId('port-new-connection-handle')).toBeNull();
+  });
+
+  it('shows ctrl-drag preview for connected interfaces whose real index differs from array order', async () => {
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 100,
+      bottom: 100,
+      width: 100,
+      height: 100,
+      toJSON: () => ({}),
+    } as DOMRect);
+
+    render(CustomNode, {
+      props: {
+        data: {
+          label: 'pa-vm-01',
+          status: 2,
+          nodeId: 1,
+          connectedInterfaceIndexes: [5],
+          interfaces: [
+            { index: 5, name: 'ethernet1/5', network_id: 9, port_position: { side: 'right', offset: 0.5 } },
+          ],
+        },
+      },
+    });
+
+    const portWrapper = document.querySelector(
+      '[data-port-node-id="1"][data-port-interface-index="5"]'
+    ) as HTMLElement | null;
+    expect(portWrapper).not.toBeNull();
+    expect(portWrapper).toHaveAttribute('data-port-side', 'right');
+
+    portWrapper?.dispatchEvent(
+      new MouseEvent('mousedown', {
+        button: 0,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+        clientX: 100,
+        clientY: 50,
+      })
+    );
+    await tick();
+    window.dispatchEvent(
+      new MouseEvent('mousemove', {
+        bubbles: true,
+        cancelable: true,
+        clientX: 50,
+        clientY: -5,
+      })
+    );
+    await tick();
+
+    const movedPortWrapper = document.querySelector(
+      '[data-port-node-id="1"][data-port-interface-index="5"]'
+    ) as HTMLElement | null;
+    expect(movedPortWrapper).toHaveAttribute('data-port-side', 'top');
+    expect(movedPortWrapper?.getAttribute('data-port-offset')).toBe('0.5000');
+
+    window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
   });
 });
