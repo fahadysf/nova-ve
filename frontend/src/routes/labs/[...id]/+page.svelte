@@ -128,7 +128,9 @@
   $: labId = $page.params.id ?? '';
   $: isLabIndexRoute = labId === '';
   $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
-  $: networkList = Object.values(networks).sort((a, b) => a.id - b.id);
+  $: networkList = Object.values(networks)
+    .filter((network) => network.implicit !== true && network.visibility !== false)
+    .sort((a, b) => a.id - b.id);
   $: totalVCpu = nodeList.reduce((total, node) => total + (node.cpu ?? 0), 0);
   $: runningConsoleNodes = nodeList.filter((node) => node.status === 2 && !node.transientStatus);
   $: runningNodeCount = runningConsoleNodes.length;
@@ -276,7 +278,7 @@
       const [meta, nodeData, networkData, topologyData, linksData] = await Promise.all([
         apiGetData<LabMeta>(`/labs/${labId}`),
         apiGetData<Record<string, NodeData>>(`/labs/${labId}/nodes`),
-        apiGetData<Record<string, NetworkData>>(`/labs/${labId}/networks`),
+        apiGetData<Record<string, NetworkData>>(`/labs/${labId}/networks?include_hidden=true`),
         apiGetData<TopologyLink[]>(`/labs/${labId}/topology`),
         // US-082: v2 links[] feeds the canvas edge derivation. Catch errors so
         // an isolated /links failure doesn't block the rest of the lab load.

@@ -19,7 +19,9 @@
     console?: string;
     nodeId?: number;
     interfaces?: NodeInterface[];
+    connectedInterfaceIndexes?: number[];
     highlightedInterfaceIndex?: number | null;
+    highlightedNewConnection?: boolean;
   };
 
   const dispatch = createEventDispatcher<{
@@ -75,8 +77,11 @@
 
   <PortLayer
     {nodeId}
+    nodeName={data.label}
     {interfaces}
+    connectedInterfaceIndexes={data.connectedInterfaceIndexes ?? []}
     highlightedInterfaceIndex={data.highlightedInterfaceIndex ?? null}
+    highlightedNewConnection={data.highlightedNewConnection ?? false}
     on:port:mousedown={(e) => dispatch('port:mousedown', e.detail)}
     on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
     on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}

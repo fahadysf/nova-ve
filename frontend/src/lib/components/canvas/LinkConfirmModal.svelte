@@ -4,17 +4,35 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount } from 'svelte';
   import { dragLinkStore } from '$lib/stores/dragLink';
-  import type { LinkStyle } from '$lib/types';
+  import { formatInterfaceName } from '$lib/services/interfaceNaming';
+  import type { DragEndpoint } from '$lib/stores/dragLink';
+  import type { Link, LinkStyle, NodeData } from '$lib/types';
 
   const dispatch = createEventDispatcher<{
-    confirm: { styleOverride: LinkStyle };
+    confirm: {
+      styleOverride: LinkStyle;
+      sourceInterfaceIndex?: number;
+      targetInterfaceIndex?: number;
+    };
     cancel: void;
   }>();
+
+  export let nodes: Record<string, NodeData> = {};
+  export let links: Link[] = [];
 
   $: snapshot = $dragLinkStore;
   $: open = snapshot.state === 'confirming';
   let style: LinkStyle = 'orthogonal';
   let modalEl: HTMLDivElement | null = null;
+  let sourceInterfaceIndex = '';
+  let targetInterfaceIndex = '';
+  let selectionSignature = '';
+
+  type InterfaceOption = {
+    index: number;
+    label: string;
+    plannedMac: string | null;
+  };
 
   function endpointTitle(
     endpoint: typeof snapshot.source | typeof snapshot.target | null | undefined
@@ -23,17 +41,104 @@
     if (endpoint.kind === 'network') {
       return `Network: ${endpoint.networkName ?? `#${endpoint.networkId}`}`;
     }
+    if (endpoint.kind === 'node-slot') {
+      return `Node: ${endpoint.nodeName ?? `#${endpoint.nodeId}`}`;
+    }
     return endpoint.interfaceName ?? `port ${endpoint.interfaceIndex ?? '?'}`;
   }
   $: sourceTitle = endpointTitle(snapshot.source);
   $: targetTitle = endpointTitle(snapshot.target);
+
+  function nodeForEndpoint(endpoint: DragEndpoint | null): NodeData | null {
+    if (!endpoint || (endpoint.kind !== 'interface' && endpoint.kind !== 'node-slot')) {
+      return null;
+    }
+    return nodes[String(endpoint.nodeId)] ?? null;
+  }
+
+  function connectedInterfaceIndexes(nodeId: number): Set<number> {
+    const indexes = new Set<number>();
+    const node = nodes[String(nodeId)];
+    if (node) {
+      for (const [index, iface] of node.interfaces.entries()) {
+        if ((iface.network_id ?? 0) > 0) {
+          indexes.add(iface.index ?? index);
+        }
+      }
+    }
+    for (const link of links) {
+      for (const endpoint of [link.from, link.to]) {
+        if (endpoint?.node_id === nodeId && typeof endpoint.interface_index === 'number') {
+          indexes.add(endpoint.interface_index);
+        }
+      }
+    }
+    return indexes;
+  }
+
+  function interfaceOptionsFor(endpoint: DragEndpoint | null): InterfaceOption[] {
+    if (!endpoint || endpoint.kind !== 'node-slot') {
+      return [];
+    }
+    const node = nodes[String(endpoint.nodeId)];
+    if (!node) {
+      return [];
+    }
+    const connected = connectedInterfaceIndexes(endpoint.nodeId);
+    return node.interfaces
+      .map((iface, index) => {
+        const interfaceIndex = iface.index ?? index;
+        return {
+          index: interfaceIndex,
+          label:
+            formatInterfaceName(node.interface_naming_scheme, interfaceIndex) ||
+            iface.name ||
+            `iface ${interfaceIndex}`,
+          plannedMac: iface.planned_mac ?? null,
+        };
+      })
+      .filter((option) => !connected.has(option.index));
+  }
+
+  $: sourceInterfaceOptions = interfaceOptionsFor(snapshot.source);
+  $: targetInterfaceOptions = interfaceOptionsFor(snapshot.target);
+  $: sourceRequiresInterface = snapshot.source?.kind === 'node-slot';
+  $: targetRequiresInterface = snapshot.target?.kind === 'node-slot';
+  $: sourceNode = nodeForEndpoint(snapshot.source);
+  $: targetNode = nodeForEndpoint(snapshot.target);
+  $: sourceSelectionValid = !sourceRequiresInterface || sourceInterfaceIndex !== '';
+  $: targetSelectionValid = !targetRequiresInterface || targetInterfaceIndex !== '';
+  $: canConfirm = sourceSelectionValid && targetSelectionValid;
+
+  $: if (open) {
+    const nextSignature = JSON.stringify({
+      source: snapshot.source,
+      target: snapshot.target,
+      sourceOptions: sourceInterfaceOptions.map((option) => option.index),
+      targetOptions: targetInterfaceOptions.map((option) => option.index),
+    });
+    if (nextSignature !== selectionSignature) {
+      selectionSignature = nextSignature;
+      sourceInterfaceIndex = sourceInterfaceOptions[0]?.index.toString() ?? '';
+      targetInterfaceIndex = targetInterfaceOptions[0]?.index.toString() ?? '';
+    }
+  } else if (selectionSignature !== '') {
+    selectionSignature = '';
+    sourceInterfaceIndex = '';
+    targetInterfaceIndex = '';
+  }
 
   function close() {
     dispatch('cancel');
   }
 
   function confirm() {
-    dispatch('confirm', { styleOverride: style });
+    if (!canConfirm) return;
+    dispatch('confirm', {
+      styleOverride: style,
+      sourceInterfaceIndex: sourceInterfaceIndex === '' ? undefined : Number(sourceInterfaceIndex),
+      targetInterfaceIndex: targetInterfaceIndex === '' ? undefined : Number(targetInterfaceIndex),
+    });
   }
 
   function onKey(event: KeyboardEvent) {
@@ -109,6 +214,27 @@
               <div class="mt-1 text-sm font-medium">
                 Network: {snapshot.source.networkName ?? `#${snapshot.source.networkId}`}
               </div>
+            {:else if snapshot.source?.kind === 'node-slot'}
+              <div class="mt-1 text-sm font-medium">
+                node #{snapshot.source.nodeId} · {sourceNode?.name ?? 'new connection'}
+              </div>
+              <label class="mt-3 block">
+                <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Source interface</span>
+                <select
+                  bind:value={sourceInterfaceIndex}
+                  class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none transition focus:border-blue-500"
+                  data-testid="link-source-interface-select"
+                >
+                  {#each sourceInterfaceOptions as option}
+                    <option value={option.index.toString()}>
+                      {option.label}
+                    </option>
+                  {/each}
+                </select>
+              </label>
+              {#if sourceInterfaceOptions.length === 0}
+                <div class="mt-2 text-xs text-amber-200">No unused source interfaces are available.</div>
+              {/if}
             {:else if snapshot.source?.kind === 'interface'}
               <div class="mt-1 text-sm font-medium">
                 node #{snapshot.source.nodeId} · {snapshot.source.interfaceName ?? `iface ${snapshot.source.interfaceIndex}`}
@@ -124,6 +250,27 @@
               <div class="mt-1 text-sm font-medium">
                 Network: {snapshot.target.networkName ?? `#${snapshot.target.networkId}`}
               </div>
+            {:else if snapshot.target?.kind === 'node-slot'}
+              <div class="mt-1 text-sm font-medium">
+                node #{snapshot.target.nodeId} · {targetNode?.name ?? 'new connection'}
+              </div>
+              <label class="mt-3 block">
+                <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Target interface</span>
+                <select
+                  bind:value={targetInterfaceIndex}
+                  class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-2 py-1.5 text-xs text-slate-100 outline-none transition focus:border-blue-500"
+                  data-testid="link-target-interface-select"
+                >
+                  {#each targetInterfaceOptions as option}
+                    <option value={option.index.toString()}>
+                      {option.label}
+                    </option>
+                  {/each}
+                </select>
+              </label>
+              {#if targetInterfaceOptions.length === 0}
+                <div class="mt-2 text-xs text-amber-200">No unused target interfaces are available.</div>
+              {/if}
             {:else if snapshot.target?.kind === 'interface'}
               <div class="mt-1 text-sm font-medium">
                 node #{snapshot.target.nodeId} · {snapshot.target.interfaceName ?? `iface ${snapshot.target.interfaceIndex}`}
@@ -173,6 +320,7 @@
           class="rounded-full border border-blue-500/40 bg-blue-500/15 px-4 py-2 text-sm text-blue-100 transition hover:bg-blue-500/25"
           on:click={confirm}
           data-testid="link-confirm-button"
+          disabled={!canConfirm}
         >
           Confirm
         </button>

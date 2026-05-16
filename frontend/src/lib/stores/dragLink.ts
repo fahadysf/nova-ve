@@ -27,6 +27,15 @@ export interface InterfaceEndpoint {
   plannedMac?: string | null;
 }
 
+/** Node endpoint for the dotted "new connection" slot before interface choice. */
+export interface NodeSlotEndpoint {
+  kind: 'node-slot';
+  nodeId: number;
+  port: PortPosition;
+  /** Optional human-friendly node label rendered in the confirm modal. */
+  nodeName?: string;
+}
+
 /** Network-bridge endpoint (one of the four perimeter handles on a NetworkNode). */
 export interface NetworkEndpoint {
   kind: 'network';
@@ -37,7 +46,7 @@ export interface NetworkEndpoint {
   networkName?: string;
 }
 
-export type DragEndpoint = InterfaceEndpoint | NetworkEndpoint;
+export type DragEndpoint = InterfaceEndpoint | NodeSlotEndpoint | NetworkEndpoint;
 
 export interface DragLinkPointer {
   x: number;
@@ -113,6 +122,13 @@ export function defaultIdempotencyKey(): string {
 
 export function isLegalEndpointPair(source: DragEndpoint, target: DragEndpoint): boolean {
   if (source.kind === 'network' && target.kind === 'network') {
+    return false;
+  }
+  const sourceNodeId =
+    source.kind === 'interface' || source.kind === 'node-slot' ? source.nodeId : null;
+  const targetNodeId =
+    target.kind === 'interface' || target.kind === 'node-slot' ? target.nodeId : null;
+  if (sourceNodeId !== null && sourceNodeId === targetNodeId) {
     return false;
   }
   return true;

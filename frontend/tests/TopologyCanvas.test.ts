@@ -5,9 +5,9 @@ import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
-import type { DragEndpoint, InterfaceEndpoint, NetworkEndpoint } from '$lib/stores/dragLink';
+import type { DragEndpoint, InterfaceEndpoint, NetworkEndpoint, NodeSlotEndpoint } from '$lib/stores/dragLink';
 import { dragLinkStore } from '$lib/stores/dragLink';
-import type { NetworkData, NodeCatalog, NodeData, TemplateCapabilities } from '$lib/types';
+import type { Link, NetworkData, NodeCatalog, NodeData, TemplateCapabilities } from '$lib/types';
 
 vi.mock('@xyflow/svelte', async () => {
   const SvelteFlow = (await import('./mocks/SvelteFlowMock.svelte')).default;
@@ -77,12 +77,14 @@ vi.mock('$lib/stores/labWs', () => ({
 }));
 
 import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
+import { apiRequest } from '$lib/api';
 
 function makeNode(
   id: number,
   name: string,
   status: 0 | 2,
-  capabilities: TemplateCapabilities
+  capabilities: TemplateCapabilities,
+  interfaceCount = 1
 ): NodeData {
   return {
     id,
@@ -99,15 +101,13 @@ function makeNode(
     left: 100 * id,
     top: 120,
     icon: 'Router.png',
-    interfaces: [
-      {
-        index: 0,
-        name: 'eth0',
-        network_id: 0,
-        planned_mac: null,
-        port_position: { side: 'right', offset: 0.5 },
-      },
-    ],
+    interfaces: Array.from({ length: interfaceCount }, (_, index) => ({
+      index,
+      name: `eth${index}`,
+      network_id: 0,
+      planned_mac: null,
+      port_position: { side: 'right', offset: 0.25 + index * 0.25 },
+    })),
     capabilities,
   };
 }
@@ -146,14 +146,27 @@ function networkEndpoint(networkId: number, networkName: string): NetworkEndpoin
   };
 }
 
-function renderCanvas(nodes: Record<string, NodeData>, networks: Record<string, NetworkData> = {}) {
+function nodeSlotEndpoint(nodeId: number, nodeName: string): NodeSlotEndpoint {
+  return {
+    kind: 'node-slot',
+    nodeId,
+    nodeName,
+    port: { side: 'right', offset: 0.5 },
+  };
+}
+
+function renderCanvas(
+  nodes: Record<string, NodeData>,
+  networks: Record<string, NetworkData> = {},
+  links: Link[] = []
+) {
   return render(TopologyCanvas, {
     props: {
       labId: 'lab-hotplug',
       nodes,
       networks,
       topology: [],
-      links: [],
+      links,
       defaults: { link_style: 'orthogonal' },
       consoleSelectorWindows: [],
       consoleMinimizedWindows: [],
@@ -226,5 +239,93 @@ describe('TopologyCanvas hotplug gate', () => {
     });
     expect(screen.queryByTestId('topology-hotplug-banner')).toBeNull();
     expect(get(dragLinkStore).state).toBe('confirming');
+  });
+});
+
+describe('TopologyCanvas node-slot link confirmation', () => {
+  it('asks for source and target interfaces for node-to-node new-slot links', async () => {
+    renderCanvas({
+      '1': makeNode(1, 'edge-a', 0, { hotplug: true, max_nics: 8, machine: 'q35' }, 2),
+      '2': makeNode(2, 'edge-b', 0, { hotplug: true, max_nics: 8, machine: 'q35' }, 2),
+    });
+
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), nodeSlotEndpoint(2, 'edge-b'));
+
+    expect(await screen.findByTestId('link-source-interface-select')).toBeInTheDocument();
+    expect(screen.getByTestId('link-target-interface-select')).toBeInTheDocument();
+  });
+
+  it('asks only for the node-side source interface for node-to-network new-slot links', async () => {
+    renderCanvas(
+      {
+        '1': makeNode(1, 'edge-a', 0, { hotplug: true, max_nics: 8, machine: 'q35' }, 2),
+      },
+      {
+        '9': makeNetwork(9, 'bridge-a'),
+      }
+    );
+
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), networkEndpoint(9, 'bridge-a'));
+
+    expect(await screen.findByTestId('link-source-interface-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('link-target-interface-select')).toBeNull();
+  });
+
+  it('asks only for the node-side target interface for network-to-node new-slot links', async () => {
+    renderCanvas(
+      {
+        '1': makeNode(1, 'edge-a', 0, { hotplug: true, max_nics: 8, machine: 'q35' }, 2),
+      },
+      {
+        '9': makeNetwork(9, 'bridge-a'),
+      }
+    );
+
+    driveConfirm(networkEndpoint(9, 'bridge-a'), nodeSlotEndpoint(1, 'edge-a'));
+
+    expect(await screen.findByTestId('link-target-interface-select')).toBeInTheDocument();
+    expect(screen.queryByTestId('link-source-interface-select')).toBeNull();
+  });
+
+  it('posts the selected unconnected interfaces and omits already connected interfaces', async () => {
+    const apiMock = vi.mocked(apiRequest);
+    apiMock.mockClear();
+    const existingLink: Link = {
+      id: 'lnk_001',
+      from: { node_id: 1, interface_index: 0 },
+      to: { network_id: 9 },
+      style_override: null,
+      label: '',
+      color: '',
+      width: '1',
+    };
+    renderCanvas(
+      {
+        '1': makeNode(1, 'edge-a', 0, { hotplug: true, max_nics: 8, machine: 'q35' }, 2),
+      },
+      {
+        '9': makeNetwork(9, 'bridge-a'),
+      },
+      [existingLink]
+    );
+
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), networkEndpoint(9, 'bridge-a'));
+
+    const select = (await screen.findByTestId('link-source-interface-select')) as HTMLSelectElement;
+    expect([...select.options].map((option) => option.value)).toEqual(['1']);
+    screen.getByTestId('link-confirm-button').click();
+
+    await waitFor(() => {
+      expect(apiMock).toHaveBeenCalledWith(
+        '/labs/lab-hotplug/links',
+        expect.objectContaining({
+          method: 'POST',
+          body: expect.objectContaining({
+            from: { node_id: 1, interface_index: 1 },
+            to: { network_id: 9 },
+          }),
+        })
+      );
+    });
   });
 });

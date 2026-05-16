@@ -17,11 +17,15 @@
  */
 
 import { fireEvent, render, screen } from '@testing-library/svelte';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
 import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
 import NodeConfigModalHarness from './NodeConfigModalHarness.svelte';
 import type { NodeCatalog, NodeCatalogTemplate, NodeData, TemplateCapabilities } from '$lib/types';
+
+vi.mock('$lib/api', () => ({
+  apiGetData: vi.fn(),
+}));
 
 function makeTemplate(caps?: TemplateCapabilities): NodeCatalogTemplate {
   return {
@@ -80,6 +84,16 @@ function makeNode(overrides: Partial<NodeData> = {}): NodeData {
   };
 }
 
+function interfaceNamingInput(): HTMLInputElement {
+  const input = screen
+    .getAllByRole('textbox')
+    .find((element) => (element as HTMLInputElement).placeholder.includes('mgmt0'));
+  if (!input) {
+    throw new Error('Interface naming input not found');
+  }
+  return input as HTMLInputElement;
+}
+
 describe('NodeConfigModal capabilities banner — static paths', () => {
   it('renders without error when catalog template has hotplug=true', async () => {
     const catalog = makeCatalog(makeTemplate({ hotplug: true, max_nics: 8, machine: 'q35' }));
@@ -128,7 +142,7 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     });
 
     await tick();
-    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
+    await fireEvent.input(interfaceNamingInput(), {
       target: { value: 'Port{n}' },
     });
     const createForm = screen.getByRole('dialog').querySelector('form');
@@ -155,7 +169,7 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     });
 
     await tick();
-    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
+    await fireEvent.input(interfaceNamingInput(), {
       target: { value: '' },
     });
     const editForm = screen.getByRole('dialog').querySelector('form');
@@ -182,7 +196,7 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     });
 
     await tick();
-    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
+    await fireEvent.input(interfaceNamingInput(), {
       target: { value: 'mgmt{n},Gi{port}' },
     });
     await tick();
@@ -201,7 +215,7 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     });
 
     await tick();
-    await fireEvent.input(screen.getByRole('textbox', { name: /interface naming/i }), {
+    await fireEvent.input(interfaceNamingInput(), {
       target: { value: 'mgmt0,eth{n}' },
     });
     await tick();

@@ -25,10 +25,12 @@
   export let highlighted = false;
   export let liveMac: LiveMacState | undefined = undefined;
   export let interfaceNamingScheme: string | null | undefined = undefined;
+  export let nodeName: string | undefined = undefined;
   // When true, an inline label with the interface name is rendered next to the
   // port handle without requiring hover. Used to surface link attachments at a
   // glance (US-214: pinned labels on connected ports).
   export let connected = false;
+  export let newConnectionSlot = false;
 
   const dispatch = createEventDispatcher<{
     'port:mousedown': { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition };
@@ -160,17 +162,28 @@
 
     const snap = getDragLinkSnapshot();
     if (snap.state === 'idle' || snap.state === 'confirming') return;
-    if (snap.source && snap.source.kind === 'interface' && snap.source.nodeId === nodeId) return;
+    if (
+      snap.source &&
+      (snap.source.kind === 'interface' || snap.source.kind === 'node-slot') &&
+      snap.source.nodeId === nodeId
+    ) return;
     dragLinkStore.move({
       pointer: snap.pointer ?? { x: event.clientX, y: event.clientY },
-      target: {
-        kind: 'interface',
-        nodeId,
-        interfaceIndex,
-        port: position,
-        interfaceName: renderedInterfaceName,
-        plannedMac: interfaceData.planned_mac ?? null,
-      },
+      target: newConnectionSlot
+        ? {
+            kind: 'node-slot',
+            nodeId,
+            port: position,
+            nodeName,
+          }
+        : {
+            kind: 'interface',
+            nodeId,
+            interfaceIndex,
+            port: position,
+            interfaceName: renderedInterfaceName,
+            plannedMac: interfaceData.planned_mac ?? null,
+          },
       nearTarget: true,
     });
   }
@@ -202,14 +215,21 @@
       clickStartTs = Date.now();
       clickStartCoords = { x: event.clientX, y: event.clientY };
       dragLinkStore.start({
-        source: {
-          kind: 'interface',
-          nodeId,
-          interfaceIndex,
-          port: position,
-          interfaceName: renderedInterfaceName,
-          plannedMac: interfaceData.planned_mac ?? null,
-        },
+        source: newConnectionSlot
+          ? {
+              kind: 'node-slot',
+              nodeId,
+              port: position,
+              nodeName,
+            }
+          : {
+              kind: 'interface',
+              nodeId,
+              interfaceIndex,
+              port: position,
+              interfaceName: renderedInterfaceName,
+              plannedMac: interfaceData.planned_mac ?? null,
+            },
         pointer: { x: event.clientX, y: event.clientY },
       });
     }
@@ -231,6 +251,9 @@
         const snapBeforeCancel = getDragLinkSnapshot();
         if (snapBeforeCancel.state === 'port_pressed') {
           dragLinkStore.cancel();
+        }
+        if (newConnectionSlot) {
+          return;
         }
         captureAnchorRect();
         const rect = anchorRect;
@@ -255,20 +278,30 @@
       dragLinkStore.cancel();
       return;
     }
-    if (snap.source.kind === 'interface' && snap.source.nodeId === nodeId) {
+    if (
+      (snap.source.kind === 'interface' || snap.source.kind === 'node-slot') &&
+      snap.source.nodeId === nodeId
+    ) {
       dragLinkStore.cancel();
       return;
     }
     dragLinkStore.move({
       pointer: { x: event.clientX, y: event.clientY },
-      target: {
-        kind: 'interface',
-        nodeId,
-        interfaceIndex,
-        port: position,
-        interfaceName: renderedInterfaceName,
-        plannedMac: interfaceData.planned_mac ?? null,
-      },
+      target: newConnectionSlot
+        ? {
+            kind: 'node-slot',
+            nodeId,
+            port: position,
+            nodeName,
+          }
+        : {
+            kind: 'interface',
+            nodeId,
+            interfaceIndex,
+            port: position,
+            interfaceName: renderedInterfaceName,
+            plannedMac: interfaceData.planned_mac ?? null,
+          },
       nearTarget: true,
     });
     dragLinkStore.release({
@@ -287,12 +320,13 @@
   style={stylePosition}
   data-port-node-id={nodeId}
   data-port-interface-index={interfaceIndex}
+  data-port-new-connection={newConnectionSlot ? 'true' : 'false'}
   data-port-side={position.side}
   data-port-offset={position.offset.toFixed(4)}
   data-port-live-state={liveMac?.state ?? ''}
   role="button"
   tabindex="-1"
-  aria-label={`Port ${renderedInterfaceName}`}
+  aria-label={newConnectionSlot ? `New connection for ${nodeName ?? `node ${nodeId}`}` : `Port ${renderedInterfaceName}`}
   on:mousedown={handleMouseDown}
   on:mouseup={handleMouseUp}
   on:mouseenter={handleMouseEnter}
@@ -318,16 +352,20 @@
   {/if}
   <span
     bind:this={portHandle}
-    class={`port-handle block h-2.5 w-2.5 rounded-full border border-gray-950 ${
+    class={`port-handle block h-2.5 w-2.5 rounded-full border ${
+      newConnectionSlot ? 'border-dashed border-blue-300/80' : 'border-gray-950'
+    } ${
       isHovered ? 'port-handle-hover' : ''
     } ${
       highlighted
         ? 'bg-emerald-300 ring-2 ring-emerald-300/60 shadow-[0_0_8px_rgba(110,231,183,0.55)]'
-        : isSource
+        : newConnectionSlot
+          ? 'bg-gray-950/60 hover:bg-blue-700/70'
+          : isSource
           ? 'bg-blue-400'
           : 'bg-gray-400 hover:bg-blue-300'
     }`}
-    data-testid="port-handle"
+    data-testid={newConnectionSlot ? 'port-new-connection-handle' : 'port-handle'}
   ></span>
   {#if hasMismatch}
     <span
@@ -336,7 +374,7 @@
       aria-hidden="true"
     ></span>
   {/if}
-  {#if connected && !showTooltip}
+  {#if connected && !newConnectionSlot && !showTooltip}
     <span
       class="pointer-events-none absolute whitespace-nowrap rounded-full border border-gray-700/70 bg-gray-950/85 px-1.5 py-px font-mono text-[7.5px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm"
       style={pinnedLabelStyle}

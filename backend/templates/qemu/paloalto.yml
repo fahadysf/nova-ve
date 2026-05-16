@@ -15,9 +15,9 @@ qemu_nic: e1000
 qemu_version: "2.12.0"
 qemu_options: "-rtc base=utc -cpu host"
 capabilities:
-  hotplug: false
+  hotplug: true
   max_nics: 25
-  machine: pc
+  machine: q35
 interface_naming:
   format:
     - mgmt

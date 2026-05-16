@@ -132,9 +132,9 @@ def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(
     assert paloalto["extras"]["qemu_nic"] == "e1000"
     assert paloalto["extras"]["qemu_version"] == "2.12.0"
     assert paloalto["capabilities"] == {
-        "hotplug": False,
+        "hotplug": True,
         "max_nics": 25,
-        "machine": "pc",
+        "machine": "q35",
     }
     assert service.interface_naming("qemu", "paloalto") == {
         "format": "mgmt,ethernet1/{port}"
