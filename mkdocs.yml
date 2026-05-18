@@ -117,7 +117,6 @@ nav:
       - Deployment contract: development/deployment-contract.md
       - CI — self-hosted runner: development/ci/self-hosted-runner.md
       - CI — Ubuntu 26.04 beta ISO: development/ci/ubuntu-2604-iso.md
-      - CI — validation lab validation: development/ci/retired-validation-guide.md
       - Contributing: development/contributing.md
 
 extra:

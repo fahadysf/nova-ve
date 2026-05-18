@@ -19,7 +19,6 @@ Contributor and architecture content. If you are an operator running labs, the r
 
 - [Self-hosted runner](ci/self-hosted-runner.md) — how the GitHub Actions self-hosted runner is set up.
 - [Ubuntu 26.04 beta ISO](ci/ubuntu-2604-iso.md) — base image notes for the CI runner.
-- [validation lab validation](ci/retired-validation-guide.md) — the in-house validation lab.
 
 ## Contributing
 
