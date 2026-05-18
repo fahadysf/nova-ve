@@ -116,7 +116,7 @@ nav:
       - Design system adoption: development/design-system.md
       - Deployment contract: development/deployment-contract.md
       - CI — self-hosted runner: development/ci/self-hosted-runner.md
-      - CI — Ubuntu 26.04 beta ISO: development/ci/ubuntu-2604-iso.md
+      - CI — Ubuntu 26.04 LTS ISO: development/ci/ubuntu-2604-iso.md
       - Contributing: development/contributing.md
 
 extra:
