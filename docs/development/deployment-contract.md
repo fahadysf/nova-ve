@@ -59,7 +59,7 @@ Route ownership:
 
 - Browser/API traffic is same-origin in this lane, so cross-origin CORS is not required for production traffic.
 - Auth cookies remain scoped to `/api/`.
-- `COOKIE_SECURE=False` is permitted for the first FY Lab control-plane lane because the initial contract does not require TLS termination.
+- `COOKIE_SECURE=False` is permitted for an initial isolated control-plane validation lane because the initial contract does not require TLS termination.
 - When the deployment is moved behind trusted HTTPS with a stable hostname, `COOKIE_SECURE` should be flipped to `True`.
 
 ## Database Lifecycle Ownership

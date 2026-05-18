@@ -21,14 +21,13 @@ sha256sum ubuntu-26.04-beta-live-server-amd64.iso
 grep 'ubuntu-26.04-beta-live-server-amd64.iso' SHA256SUMS
 ```
 
-The two SHA256 values must match exactly before the image is used for FY Lab validation.
+The two SHA256 values must match exactly before the image is used for validation.
 
 ## Refresh Rule
 
 When an official `26.04` RC or GA AMD64 server ISO becomes available from Ubuntu's official release channels:
 
 1. update this document
-2. update the FY Lab runbook
-3. rerun Pass A using the newer official image
+2. rerun the validation lane using the newer official image
 
 Do not switch to daily or unofficial media for the main validation lane.
