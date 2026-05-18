@@ -91,6 +91,19 @@ async def startup():
             )
 
     from app.services.node_runtime_service import NodeRuntimeService
+    # Issue #225: adopt orphan QEMU processes that survived a backend
+    # restart (e.g. systemd KillMode=process or graceful reparent to PID 1)
+    # back into the runtime registry before the heartbeat starts marking
+    # them stopped. Best-effort — never blocks startup, never raises.
+    try:
+        _stats = NodeRuntimeService.reconcile_orphan_qemu()
+        if _stats.get("adopted"):
+            _logger.info(
+                "startup reconcile: adopted %d orphan QEMU process(es) (scanned %d)",
+                _stats["adopted"], _stats["scanned"],
+            )
+    except Exception:
+        _logger.exception("startup reconcile: orphan-QEMU sweep failed (non-fatal)")
     NodeRuntimeService.start_heartbeat()
     # US-402: periodic kernel-side bridge discovery.  Reads cadence from
     # settings on every iteration so live ``NOVA_VE_DISCOVERY_CADENCE_SECONDS``
