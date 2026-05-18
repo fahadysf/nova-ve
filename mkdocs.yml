@@ -4,6 +4,8 @@ site_url: https://docs.nova-ve.com/
 repo_url: https://github.com/fahadysf/nova-ve
 repo_name: fahadysf/nova-ve
 edit_uri: edit/main/docs/
+not_in_nav: |
+  development/ci/fy-lab-validation.md
 
 theme:
   name: material
