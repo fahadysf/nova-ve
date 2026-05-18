@@ -192,19 +192,32 @@ def _node_is_running(lab_data: dict, node_id: int) -> bool:
 
 
 def _validate_node_update_request(node: dict, request: NodeUpdate, node_running: bool) -> str | None:
-    requested_fields = set(request.model_dump(exclude_unset=True).keys())
+    payload = request.model_dump(exclude_unset=True)
+    requested_fields = set(payload.keys())
     invalid_fields = requested_fields - NODE_FIELDS_MUTABLE
     if invalid_fields:
         invalid_list = ", ".join(sorted(invalid_fields))
         return f"Unsupported node field update: {invalid_list}."
 
+    # Treat a field as actually being changed only when the incoming value
+    # differs from the stored value. The edit modal always re-submits the full
+    # field set (so unchanged fields ride along on every save), and we must
+    # not refuse a rename of a running node just because the payload echoes
+    # back the same cpu/ram/ethernet/image/...
+    def _changed(field: str) -> bool:
+        return payload.get(field) != node.get(field)
+
     if node_running:
-        blocked_fields = sorted(field for field in requested_fields if field in NODE_FIELDS_EDITABLE_WHILE_STOPPED)
+        blocked_fields = sorted(
+            field
+            for field in requested_fields
+            if field in NODE_FIELDS_EDITABLE_WHILE_STOPPED and _changed(field)
+        )
         if blocked_fields:
             blocked_list = ", ".join(blocked_fields)
             return f"Stop the node before changing: {blocked_list}."
 
-    if "image" in requested_fields:
+    if "image" in requested_fields and _changed("image"):
         try:
             TemplateService().validate_node_request(
                 str(node.get("type", "qemu")),
@@ -1389,7 +1402,7 @@ async def delete_node(
         }
 
     try:
-        NodeRuntimeService().stop_node(data, node_id)
+        NodeRuntimeService().wipe_node(data, node_id)
     except NodeRuntimeError:
         pass
 

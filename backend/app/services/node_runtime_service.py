@@ -983,6 +983,230 @@ class NodeRuntimeService:
                 )
 
     # ------------------------------------------------------------------
+    # Issue #225 — orphan-process reconciliation
+    # ------------------------------------------------------------------
+    @classmethod
+    def reconcile_orphan_qemu(cls) -> dict[str, int]:
+        """Adopt running QEMU processes that the registry does not know about.
+
+        Run once at backend startup. QEMU children survive a backend restart
+        when the systemd unit uses ``KillMode=process`` (or when the process
+        was simply reparented to PID 1 after a graceful uvicorn exit). On
+        the new backend instance the on-disk registry already names them by
+        PID; this method is the safety net for the case where the registry
+        is empty or stale and a live process is otherwise invisible.
+
+        Identification: every QEMU started by this backend carries
+        ``-uuid <lab_id>-<node_id>`` (see :meth:`_build_qemu_base_cmd`).
+        We walk ``psutil.process_iter``, match that argv pattern against
+        the on-disk lab catalog, and re-register any live PID whose
+        ``(lab_id, node_id)`` is not already tracked. Returns a small
+        stats dict for logging.
+        """
+        import logging
+        _logger = logging.getLogger("nova-ve")
+
+        settings = get_settings()
+        labs_dir = settings.LABS_DIR
+        stats = {"adopted": 0, "scanned": 0}
+        if not labs_dir.exists():
+            return stats
+
+        known: dict[str, dict[int, dict]] = {}
+        for lab_file in labs_dir.rglob("*.json"):
+            try:
+                raw = json.loads(lab_file.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            lab_id = str(raw.get("id", "")).strip()
+            if not lab_id:
+                continue
+            nodes = raw.get("nodes")
+            if not isinstance(nodes, dict):
+                continue
+            known.setdefault(lab_id, {})
+            for nid_str, node in nodes.items():
+                if not isinstance(node, dict):
+                    continue
+                if str(node.get("type", "")) != "qemu":
+                    continue
+                try:
+                    nid = int(nid_str)
+                except (TypeError, ValueError):
+                    continue
+                known[lab_id][nid] = node
+
+        if not any(known.values()):
+            return stats
+
+        instance = cls()
+        instance._load_registry()
+        with cls._lock:
+            registered = {key for key in cls._registry.keys()}
+
+        for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+            stats["scanned"] += 1
+            try:
+                info = proc.info
+                cmdline = info.get("cmdline") or []
+                if not cmdline:
+                    continue
+                # First argv must be qemu-system-* (full path or basename).
+                exe_basename = os.path.basename(cmdline[0])
+                if not exe_basename.startswith("qemu-system"):
+                    continue
+                if "-uuid" not in cmdline:
+                    continue
+                uuid_index = cmdline.index("-uuid")
+                if uuid_index + 1 >= len(cmdline):
+                    continue
+                uuid_value = cmdline[uuid_index + 1]
+                if "-" not in uuid_value:
+                    continue
+                # The uuid we emit is ``<lab_id>-<node_id>``. lab_id may
+                # itself contain hyphens, so split from the right.
+                candidate_lab, _, candidate_node = uuid_value.rpartition("-")
+                try:
+                    candidate_node_id = int(candidate_node)
+                except ValueError:
+                    continue
+                node = known.get(candidate_lab, {}).get(candidate_node_id)
+                if not node:
+                    continue
+                key = cls._key(candidate_lab, candidate_node_id)
+                if key in registered:
+                    continue
+
+                runtime = cls._runtime_from_qemu_cmdline(
+                    lab_id=candidate_lab,
+                    node_id=candidate_node_id,
+                    node=node,
+                    cmdline=cmdline,
+                    pid=int(info["pid"]),
+                    create_time=float(info["create_time"]),
+                )
+
+                state_dir = settings.TMP_DIR / "node-runtime"
+                try:
+                    state_dir.mkdir(parents=True, exist_ok=True)
+                    state_path = state_dir / f"{candidate_lab}-{candidate_node_id}.json"
+                    tmp_path = state_path.with_suffix(state_path.suffix + ".tmp")
+                    tmp_path.write_text(json.dumps(runtime, indent=2))
+                    os.replace(tmp_path, state_path)
+                except OSError as exc:
+                    _logger.warning(
+                        "reconcile: failed to persist adopted runtime for %s/%s: %s",
+                        candidate_lab, candidate_node_id, exc,
+                    )
+                    continue
+
+                with cls._lock:
+                    cls._registry[key] = runtime
+                registered.add(key)
+
+                try:
+                    runtime_pids.register(
+                        runtime["pid"], "qemu", candidate_lab, candidate_node_id
+                    )
+                except Exception as exc:  # noqa: BLE001 — registry is best-effort
+                    _logger.warning(
+                        "reconcile: runtime_pids.register failed for %s/%s pid=%d: %s",
+                        candidate_lab, candidate_node_id, runtime["pid"], exc,
+                    )
+
+                stats["adopted"] += 1
+                _logger.info(
+                    "reconcile: adopted orphan QEMU lab=%s node=%s pid=%d",
+                    candidate_lab, candidate_node_id, runtime["pid"],
+                )
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:  # noqa: BLE001
+                _logger.exception("reconcile: unexpected error inspecting pid")
+                continue
+
+        return stats
+
+    @staticmethod
+    def _runtime_from_qemu_cmdline(
+        *,
+        lab_id: str,
+        node_id: int,
+        node: dict[str, Any],
+        cmdline: list[str],
+        pid: int,
+        create_time: float,
+    ) -> dict[str, Any]:
+        """Best-effort rebuild of a runtime record from a live QEMU's argv.
+
+        Mirrors the shape produced by :meth:`_start_qemu_node`; values that
+        cannot be recovered from argv are taken from the node dict or left
+        as their safe defaults so subsequent operations (stop/console/qmp)
+        can still locate the right resources.
+        """
+        def _arg_after(flag: str) -> str | None:
+            try:
+                idx = cmdline.index(flag)
+            except ValueError:
+                return None
+            if idx + 1 >= len(cmdline):
+                return None
+            return cmdline[idx + 1]
+
+        console_mode = str(node.get("console", "telnet"))
+        console_port = 0
+        serial_arg = _arg_after("-serial")
+        if serial_arg and serial_arg.startswith("telnet::"):
+            try:
+                console_port = int(serial_arg.split("::", 1)[1].split(",", 1)[0])
+            except (IndexError, ValueError):
+                console_port = 0
+        vnc_arg = _arg_after("-vnc")
+        if vnc_arg and vnc_arg.startswith(":"):
+            try:
+                console_port = 5900 + int(vnc_arg[1:].split(",", 1)[0])
+            except ValueError:
+                pass
+
+        qmp_socket = ""
+        qmp_arg = _arg_after("-qmp")
+        if qmp_arg and qmp_arg.startswith("unix:"):
+            qmp_socket = qmp_arg.split("unix:", 1)[1].split(",", 1)[0]
+
+        overlay_path = ""
+        for arg in cmdline:
+            if arg.startswith("file=") and ".qcow2" in arg:
+                overlay_path = arg.split("=", 1)[1].split(",", 1)[0]
+                break
+
+        machine_arg = _arg_after("-machine") or ""
+        machine = ""
+        if machine_arg:
+            for token in machine_arg.split(","):
+                if token.startswith("type="):
+                    machine = token.split("=", 1)[1]
+                    break
+            else:
+                machine = machine_arg.split(",", 1)[0]
+
+        return {
+            "lab_id": lab_id,
+            "node_id": node_id,
+            "kind": "qemu",
+            "name": node.get("name"),
+            "console": console_mode,
+            "console_port": console_port,
+            "pid": pid,
+            "pid_create_time": create_time,
+            "overlay_path": overlay_path,
+            "qmp_socket": qmp_socket,
+            "command": list(cmdline),
+            "machine": machine,
+            "boot_ethernet": int(node.get("ethernet", 0)),
+            "adopted": True,
+        }
+
+    # ------------------------------------------------------------------
     # US-402 — Discovery cadence
     # ------------------------------------------------------------------
     @classmethod

@@ -6,6 +6,8 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.routers.labs import _validate_node_update_request, delete_node, update_node
+from app.schemas.node import NodeUpdate
 
 
 @pytest.fixture()
@@ -121,6 +123,215 @@ cpulimit: 1
         assert payload["message"] == "Node deleted successfully."
 
     app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_delete_qemu_node_discards_stopped_overlay(patched_route_settings):
+    lab_path = patched_route_settings.LABS_DIR / "qemu-delete-probe.json"
+    lab_path.write_text(
+        """{
+  "schema": 2,
+  "id": "qemu-delete-probe",
+  "meta": {"name": "qemu-delete-probe"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+  "nodes": {
+    "1": {
+      "id": 1,
+      "name": "router-1",
+      "type": "qemu",
+      "template": "csr",
+      "image": "csr1000v",
+      "left": 100,
+      "top": 100
+    }
+  },
+  "networks": {},
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
+}"""
+    )
+    overlay_path = patched_route_settings.TMP_DIR / "qemu-delete-probe" / "1" / "virtioa.qcow2"
+    overlay_path.parent.mkdir(parents=True)
+    overlay_path.write_text("stale writable overlay")
+
+    response = await delete_node(
+        "qemu-delete-probe.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    assert not overlay_path.exists()
+
+
+def test_validate_node_update_running_allows_rename_only_payload():
+    """Modal re-submits all edit fields on save; running-state guard must
+    block a stopped-only field only when its value actually changed."""
+    node = {
+        "name": "old-name",
+        "type": "qemu",
+        "template": "vyos",
+        "image": "vyos-rolling",
+        "cpu": 2,
+        "ram": 1536,
+        "ethernet": 4,
+        "console": "telnet",
+        "delay": 0,
+        "extras": {"arch": "x86_64"},
+        "icon": "Router.png",
+    }
+    request = NodeUpdate(
+        name="upstream-isp-net",
+        image=node["image"],
+        icon=node["icon"],
+        cpu=node["cpu"],
+        ram=node["ram"],
+        ethernet=node["ethernet"],
+        console=node["console"],
+        delay=node["delay"],
+        extras=node["extras"],
+        interface_naming_scheme=None,
+    )
+    assert _validate_node_update_request(node, request, node_running=True) is None
+
+
+def test_validate_node_update_running_blocks_actual_cpu_change():
+    node = {
+        "name": "old-name",
+        "type": "qemu",
+        "template": "vyos",
+        "image": "vyos-rolling",
+        "cpu": 2,
+        "ram": 1536,
+        "ethernet": 4,
+        "console": "telnet",
+        "delay": 0,
+        "extras": {},
+        "icon": "Router.png",
+    }
+    request = NodeUpdate(
+        name=node["name"],
+        cpu=4,
+        ram=node["ram"],
+        ethernet=node["ethernet"],
+    )
+    error = _validate_node_update_request(node, request, node_running=True)
+    assert error == "Stop the node before changing: cpu."
+
+
+@pytest.mark.asyncio
+async def test_update_node_renames_running_node(monkeypatch, patched_route_settings):
+    """End-to-end PUT /labs/.../nodes/{id} must succeed when the modal
+    re-submits the full edit payload but only `name` changed."""
+    lab_path = patched_route_settings.LABS_DIR / "rename-probe.json"
+    lab_path.write_text(
+        """{
+  "schema": 2,
+  "id": "renameprobe",
+  "meta": {"name": "rename-probe"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+  "nodes": {
+    "1": {
+      "id": 1,
+      "name": "old-name",
+      "type": "qemu",
+      "template": "vyos",
+      "image": "vyos-rolling",
+      "cpu": 2,
+      "ram": 1536,
+      "ethernet": 4,
+      "console": "telnet",
+      "delay": 0,
+      "extras": {},
+      "icon": "Router.png",
+      "left": 100,
+      "top": 100,
+      "interfaces": []
+    }
+  },
+  "networks": {},
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
+}"""
+    )
+    monkeypatch.setattr("app.routers.labs._node_is_running", lambda lab_data, node_id: True)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.NodeRuntimeService.enrich_node",
+        lambda self, lab_id, node_id, node: {**node, "status": 2},
+    )
+
+    response = await update_node(
+        "rename-probe.json",
+        1,
+        request=NodeUpdate(
+            name="upstream-isp-net",
+            image="vyos-rolling",
+            icon="Router.png",
+            cpu=2,
+            ram=1536,
+            ethernet=4,
+            console="telnet",
+            delay=0,
+            extras={},
+            interface_naming_scheme=None,
+        ),
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    assert response["data"]["name"] == "upstream-isp-net"
+    # JSON is persisted with the new name.
+    import json
+    persisted = json.loads(lab_path.read_text())
+    assert persisted["nodes"]["1"]["name"] == "upstream-isp-net"
+
+
+@pytest.mark.asyncio
+async def test_update_node_running_rejects_actual_cpu_change(monkeypatch, patched_route_settings):
+    """If the user really does change a stopped-only field, the guard must
+    still refuse the request with the precise blocked-field list."""
+    lab_path = patched_route_settings.LABS_DIR / "cpu-block-probe.json"
+    lab_path.write_text(
+        """{
+  "schema": 2,
+  "id": "cpublockprobe",
+  "meta": {"name": "cpu-block-probe"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+  "nodes": {
+    "1": {
+      "id": 1,
+      "name": "rtr",
+      "type": "qemu",
+      "template": "vyos",
+      "image": "vyos-rolling",
+      "cpu": 2,
+      "ram": 1536,
+      "ethernet": 4,
+      "console": "telnet",
+      "delay": 0,
+      "extras": {},
+      "icon": "Router.png",
+      "left": 100,
+      "top": 100,
+      "interfaces": []
+    }
+  },
+  "networks": {},
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
+}"""
+    )
+    monkeypatch.setattr("app.routers.labs._node_is_running", lambda lab_data, node_id: True)
+
+    response = await update_node(
+        "cpu-block-probe.json",
+        1,
+        request=NodeUpdate(name="rtr", cpu=4, ram=1536, ethernet=4),
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 400
+    assert response["message"] == "Stop the node before changing: cpu."
 
 
 @pytest.mark.asyncio
