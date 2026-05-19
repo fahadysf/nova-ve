@@ -379,6 +379,85 @@ def test_reconciler_phase2_tears_down_stale_attachment(
     ), f"expected set_link(net0, up=False) in {set_link_calls}"
 
 
+def test_reconciler_pins_unattached_unconnected_boot_nic_down(
+    monkeypatch, patched_settings
+):
+    """Issue #226: a boot NIC with no lab.json link and no attachment
+    record is still a live QEMU netdev. Reconcile must pin it carrier-down
+    even when the start-path ``set_link`` was missed.
+    """
+    lab_id = "lab-recon-226"
+    node_id = 22
+    service = NodeRuntimeService()
+    runtime = _seed_running_qemu_runtime(
+        service,
+        lab_id=lab_id,
+        node_id=node_id,
+        boot_ethernet=3,
+        interface_attachments=[],
+    )
+    lab_data = {
+        "schema": 2,
+        "id": lab_id,
+        "meta": {"name": "issue-226"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            str(node_id): {
+                "id": node_id,
+                "name": "vm-226",
+                "type": "qemu",
+                "ethernet": 3,
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None},
+                    {"index": 1, "name": "eth1", "planned_mac": None},
+                    {"index": 2, "name": "eth2", "planned_mac": None},
+                ],
+            }
+        },
+        "networks": {
+            "1": {"id": 1, "name": "lan-a", "type": "linux_bridge", "config": {}},
+            "2": {"id": 2, "name": "lan-b", "type": "linux_bridge", "config": {}},
+        },
+        "links": [
+            {
+                "id": "lnk-a",
+                "from": {"node_id": node_id, "interface_index": 0},
+                "to": {"network_id": 1},
+                "runtime": {"attach_generation": 1},
+            },
+            {
+                "id": "lnk-b",
+                "from": {"node_id": node_id, "interface_index": 1},
+                "to": {"network_id": 2},
+                "runtime": {"attach_generation": 1},
+            },
+        ],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+    host_calls = _stub_reconciler_host_net(monkeypatch, tap_exists=True)
+    qmp_calls = _capture_qmp(service)
+
+    result = service.reconcile_qemu_node_links(
+        lab_id, lab_data, lab_data["nodes"][str(node_id)]
+    )
+
+    assert result["removed"] == []
+    assert result["pinned_down"] == [
+        {"interface_index": 2, "tap": f"nve-test-d{node_id}i2"}
+    ]
+    assert f"nve-test-d{node_id}i2" in host_calls["link_set_nomaster"]
+
+    set_link_calls = [c for c in qmp_calls if c["command"] == "set_link"]
+    assert any(
+        c["arguments"] == {"name": "net2", "up": False} for c in set_link_calls
+    ), f"expected set_link(net2, up=False) in {set_link_calls}"
+    assert all(
+        int(entry["interface_index"]) != 2
+        for entry in runtime["interface_attachments"]
+    ), f"unconnected iface 2 must not get an attachment: {runtime['interface_attachments']}"
+
+
 def test_reconciler_handles_string_node_id_in_labjson(
     monkeypatch, patched_settings
 ):

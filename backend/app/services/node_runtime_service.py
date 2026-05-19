@@ -4009,6 +4009,10 @@ class NodeRuntimeService:
           * QMP ``set_link netN up=true``.
           * Add a matching ``interface_attachments`` entry if missing.
 
+        For each unconnected boot iface with no attachment record:
+          * link_set_nomaster + QMP ``set_link netN up=false``. TAP stays.
+          * Do not add an ``interface_attachments`` record.
+
         For each ``interface_attachments`` entry on a boot iface NOT in the
         declared links:
           * link_set_nomaster + QMP ``set_link netN up=false``. TAP stays.
@@ -4019,13 +4023,13 @@ class NodeRuntimeService:
         as a warning so the operator can investigate.
 
         Returns a summary dict for observability:
-            {"node_id", "applied": [...], "removed": [...],
+            {"node_id", "applied": [...], "pinned_down": [...], "removed": [...],
              "warnings": [...], "skipped_hotplug": [...]}.
         """
         try:
             node_id = int(node.get("id"))
         except (TypeError, ValueError):
-            return {"node_id": None, "applied": [], "removed": [], "warnings": [], "skipped_hotplug": []}
+            return {"node_id": None, "applied": [], "pinned_down": [], "removed": [], "warnings": [], "skipped_hotplug": []}
 
         # Issue #175 (C1): serialize the entire reconcile pass against
         # concurrent attach/detach/start/stop to prevent interleaved persist writes.
@@ -4048,7 +4052,7 @@ class NodeRuntimeService:
         """
         runtime = self._runtime_record(lab_id, node_id)
         if runtime is None or runtime.get("kind") != "qemu":
-            return {"node_id": node_id, "applied": [], "removed": [], "warnings": [], "skipped_hotplug": []}
+            return {"node_id": node_id, "applied": [], "pinned_down": [], "removed": [], "warnings": [], "skipped_hotplug": []}
 
         boot_ethernet = int(runtime.get("boot_ethernet") or 0)
 
@@ -4104,6 +4108,7 @@ class NodeRuntimeService:
                 }
 
         applied: list[dict] = []
+        pinned_down: list[dict] = []
         removed: list[dict] = []
         warnings: list[dict] = []
         skipped_hotplug: list[dict] = []
@@ -4187,8 +4192,46 @@ class NodeRuntimeService:
                     runtime["tap_names"] = tap_names
             applied.append({"interface_index": idx, "bridge": bridge, "tap": tap})
 
-        # ---- Phase 2: tear down attachments not in lab.json ------------
-        # Issue #175 (M1): Phase 2 does NOT bump generation for removed
+        # ---- Phase 2: pin unattached + unconnected boot NICs down -----
+        # Issue #226: a boot NIC can exist in QEMU without any matching
+        # interface_attachments record when it was never linked in lab.json.
+        # If the post-spawn set_link races QMP startup, that NIC sits outside
+        # the old Phase 1/2 coverage forever. Walk all boot NIC indices and
+        # explicitly drive the unlinked, unrecorded ones carrier-down.
+        with self._lock:
+            recorded_boot_indices: set[int] = set()
+            for entry in runtime.get("interface_attachments") or []:
+                try:
+                    idx = int(entry.get("interface_index", -1))
+                except (TypeError, ValueError):
+                    continue
+                if bool(entry.get("boot_nic", False)) and idx < boot_ethernet:
+                    recorded_boot_indices.add(idx)
+
+        for idx in range(boot_ethernet):
+            if idx in expected or idx in recorded_boot_indices:
+                continue
+
+            tap = host_net.tap_name(lab_id, node_id, idx)
+            if socket_path:
+                try:
+                    self._qmp_command(
+                        socket_path, "set_link", {"name": f"net{idx}", "up": False}
+                    )
+                except Exception:  # noqa: BLE001
+                    warnings.append({
+                        "interface_index": idx,
+                        "reason": "set_link up=False failed (best-effort)",
+                    })
+            try:
+                host_net.link_set_nomaster(tap)
+            except host_net.HostNetError as exc:
+                warnings.append({"interface_index": idx, "reason": f"nomaster: {exc}"})
+
+            pinned_down.append({"interface_index": idx, "tap": tap})
+
+        # ---- Phase 3: tear down attachments not in lab.json ------------
+        # Issue #175 (M1): this phase does NOT bump generation for removed
         # entries. The next user-driven create_link will bump both lab.json
         # and runtime sides naturally when the link is re-established.
         for entry in attachments:
@@ -4233,6 +4276,7 @@ class NodeRuntimeService:
         return {
             "node_id": node_id,
             "applied": applied,
+            "pinned_down": pinned_down,
             "removed": removed,
             "warnings": warnings,
             "skipped_hotplug": skipped_hotplug,
