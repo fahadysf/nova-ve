@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.schemas.user import UserRead
+from app.services.bridge_cloud_service import list_bridge_clouds
 from app.services.node_runtime_service import NodeRuntimeService
 import psutil
 
@@ -89,6 +90,24 @@ async def get_settings_route(
             "numa": "0",
             "realtime_update": "eco",
         },
+    }
+
+
+@router.get("/system/bridge-clouds")
+async def get_bridge_clouds(
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Enumerate host-owned Bridge-Cloud bridges (``br-eth*``).
+
+    Used by the Bridge-Cloud network-config modal in the frontend to
+    populate the host-bridge dropdown.  Auth-gated (mirrors
+    ``/api/status`` / ``/api/poll``).  Results are cached server-side for
+    5 s to dampen UI poll cost.
+    """
+    return {
+        "code": 200,
+        "status": "success",
+        "data": await list_bridge_clouds(),
     }
 
 

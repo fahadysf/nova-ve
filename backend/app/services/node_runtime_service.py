@@ -1869,8 +1869,11 @@ class NodeRuntimeService:
                     provisioned_taps.append(tap)
                 tap_names[index] = tap
                 if index in attachment_by_index:
-                    bridge = attachment_by_index[index]["bridge_name"]
-                    host_net.link_master(tap, bridge)
+                    attachment = attachment_by_index[index]
+                    bridge = attachment["bridge_name"]
+                    host_net.link_master_any(
+                        tap, bridge, driver=attachment.get("driver")
+                    )
                     host_net.link_up(tap)
                 else:
                     # Issue #174: ensure unconnected boot TAPs do not
@@ -2195,6 +2198,7 @@ class NodeRuntimeService:
                     "interface_index": interface_index,
                     "network_id": network_id,
                     "bridge_name": bridge,
+                    "driver": runtime_record.get("driver"),
                 }
             )
 
@@ -2222,6 +2226,7 @@ class NodeRuntimeService:
                     "interface_index": interface_index,
                     "network_id": network_id,
                     "bridge_name": bridge,
+                    "driver": runtime_record.get("driver"),
                 }
             )
 
@@ -2541,7 +2546,7 @@ class NodeRuntimeService:
         # Track host_end BEFORE creation so rollback sweeps a partial pair.
         provisioned_host_ends.append(host_end)
         host_net.veth_pair_add(host_end, peer_end)
-        host_net.link_master(host_end, bridge)
+        host_net.link_master_any(host_end, bridge, driver=attachment.get("driver"))
         host_net.link_up(host_end)
         host_net.link_netns(peer_end, pid)
         host_net.link_set_name_in_netns(pid, peer_end, netns_iface)
@@ -2678,6 +2683,7 @@ class NodeRuntimeService:
             "interface_index": int(interface_index),
             "network_id": int(network_id),
             "bridge_name": bridge,
+            "driver": self._resolve_runtime_driver(lab_id, int(network_id)),
         }
 
         provisioned_host_ends: list[str] = []
@@ -2948,7 +2954,7 @@ class NodeRuntimeService:
              (descending scan per US-301 policy: hot-add never collides
              with the boot-time positional layout).
           3. ``host_net.tap_add(tap_name)``.
-          4. ``host_net.link_master(tap_name, bridge_name)``.
+          4. ``host_net.link_master_any(tap_name, bridge_name, driver=...)``.
           5. QMP ``netdev_add type=tap id=net{interface_index}
              ifname={tap_name} script=no downscript=no``.
           6. QMP ``device_add driver={qemu_nic_model} id=dev{interface_index}
@@ -2958,7 +2964,7 @@ class NodeRuntimeService:
 
           * Step 2 (query-pci) fails → release lock, raise NodeRuntimeError.
           * Step 3 (``host_net.tap_add``) fails → raise NodeRuntimeError.
-          * Step 4 (``host_net.link_master``) fails → ``host_net.tap_del``.
+          * Step 4 (``host_net.link_master_any``) fails → ``host_net.tap_del``.
           * Step 5 (QMP ``netdev_add``) fails → ``host_net.link_set_nomaster``,
             ``host_net.tap_del``.
           * Step 6 (QMP ``device_add``) fails → QMP ``netdev_del``,
@@ -3076,6 +3082,12 @@ class NodeRuntimeService:
                 "hot-attaching interfaces."
             )
 
+        # Resolve the trusted driver discriminator once.  Used by both
+        # the boot-NIC host-only attach path and the hot-add attach path
+        # below to route ``br-eth*`` to the host helper only when the
+        # network's persisted ``runtime.driver == "bridge_cloud"``.
+        runtime_driver = self._resolve_runtime_driver(lab_id, int(network_id))
+
         # Resolve the NIC model from the same source the boot path uses
         # (Codex critic finding #4). Caller may override (link_service can
         # plumb extras through), otherwise read from the runtime record's
@@ -3113,7 +3125,7 @@ class NodeRuntimeService:
                     host_net.tap_add(tap)
                     tap_provisioned = True
 
-                host_net.link_master(tap, bridge)
+                host_net.link_master_any(tap, bridge, driver=runtime_driver)
                 bridge_attached = True
                 host_net.link_up(tap)
 
@@ -3205,8 +3217,10 @@ class NodeRuntimeService:
                     host_net.tap_add(tap)
                     tap_provisioned = True
 
-                    # ----- Step 4: link_master (TAP -> bridge) ------------
-                    host_net.link_master(tap, bridge)
+                    # ----- Step 4: link_master_any (TAP -> bridge) ------
+                    # Driver-aware dispatcher routes ``br-eth*`` to the
+                    # host helper iff runtime.driver=='bridge_cloud'.
+                    host_net.link_master_any(tap, bridge, driver=runtime_driver)
                     bridge_attached = True
                     # Bring the host side of the TAP up so traffic can flow.
                     host_net.link_up(tap)
@@ -4103,6 +4117,7 @@ class NodeRuntimeService:
                     "interface_index": idx,
                     "network_id": network_id,
                     "bridge_name": bridge,
+                    "driver": rt.get("driver"),
                     "tap_name": host_net.tap_name(lab_id, node_id, idx),
                     "attach_generation": int(attach_gen) if attach_gen else 1,
                 }
@@ -4130,7 +4145,7 @@ class NodeRuntimeService:
                     # Defensive: a pre-#174 process or a race left no TAP.
                     # Recreate so the e1000 backend has something to talk to.
                     host_net.tap_add(tap)
-                host_net.link_master(tap, bridge)
+                host_net.link_master_any(tap, bridge, driver=want.get("driver"))
                 host_net.link_up(tap)
                 if socket_path:
                     try:
@@ -4353,6 +4368,51 @@ class NodeRuntimeService:
         for slot_index in range(int(max_nics) - 1, -1, -1):
             if slot_index not in occupied:
                 return slot_index
+        return None
+
+    def _resolve_runtime_driver(self, lab_id: str, network_id: int) -> str | None:
+        """Resolve the per-network ``runtime.driver`` for the dispatcher.
+
+        Returns the trusted driver discriminator (``"bridge_cloud"``,
+        ``"nat_cloud"``, ``"linux_bridge"``, ...) recorded at
+        ``create_network`` time.  This value — NOT the bridge-name shape —
+        is the input :func:`host_net.link_master_any` uses to route
+        ``br-eth*`` to the host helper.
+
+        Walks ``LABS_DIR`` looking for the lab.json whose ``id`` matches
+        ``lab_id``.  Returns ``None`` if the lookup fails — callers in the
+        attach path treat that as "non-bridge_cloud" and let the
+        dispatcher refuse any ``br-eth*`` attempt at the lowest layer.
+        """
+        try:
+            from app.services.lab_service import LabService  # noqa: WPS433
+        except ImportError:
+            return None
+        try:
+            settings = get_settings()
+        except Exception:  # noqa: BLE001
+            return None
+        labs_dir = Path(settings.LABS_DIR)
+        if not labs_dir.exists():
+            return None
+        # ``rglob`` (not ``glob``) so nested lab folders are discoverable —
+        # consistent with the discovery scan at
+        # :meth:`NodeRuntimeService.reconcile_qemu_node_links`.
+        for path in labs_dir.rglob("*.json"):
+            try:
+                rel = path.relative_to(labs_dir).as_posix()
+                data = LabService.read_lab_json_static(rel)
+            except Exception:  # noqa: BLE001
+                continue
+            if str(data.get("id") or "") != lab_id:
+                continue
+            networks = data.get("networks") or {}
+            record = networks.get(str(int(network_id)))
+            if not isinstance(record, dict):
+                return None
+            runtime_record = record.get("runtime") or {}
+            driver = runtime_record.get("driver")
+            return str(driver) if isinstance(driver, str) and driver else None
         return None
 
     def _resolve_qemu_nic_model(
@@ -4766,6 +4826,7 @@ class NodeRuntimeService:
                     "interface_index": interface_index,
                     "network_id": network_id,
                     "bridge_name": bridge,
+                    "driver": runtime_record.get("driver"),
                 }
             )
         attachments.sort(key=lambda item: item["interface_index"])
@@ -4928,13 +4989,21 @@ class NodeRuntimeService:
                 template[key] = value
 
         provisioned_taps: list[str] = []
+        # Driver-by-interface lookup for the closure below — keyed off the
+        # interface_index in each attachment record (populated by
+        # ``_qemu_attachments`` which we reuse for dynamips).
+        driver_by_iface: dict[int, str | None] = {
+            int(a["interface_index"]): a.get("driver") for a in attachments
+        }
 
         def _tap_factory(interface_index: int, bridge_name: str) -> str:
             tap = host_net.tap_name(lab_id, node_id, interface_index)
             if not host_net.tap_exists(tap):
                 host_net.tap_add(tap)
                 provisioned_taps.append(tap)
-            host_net.link_master(tap, bridge_name)
+            host_net.link_master_any(
+                tap, bridge_name, driver=driver_by_iface.get(int(interface_index))
+            )
             host_net.link_up(tap)
             return tap
 

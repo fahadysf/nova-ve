@@ -203,6 +203,13 @@ def _stub_reconciler_host_net(monkeypatch, *, tap_exists: bool = True):
     def fake_link_master(iface: str, bridge: str) -> None:
         calls["link_master"].append((iface, bridge))
 
+    def fake_link_master_any(iface: str, bridge: str, *, driver=None) -> None:
+        # Bridge-Cloud migration: upper layers dispatch via
+        # ``link_master_any``.  The reconciler uses synthetic bridge
+        # names (``nve-test-bridge-N``) that match neither lab nor host
+        # regex; capture the call here for the existing assertions.
+        calls["link_master"].append((iface, bridge))
+
     def fake_link_up(iface: str) -> None:
         calls["link_up"].append(iface)
 
@@ -217,6 +224,10 @@ def _stub_reconciler_host_net(monkeypatch, *, tap_exists: bool = True):
     )
     monkeypatch.setattr(
         "app.services.node_runtime_service.host_net.link_master", fake_link_master
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_master_any",
+        fake_link_master_any,
     )
     monkeypatch.setattr(
         "app.services.node_runtime_service.host_net.link_up", fake_link_up

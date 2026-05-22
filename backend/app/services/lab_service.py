@@ -13,6 +13,7 @@ from app.services import host_net
 
 SCHEMA_VERSION = 2
 NAT_CLOUD_TYPE = "nat_cloud"
+BRIDGE_CLOUD_TYPE = "bridge_cloud"
 logger = logging.getLogger(__name__)
 
 LEGACY_SCHEMA_ERROR = "Lab uses legacy schema; run scripts/migrate_lab_v1_to_v2.py"
@@ -230,6 +231,27 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
                 bridge = None
         if not bridge:
             continue
+
+        # Bridge-Cloud: host-owned bridge.  Never tear it down on lab
+        # cleanup.  Match on both ``network.type`` and ``runtime.driver``
+        # so legacy records without a driver still skip teardown.
+        if (
+            str(network.get("type", "")) == BRIDGE_CLOUD_TYPE
+            or (isinstance(runtime, dict) and runtime.get("driver") == BRIDGE_CLOUD_TYPE)
+        ):
+            logger.info(
+                "delete_lab: host-owned bridge %s preserved (driver=bridge_cloud)",
+                bridge,
+            )
+            continue
+        # Defense-in-depth: refuse to delete anything that LOOKS like a
+        # host bridge even if the record's type/driver was stripped.  The
+        # lowest-layer ``host_net.bridge_del`` will refuse too, but this
+        # assertion keeps the cleanup loop from logging spurious
+        # "refusing bridge_del" warnings.
+        assert not str(bridge).startswith("br-eth"), (
+            f"delete_lab: refusing host-owned name {bridge!r}"
+        )
 
         if str(network.get("type", "")) == NAT_CLOUD_TYPE:
             config = network.get("config") or {}

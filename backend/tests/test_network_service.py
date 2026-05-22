@@ -1090,3 +1090,362 @@ def test_ensure_lab_bridges_skips_non_qemu_nodes_for_set_link(
 
     NetworkService().ensure_lab_bridges(lab_name)
     assert captured == []
+
+
+# ---------------------------------------------------------------------------
+# Bridge-Cloud — create_network / delete_network / ensure_lab_bridges branches
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_bridge_cloud_validates_name(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """AC8: invalid ``host_bridge`` name → NetworkServiceError(400)."""
+    lab_name = _seed_lab(labs_dir, lab_id="bc-lab-A")
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().create_network(
+            lab_name,
+            {"name": "bc1", "type": "bridge_cloud", "config": {"host_bridge": "br-foo"}},
+        )
+    assert ei.value.code == 400
+    # Bridge_add MUST NOT have been called.
+    assert helper_mocks["bridge_add"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_bridge_cloud_rejects_missing_host_bridge(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """AC8: missing ``host_bridge`` → NetworkServiceError(400)."""
+    lab_name = _seed_lab(labs_dir, lab_id="bc-lab-B")
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().create_network(
+            lab_name,
+            {"name": "bc2", "type": "bridge_cloud", "config": {}},
+        )
+    assert ei.value.code == 400
+    assert helper_mocks["bridge_add"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_bridge_cloud_404_when_host_bridge_missing(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """AC8: host bridge not present → NetworkServiceError(404)."""
+    # bridge_exists default fixture returns False — perfect for this case.
+    lab_name = _seed_lab(labs_dir, lab_id="bc-lab-C")
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().create_network(
+            lab_name,
+            {"name": "bc3", "type": "bridge_cloud", "config": {"host_bridge": "br-eth0"}},
+        )
+    assert ei.value.code == 404
+    assert helper_mocks["bridge_add"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_bridge_cloud_skips_add_fingerprint_nat_dnsmasq(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """AC8: successful bridge_cloud create stamps runtime and skips every
+    add/fingerprint/NAT/dnsmasq host call."""
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: True)
+    fingerprint_calls: list[str] = []
+    monkeypatch.setattr(
+        host_net,
+        "bridge_fingerprint_write",
+        lambda *a, **kw: fingerprint_calls.append(a[0]),
+    )
+    lab_name = _seed_lab(labs_dir, lab_id="bc-lab-D")
+
+    payload = await NetworkService().create_network(
+        lab_name,
+        {"name": "bc-ok", "type": "bridge_cloud", "config": {"host_bridge": "br-eth0"}},
+    )
+
+    assert payload["runtime"]["bridge_name"] == "br-eth0"
+    assert payload["runtime"]["driver"] == "bridge_cloud"
+    assert "created_at" in payload["runtime"]
+    # Negative assertions — no side effects on host bridge state.
+    assert helper_mocks["bridge_add"] == []
+    assert helper_mocks["nat_apply"] == []
+    assert helper_mocks["dnsmasq_start"] == []
+    assert fingerprint_calls == []
+
+
+@pytest.mark.asyncio
+async def test_delete_bridge_cloud_returns_409_with_active_attachments(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """AC9: refcount>0 → 409 (mirrors existing nat_cloud behavior)."""
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: True)
+    lab_name = _seed_lab(labs_dir, lab_id="bc-lab-E")
+    await NetworkService().create_network(
+        lab_name,
+        {"name": "bc-link", "type": "bridge_cloud", "config": {"host_bridge": "br-eth0"}},
+    )
+
+    # Inject a fake link so refcount > 0.
+    saved = json.loads((labs_dir / lab_name).read_text())
+    saved["links"] = [
+        {
+            "id": "L1",
+            "from": {"node_id": 99, "interface_index": 0},
+            "to": {"network_id": 1},
+        }
+    ]
+    (labs_dir / lab_name).write_text(json.dumps(saved))
+
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().delete_network(lab_name, 1)
+    assert ei.value.code == 409
+    # bridge_del MUST NOT have been invoked.
+    assert helper_mocks["bridge_del"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_bridge_cloud_skips_bridge_del_when_refcount_zero(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """AC9: clean delete preserves the host-owned bridge."""
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: True)
+    lab_name = _seed_lab(labs_dir, lab_id="bc-lab-F")
+    await NetworkService().create_network(
+        lab_name,
+        {"name": "bc-clean", "type": "bridge_cloud", "config": {"host_bridge": "br-eth0"}},
+    )
+    helper_mocks["bridge_del"].clear()
+
+    await NetworkService().delete_network(lab_name, 1)
+
+    assert helper_mocks["bridge_del"] == []
+
+
+def test_ensure_lab_bridges_skips_fingerprint_for_bridge_cloud(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """AC8: verify-only behavior for bridge_cloud records."""
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: True)
+    fingerprint_calls: list[str] = []
+    monkeypatch.setattr(
+        host_net,
+        "bridge_fingerprint_check",
+        lambda *a, **kw: fingerprint_calls.append("check") or "match",
+    )
+    monkeypatch.setattr(
+        host_net,
+        "bridge_fingerprint_write",
+        lambda *a, **kw: fingerprint_calls.append("write"),
+    )
+
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        "bc-lab-G",
+        networks={
+            "1": {
+                "id": 1,
+                "name": "bc-net",
+                "type": "bridge_cloud",
+                "runtime": {"bridge_name": "br-eth0", "driver": "bridge_cloud"},
+            }
+        },
+        links=[],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+    assert "br-eth0" in summary["ensured"]
+    assert helper_mocks["bridge_add"] == []
+    assert fingerprint_calls == []
+
+
+def test_ensure_lab_bridges_reports_missing_host_bridge_clearly(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """AC6 adjacent: a bridge_cloud network whose host bridge is missing
+    appears in ``skipped`` with the provisioning hint."""
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: False)
+
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        "bc-lab-H",
+        networks={
+            "2": {
+                "id": 2,
+                "name": "bc-net-2",
+                "type": "bridge_cloud",
+                "runtime": {"bridge_name": "br-eth1", "driver": "bridge_cloud"},
+            }
+        },
+        links=[],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+    assert helper_mocks["bridge_add"] == []
+    skipped_bridges = [item["bridge"] for item in summary["skipped"]]
+    assert "br-eth1" in skipped_bridges
+    reasons = [item["reason"] for item in summary["skipped"] if item["bridge"] == "br-eth1"]
+    assert any("host-bridge-missing" in r for r in reasons)
+
+
+# ---------------------------------------------------------------------------
+# Bridge-Cloud — patch_network forgery refusal (codex iter-2 finding)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_patch_network_refuses_type_transition_to_bridge_cloud(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """PATCH cannot upgrade an existing linux_bridge network to
+    bridge_cloud — only ``create_network`` runs the regex + bridge_exists
+    validation that protects the host LAN."""
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        "patch-bc-A",
+        networks={
+            "1": {
+                "id": 1,
+                "name": "lan",
+                "type": "linux_bridge",
+                "config": {},
+                "runtime": {"bridge_name": "nove1234n1", "driver": "linux_bridge"},
+            }
+        },
+        links=[],
+    )
+
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().patch_network(
+            lab_name, 1, {"type": "bridge_cloud", "config": {"host_bridge": "br-eth0"}}
+        )
+    assert ei.value.code == 422
+    # Lab record untouched.
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["type"] == "linux_bridge"
+    assert saved["networks"]["1"]["runtime"]["driver"] == "linux_bridge"
+
+
+@pytest.mark.asyncio
+async def test_patch_network_refuses_type_transition_from_bridge_cloud(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """The inverse: cannot downgrade a bridge_cloud record either — the
+    runtime ownership metadata would no longer match the network type."""
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        "patch-bc-B",
+        networks={
+            "1": {
+                "id": 1,
+                "name": "lan",
+                "type": "bridge_cloud",
+                "config": {"host_bridge": "br-eth0"},
+                "runtime": {"bridge_name": "br-eth0", "driver": "bridge_cloud"},
+            }
+        },
+        links=[],
+    )
+
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().patch_network(lab_name, 1, {"type": "linux_bridge"})
+    assert ei.value.code == 422
+
+
+@pytest.mark.asyncio
+async def test_patch_network_refuses_host_bridge_on_non_bridge_cloud(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """``config.host_bridge`` is only valid on bridge_cloud records;
+    setting it elsewhere is meaningless and a smell of forgery."""
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        "patch-bc-C",
+        networks={
+            "1": {
+                "id": 1,
+                "name": "lan",
+                "type": "linux_bridge",
+                "config": {},
+                "runtime": {"bridge_name": "nove1234n1", "driver": "linux_bridge"},
+            }
+        },
+        links=[],
+    )
+
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().patch_network(
+            lab_name, 1, {"config": {"host_bridge": "br-eth0"}}
+        )
+    assert ei.value.code == 422
+
+
+@pytest.mark.asyncio
+async def test_patch_network_refuses_config_mutation_on_bridge_cloud(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """Bridge-Cloud is create-only.  Even on an existing bridge_cloud
+    record, ``config`` mutations are refused — re-targeting the host
+    bridge requires delete + recreate to keep runtime/links consistent.
+    """
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        "patch-bc-E",
+        networks={
+            "1": {
+                "id": 1,
+                "name": "bc",
+                "type": "bridge_cloud",
+                "config": {"host_bridge": "br-eth0"},
+                "runtime": {"bridge_name": "br-eth0", "driver": "bridge_cloud"},
+            }
+        },
+        links=[],
+    )
+
+    # Even pointing at a different valid host bridge name is refused.
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().patch_network(
+            lab_name, 1, {"config": {"host_bridge": "br-eth1"}}
+        )
+    assert ei.value.code == 422
+
+    # And an empty config patch is refused for the same reason.
+    with pytest.raises(NetworkServiceError) as ei:
+        await NetworkService().patch_network(lab_name, 1, {"config": {}})
+    assert ei.value.code == 422
+
+    # Lab record untouched.
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["config"] == {"host_bridge": "br-eth0"}
+    assert saved["networks"]["1"]["runtime"]["bridge_name"] == "br-eth0"
+
+
+@pytest.mark.asyncio
+async def test_patch_network_refuses_runtime_id_implicit_mutation(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """PATCH cannot touch service-managed fields."""
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        "patch-bc-D",
+        networks={
+            "1": {
+                "id": 1,
+                "name": "lan",
+                "type": "linux_bridge",
+                "config": {},
+                "runtime": {"bridge_name": "nove1234n1", "driver": "linux_bridge"},
+            }
+        },
+        links=[],
+    )
+
+    for forbidden_patch in (
+        {"runtime": {"driver": "bridge_cloud", "bridge_name": "br-eth0"}},
+        {"id": 999},
+        {"implicit": True},
+    ):
+        with pytest.raises(NetworkServiceError) as ei:
+            await NetworkService().patch_network(lab_name, 1, forbidden_patch)
+        assert ei.value.code == 422

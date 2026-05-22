@@ -43,6 +43,12 @@ NAT_CLOUD_STATIC_FIRST_OFFSET = 2
 NAT_CLOUD_STATIC_LAST_OFFSET = 99
 NAT_CLOUD_DHCP_FIRST_OFFSET = 100
 
+# Bridge-Cloud network type — transparent host-bridge backed by
+# provision-ubuntu-2604.sh.  Lab side never adds/removes the bridge, never
+# writes a fingerprint, never runs NAT or dnsmasq.  See
+# .omc/plans/bridge-cloud-feature.md §4.4 for the full ownership model.
+BRIDGE_CLOUD_TYPE = "bridge_cloud"
+
 
 class NetworkServiceError(Exception):
     """Generic exception for network-service contract violations."""
@@ -517,6 +523,33 @@ class NetworkService:
                 if not isinstance(bridge, str) or not bridge:
                     bridge = host_net.bridge_name(lab_id, network_id)
 
+                # Bridge-Cloud: host-owned bridge, NEVER fingerprint or add.
+                # Verify-only.  Distinguish via runtime.driver (set at create
+                # time) AND network.type (defensive, covers migrations).
+                if (
+                    runtime_record.get("driver") == BRIDGE_CLOUD_TYPE
+                    or str(network.get("type", "")) == BRIDGE_CLOUD_TYPE
+                ):
+                    try:
+                        if host_net.bridge_exists(bridge):
+                            ensured.append(bridge)
+                        else:
+                            skipped.append({
+                                "bridge": bridge,
+                                "network_id": network_id,
+                                "reason": (
+                                    "host-bridge-missing — "
+                                    "provision-ubuntu-2604.sh has not run"
+                                ),
+                            })
+                    except host_net.HostNetError as exc:
+                        skipped.append({
+                            "bridge": bridge,
+                            "network_id": network_id,
+                            "reason": str(exc),
+                        })
+                    continue   # never fingerprint or add a host bridge
+
                 try:
                     if host_net.bridge_exists(bridge):
                         status = host_net.bridge_fingerprint_check(
@@ -642,11 +675,32 @@ class NetworkService:
                 if network_type == NAT_CLOUD_TYPE
                 else dict(raw_config)
             )
+            # Bridge-Cloud: host-owned bridge.  Validate config.host_bridge
+            # name + existence BEFORE allocating an id or persisting state.
+            if network_type == BRIDGE_CLOUD_TYPE:
+                host_bridge = normalized_config.get("host_bridge")
+                if not isinstance(host_bridge, str) or not host_net.RE_HOST_BRIDGE_NAME.fullmatch(host_bridge):
+                    raise NetworkServiceError(
+                        400,
+                        "config.host_bridge must match ^br-eth[0-9]+$",
+                        extra={"host_bridge": host_bridge},
+                    )
+                if not host_net.bridge_exists(host_bridge):
+                    raise NetworkServiceError(
+                        404,
+                        f"Host bridge {host_bridge!r} not found.  Run "
+                        "provision-ubuntu-2604.sh on the host first.",
+                        extra={"host_bridge": host_bridge},
+                    )
             next_id = max(
                 (int(key) for key in networks.keys() if str(key).isdigit()),
                 default=0,
             ) + 1
-            bridge = host_net.bridge_name(lab_id, next_id)
+            bridge = (
+                normalized_config["host_bridge"]
+                if network_type == BRIDGE_CLOUD_TYPE
+                else host_net.bridge_name(lab_id, next_id)
+            )
             network = {
                 "id": next_id,
                 "name": raw_name,
@@ -668,8 +722,14 @@ class NetworkService:
                     # US-401: provisioning-backend metadata for the
                     # reconciliation loop (US-402). ``driver`` mirrors
                     # the network's ``type`` vocabulary; ``created_at``
-                    # is an ISO-8601 UTC timestamp.
-                    "driver": network_type if network_type == NAT_CLOUD_TYPE else "linux_bridge",
+                    # is an ISO-8601 UTC timestamp.  For bridge_cloud
+                    # ``driver`` is the discriminator the dispatcher in
+                    # ``host_net.link_master_any`` keys off.
+                    "driver": (
+                        network_type
+                        if network_type in (NAT_CLOUD_TYPE, BRIDGE_CLOUD_TYPE)
+                        else "linux_bridge"
+                    ),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     # US-204c: seed an empty free-list. Counter-based
                     # allocation would exhaust a /24 in 250 cycles even
@@ -697,7 +757,12 @@ class NetworkService:
             # kernel state. Any provisioning or ownership failure rolls it back.
             LabService.write_lab_json_static(normalized, data)
             try:
-                if host_net.bridge_exists(bridge):
+                if network_type == BRIDGE_CLOUD_TYPE:
+                    # Bridge-Cloud: host-owned bridge, existence validated
+                    # above.  No bridge_add, no fingerprint, no NAT, no
+                    # dnsmasq — the post-JSON-write step is a no-op.
+                    pass
+                elif host_net.bridge_exists(bridge):
                     status = host_net.bridge_fingerprint_check(bridge, lab_id, next_id)
                     if status != "match":
                         raise host_net.HostNetBridgeOwnershipError(
@@ -807,27 +872,41 @@ class NetworkService:
                 except Exception:  # noqa: BLE001 — defensive
                     bridge = None
             if bridge:
-                if str(network.get("type", "")) == NAT_CLOUD_TYPE:
-                    config = network.get("config") or {}
-                    self._cleanup_nat_cloud_runtime(
-                        bridge,
-                        str(config.get("cidr") or ""),
-                        str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
-                    )
-                try:
-                    host_net.bridge_del(bridge)
-                except host_net.HostNetEINVAL:
+                network_driver = runtime.get("driver")
+                if (
+                    str(network.get("type", "")) == BRIDGE_CLOUD_TYPE
+                    or network_driver == BRIDGE_CLOUD_TYPE
+                ):
+                    # Bridge-Cloud: host-owned bridge.  Lab cleanup MUST
+                    # NOT call bridge_del or remove the fingerprint.  The
+                    # 409 refcount guard above already prevents premature
+                    # delete with active attachments.
                     logger.info(
-                        "delete_network: bridge %s already absent; nothing to do",
+                        "delete_network: host-owned bridge %s preserved (driver=bridge_cloud)",
                         bridge,
                     )
-                except host_net.HostNetError as exc:
-                    logger.warning(
-                        "delete_network: bridge_del(%s) failed (%s); "
-                        "JSON record removed regardless",
-                        bridge,
-                        exc,
-                    )
+                else:
+                    if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+                        config = network.get("config") or {}
+                        self._cleanup_nat_cloud_runtime(
+                            bridge,
+                            str(config.get("cidr") or ""),
+                            str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
+                        )
+                    try:
+                        host_net.bridge_del(bridge)
+                    except host_net.HostNetEINVAL:
+                        logger.info(
+                            "delete_network: bridge %s already absent; nothing to do",
+                            bridge,
+                        )
+                    except host_net.HostNetError as exc:
+                        logger.warning(
+                            "delete_network: bridge_del(%s) failed (%s); "
+                            "JSON record removed regardless",
+                            bridge,
+                            exc,
+                        )
 
         await ws_hub.publish(normalized, "network_deleted", {"network": removed})
         return removed
@@ -1024,6 +1103,50 @@ class NetworkService:
                         promoted = True
                     else:
                         network["name"] = new_name
+
+            # Bridge-Cloud security: PATCH is NOT the validated path for
+            # bridge_cloud creation.  Refuse type↔bridge_cloud transitions
+            # and refuse setting ``config.host_bridge`` on a
+            # non-bridge_cloud record.  Without this, an authenticated
+            # editor could mutate ``type="bridge_cloud"`` on an existing
+            # linux_bridge record (leaving stale runtime.driver), and
+            # subsequent lifecycle code that branches on ``type`` (e.g.
+            # ``_cleanup_lab_network_runtime``) would corrupt cleanup.
+            current_type = str(network.get("type", "linux_bridge") or "linux_bridge")
+            new_type = patch.get("type")
+            if new_type is not None and new_type != current_type:
+                if new_type == BRIDGE_CLOUD_TYPE or current_type == BRIDGE_CLOUD_TYPE:
+                    raise NetworkServiceError(
+                        422,
+                        "Cannot mutate network type to/from 'bridge_cloud' via "
+                        "PATCH; delete and recreate the network instead.",
+                    )
+            new_config = patch.get("config")
+            if isinstance(new_config, dict) and "host_bridge" in new_config:
+                if current_type != BRIDGE_CLOUD_TYPE:
+                    raise NetworkServiceError(
+                        422,
+                        "config.host_bridge is only valid on bridge_cloud "
+                        "networks; cannot set it on a non-bridge_cloud record.",
+                    )
+            # Bridge-Cloud is create-only — ``config`` (specifically
+            # ``host_bridge``) MUST NOT be re-targeted after create.
+            # Re-pointing a bridge_cloud network at a different host
+            # bridge requires delete + recreate so the runtime metadata,
+            # bridge ownership, and any attached links stay consistent.
+            if current_type == BRIDGE_CLOUD_TYPE and "config" in patch:
+                raise NetworkServiceError(
+                    422,
+                    "Cannot mutate config on a bridge_cloud network; "
+                    "delete and recreate to retarget the host bridge.",
+                )
+            # Service-managed fields MUST NOT be mutated via PATCH.
+            for forbidden in ("runtime", "id", "implicit"):
+                if forbidden in patch:
+                    raise NetworkServiceError(
+                        422,
+                        f"PATCH cannot mutate {forbidden!r} (service-managed).",
+                    )
 
             for field in ("type", "left", "top", "icon", "visibility", "config"):
                 if field in patch and patch[field] is not None:

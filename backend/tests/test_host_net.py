@@ -223,3 +223,119 @@ def test_bridge_del_removes_fingerprint(monkeypatch, tmp_path: Path):
 
     assert calls == [("bridge-del", "nove1234n5")]
     assert host_net.bridge_fingerprint_check("nove1234n5", "lab-a", 5) == "absent"
+
+
+# ---------------------------------------------------------------------------
+# Bridge-Cloud: driver-aware dispatch + host-bridge refusals
+# ---------------------------------------------------------------------------
+
+
+def test_link_master_host_invokes_helper_verb(monkeypatch) -> None:
+    recorded: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        host_net,
+        "_invoke_helper",
+        lambda verb, *a: recorded.append((verb, *a)),
+    )
+
+    host_net.link_master_host("nvec0de1d2i3h", "br-eth0")
+
+    assert recorded == [("link-master-host", "nvec0de1d2i3h", "br-eth0")]
+
+
+def test_link_master_any_routes_nove_to_lab_helper(monkeypatch) -> None:
+    lab_calls: list[tuple[str, str]] = []
+    host_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        host_net, "link_master", lambda i, b: lab_calls.append((i, b))
+    )
+    monkeypatch.setattr(
+        host_net, "link_master_host", lambda i, b: host_calls.append((i, b))
+    )
+
+    # Driver value irrelevant when bridge matches the lab regex.
+    host_net.link_master_any("nvec0de1d2i3h", "nove1234n7", driver=None)
+    host_net.link_master_any("nvec0de1d2i3h", "nove1234n7", driver="bridge_cloud")
+
+    assert lab_calls == [("nvec0de1d2i3h", "nove1234n7")] * 2
+    assert host_calls == []
+
+
+def test_link_master_any_routes_br_eth_to_host_helper_with_correct_driver(monkeypatch) -> None:
+    host_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(host_net, "link_master", lambda *_a: pytest.fail("lab helper not allowed"))
+    monkeypatch.setattr(
+        host_net, "link_master_host", lambda i, b: host_calls.append((i, b))
+    )
+
+    host_net.link_master_any("nvec0de1d2i3h", "br-eth0", driver="bridge_cloud")
+
+    assert host_calls == [("nvec0de1d2i3h", "br-eth0")]
+
+
+@pytest.mark.parametrize("wrong_driver", [None, "", "nat_cloud", "linux_bridge", "bogus"])
+def test_link_master_any_refuses_br_eth_with_wrong_driver(monkeypatch, wrong_driver) -> None:
+    monkeypatch.setattr(host_net, "link_master", lambda *_a: pytest.fail("must not call"))
+    monkeypatch.setattr(host_net, "link_master_host", lambda *_a: pytest.fail("must not call"))
+
+    with pytest.raises(host_net.HostNetError) as ei:
+        host_net.link_master_any("nvec0de1d2i3h", "br-eth0", driver=wrong_driver)
+
+    assert "without driver=bridge_cloud" in str(ei.value)
+
+
+def test_link_master_any_defaults_unknown_to_lab_helper(monkeypatch) -> None:
+    """For names that match neither the host-bridge nor lab-bridge
+    regex, dispatch falls through to ``link_master``.  The privileged
+    helper itself validates against the lab regex and rejects unknown
+    names there.  Defense-in-depth: keep this dispatcher narrowly
+    scoped to the Bridge-Cloud cross-domain rule.
+    """
+    lab_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        host_net, "link_master", lambda i, b: lab_calls.append((i, b))
+    )
+    monkeypatch.setattr(
+        host_net, "link_master_host", lambda *_a: pytest.fail("must not call"),
+    )
+
+    host_net.link_master_any("nvec0de1d2i3h", "docker0", driver="bridge_cloud")
+
+    assert lab_calls == [("nvec0de1d2i3h", "docker0")]
+
+
+def test_bridge_del_refuses_br_eth(monkeypatch) -> None:
+    monkeypatch.setattr(
+        host_net,
+        "_invoke_helper",
+        lambda *_a: pytest.fail("helper must not be invoked for host bridges"),
+    )
+    monkeypatch.setattr(
+        host_net,
+        "bridge_fingerprint_remove",
+        lambda *_a: pytest.fail("fingerprint must not be touched for host bridges"),
+    )
+
+    with pytest.raises(host_net.HostNetError) as ei:
+        host_net.bridge_del("br-eth0")
+
+    assert "host-owned" in str(ei.value)
+
+
+def test_host_bridge_name_regex_rejects_injection() -> None:
+    # Accepted shapes
+    assert host_net.RE_HOST_BRIDGE_NAME.match("br-eth0")
+    assert host_net.RE_HOST_BRIDGE_NAME.match("br-eth10")
+    # Rejected shapes
+    for bad in (
+        "nove1234n1",
+        "br-foo",
+        "br-eth-0",
+        "br-eth0; rm -rf /",
+        "BR-ETH0",
+        " br-eth0",
+        "br-eth0 ",
+        "br-eth0\n",
+        "",
+    ):
+        assert not host_net.RE_HOST_BRIDGE_NAME.match(bad), bad

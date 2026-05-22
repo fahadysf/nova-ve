@@ -75,6 +75,11 @@ IP_FORWARD_PATH = Path(os.environ.get("NOVA_VE_IP_FORWARD_PATH", "/proc/sys/net/
 # Bridge: nove<lab_hash:04x>n<network_id 1-5 digits>     max 14
 RE_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}n[0-9]{1,5}$")
 
+# Host-owned bridges created by the provision script for Bridge-Cloud
+# networks.  Lab-side verbs MUST NOT accept these; only the dedicated
+# link-master-host verb does.
+RE_HOST_BRIDGE_NAME = re.compile(r"^br-eth[0-9]+$")
+
 # TAP (QEMU): nve<lab_hash:04x>d<node 1-3>i<iface 1-2>     max 13
 RE_TAP_NAME = re.compile(r"^nve[a-f0-9]{4}d[0-9]{1,3}i[0-9]{1,2}$")
 
@@ -116,6 +121,16 @@ def _check_regex(value: str, pattern: re.Pattern[str], label: str) -> str:
 
 def validate_bridge_name(value: str) -> str:
     return _check_regex(value, RE_BRIDGE_NAME, "bridge_name")
+
+
+def validate_host_bridge_name(value: str) -> str:
+    """Validate names for host-owned ``br-eth*`` bridges.
+
+    Accepted by exactly one verb (``link-master-host``).  Lab-side verbs
+    continue to use ``validate_bridge_name`` / ``validate_iface_name`` and
+    refuse anything matching ``RE_HOST_BRIDGE_NAME``.
+    """
+    return _check_regex(value, RE_HOST_BRIDGE_NAME, "host_bridge_name")
 
 
 def validate_tap_name(value: str) -> str:
@@ -415,6 +430,21 @@ def cmd_veth_pair_add(args: argparse.Namespace) -> int:
 def cmd_link_master(args: argparse.Namespace) -> int:
     iface = validate_iface_name(args.iface)
     bridge = validate_bridge_name(args.bridge)
+    return _ip("link", "set", iface, "master", bridge)
+
+
+def cmd_link_master_host(args: argparse.Namespace) -> int:
+    """Attach a nova-ve iface (TAP/veth/lab bridge) to a host-owned
+    ``br-eth*`` bridge.
+
+    Distinct from ``cmd_link_master`` so the lab-side ``RE_BRIDGE_NAME``
+    regex stays exclusive for lab bridges.  Scope creep into the existing
+    verb would let lab paths target host bridges; instead this new verb
+    has its own ``RE_HOST_BRIDGE_NAME`` regex and is invoked only by
+    Bridge-Cloud paths in the backend.
+    """
+    iface = validate_iface_name(args.iface)
+    bridge = validate_host_bridge_name(args.bridge)
     return _ip("link", "set", iface, "master", bridge)
 
 
@@ -903,6 +933,7 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "link-del": cmd_link_del,
     "veth-pair-add": cmd_veth_pair_add,
     "link-master": cmd_link_master,
+    "link-master-host": cmd_link_master_host,
     "link-set-nomaster": cmd_link_set_nomaster,
     "link-netns": cmd_link_netns,
     "link-up": cmd_link_up,
@@ -957,6 +988,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("peerend")
 
     p = sub.add_parser("link-master", help="ip link set <iface> master <bridge>")
+    p.add_argument("iface")
+    p.add_argument("bridge")
+
+    p = sub.add_parser(
+        "link-master-host",
+        help="ip link set <iface> master <br-eth*> — Bridge-Cloud only",
+    )
     p.add_argument("iface")
     p.add_argument("bridge")
 

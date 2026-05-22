@@ -813,6 +813,21 @@ class LinkService:
             if bridge in seen_explicit_bridges:
                 continue
             seen_explicit_bridges.add(bridge)
+            # Bridge-Cloud: host-owned bridge.  NEVER auto-provision.  If
+            # missing here, provisioning hasn't run on the host yet —
+            # surface a typed error so the operator runs the install
+            # script instead of nova-ve silently calling bridge_add and
+            # being refused by the helper's regex.
+            net_record = (lab_data.get("networks") or {}).get(str(network_id)) or {}
+            net_runtime = net_record.get("runtime") or {}
+            if net_runtime.get("driver") == "bridge_cloud":
+                if not host_net.bridge_exists(bridge):
+                    raise host_net.HostNetError(
+                        f"host bridge {bridge!r} missing — run "
+                        "deploy/scripts/provision-ubuntu-2604.sh before "
+                        "attaching nodes to this network."
+                    )
+                continue
             if not host_net.bridge_exists(bridge):
                 host_net.bridge_add(bridge)
                 provisioned_bridges.append(bridge)
