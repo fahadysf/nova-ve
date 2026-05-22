@@ -390,6 +390,10 @@ install_bridge_cloud_helpers() {
   local phase_dst="/opt/nova-ve/bin/nova-ve-bridge-cloud.sh"
   local unit_src="${REPO_ROOT}/deploy/scripts/nova-ve-postboot.service.tpl"
   local unit_dst="/etc/systemd/system/nova-ve-postboot.service"
+  local learning_src="${REPO_ROOT}/deploy/scripts/nova-ve-bridge-cloud-learning.sh"
+  local learning_dst="/opt/nova-ve/bin/nova-ve-bridge-cloud-learning.sh"
+  local learning_unit_src="${REPO_ROOT}/deploy/scripts/nova-ve-bridge-cloud-learning.service.tpl"
+  local learning_unit_dst="/etc/systemd/system/nova-ve-bridge-cloud-learning.service"
   install -d -o root -g root -m 0755 /opt/nova-ve/bin
   install -d -o root -g root -m 0755 /etc/nova-ve
   install -m 0644 -o root -g root "${marker_src}" "${marker_dst}"
@@ -397,6 +401,10 @@ install_bridge_cloud_helpers() {
   install -m 0755 -o root -g root "${backup_src}" "${backup_dst}"
   install -m 0750 -o root -g root "${phase_src}" "${phase_dst}"
   install -m 0644 -o root -g root "${unit_src}" "${unit_dst}"
+  install -m 0750 -o root -g root "${learning_src}" "${learning_dst}"
+  install -m 0644 -o root -g root "${learning_unit_src}" "${learning_unit_dst}"
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable nova-ve-bridge-cloud-learning.service 2>/dev/null || true
 }
 
 bridge_cloud_marker_state() {
