@@ -112,6 +112,16 @@ if ! "$NETPLAN_GEN" "${GEN_ARGS[@]}" "${IFACES[@]}"; then
 fi
 LOG "phase=netplan-gen out=/etc/netplan/60-nova-ve-bridge-cloud.yaml"
 
+# Remove the Phase B transitional netplan so the bridge file is the
+# only source of truth for the parent ethernet stanza.  systemd-networkd
+# is non-destructive: leaving the transitional file in place means the
+# parent NIC's IPs / routes from Phase B linger after the bridge takes
+# over and the host ends up dual-addressed (IP on both eth0 and br-eth0).
+if [[ -f /etc/netplan/50-nova-ve-transitional.yaml ]]; then
+    rm -f /etc/netplan/50-nova-ve-transitional.yaml
+    LOG "phase=cleanup removed=/etc/netplan/50-nova-ve-transitional.yaml"
+fi
+
 restore_and_apply() {
     "$BACKUP_PY" restore "$BACKUP_ROOT" /etc/netplan
     rm -f /etc/netplan/60-nova-ve-bridge-cloud.yaml
@@ -134,6 +144,37 @@ if ! timeout 60 netplan apply; then
 fi
 LOG "phase=apply rc=0"
 
+# Post-apply reconciliation: systemd-networkd is non-destructive, so
+# any IPv4/IPv6 address that was on the parent NIC before this apply
+# stays in the kernel.  Strip everything but link-local from each
+# parent so the IP only lives on the bridge.  We deliberately keep
+# IPv6 link-local (``fe80::``) — it's auto-generated and harmless.
+for i in "${IFACES[@]}"; do
+    if [[ -e "/sys/class/net/${i}" ]]; then
+        if ip -4 addr show dev "${i}" | grep -q 'inet '; then
+            ip -4 addr flush dev "${i}" 2>/dev/null || true
+            LOG "phase=cleanup flushed_inet=${i}"
+        fi
+        if ip -6 addr show dev "${i}" | grep -E 'inet6 (?!fe80)' >/dev/null 2>&1; then
+            ip -6 addr show dev "${i}" | awk '/inet6 / && $2 !~ /^fe80/ {print $2}' | \
+                while read -r addr; do
+                    [[ -z "${addr}" ]] && continue
+                    ip -6 addr del "${addr}" dev "${i}" 2>/dev/null || true
+                    LOG "phase=cleanup flushed_inet6=${i} addr=${addr}"
+                done
+        fi
+    fi
+done
+
+# Force a networkd reconcile so the routes / DNS from the new netplan
+# definitely take effect — apply alone can leave routes pending in
+# rare cases when the parent NIC was actively transitioning.
+networkctl reload 2>/dev/null || true
+networkctl reconfigure "${IFACES[@]}" 2>/dev/null || true
+for b in "${IFACES[@]}"; do
+    networkctl reconfigure "br-${b}" 2>/dev/null || true
+done
+
 # ----- 6. Wait for br-eth0 carrier (best-effort, <=30s) ---------------------
 for _ in $(seq 1 30); do
     if [[ "$(cat /sys/class/net/br-eth0/carrier 2>/dev/null)" == "1" ]]; then
@@ -144,6 +185,21 @@ done
 
 # ----- 7. Gateway reachability check (5 × 3s) -------------------------------
 if [[ -n "$PRE_GW" ]]; then
+    # If the default route didn't land on br-eth0 (rare apply race),
+    # install it manually before the ping check.  netplan generated the
+    # route in the YAML; this is a defensive belt-and-suspenders.
+    if ! ip route show default | grep -q "via $PRE_GW dev br-eth0"; then
+        if ip route show default | grep -q "via $PRE_GW"; then
+            # Default route exists but on a different device — replace it.
+            ip route replace default via "$PRE_GW" dev br-eth0 2>/dev/null || true
+            LOG "phase=route-fix action=replace-default gw=$PRE_GW dev=br-eth0"
+        else
+            # No default route at all — install one.
+            ip route add default via "$PRE_GW" dev br-eth0 2>/dev/null || true
+            LOG "phase=route-fix action=add-default gw=$PRE_GW dev=br-eth0"
+        fi
+    fi
+
     rc=1
     for _ in $(seq 1 5); do
         if ping -c 1 -W 3 -I br-eth0 "$PRE_GW" >/dev/null 2>&1; then
