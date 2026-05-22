@@ -484,10 +484,26 @@ async def update_topology(
                     for field, value in node_patch.items():
                         if value is not None:
                             node[field] = value
+            # Bridge-Cloud security boundary: PUT /topology accepts only
+            # layout/display fields for network patches.  Semantic fields
+            # (``type``, ``runtime``, ``config``, ``id``, ``implicit``)
+            # MUST go through ``NetworkService`` so the validated
+            # create/update path stays the only writer of ownership
+            # metadata.  Without this, an authenticated lab editor could
+            # forge ``runtime.driver=bridge_cloud`` +
+            # ``runtime.bridge_name=br-eth0`` and trick ``link_master_any``
+            # into routing a TAP onto the physical host bridge.
+            _NETWORK_TOPOLOGY_FIELDS = frozenset({
+                "name", "left", "top", "icon", "width",
+                "style", "linkstyle", "color", "label",
+                "visibility", "smart",
+            })
             for network_id, network_patch in payload.get("networks", {}).items():
                 network = data.get("networks", {}).get(str(network_id))
                 if network and isinstance(network_patch, dict):
                     for field, value in network_patch.items():
+                        if field not in _NETWORK_TOPOLOGY_FIELDS:
+                            continue
                         if value is not None:
                             network[field] = value
 
@@ -1929,7 +1945,45 @@ async def update_network(
             "message": "Network does not exist.",
         }
 
-    for field, value in request.model_dump(exclude_unset=True).items():
+    # Bridge-Cloud security: same rule as ``NetworkService.patch_network``
+    # — refuse type↔bridge_cloud transitions and refuse setting
+    # ``config.host_bridge`` on a non-bridge_cloud record.  See plan
+    # §6.2 T2 + .omc/plans/bridge-cloud-feature.md.
+    patch = request.model_dump(exclude_unset=True)
+    current_type = str(network.get("type", "linux_bridge") or "linux_bridge")
+    new_type = patch.get("type")
+    if new_type is not None and new_type != current_type:
+        if new_type == "bridge_cloud" or current_type == "bridge_cloud":
+            return {
+                "code": 422,
+                "status": "fail",
+                "message": (
+                    "Cannot mutate network type to/from 'bridge_cloud' via "
+                    "update; delete and recreate the network instead."
+                ),
+            }
+    new_config = patch.get("config")
+    if isinstance(new_config, dict) and "host_bridge" in new_config:
+        if current_type != "bridge_cloud":
+            return {
+                "code": 422,
+                "status": "fail",
+                "message": (
+                    "config.host_bridge is only valid on bridge_cloud "
+                    "networks; cannot set it on a non-bridge_cloud record."
+                ),
+            }
+    if current_type == "bridge_cloud" and "config" in patch:
+        return {
+            "code": 422,
+            "status": "fail",
+            "message": (
+                "Cannot mutate config on a bridge_cloud network; "
+                "delete and recreate to retarget the host bridge."
+            ),
+        }
+
+    for field, value in patch.items():
         if value is not None:
             network[field] = value
 

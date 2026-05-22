@@ -29,6 +29,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -370,6 +371,18 @@ def bridge_fingerprint_remove(name: str) -> None:
     bridge_fingerprint_path(name).unlink(missing_ok=True)
 
 
+# Lab-owned bridges follow ``nove<lab_hash:04x>n<network_id>``.  Used
+# by :func:`link_master_any` to route to the lab-side privileged verb.
+# ``\A``/``\Z`` (not ``^``/``$``) so a trailing newline cannot sneak past.
+RE_BRIDGE_NAME = re.compile(r"\Anove[a-f0-9]{4}n[0-9]{1,5}\Z")
+
+# Host-owned bridges created by the provision script for Bridge-Cloud
+# networks.  Lab-side helpers MUST refuse to operate on these names; the
+# dedicated ``link_master_host`` / ``link-master-host`` privileged-helper
+# verb is the only path allowed to touch them.
+RE_HOST_BRIDGE_NAME = re.compile(r"\Abr-eth[0-9]+\Z")
+
+
 def bridge_add(name: str) -> None:
     """Create a Linux bridge with ``name`` via the privileged helper.
 
@@ -385,7 +398,18 @@ def bridge_del(name: str) -> None:
     """Delete the Linux bridge ``name`` via the privileged helper.
 
     Raises :class:`HostNetEINVAL` if the bridge does not exist.
+
+    Defense-in-depth: refuses any name matching ``^br-eth[0-9]+$`` because
+    those are host-owned Bridge-Cloud bridges (owned by
+    ``provision-ubuntu-2604.sh``, never by nova-ve).  One assertion at the
+    lowest layer covers ALL call sites — lab cleanup, network rollback,
+    orphan sweep, etc.
     """
+    if RE_HOST_BRIDGE_NAME.match(name or ""):
+        raise HostNetError(
+            f"refusing bridge_del on host-owned bridge {name!r}; "
+            "host bridges are owned by provision-ubuntu-2604.sh only"
+        )
     _invoke_helper("bridge-del", name)
     bridge_fingerprint_remove(name)
 
@@ -418,6 +442,46 @@ def veth_pair_add(host_end: str, peer_end: str) -> None:
 def link_master(iface: str, bridge: str) -> None:
     """Attach ``iface`` to ``bridge`` (``ip link set <iface> master <bridge>``)."""
     _invoke_helper("link-master", iface, bridge)
+
+
+def link_master_host(iface: str, bridge: str) -> None:
+    """Attach ``iface`` to a host-owned Bridge-Cloud bridge (``br-eth*``).
+
+    Calls the privileged helper's ``link-master-host`` verb, which uses its
+    own ``RE_HOST_BRIDGE_NAME`` regex.  Lab-side ``link_master`` continues
+    to reject ``br-eth*`` via the lab-bridge regex.
+    """
+    _invoke_helper("link-master-host", iface, bridge)
+
+
+def link_master_any(iface: str, bridge: str, *, driver: str | None = None) -> None:
+    """Driver-aware attach dispatch — the only entry point upper layers
+    should call when attaching a TAP/veth to a bridge.
+
+    Routing matrix::
+
+        bridge ~= ^br-eth[0-9]+$ AND driver == 'bridge_cloud' → link_master_host
+        bridge ~= ^br-eth[0-9]+$ AND driver != 'bridge_cloud' → HostNetError
+        anything else                                          → link_master
+
+    The single explicit rule is the Bridge-Cloud cross-domain attach
+    refusal.  Everything else falls through to ``link_master`` (the
+    lab-side helper); the privileged helper there validates the name
+    against the lab regex.  Three independent layers refuse the
+    cross-domain attach: this dispatcher, the privileged helper's
+    per-verb ``RE_HOST_BRIDGE_NAME`` regex, and the lab-side
+    ``link_master`` regex (which rejects ``br-eth*``).
+    """
+    bridge_value = bridge or ""
+    if RE_HOST_BRIDGE_NAME.match(bridge_value):
+        if driver == "bridge_cloud":
+            link_master_host(iface, bridge_value)
+            return
+        raise HostNetError(
+            f"refusing to attach to host bridge {bridge_value!r} "
+            f"without driver=bridge_cloud (got driver={driver!r})"
+        )
+    link_master(iface, bridge_value)
 
 
 def link_set_nomaster(iface: str) -> None:

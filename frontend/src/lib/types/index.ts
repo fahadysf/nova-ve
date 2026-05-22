@@ -90,6 +90,7 @@ export type NetworkType =
   | 'ovs_bridge'
   | 'nat'
   | 'nat_cloud'
+  | 'bridge_cloud'
   | 'cloud'
   | 'management'
   | 'pnet0' | 'pnet1' | 'pnet2' | 'pnet3' | 'pnet4'
@@ -197,6 +198,8 @@ export interface NetworkCreateConfig {
   dhcp_start?: string;
   dhcp_end?: string;
   egress_interface?: string;
+  /** Bridge-Cloud only — name of the host-owned br-eth* bridge. */
+  host_bridge?: string;
 }
 
 export interface LabViewport {

@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import json
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -555,3 +557,92 @@ async def test_delete_lab_missing_returns_404(monkeypatch, patched_route_setting
     payload = response.json()
     assert payload["code"] == 404
     assert payload["status"] == "fail"
+
+
+@pytest.mark.asyncio
+async def test_update_topology_refuses_to_forge_network_runtime_or_type(
+    monkeypatch, patched_route_settings
+):
+    """Bridge-Cloud security regression — codex critic CRIT-1.
+
+    PUT /api/labs/{path}/topology used to blindly write every field from
+    each network_patch onto the existing network record.  An
+    authenticated lab editor could thus forge
+    ``runtime.driver = "bridge_cloud"`` +
+    ``runtime.bridge_name = "br-eth0"`` to trick ``link_master_any`` into
+    routing a TAP onto the host's physical LAN.  The router now
+    whitelists layout-only fields; semantic fields (``type``, ``runtime``,
+    ``config``, ``id``, ``implicit``) MUST come through
+    ``NetworkService``.
+    """
+    lab_path = patched_route_settings.LABS_DIR / "forge-probe.json"
+    lab_path.write_text(
+        """{
+  "schema": 2,
+  "id": "forge-probe",
+  "meta": {"name": "forge-probe"},
+  "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+  "nodes": {},
+  "networks": {
+    "1": {
+      "id": 1,
+      "name": "lab-net",
+      "type": "linux_bridge",
+      "left": 100,
+      "top": 100,
+      "runtime": {}
+    }
+  },
+  "links": [],
+  "defaults": {"link_style": "orthogonal"}
+}"""
+    )
+
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        username="admin",
+        role="admin",
+        html5=True,
+        folder="/",
+    )
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.put(
+            "/api/labs/forge-probe.json/topology",
+            json={
+                "topology": [],
+                "networks": {
+                    "1": {
+                        # Layout fields (allowed) — should be persisted.
+                        "left": 222,
+                        "top": 333,
+                        "color": "#ff0000",
+                        # Semantic fields (forbidden) — must NOT be persisted.
+                        "type": "bridge_cloud",
+                        "runtime": {"driver": "bridge_cloud", "bridge_name": "br-eth0"},
+                        "config": {"host_bridge": "br-eth0"},
+                        "id": 999,
+                        "implicit": True,
+                    }
+                },
+            },
+        )
+        assert response.status_code == 200, response.text
+
+    app.dependency_overrides.clear()
+
+    # Reload from disk and verify the forgery did NOT land.
+    persisted = json.loads(lab_path.read_text())
+    record = persisted["networks"]["1"]
+    # Allowed fields persisted:
+    assert record["left"] == 222
+    assert record["top"] == 333
+    assert record["color"] == "#ff0000"
+    # Forbidden fields refused:
+    assert record["type"] == "linux_bridge", "type forgery must be rejected"
+    assert record["runtime"] == {}, "runtime forgery must be rejected"
+    assert "config" not in record or record.get("config") in (None, {}), \
+        "config forgery must be rejected"
+    assert record["id"] == 1, "id forgery must be rejected"
+    assert record.get("implicit") in (None, False), \
+        "implicit forgery must be rejected"

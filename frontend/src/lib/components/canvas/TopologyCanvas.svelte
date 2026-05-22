@@ -99,7 +99,8 @@
   // ``POST /api/labs/{path}/networks`` and must match ``NetworkType``.
   const NETWORK_PALETTE: PaletteNetworkItem[] = [
     { kind: 'network', title: 'Bridge Network', subtitle: 'linux_bridge', networkType: 'linux_bridge' },
-    { kind: 'network', title: 'NAT-Cloud', subtitle: 'DHCP + outbound NAT', networkType: 'nat_cloud' }
+    { kind: 'network', title: 'NAT-Cloud', subtitle: 'DHCP + outbound NAT', networkType: 'nat_cloud' },
+    { kind: 'network', title: 'Bridge-Cloud', subtitle: 'Transparent host bridge', networkType: 'bridge_cloud' }
   ];
   type ConsoleSelectorWindow = {
     id: number;

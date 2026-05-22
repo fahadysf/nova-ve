@@ -13,8 +13,18 @@
   // must be a member of ``NetworkType`` so the backend POST accepts it.
   const TYPE_OPTIONS: { value: NetworkType; label: string }[] = [
     { value: 'linux_bridge', label: 'Bridge (linux_bridge)' },
-    { value: 'nat_cloud', label: 'NAT-Cloud (nat_cloud)' }
+    { value: 'nat_cloud', label: 'NAT-Cloud (nat_cloud)' },
+    { value: 'bridge_cloud', label: 'Bridge-Cloud (host bridge)' }
   ];
+
+  interface HostBridge {
+    id: string;
+    label: string;
+    host_bridge: string;
+    iface: string;
+    carrier: boolean;
+    addrs: string[];
+  }
 
   const dispatch = createEventDispatcher<{
     confirm: { name: string; type: NetworkType; config?: NetworkCreateConfig };
@@ -29,6 +39,11 @@
   let dhcpStart = '';
   let dhcpEnd = '';
   let egressInterface = '';
+  let selectedHostBridge = '';
+  let hostBridges: HostBridge[] = [];
+  let hostBridgesLoading = false;
+  let hostBridgesLoaded = false;
+  let hostBridgesError: string | null = null;
   let modalEl: HTMLDivElement | null = null;
   let nameInputEl: HTMLInputElement | null = null;
   let wasOpen = false;
@@ -47,13 +62,51 @@
       dhcpStart = '';
       dhcpEnd = '';
       egressInterface = '';
+      selectedHostBridge = '';
+      hostBridges = [];
+      hostBridgesError = null;
+      hostBridgesLoaded = false;
       void focusName();
     }
     wasOpen = open;
   }
 
+  // Fetch host bridges exactly once per (open, bridge_cloud) selection.
+  // ``hostBridgesLoaded`` becomes the terminal flag: empty results or
+  // errors are still "loaded" so we don't refetch in a reactive loop.
+  $: if (open && type === 'bridge_cloud' && !hostBridgesLoaded && !hostBridgesLoading) {
+    void loadHostBridges();
+  }
+
   $: trimmedName = name.trim();
-  $: canSubmit = trimmedName.length > 0;
+  $: canSubmit =
+    trimmedName.length > 0 &&
+    (type !== 'bridge_cloud' || selectedHostBridge.length > 0);
+
+  async function loadHostBridges() {
+    hostBridgesLoading = true;
+    hostBridgesError = null;
+    try {
+      const resp = await fetch('/api/system/bridge-clouds', { credentials: 'include' });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const payload = await resp.json();
+      const list = (payload?.data ?? []) as HostBridge[];
+      hostBridges = list;
+      if (list.length > 0 && !selectedHostBridge) {
+        selectedHostBridge = list[0].host_bridge;
+      }
+    } catch (err) {
+      hostBridgesError = err instanceof Error ? err.message : String(err);
+      hostBridges = [];
+    } finally {
+      hostBridgesLoading = false;
+      // Terminal state — empty results and errors both count as
+      // "loaded" so the reactive fetch trigger does not refire.
+      hostBridgesLoaded = true;
+    }
+  }
 
   async function focusName() {
     await tick();
@@ -75,6 +128,8 @@
       if (dhcpStart.trim()) config.dhcp_start = dhcpStart.trim();
       if (dhcpEnd.trim()) config.dhcp_end = dhcpEnd.trim();
       if (egressInterface.trim()) config.egress_interface = egressInterface.trim();
+    } else if (type === 'bridge_cloud') {
+      config.host_bridge = selectedHostBridge;
     }
     dispatch('confirm', { name: trimmedName, type, config });
   }
@@ -218,6 +273,51 @@
                 placeholder=".254"
                 disabled={!dhcp}
               />
+            </label>
+          </div>
+        {/if}
+
+        {#if type === 'bridge_cloud'}
+          <div class="space-y-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3">
+            <div class="text-xs text-amber-200">
+              Lab nodes attached to a Bridge-Cloud network bridge directly onto
+              the host's physical LAN.  Do <strong>not</strong> run
+              unauthorized DHCP servers on those nodes — they will leak onto
+              the upstream network.
+            </div>
+            <label class="block space-y-1.5">
+              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Host bridge</span>
+              {#if hostBridgesLoading}
+                <div class="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-400">
+                  Loading host bridges…
+                </div>
+              {:else if hostBridgesError}
+                <div class="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                  Failed to list host bridges: {hostBridgesError}
+                </div>
+              {:else if hostBridges.length === 0}
+                <div class="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                  No <code>br-eth*</code> bridges found.  Run
+                  <code>deploy/scripts/provision-ubuntu-2604.sh</code> on the
+                  host first.
+                </div>
+              {:else}
+                <select
+                  bind:value={selectedHostBridge}
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                  data-testid="network-host-bridge-select"
+                >
+                  {#each hostBridges as bridge}
+                    <option value={bridge.host_bridge}>
+                      {bridge.label}
+                      {#if bridge.addrs.length > 0}
+                        ({bridge.addrs.join(', ')})
+                      {/if}
+                      {bridge.carrier ? '' : '(link down)'}
+                    </option>
+                  {/each}
+                </select>
+              {/if}
             </label>
           </div>
         {/if}

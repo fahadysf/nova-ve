@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 NetworkType = Literal[
@@ -9,6 +9,7 @@ NetworkType = Literal[
     "ovs_bridge",
     "nat",
     "nat_cloud",
+    "bridge_cloud",
     "cloud",
     "management",
     "pnet0", "pnet1", "pnet2", "pnet3", "pnet4",
@@ -34,6 +35,11 @@ class NetworkConfig(BaseModel):
     dhcp_start: Optional[str] = None
     dhcp_end: Optional[str] = None
     egress_interface: Optional[str] = None
+    # Bridge-Cloud: name of the host-owned bridge (``br-eth*``) this lab
+    # network attaches to.  Required when ``type == "bridge_cloud"``;
+    # validated at the service layer against ``^br-eth[0-9]+$`` and a
+    # ``host_net.bridge_exists`` probe.
+    host_bridge: Optional[str] = None
 
 
 class NetworkRuntime(BaseModel):
@@ -102,6 +108,25 @@ class NetworkCreate(BaseModel):
     left: int = 0
     top: int = 0
     config: Optional[NetworkConfig] = None
+
+    @model_validator(mode="after")
+    def _require_host_bridge_for_bridge_cloud(self) -> "NetworkCreate":
+        """Bridge-Cloud payloads MUST carry ``config.host_bridge``.
+
+        AC7 in .omc/plans/bridge-cloud-feature.md §3: Pydantic accepts a
+        ``bridge_cloud`` payload only when ``config.host_bridge`` is a
+        non-empty string.  Without this, the malformed payload reaches
+        the service layer and is rejected with a less helpful 400.
+        """
+        if self.type == "bridge_cloud":
+            host_bridge = (
+                self.config.host_bridge if self.config is not None else None
+            )
+            if not isinstance(host_bridge, str) or not host_bridge.strip():
+                raise ValueError(
+                    "config.host_bridge is required when type == 'bridge_cloud'"
+                )
+        return self
 
 
 class NetworkUpdate(BaseModel):
