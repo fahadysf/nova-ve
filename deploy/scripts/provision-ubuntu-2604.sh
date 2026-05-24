@@ -416,6 +416,79 @@ bridge_cloud_marker_state() {
   fi
 }
 
+bridge_cloud_cleanup_stale_transitional() {
+  # Idempotent cleanup of the Phase B transitional netplan if it
+  # lingers on a host whose marker is "complete".  Hosts provisioned
+  # before the Phase C cleanup landed (commit 5454520) left this file
+  # in place, which causes systemd-networkd to re-apply eth0's L3
+  # config on every reconfigure — re-creating the dual-IP regression
+  # (192.168.100.X on both eth0 AND br-eth0) and a second default
+  # route via eth0.
+  #
+  # Safe to run unconditionally on every provision: only acts when the
+  # marker says "complete" AND the file is present.
+  #
+  # IMPORTANT: this function deliberately does NOT call `netplan apply`.
+  # `netplan apply` triggers `systemd-networkd` to issue RTM_DELROUTE
+  # on every iface as part of the reconfigure cycle, then attempts to
+  # re-add routes once carriers settle.  With a bridge whose slave
+  # briefly flickers during reconfigure, the route re-add can silently
+  # drop — and the host loses its default route despite the YAML being
+  # correct, leaving it unreachable.  We instead make surgical kernel-
+  # level changes (flush, route-del) and refresh networkd's view via
+  # `netplan generate` + `networkctl reload`, which do not disrupt
+  # carriers.
+  local transitional=/etc/netplan/50-nova-ve-transitional.yaml
+  [[ -f "${transitional}" ]] || return 0
+  local state
+  state="$(bridge_cloud_marker_state)"
+  [[ "${state}" == "complete" ]] || return 0
+  echo "bridge-cloud: removing stale Phase B transitional netplan (state=complete)"
+  # Capture the current default-route gateway BEFORE any changes so we
+  # can restore it if the per-iface route-del incidentally takes out
+  # the bridge route.
+  local pre_gw
+  pre_gw="$(ip route show default 2>/dev/null | awk '/^default/ {print $3; exit}')"
+
+  rm -f "${transitional}"
+
+  # Flush any lingering inet on physical uplinks (the IP belongs only
+  # on the bridge now) and drop the duplicate default route the
+  # transitional netplan installed via the physical iface.
+  local d iface gw
+  for d in /sys/class/net/eth*; do
+    [[ -d "${d}" ]] || continue
+    iface="$(basename "${d}")"
+    [[ "${iface}" =~ ^eth[0-9]+$ ]] || continue
+    if ip -4 addr show dev "${iface}" 2>/dev/null | grep -q 'inet '; then
+      ip -4 addr flush dev "${iface}" 2>/dev/null || true
+      echo "bridge-cloud: flushed stale inet on ${iface}"
+    fi
+    gw="$(ip route show default 2>/dev/null | awk -v ifn="${iface}" '$1=="default" && $NF==ifn {print $3; exit}')"
+    if [[ -n "${gw}" ]]; then
+      ip route del default via "${gw}" dev "${iface}" 2>/dev/null || true
+      echo "bridge-cloud: removed stale default route via ${gw} dev ${iface}"
+    fi
+  done
+
+  # Refresh networkd's config view without disrupting carriers.  This
+  # ensures a later `networkctl reconfigure` won't re-apply the now-
+  # deleted transitional address.  `netplan generate` re-renders the
+  # /run/systemd/network/ files; `networkctl reload` makes networkd
+  # re-read them.  Neither call removes or re-adds kernel routes.
+  netplan generate 2>/dev/null || true
+  networkctl reload 2>/dev/null || true
+
+  # Belt-and-suspenders: if any of the surgical changes incidentally
+  # took out the bridge's default route, restore it.  This shouldn't
+  # happen with the per-iface awk filter above, but we treat the host
+  # losing reachability as a hard failure to avoid.
+  if [[ -n "${pre_gw}" ]] && ! ip route show default 2>/dev/null | grep -q "via ${pre_gw} dev br-eth0"; then
+    ip route replace default via "${pre_gw}" dev br-eth0 2>/dev/null || true
+    echo "bridge-cloud: restored default route via ${pre_gw} dev br-eth0"
+  fi
+}
+
 bridge_cloud_renderer_supported() {
   # Returns 0 if no /etc/netplan file declares ``renderer: NetworkManager``.
   if [[ ! -d /etc/netplan ]]; then
@@ -606,6 +679,11 @@ bridge_cloud_flip() {
   fi
 
   install_bridge_cloud_helpers
+  # Idempotent guard: if a previous provision left the Phase B
+  # transitional netplan on disk after Phase C completed, remove it
+  # before doing anything else so subsequent networkctl reconfigure
+  # calls don't re-create the dual-IP regression on eth0.
+  bridge_cloud_cleanup_stale_transitional
 
   local state
   state="$(bridge_cloud_marker_state)"

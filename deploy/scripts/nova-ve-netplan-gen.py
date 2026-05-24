@@ -183,6 +183,14 @@ def build_config(
             "interfaces": [iface],
             "parameters": {"stp": False, "forward-delay": 0},
         }
+        # Pin the bridge MAC to the parent NIC's MAC.  Without this Linux
+        # generates a random locally-administered MAC for the bridge, which
+        # (a) varies as veth slaves are added/removed and (b) breaks
+        # VMware VDS MAC-Learning + upstream firewall IP-MAC bindings that
+        # were established against the vNIC's burnt-in MAC.  See
+        # .omc/plans/bridge-cloud-feature.md "VDS MAC pinning".
+        if mac_map and iface in mac_map:
+            bridge_cfg["macaddress"] = mac_map[iface]
         applied_from_source = False
         if source_files and mac_map and iface in mac_map:
             stanza = _find_source_ethernet_by_mac(source_files, mac_map[iface])
