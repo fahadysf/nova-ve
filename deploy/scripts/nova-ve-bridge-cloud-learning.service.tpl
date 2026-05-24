@@ -1,11 +1,8 @@
 [Unit]
 Description=nova-ve Bridge-Cloud uplink MAC-learning disable
 DefaultDependencies=no
-Requires=systemd-networkd.service
-After=systemd-networkd.service nova-ve-postboot.service
-Before=network-online.target
-Wants=network-online.target
-ConditionPathExistsGlob=/sys/class/net/br-eth*
+Wants=systemd-networkd.service
+After=systemd-networkd.service network.target
 
 [Service]
 Type=oneshot
