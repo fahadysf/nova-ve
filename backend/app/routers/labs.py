@@ -38,9 +38,11 @@ from app.services.template_service import (
 )
 from app.services.ws_hub import ws_hub
 
+from app.openapi import COMMON_RESPONSES
+
 _logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/labs", tags=["labs"])
+router = APIRouter(prefix="/api/labs", tags=["labs"], responses=COMMON_RESPONSES)
 
 
 class LegacyLabSchemaError(ValueError):

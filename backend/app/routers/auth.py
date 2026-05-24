@@ -9,8 +9,9 @@ from app.dependencies import get_current_user, get_optional_user
 from app.config import get_settings
 from app.core.security import create_access_token
 from app.core.constants import UserRole
+from app.openapi import COMMON_RESPONSES
 
-router = APIRouter(prefix="/api/auth", tags=["auth"])
+router = APIRouter(prefix="/api/auth", tags=["auth"], responses=COMMON_RESPONSES)
 settings = get_settings()
 SESSION_MAX_AGE_FLOOR = 14400
 

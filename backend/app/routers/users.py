@@ -3,11 +3,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin
+from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead, UserCreate, UserUpdate
 from app.services.auth_service import AuthService
 from app.models.user import User
 
-router = APIRouter(prefix="/api/users", tags=["users"])
+router = APIRouter(prefix="/api/users", tags=["users"], responses=COMMON_RESPONSES)
 
 
 @router.get("/")

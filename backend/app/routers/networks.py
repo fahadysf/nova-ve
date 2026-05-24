@@ -17,6 +17,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import JSONResponse
 
 from app.dependencies import get_current_user
+from app.openapi import COMMON_RESPONSES
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.user import UserRead
 from app.services.host_net import HostNetBridgeOwnershipError
@@ -24,7 +25,7 @@ from app.services.lab_service import LEGACY_SCHEMA_ERROR
 from app.services.network_service import NetworkServiceError, network_service
 
 
-router = APIRouter(prefix="/api/labs", tags=["networks"])
+router = APIRouter(prefix="/api/labs", tags=["networks"], responses=COMMON_RESPONSES)
 
 
 def _legacy_schema_response(lab_path: str) -> dict:

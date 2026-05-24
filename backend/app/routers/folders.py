@@ -5,12 +5,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.openapi import COMMON_RESPONSES
 from app.schemas.folder import FolderCreateRequest, FolderRenameRequest
 from app.schemas.user import UserRead
 from app.services.folder_service import FolderService
 from app.services.lab_service import LabService
 
-router = APIRouter(prefix="/api/folders", tags=["folders"])
+router = APIRouter(
+    prefix="/api/folders",
+    tags=["folders"],
+    responses=COMMON_RESPONSES,
+)
 
 
 def _fmt_time(ts: float) -> str:
