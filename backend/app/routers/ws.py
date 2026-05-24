@@ -8,6 +8,9 @@ from app.services.ws_hub import ws_hub
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeService
 
+# WebSocket routes don't carry HTTP response codes the way REST routes do
+# (the WebSocket protocol uses close codes, not response codes), so the
+# COMMON_RESPONSES spread is intentionally omitted here.
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
 

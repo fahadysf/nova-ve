@@ -11,6 +11,7 @@ from fastapi import APIRouter, Body, Depends, Header
 from fastapi.responses import JSONResponse
 
 from app.dependencies import get_current_user
+from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services import host_net
 from app.services.lab_service import LEGACY_SCHEMA_ERROR
@@ -23,7 +24,7 @@ from app.services.link_service import (
 from app.services.node_runtime_service import NodeRuntimeError
 
 
-router = APIRouter(prefix="/api/labs", tags=["links"])
+router = APIRouter(prefix="/api/labs", tags=["links"], responses=COMMON_RESPONSES)
 
 
 def _legacy_schema_response(lab_path: str) -> dict:

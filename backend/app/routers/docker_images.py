@@ -13,17 +13,22 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
 from app.dependencies import get_current_admin, get_current_user
+from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services.docker_image_service import DockerImageError, DockerImageService
 
-router = APIRouter(prefix="/api/docker/images", tags=["docker-images"])
+router = APIRouter(
+    prefix="/api/docker/images",
+    tags=["docker-images"],
+    responses=COMMON_RESPONSES,
+)
 
 
-class _ImageRefBody(BaseModel):
+class ImageRefBody(BaseModel):
     image: str = Field(..., min_length=1, description="Docker image reference, e.g. 'alpine:3.22'.")
 
 
-class _PullBody(BaseModel):
+class PullImageBody(BaseModel):
     reference: str = Field(..., min_length=1, description="Pullable image reference.")
     mark: bool = Field(True, description="Apply the lab marker tag after a successful pull.")
 
@@ -54,7 +59,7 @@ async def list_images(
 
 @router.post("/mark")
 async def mark_image(
-    body: _ImageRefBody,
+    body: ImageRefBody,
     _: UserRead = Depends(get_current_admin),
 ):
     try:
@@ -66,7 +71,7 @@ async def mark_image(
 
 @router.post("/unmark")
 async def unmark_image(
-    body: _ImageRefBody,
+    body: ImageRefBody,
     _: UserRead = Depends(get_current_admin),
 ):
     try:
@@ -81,7 +86,7 @@ async def unmark_image(
 
 @router.post("/pull")
 async def pull_image(
-    body: _PullBody,
+    body: PullImageBody,
     _: UserRead = Depends(get_current_admin),
 ):
     try:

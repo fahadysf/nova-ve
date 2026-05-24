@@ -3,12 +3,13 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services.bridge_cloud_service import list_bridge_clouds
 from app.services.node_runtime_service import NodeRuntimeService
 import psutil
 
-router = APIRouter(prefix="/api", tags=["system"])
+router = APIRouter(prefix="/api", tags=["system"], responses=COMMON_RESPONSES)
 
 
 @router.get("/health")

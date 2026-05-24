@@ -19,8 +19,17 @@ from app.routers import (
 )
 from app.database import engine
 from app.config import get_settings
+from app.openapi import (
+    CONTACT,
+    DESCRIPTION,
+    LICENSE_INFO,
+    OPENAPI_TAGS,
+)
 from app.services.lab_lock import LabLockTimeout
 from app.services.host_net import HostNetInstanceIdMissing, get_instance_id
+
+
+VERSION = "0.1.0-alpha"
 
 
 def lab_lock_timeout_handler(request: Request, exc: LabLockTimeout) -> JSONResponse:
@@ -35,7 +44,28 @@ def lab_lock_timeout_handler(request: Request, exc: LabLockTimeout) -> JSONRespo
     )
 
 settings = get_settings()
-app = FastAPI(title="nova-ve", version="0.1.0-alpha")
+app = FastAPI(
+    title="nova-ve API",
+    version=VERSION,
+    description=DESCRIPTION,
+    contact=CONTACT,
+    license_info=LICENSE_INFO,
+    openapi_tags=OPENAPI_TAGS,
+    # Doc URLs live under /api/* so the existing Caddy reverse_proxy rule
+    # for /api/* exposes them through the public host without needing an
+    # extra route.  See deploy/caddy/Caddyfile.tpl.
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+    swagger_ui_parameters={
+        # Persist auth cookies across page reloads and surface request
+        # duration in the Try-It-Out panel.
+        "persistAuthorization": True,
+        "displayRequestDuration": True,
+        "docExpansion": "none",
+        "filter": True,
+    },
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -149,16 +179,34 @@ async def shutdown():
     await engine.dispose()
 
 
-@app.get("/VERSION")
-async def version():
-    return "0.1.0-alpha"
+@app.get(
+    "/VERSION",
+    tags=["system"],
+    summary="Backend version string",
+    response_model=str,
+)
+async def version() -> str:
+    """Plain-text version identifier of the running backend."""
+    return VERSION
 
 
-@app.get("/local_version")
-async def local_version():
-    return "0.1.0-alpha"
+@app.get(
+    "/local_version",
+    tags=["system"],
+    summary="Backend local version string",
+    response_model=str,
+)
+async def local_version() -> str:
+    """Alias of `/VERSION` — kept for compatibility with the upgrade flow."""
+    return VERSION
 
 
-@app.get("/online_version")
-async def online_version():
-    return "0.1.0-alpha"
+@app.get(
+    "/online_version",
+    tags=["system"],
+    summary="Latest published version string",
+    response_model=str,
+)
+async def online_version() -> str:
+    """Latest published backend version. Currently returns the local version."""
+    return VERSION

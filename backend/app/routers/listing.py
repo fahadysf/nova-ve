@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from app.dependencies import get_current_admin, get_current_user
+from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services.template_service import TemplateError, TemplateService
 
-router = APIRouter(prefix="/api/list", tags=["list"])
+router = APIRouter(prefix="/api/list", tags=["list"], responses=COMMON_RESPONSES)
 
 
 @router.get("/templates/{template_type}")

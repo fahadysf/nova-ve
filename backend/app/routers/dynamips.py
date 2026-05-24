@@ -24,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.dependencies import get_current_user
+from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services.runtime.dynamips import (
     DynamipsError,
@@ -32,7 +33,11 @@ from app.services.runtime.dynamips import (
 )
 
 
-router = APIRouter(prefix="/api/dynamips", tags=["dynamips"])
+router = APIRouter(
+    prefix="/api/dynamips",
+    tags=["dynamips"],
+    responses=COMMON_RESPONSES,
+)
 
 
 class DynamipsImage(BaseModel):
