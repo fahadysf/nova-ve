@@ -255,6 +255,21 @@ else
     LOG "WARN /opt/nova-ve/bin/nova-ve-bridge-cloud-learning.sh missing — uplink learning left enabled"
 fi
 
+# ----- 7b. Advisory: VMware vmxnet3 needs specific VDS portgroup settings --
+# Bridge-Cloud assumes the upstream portgroup has Unknown Unicast Flooding
+# enabled (containers' MACs would otherwise be black-holed when their VDS
+# MAC-table entry ages out).  Detect vmxnet3 NICs via the PCI vendor ID
+# (0x15ad = VMware) and emit a single advisory line so operators know
+# where to look if container traffic goes one-way.
+for _iface in "${IFACES[@]}"; do
+    _vendor_file="/sys/class/net/${_iface}/device/vendor"
+    [[ -f "${_vendor_file}" ]] || continue
+    if [[ "$(cat "${_vendor_file}" 2>/dev/null)" == "0x15ad" ]]; then
+        LOG "advisory iface=${_iface} driver=vmxnet3 — confirm VDS portgroup has 'Unknown Unicast Flooding=True' and 'MAC Learning=True' (see docs/operations/vmware-deployment.md)"
+        break
+    fi
+done
+
 # ----- 8. Success -----------------------------------------------------------
 _write_marker_atomic complete
 systemctl disable nova-ve-postboot.service 2>/dev/null || true

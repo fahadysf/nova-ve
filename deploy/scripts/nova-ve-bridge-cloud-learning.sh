@@ -21,6 +21,22 @@ LOG() {
     echo "$@" >&2
 }
 
+# Wait briefly for at least one Bridge-Cloud bridge to appear in
+# /sys/class/net.  On some boots systemd-networkd has not yet finished
+# instantiating br-eth0 by the time this service is eligible to run,
+# even though nova-ve-postboot.service has completed.  Without this
+# loop the helper would no-op and the kernel-level learning=off
+# (belt-and-suspenders relative to the [Bridge] Learning=no networkd
+# drop-in installed in Phase C) would silently not be applied.
+wait_attempts=15
+while (( wait_attempts > 0 )); do
+    if compgen -G '/sys/class/net/br-eth*' >/dev/null; then
+        break
+    fi
+    wait_attempts=$((wait_attempts - 1))
+    sleep 1
+done
+
 touched=0
 for bdir in /sys/class/net/br-eth*; do
     [[ -d "${bdir}" ]] || continue
