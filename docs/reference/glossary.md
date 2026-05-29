@@ -30,7 +30,7 @@ Project-specific terms, in alphabetical order.
 :   The hardware-virtualization mode that makes QEMU nodes fast. Requires VT-x (Intel) or AMD-V (AMD) plus the `kvm` and `kvm-intel` / `kvm-amd` kernel modules. Verify with `kvm-ok`.
 
 **Lab**
-:   A JSON file under `/var/lib/nova-ve/labs/` plus its per-node runtime state directory. Owned by root, mode 0600 / 0700.
+:   A JSON file under `/var/lib/nova-ve/labs/` plus its per-node runtime state directory. Owned by the `nova-ve` service user, mode 0600 / 0700.
 
 **Link**
 :   An attachment between two endpoints. One endpoint is always a node interface; the other is either a node interface (peer link) or a network (network link).

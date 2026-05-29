@@ -58,11 +58,11 @@ The FastAPI backend is the only writer to lab JSON. The frontend treats the lab 
 
 | Process | Where | Owner | Privilege |
 |---|---|---|---|
-| `nova-ve-backend` (uvicorn) | systemd unit | app owner (`ubuntu` by default) | Unprivileged; shells out to the helper for net ops |
+| `nova-ve-backend` (uvicorn) | systemd unit | dedicated `nova-ve` service user by default | Unprivileged; shells out to the helper for net ops |
 | `caddy` | systemd unit | caddy user | CAP_NET_BIND_SERVICE for ports 80/443 |
 | `nova-ve-net` (privileged helper) | invoked per call | root (via sudoers fragment) | Bridge / veth / TAP create-and-attach |
 | `guacd` + `guacamole` + `guacdb` | Docker compose | Docker | Console proxy |
-| QEMU / Docker children | per-node | root or app owner depending on runtime | Per-process; cleaned up on node stop |
+| QEMU / Docker children | per-node | service user or root depending on runtime path | Per-process; cleaned up on node stop |
 
 ## Key contracts
 

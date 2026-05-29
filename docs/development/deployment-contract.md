@@ -74,7 +74,7 @@ Route ownership:
 
 ## Filesystem Layout
 
-- App checkout root: the absolute repo path where `deploy/scripts/provision-ubuntu-2604.sh` is executed; recommended location is `/opt/nova-ve`
+- App checkout root: the absolute repo path where `deploy/scripts/provision-ubuntu-2604.sh` is executed; installer default is `/var/lib/nova-ve/nova-ve-git`
 - Backend env file: `/etc/nova-ve/backend.env`
 - **Instance ID file: `/etc/nova-ve/instance_id`** — written once by `provision-ubuntu-2604.sh`, never overwritten; authoritative source for bridge/TAP name derivation
 - Static frontend root: `/var/lib/nova-ve/www`

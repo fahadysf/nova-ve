@@ -3,9 +3,10 @@
 
 Single privileged binary invoked via ``sudo`` from the un-privileged
 ``nova-ve`` backend.  Exposes a *fixed* set of verbs — there is no generic
-``in-netns`` escape hatch.  Each verb maps to one ``ip`` (or ``nsenter ip``)
-invocation with all arguments validated against tight regular expressions
-before any subprocess is spawned.
+``in-netns`` escape hatch.  Most verbs map to one ``ip`` (or ``nsenter ip``)
+invocation; the process-signal verb is limited to registry-authorized QEMU
+process groups.  All arguments are validated before any subprocess or signal is
+issued.
 
 Authoritative spec: ``.omc/plans/network-runtime-wiring.md`` § US-201.
 
@@ -25,7 +26,7 @@ Exit codes
 0   success
 2   argument failed validation OR pid ownership check failed
 3   unknown verb (argparse rejection)
-1   underlying ``ip`` / ``nsenter`` invocation failed
+1   underlying ``ip`` / ``nsenter`` / process operation failed
 """
 
 from __future__ import annotations
@@ -262,6 +263,7 @@ RE_CGROUP_CRIO_V1 = re.compile(r"crio[/\-][0-9a-f]{12,}")
 RE_CGROUP_DOCKER_V2_SCOPE = re.compile(r"docker-[0-9a-f]{12,}\.scope")
 RE_CGROUP_CONTAINERD_V2_SCOPE = re.compile(r"containerd-[0-9a-f]{12,}\.scope")
 RE_COMM_QEMU = re.compile(r"^qemu-system-.+$")
+RE_SAFE_LAB_ID = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
 
 
 def _read_proc_text(pid: int, name: str) -> str:
@@ -270,6 +272,19 @@ def _read_proc_text(pid: int, name: str) -> str:
         return path.read_text()
     except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
         return ""
+
+
+def _read_proc_cmdline(pid: int) -> list[str]:
+    path = PROC_ROOT / str(pid) / "cmdline"
+    try:
+        raw = path.read_bytes()
+    except (FileNotFoundError, ProcessLookupError, PermissionError, OSError):
+        return []
+    return [
+        piece.decode("utf-8", errors="surrogateescape")
+        for piece in raw.split(b"\0")
+        if piece
+    ]
 
 
 def _cgroup_or_comm_matches(pid: int) -> bool:
@@ -302,20 +317,72 @@ def _emit_ownership_diagnostic(pid: int) -> None:
     )
 
 
-def authorize_pid(value: str) -> int:
-    """Validate pid argv shape AND verify ownership.
+def _qemu_qmp_path_for_entry(entry: Mapping[str, object]) -> str | None:
+    lab_id = str(entry.get("lab_id") or "").strip()
+    if not RE_SAFE_LAB_ID.match(lab_id):
+        return None
+    try:
+        node_id = int(entry.get("node_id"))
+    except (TypeError, ValueError):
+        return None
+    if node_id <= 0:
+        return None
+    return str(RUNTIME_ROOT / "tmp" / lab_id / str(node_id) / "qmp.sock")
+
+
+def _qemu_cmdline_matches_registry_entry(pid: int, entry: Mapping[str, object]) -> bool:
+    """Bind QEMU signaling to an immutable /proc cmdline fingerprint.
+
+    ``pids.json`` is writable by the service account so it is not sufficient
+    authorization for root-mediated process signals.  The QEMU process argv is
+    controlled by the kernel; require the live process to carry the canonical
+    nova-ve QMP socket path for the registered lab/node before signaling it.
+    """
+    argv = _read_proc_cmdline(pid)
+    if not argv:
+        return False
+    if not Path(argv[0]).name.startswith("qemu-system-"):
+        return False
+
+    qmp_path = _qemu_qmp_path_for_entry(entry)
+    if not qmp_path:
+        return False
+    qmp_prefix = f"unix:{qmp_path},"
+    for idx, arg in enumerate(argv[:-1]):
+        if arg == "-qmp" and argv[idx + 1].startswith(qmp_prefix):
+            return True
+    return False
+
+
+def _emit_qemu_signal_diagnostic(pid: int, entry: Mapping[str, object]) -> None:
+    qmp_path = _qemu_qmp_path_for_entry(entry) or "<invalid registry lab/node>"
+    argv = _read_proc_cmdline(pid)
+    print(f"qemu process-signal check FAILED for pid={pid}", file=sys.stderr)
+    print(f"  expected qmp path: {qmp_path}", file=sys.stderr)
+    print(f"  /proc/{pid}/cmdline: {argv[:20]!r}", file=sys.stderr)
+
+
+def authorize_pid_entry(value: str) -> tuple[int, dict]:
+    """Validate pid argv shape and return the matching registry entry.
 
     Order: regex shape → reserved range → registry lookup → cgroup/comm
     defense-in-depth.  On any failure raises ``_ValidationError`` after
     emitting the structured diagnostic specified in US-201.
     """
     pid = validate_pid_shape(value)
-    if _registry_lookup(pid) is None:
+    entry = _registry_lookup(pid)
+    if entry is None:
         _emit_ownership_diagnostic(pid)
         raise _ValidationError("pid_not_in_registry")
     if not _cgroup_or_comm_matches(pid):
         _emit_ownership_diagnostic(pid)
         raise _ValidationError("pid_cgroup_mismatch")
+    return pid, entry
+
+
+def authorize_pid(value: str) -> int:
+    """Validate pid argv shape AND verify ownership."""
+    pid, _entry = authorize_pid_entry(value)
     return pid
 
 
@@ -920,6 +987,33 @@ def cmd_console_proxy_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_qemu_process_signal(args: argparse.Namespace) -> int:
+    """Signal a registry-authorized QEMU process group.
+
+    This is the migration-safe fallback for hosts moving the backend from the
+    installer user to the dedicated service user: old QEMU processes may still
+    be owned by the old account, but the root helper can terminate only pids
+    that are both in nova-ve's registry and still look like qemu-system-*.
+    """
+    pid, entry = authorize_pid_entry(args.pid)
+    if entry.get("kind") != "qemu":
+        raise _ValidationError("pid_not_qemu")
+    if not _qemu_cmdline_matches_registry_entry(pid, entry):
+        _emit_qemu_signal_diagnostic(pid, entry)
+        raise _ValidationError("qemu_cmdline_mismatch")
+    if args.signal == "term":
+        sig = signal.SIGTERM
+    elif args.signal == "kill":
+        sig = signal.SIGKILL
+    else:
+        raise _ValidationError("signal")
+    try:
+        os.killpg(pid, sig)
+    except ProcessLookupError:
+        return 0
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # argparse wiring
 # ---------------------------------------------------------------------------
@@ -952,6 +1046,7 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "read-iface-mac": cmd_read_iface_mac,
     "console-proxy-start": cmd_console_proxy_start,
     "console-proxy-stop": cmd_console_proxy_stop,
+    "qemu-process-signal": cmd_qemu_process_signal,
 }
 
 
@@ -1090,6 +1185,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="kill a previously-spawned console proxy by pid (idempotent)",
     )
     p.add_argument("pid")
+
+    p = sub.add_parser(
+        "qemu-process-signal",
+        help="signal a registry-authorized QEMU process group",
+    )
+    p.add_argument("pid")
+    p.add_argument("signal", choices=("term", "kill"))
 
     return parser
 

@@ -4844,6 +4844,8 @@ class NodeRuntimeService:
             self._sweep_qemu_taps(runtime)
             self._unregister_pid(pid)
             return
+        except PermissionError:
+            host_net.qemu_process_signal(pid, "term")
 
         try:
             psutil.Process(pid).wait(timeout=5)
@@ -4852,6 +4854,8 @@ class NodeRuntimeService:
                 os.killpg(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            except PermissionError:
+                host_net.qemu_process_signal(pid, "kill")
 
         # US-302: sweep the per-NIC TAPs owned by this VM. Best-effort
         # via ``try_link_del`` so already-removed TAPs (cleanup sweeper

@@ -12,8 +12,14 @@ ISO_URL="https://github.com/vyos/vyos-nightly-build/releases/download/${VYOS_REL
 SIG_URL="${ISO_URL}.minisig"
 EXPECTED_SIZE=658505728
 
-OWNER_USER="${NOVA_VE_OWNER_USER:-ubuntu}"
-OWNER_GROUP="${NOVA_VE_OWNER_GROUP:-ubuntu}"
+OWNER_USER="${NOVA_VE_OWNER_USER:-${NOVA_VE_SERVICE_USER:-nova-ve}}"
+if [[ -n "${NOVA_VE_OWNER_GROUP:-}" ]]; then
+  OWNER_GROUP="${NOVA_VE_OWNER_GROUP}"
+elif [[ -n "${NOVA_VE_SERVICE_GROUP:-}" ]]; then
+  OWNER_GROUP="${NOVA_VE_SERVICE_GROUP}"
+else
+  OWNER_GROUP="$(id -gn "${OWNER_USER}")"
+fi
 
 install -d -m 0755 "${TEMPLATE_DIR}"
 

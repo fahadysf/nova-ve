@@ -11,8 +11,11 @@
 #   sudo bash install.sh
 #
 # What it does (one-shot, idempotent):
-#   1. Installs git + ca-certificates + curl (bootstrap dependencies).
-#   2. Clones https://github.com/fahadysf/nova-ve.git into ~${SUDO_USER}/nova-ve-git.
+#   1. Installs git + ca-certificates + curl + sudo (bootstrap dependencies).
+#   2. Creates/reuses the dedicated nova-ve service user and clones
+#      https://github.com/fahadysf/nova-ve.git into that user's checkout
+#      (default /var/lib/nova-ve/nova-ve-git; existing legacy checkouts are
+#      reused during migration).
 #   3. Runs deploy/scripts/provision-ubuntu-2604.sh which:
 #        - installs all OS packages: docker.io, docker-compose-v2, postgresql,
 #          caddy, nodejs+npm, python3+venv, build-essential, libpq-dev, jq,
@@ -42,8 +45,9 @@
 # Override knobs (env):
 #   NOVA_VE_REPO_URL  default https://github.com/fahadysf/nova-ve.git
 #   NOVA_VE_REPO_REF  default main
-#   NOVA_VE_REPO_DIR  default ~${SUDO_USER}/nova-ve-git
-#   NOVA_VE_OWNER     default ${SUDO_USER:-ubuntu}
+#   NOVA_VE_REPO_DIR      default /var/lib/nova-ve/nova-ve-git
+#   NOVA_VE_SERVICE_USER  default nova-ve
+#   NOVA_VE_OWNER         compatibility alias for NOVA_VE_SERVICE_USER
 
 set -euo pipefail
 
@@ -63,6 +67,7 @@ fi
 REPO_URL="${NOVA_VE_REPO_URL:-https://github.com/fahadysf/nova-ve.git}"
 REPO_REF="${NOVA_VE_REPO_REF:-main}"
 LAUNCH_DIR="${NOVA_VE_LAUNCH_DIR:-${PWD}}"
+INSTALLER_USER="${SUDO_USER:-}"
 
 if [[ ${EUID} -ne 0 ]]; then
   echo "install.sh: must run as root. Try: curl -fsSL <url> | sudo bash" >&2
@@ -80,28 +85,66 @@ if [[ "$(uname -m)" != "x86_64" ]]; then
   exit 1
 fi
 
-APP_OWNER="${NOVA_VE_OWNER:-${SUDO_USER:-ubuntu}}"
-if ! id "${APP_OWNER}" >/dev/null 2>&1; then
-  echo "install.sh: target user '${APP_OWNER}' does not exist" >&2
-  exit 1
-fi
-APP_GROUP="$(id -gn "${APP_OWNER}")"
-APP_HOME="$(getent passwd "${APP_OWNER}" | cut -d: -f6)"
-REPO_DIR="${NOVA_VE_REPO_DIR:-${APP_HOME}/nova-ve-git}"
-
 log() { printf '\n[install.sh] %s\n' "$*"; }
 
+validate_service_user() {
+  local user="$1"
+  if [[ "${user}" == "root" ]]; then
+    echo "install.sh: NOVA_VE_SERVICE_USER must not be root" >&2
+    exit 1
+  fi
+  if [[ ! "${user}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
+    echo "install.sh: invalid NOVA_VE_SERVICE_USER '${user}'" >&2
+    exit 1
+  fi
+}
+
+ensure_service_account() {
+  local user="$1"
+  local home="$2"
+
+  validate_service_user "${user}"
+  if id "${user}" >/dev/null 2>&1; then
+    log "Service account '${user}' already exists; reusing it."
+  else
+    log "Creating service account '${user}' with home ${home}..."
+    install -d -o root -g root -m 0755 "$(dirname "${home}")"
+    useradd --system --create-home --home-dir "${home}" \
+      --shell /usr/sbin/nologin --comment "nova-ve service account" "${user}"
+  fi
+}
+
 log "Target host: $(hostname -f) ($(hostname -I 2>/dev/null | awk '{print $1}'))"
-log "Repo destination: ${REPO_DIR} (owner=${APP_OWNER}:${APP_GROUP})"
 log "Launch dir for SUMMARY: ${LAUNCH_DIR}"
 
-log "Installing bootstrap packages (git, ca-certificates, curl)..."
+log "Installing bootstrap packages (git, ca-certificates, curl, sudo)..."
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y --no-install-recommends ca-certificates curl git
+apt-get install -y --no-install-recommends ca-certificates curl git sudo
+
+APP_OWNER="${NOVA_VE_SERVICE_USER:-${NOVA_VE_OWNER:-nova-ve}}"
+APP_HOME_DEFAULT="${NOVA_VE_SERVICE_HOME:-/var/lib/nova-ve}"
+ensure_service_account "${APP_OWNER}" "${APP_HOME_DEFAULT}"
+APP_GROUP="$(id -gn "${APP_OWNER}")"
+APP_HOME="$(getent passwd "${APP_OWNER}" | cut -d: -f6)"
+
+DEFAULT_REPO_DIR="${APP_HOME}/nova-ve-git"
+if [[ -z "${NOVA_VE_REPO_DIR:-}" && -n "${INSTALLER_USER}" ]]; then
+  INSTALLER_HOME="$(getent passwd "${INSTALLER_USER}" | cut -d: -f6 || true)"
+  LEGACY_REPO_DIR="${INSTALLER_HOME}/nova-ve-git"
+  if [[ -n "${INSTALLER_HOME}" && -d "${LEGACY_REPO_DIR}/.git" ]]; then
+    DEFAULT_REPO_DIR="${LEGACY_REPO_DIR}"
+    log "Existing legacy checkout found at ${DEFAULT_REPO_DIR}; migrating ownership to ${APP_OWNER}."
+  fi
+fi
+REPO_DIR="${NOVA_VE_REPO_DIR:-${DEFAULT_REPO_DIR}}"
+
+log "Service account: ${APP_OWNER}:${APP_GROUP} (home=${APP_HOME})"
+log "Repo destination: ${REPO_DIR} (owner=${APP_OWNER}:${APP_GROUP})"
 
 if [[ -d "${REPO_DIR}/.git" ]]; then
   log "Repo already at ${REPO_DIR}; fetching ${REPO_REF}..."
+  chown -R "${APP_OWNER}:${APP_GROUP}" "${REPO_DIR}"
   sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" fetch --tags --prune origin
   sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" checkout "${REPO_REF}"
   if ! sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" pull --ff-only origin "${REPO_REF}"; then
@@ -120,7 +163,11 @@ if [[ ! -x "${PROVISIONER}" ]]; then
 fi
 
 log "Running ${PROVISIONER} (this can take 10-20 min on a fresh box)..."
-SUDO_USER="${APP_OWNER}" bash "${PROVISIONER}"
+NOVA_VE_SERVICE_USER="${APP_OWNER}" \
+NOVA_VE_OWNER="${APP_OWNER}" \
+NOVA_VE_REPO_DIR="${REPO_DIR}" \
+SUDO_USER="${APP_OWNER}" \
+bash "${PROVISIONER}"
 
 log "Generating install summary..."
 ENV_FILE="/etc/nova-ve/backend.env"
@@ -146,6 +193,7 @@ cat > "${SUMMARY_PATH}" <<EOF
 - Primary IPv4: ${PRIMARY_IP}
 - Instance ID: ${INSTANCE_ID}
 - Repo: ${REPO_DIR} @ ${REPO_REF} (${GIT_COMMIT})
+- Service user: ${APP_OWNER}:${APP_GROUP}
 
 ## Bootstrapped admin credentials
 
@@ -157,7 +205,7 @@ cat > "${SUMMARY_PATH}" <<EOF
 - Display:  ${NOVA_VE_ADMIN_NAME}
 
 Full env file (mode 0600, root-owned) lives at \`${ENV_FILE}\`.
-This summary is mode 0600, owned by \`${APP_OWNER}\`.
+This summary is mode 0600, owned by \`root\`.
 
 ## Demo images (#191)
 
@@ -241,7 +289,7 @@ curl -fsS http://127.0.0.1/html5/ | head -1
 \`\`\`
 EOF
 
-chown "${APP_OWNER}:${APP_GROUP}" "${SUMMARY_PATH}"
+chown root:root "${SUMMARY_PATH}"
 chmod 0600 "${SUMMARY_PATH}"
 
 cat <<EOF

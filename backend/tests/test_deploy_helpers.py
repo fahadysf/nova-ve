@@ -264,6 +264,39 @@ def test_marker_helper_no_leftover_temp_files(tmp_path):
 
 
 PROVISION_SH = REPO_ROOT / "deploy" / "scripts" / "provision-ubuntu-2604.sh"
+INSTALL_SH = REPO_ROOT / "install.sh"
+SUDOERS_TEMPLATE = REPO_ROOT / "deploy" / "nova-ve-sudoers"
+IMPORT_EVENG_SH = REPO_ROOT / "deploy" / "scripts" / "import-eveng-templates.sh"
+INSTALL_VYOS_SH = REPO_ROOT / "deploy" / "scripts" / "install-vyos-template.sh"
+
+
+def test_installer_defaults_to_dedicated_service_account():
+    body = INSTALL_SH.read_text()
+    assert 'APP_OWNER="${NOVA_VE_SERVICE_USER:-${NOVA_VE_OWNER:-nova-ve}}"' in body
+    assert "useradd --system --create-home" in body
+    assert "Existing legacy checkout found" in body
+    assert 'NOVA_VE_REPO_DIR="${REPO_DIR}"' in body
+
+
+def test_provisioner_renders_sudoers_for_service_account():
+    body = PROVISION_SH.read_text()
+    sudoers = SUDOERS_TEMPLATE.read_text()
+    assert 'APP_OWNER="${NOVA_VE_SERVICE_USER:-${NOVA_VE_OWNER:-nova-ve}}"' in body
+    assert 'ensure_env_var "NOVA_VE_SERVICE_USER" "${APP_OWNER}"' in body
+    assert "render_template \"${sudoers_src}\" \"${sudoers_tmp}\"" in body
+    assert "__APP_OWNER__ ALL=(root) NOPASSWD:" in sudoers
+    assert "ubuntu ALL=(root) NOPASSWD:" not in sudoers
+
+
+def test_import_wrapper_defaults_to_its_checkout_when_env_missing():
+    body = IMPORT_EVENG_SH.read_text()
+    assert 'SCRIPT_REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"' in body
+    assert 'REPO_DIR="${NOVA_VE_REPO_DIR:-${SCRIPT_REPO_DIR}}"' in body
+
+
+def test_vyos_installer_resolves_default_owner_group_from_account():
+    body = INSTALL_VYOS_SH.read_text()
+    assert 'OWNER_GROUP="$(id -gn "${OWNER_USER}")"' in body
 
 
 def test_predictable_ifaces_sorted_handles_ens_enp_names(tmp_path):

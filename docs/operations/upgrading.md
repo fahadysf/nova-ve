@@ -8,8 +8,8 @@ curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | 
 
 What re-running does:
 
-1. Fast-forwards the cloned repo at `${NOVA_VE_REPO_DIR}` (default `~${SUDO_USER}/nova-ve-git`).
-2. Re-runs `provision-ubuntu-2604.sh` to top up OS-level packages.
+1. Creates/reuses the dedicated `nova-ve` service user, then fast-forwards the cloned repo at `${NOVA_VE_REPO_DIR}` (default `/var/lib/nova-ve/nova-ve-git`; legacy `~${SUDO_USER}/nova-ve-git` checkouts are reused during migration when present).
+2. Re-runs `provision-ubuntu-2604.sh` to top up OS-level packages and migrate `/var/lib/nova-ve` ownership to the service user.
 3. Reapplies the backend venv (`pip install -r requirements.txt`) and Alembic migrations.
 4. Rebuilds the frontend (`npm ci && vite build`) and rsyncs it into `/var/lib/nova-ve/www`.
 5. Reinstalls the privileged network helper and sudoers fragment, including NAT-Cloud DHCP, NAT, and forwarding verbs.
@@ -17,6 +17,8 @@ What re-running does:
 7. Reconciles existing NAT-Cloud bridges from lab JSON files, re-applying IPv4 forwarding, NAT, DOCKER-USER forwarding rules, and dnsmasq leases where the bridge already exists.
 
 It does **not** rotate existing secrets, drop the database, or touch lab JSON files. The upgraded backend also reconciles deterministic Docker node names at start time: a running same-name nova-ve container is adopted into runtime state, while a stopped stale same-name container is removed before `docker run`.
+
+When upgrading an older host that ran `nova-ve-backend` as the installer user, the installer migrates the unit, repo, and `/var/lib/nova-ve` ownership to the dedicated service user. Already-running QEMU nodes may still be owned by the old user until they are stopped; the privileged helper includes a registry-authorized QEMU signal path so the new backend can still stop those migrated runtimes.
 
 The smoke check at the end exits non-zero if anything broke.
 
@@ -35,7 +37,7 @@ NOVA_VE_REPO_REF=v0.4.0 curl -fsSL ... | sudo bash
 If you prefer to drive the upgrade yourself:
 
 ```bash
-cd ~ubuntu/nova-ve-git
+cd /var/lib/nova-ve/nova-ve-git
 git fetch origin
 git checkout v0.4.0          # or main, or a specific SHA
 

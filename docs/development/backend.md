@@ -69,7 +69,7 @@ backend/scripts/import_eveng/
 ├── migrate.py          # Top-level run orchestrator
 ├── manifest.py         # Manifest schema + writer
 ├── permissions.py      # chown / chmod after copy
-├── _app_owner.py       # Owner resolution (NOVA_VE_OWNER → SUDO_USER → ubuntu)
+├── _app_owner.py       # Service-user resolution (NOVA_VE_SERVICE_USER → NOVA_VE_OWNER → nova-ve)
 ├── _hash.py            # sha256 helper
 ├── logging_setup.py    # JSON-line logger config
 ├── template_schema.py  # Result schema for adapter convert()

@@ -3,7 +3,7 @@
 Wrapper script: `deploy/scripts/import-eveng-templates.sh`
 Underlying module: `backend/scripts/import_eveng` (run as `python -m scripts.import_eveng`).
 
-The wrapper sources `/etc/nova-ve/backend.env` (if present), asserts root, then `exec`s the venv'd Python module with the same argv.
+The wrapper sources `/etc/nova-ve/backend.env` (if present), asserts root, then `exec`s the venv'd Python module with the same argv. The default repo path is `/var/lib/nova-ve/nova-ve-git`; set `NOVA_VE_REPO_DIR` if the checkout lives elsewhere.
 
 ## Synopsis
 
@@ -35,7 +35,7 @@ sudo deploy/scripts/import-eveng-templates.sh
 |---|---|
 | 0 | Success (including dry-run). |
 | 2 | Tried to run non-`--dry-run` without root. |
-| 3 | Could not resolve the app owner for chown. |
+| 3 | Could not resolve the service user for chown. |
 | Non-zero (other) | Walker or copy engine raised. The manifest's `errors[]` lists specific files that failed without aborting the run; an entire run only aborts on argv parse failure or unrecoverable I/O. |
 
 ## Examples
