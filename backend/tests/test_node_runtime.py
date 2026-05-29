@@ -2456,6 +2456,35 @@ def test_us302_qemu_stop_sweeps_tap_names(
     assert set(helper["try_link_del"]) == expected_taps
 
 
+def test_qemu_stop_falls_back_to_helper_when_process_owner_changed(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Migrated installs may re-adopt QEMU pids still owned by the old service user."""
+    names = _us302_names()
+    _us302_helper_mock(monkeypatch, present_bridges={names["bridge1"], names["bridge2"]})
+    _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+
+    def deny_direct_signal(_pid, _sig):
+        raise PermissionError("owned by previous service account")
+
+    helper_signals: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.os.killpg",
+        deny_direct_signal,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.qemu_process_signal",
+        lambda pid, signal_name: helper_signals.append((pid, signal_name)),
+    )
+
+    service = NodeRuntimeService()
+    lab_data = _us302_lab_data()
+    service.start_node(lab_data, 1)
+    service.stop_node(lab_data, 1)
+
+    assert helper_signals == [(7777, "term")]
+
+
 # ---------------------------------------------------------------------------
 # Boot-time NIC link state: connected NICs default link=on, unconnected NICs
 # get link=off so the guest does not see phantom carrier on hubport-backed

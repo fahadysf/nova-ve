@@ -24,7 +24,7 @@ This non-destructive default is the inversion of the original spec, made during 
    ```bash
    rsync -a -e ssh root@old-eveng-host:/opt/unetlab/ /opt/unetlab/
    ```
-3. **Root on the nova-ve host.** The importer needs to chown destination files to the canonical app owner (resolved from `NOVA_VE_OWNER`, falling back to `SUDO_USER` then `ubuntu`).
+3. **Root on the nova-ve host.** The importer needs to chown destination files to the canonical service user (resolved from `NOVA_VE_SERVICE_USER`, falling back to the compatibility `NOVA_VE_OWNER`, then `nova-ve`).
 
 ## Run order
 

@@ -23,7 +23,9 @@ if [ -f "$ENV_FILE" ]; then
   set +a
 fi
 
-REPO_DIR="${NOVA_VE_REPO_DIR:-/home/ubuntu/nova-ve-git}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+REPO_DIR="${NOVA_VE_REPO_DIR:-${SCRIPT_REPO_DIR}}"
 BACKEND_DIR="${REPO_DIR}/backend"
 VENV_PYTHON="${BACKEND_DIR}/.venv/bin/python"
 

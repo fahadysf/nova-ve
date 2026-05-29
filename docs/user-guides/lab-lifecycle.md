@@ -52,9 +52,9 @@ Deleting:
 
 | Path | Owner | Mode | Purpose |
 |---|---|---|---|
-| `/var/lib/nova-ve/labs/<name>.json` | root | 0600 | Lab topology |
-| `/var/lib/nova-ve/labs/<name>/` | root | 0700 | Per-node runtime state (qcow2 overlays, logs) |
-| `/var/lib/nova-ve/labs/<name>.json.lock` | root | 0600 | Cooperative write lock used by the backend |
+| `/var/lib/nova-ve/labs/<name>.json` | `nova-ve` service user | 0600 | Lab topology |
+| `/var/lib/nova-ve/labs/<name>/` | `nova-ve` service user | 0700 | Per-node runtime state (qcow2 overlays, logs) |
+| `/var/lib/nova-ve/labs/<name>.json.lock` | `nova-ve` service user | 0600 | Cooperative write lock used by the backend |
 
 If you need to inspect a lab JSON from the host, `sudo cat /var/lib/nova-ve/labs/<name>.json | jq` is the canonical recipe.
 

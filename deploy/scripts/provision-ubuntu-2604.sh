@@ -7,8 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 DRY_RUN=0
-APP_OWNER="${SUDO_USER:-$(id -un)}"
-APP_GROUP="$(id -gn "${APP_OWNER}")"
+APP_OWNER="${NOVA_VE_SERVICE_USER:-${NOVA_VE_OWNER:-nova-ve}}"
+APP_GROUP="${NOVA_VE_SERVICE_GROUP:-}"
 APP_ROOT="${REPO_ROOT}"
 ENV_DIR="/etc/nova-ve"
 ENV_FILE="${ENV_DIR}/backend.env"
@@ -42,6 +42,50 @@ run() {
     return 0
   fi
   "$@"
+}
+
+validate_service_user() {
+  local user="$1"
+  if [[ "${user}" == "root" ]]; then
+    echo "NOVA_VE_SERVICE_USER must not be root" >&2
+    exit 1
+  fi
+  if [[ ! "${user}" =~ ^[a-z_][a-z0-9_-]*[$]?$ ]]; then
+    echo "Invalid NOVA_VE_SERVICE_USER '${user}'" >&2
+    exit 1
+  fi
+}
+
+ensure_service_account() {
+  validate_service_user "${APP_OWNER}"
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "+ ensure service account ${APP_OWNER} exists"
+    APP_GROUP="${APP_GROUP:-${APP_OWNER}}"
+    return 0
+  fi
+
+  local home="${NOVA_VE_SERVICE_HOME:-/var/lib/nova-ve}"
+  if id "${APP_OWNER}" >/dev/null 2>&1; then
+    echo "Service account ${APP_OWNER} already exists; reusing it."
+  else
+    install -d -o root -g root -m 0755 "$(dirname "${home}")"
+    useradd --system --create-home --home-dir "${home}" \
+      --shell /usr/sbin/nologin --comment "nova-ve service account" "${APP_OWNER}"
+    echo "Created service account ${APP_OWNER}."
+  fi
+}
+
+resolve_app_identity() {
+  if id "${APP_OWNER}" >/dev/null 2>&1; then
+    APP_GROUP="$(id -gn "${APP_OWNER}")"
+    return 0
+  fi
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    APP_GROUP="${APP_GROUP:-${APP_OWNER}}"
+    return 0
+  fi
+  echo "Service account ${APP_OWNER} does not exist." >&2
+  exit 1
 }
 
 require_target_host() {
@@ -81,6 +125,16 @@ render_template() {
     -e "s|__APP_GROUP__|${APP_GROUP}|g" \
     -e "s|__FRONTEND_ROOT__|${FRONTEND_ROOT}|g" \
     "${template}" > "${destination}"
+}
+
+ensure_env_var() {
+  local key="$1"
+  local value="$2"
+  if grep -qE "^${key}=" "${ENV_FILE}"; then
+    sed -i -E "s|^${key}=.*|${key}=${value}|" "${ENV_FILE}"
+  else
+    printf '%s=%s\n' "${key}" "${value}" >> "${ENV_FILE}"
+  fi
 }
 
 ensure_database() {
@@ -188,6 +242,9 @@ PY
   if [[ -z "${guacamole_database_url}" ]]; then
     printf 'GUACAMOLE_DATABASE_URL=postgresql+asyncpg://guacuser:%s@127.0.0.1:5433/guacdb\n' "${guacamole_db_password}" >> "${ENV_FILE}"
   fi
+  ensure_env_var "NOVA_VE_SERVICE_USER" "${APP_OWNER}"
+  ensure_env_var "NOVA_VE_OWNER" "${APP_OWNER}"
+  ensure_env_var "NOVA_VE_REPO_DIR" "${APP_ROOT}"
   chmod 0600 "${ENV_FILE}"
 }
 
@@ -202,12 +259,14 @@ install_nova_ve_net_helper() {
   local helper_dst="/opt/nova-ve/bin/nova-ve-net.py"
   local proxy_dst="/opt/nova-ve/bin/nova-ve-console-proxy.py"
   local sudoers_dst="/etc/sudoers.d/nova-ve"
+  local sudoers_tmp
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "+ install -d -o root -g root -m 0755 /opt/nova-ve/bin"
     echo "+ install -m 0755 -o root -g root ${helper_src} ${helper_dst}"
     echo "+ install -m 0755 -o root -g root ${proxy_src} ${proxy_dst}"
-    echo "+ visudo -cf ${sudoers_src}"
+    echo "+ render ${sudoers_src} with service user ${APP_OWNER}"
+    echo "+ visudo -cf <rendered sudoers>"
     echo "+ install -m 0440 -o root -g root ${sudoers_src} ${sudoers_dst}"
     return 0
   fi
@@ -215,11 +274,15 @@ install_nova_ve_net_helper() {
   install -d -o root -g root -m 0755 /opt/nova-ve /opt/nova-ve/bin
   install -m 0755 -o root -g root "${helper_src}" "${helper_dst}"
   install -m 0755 -o root -g root "${proxy_src}" "${proxy_dst}"
-  if ! visudo -cf "${sudoers_src}" >/dev/null; then
-    echo "visudo rejected ${sudoers_src}; aborting deploy" >&2
+  sudoers_tmp="$(mktemp /tmp/nova-ve-sudoers.XXXXXX)"
+  render_template "${sudoers_src}" "${sudoers_tmp}"
+  if ! visudo -cf "${sudoers_tmp}" >/dev/null; then
+    echo "visudo rejected rendered ${sudoers_src}; aborting deploy" >&2
+    rm -f "${sudoers_tmp}"
     exit 1
   fi
-  install -m 0440 -o root -g root "${sudoers_src}" "${sudoers_dst}"
+  install -m 0440 -o root -g root "${sudoers_tmp}" "${sudoers_dst}"
+  rm -f "${sudoers_tmp}"
 }
 
 reconcile_nat_cloud_runtime() {
@@ -342,6 +405,8 @@ ensure_instance_id() {
 }
 
 require_target_host
+ensure_service_account
+resolve_app_identity
 
 run apt-get update
 # NOTE: we do NOT install the apt ``dynamips`` package. Ubuntu's stock
@@ -353,6 +418,7 @@ run apt-get update
 run apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
+  sudo \
   jq \
   openssl \
   build-essential \
@@ -831,6 +897,9 @@ install_nova_ve_net_helper
 run systemctl enable docker
 run systemctl restart docker
 run usermod -aG docker "${APP_OWNER}"
+if getent group kvm >/dev/null 2>&1; then
+  run usermod -aG kvm "${APP_OWNER}"
+fi
 
 # Build bundled demo images (NOVA_VE_SKIP_DEMO_IMAGES=1 to skip; idempotent —
 # only builds images that are not already present locally). Build failure

@@ -529,6 +529,13 @@ def console_proxy_stop(proxy_pid: int) -> None:
     _invoke_helper("console-proxy-stop", str(int(proxy_pid)))
 
 
+def qemu_process_signal(pid: int, signal_name: str) -> None:
+    """Signal a registry-authorized QEMU process group via the privileged helper."""
+    if signal_name not in {"term", "kill"}:
+        raise ValueError(f"invalid qemu signal: {signal_name!r}")
+    _invoke_helper("qemu-process-signal", str(int(pid)), signal_name)
+
+
 def console_proxy_alive(proxy_pid: int) -> bool:
     """Return True if ``proxy_pid`` still refers to a running console proxy."""
     try:

@@ -32,7 +32,7 @@ Because the default mode is non-destructive, rollback is straightforward:
 ```bash
 # Reset the nova-ve image + template tree:
 sudo rm -rf /var/lib/nova-ve/images /var/lib/nova-ve/templates
-sudo install -d -o ubuntu -g ubuntu /var/lib/nova-ve/images /var/lib/nova-ve/templates
+sudo install -d -o nova-ve -g nova-ve /var/lib/nova-ve/images /var/lib/nova-ve/templates
 
 # Re-run the provisioner (idempotent) to re-create directory perms:
 sudo bash deploy/scripts/provision-ubuntu-2604.sh

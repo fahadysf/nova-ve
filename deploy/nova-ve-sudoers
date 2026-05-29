@@ -10,13 +10,14 @@
 # Why this is safe despite the trailing ``*``:
 #   * the helper itself uses ``subprocess.run([...], shell=False)`` —
 #     argv is never spliced into a shell string;
-#   * each verb maps to ONE fixed ``ip`` / ``nsenter ip`` invocation;
+#   * each network verb maps to ONE fixed ``ip`` / ``nsenter ip`` invocation;
 #   * every argv argument is validated against a tight regex BEFORE
-#     any subprocess is spawned;
+#     any subprocess is spawned or process signal is issued;
 #   * pid-taking verbs additionally consult the runtime registry at
 #     /var/lib/nova-ve/runtime/pids.json to constrain operations to
-#     processes that nova-ve itself spawned.
+#     processes that nova-ve itself spawned, with QEMU process signaling
+#     further limited to registry entries whose kind is qemu.
 #
 # Therefore the only thing the ``*`` controls is sudo's own argv
 # splitting; the helper closes the shell-injection class structurally.
-ubuntu ALL=(root) NOPASSWD: /opt/nova-ve/bin/nova-ve-net.py *
+__APP_OWNER__ ALL=(root) NOPASSWD: /opt/nova-ve/bin/nova-ve-net.py *

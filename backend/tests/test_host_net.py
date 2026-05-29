@@ -60,6 +60,7 @@ def test_classify_helper_error_matches_contract(
             ("link-set-name-in-netns", "4242", "nvec0de1d2i3p", "eth3"),
         ),
         ("addr_up_in_netns", (4242, "eth3"), ("addr-up-in-netns", "4242", "eth3")),
+        ("qemu_process_signal", (4242, "term"), ("qemu-process-signal", "4242", "term")),
         ("link_del", ("nvec0de1d2i3h",), ("link-del", "nvec0de1d2i3h")),
         ("try_link_del", ("nvec0de1d2i3h",), ("link-del", "nvec0de1d2i3h")),
     ],
@@ -80,6 +81,11 @@ def test_public_wrapper_verbs_shape_expected_helper_argv(
     getattr(host_net, wrapper_name)(*args)
 
     assert recorded == [expected_argv]
+
+
+def test_qemu_process_signal_rejects_unknown_signal() -> None:
+    with pytest.raises(ValueError):
+        host_net.qemu_process_signal(4242, "hup")
 
 
 def test_name_helpers_stay_within_linux_interface_ceiling(monkeypatch) -> None:

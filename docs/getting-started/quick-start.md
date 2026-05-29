@@ -9,7 +9,7 @@ curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | 
 That single command:
 
 1. Installs git, Docker, PostgreSQL, Caddy, Node.js, Python 3 + venv, `dnsmasq`, `nftables`, build tooling, and other OS deps.
-2. Clones this repo to `~${SUDO_USER}/nova-ve-git`.
+2. Creates/reuses the dedicated `nova-ve` service user and clones this repo to `/var/lib/nova-ve/nova-ve-git` by default.
 3. Bootstraps the host PostgreSQL role/db (`nova` / `novadb`) and the dockerized Guacamole stack (`guacdb` / `guacd` / `guacamole`).
 4. Builds the FastAPI backend (Python venv + Alembic migrations + initial seed).
 5. Builds the SvelteKit frontend (`npm ci` + `vite build`) into `/var/lib/nova-ve/www`.
@@ -29,8 +29,9 @@ Set any of these as env vars before piping into `sudo bash`:
 |-----|---------|---------|
 | `NOVA_VE_REPO_URL` | `https://github.com/fahadysf/nova-ve.git` | Source repo |
 | `NOVA_VE_REPO_REF` | `main` | Branch / tag / SHA to check out |
-| `NOVA_VE_REPO_DIR` | `~${SUDO_USER}/nova-ve-git` | Clone destination |
-| `NOVA_VE_OWNER` | `${SUDO_USER:-ubuntu}` | UNIX user that owns the repo and runs the backend |
+| `NOVA_VE_REPO_DIR` | `/var/lib/nova-ve/nova-ve-git` | Clone destination; legacy `~${SUDO_USER}/nova-ve-git` checkouts are reused during migration when present |
+| `NOVA_VE_SERVICE_USER` | `nova-ve` | Dedicated UNIX service user that owns runtime state and runs the backend |
+| `NOVA_VE_OWNER` | (unset) | Compatibility alias for `NOVA_VE_SERVICE_USER` |
 | `NOVA_VE_SKIP_DEMO_IMAGES` | (unset) | Set to `1` to skip building the bundled `nova-ve/alpine-telnet:latest` demo image |
 
 ## After install

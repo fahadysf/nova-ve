@@ -28,7 +28,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1/                   # â
 If the in-tree smoke check exists in the repo on the host, it bundles all of the above into one command:
 
 ```bash
-sudo bash ~ubuntu/nova-ve-git/deploy/scripts/smoke-check.sh
+sudo bash /var/lib/nova-ve/nova-ve-git/deploy/scripts/smoke-check.sh
 ```
 
 ## Symptom â†’ first step
@@ -46,7 +46,7 @@ sudo bash ~ubuntu/nova-ve-git/deploy/scripts/smoke-check.sh
 ## Lab JSON files
 
 ```bash
-# Read a lab JSON (root-owned, mode 0600):
+# Read a lab JSON (service-user-owned, mode 0600):
 sudo cat /var/lib/nova-ve/labs/<lab-name>.json | jq .
 
 # Show every node in a lab:
@@ -65,11 +65,11 @@ This nukes labs, images, templates, and the database. Do not run on a production
 ```bash
 # Stop services
 sudo systemctl stop nova-ve-backend
-sudo docker compose -f /home/ubuntu/nova-ve-git/docker-compose.yml down
+sudo docker compose -f /var/lib/nova-ve/nova-ve-git/deploy/compose/guacamole-compose.yml down
 
 # Wipe state
 sudo rm -rf /var/lib/nova-ve/{labs,images,templates}
-sudo install -d -o ubuntu -g ubuntu /var/lib/nova-ve/{labs,images,templates}
+sudo install -d -o nova-ve -g nova-ve /var/lib/nova-ve/{labs,images,templates}
 
 # Drop + recreate the database
 sudo -u postgres psql -c 'DROP DATABASE IF EXISTS novadb;'

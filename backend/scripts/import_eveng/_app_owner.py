@@ -1,8 +1,8 @@
-"""Resolve the canonical app owner for the EVE-NG importer (#184).
+"""Resolve the canonical service owner for the EVE-NG importer (#184, #228).
 
-Mirrors the resolution in ``install.sh:76``::
+Mirrors the service-account resolution used by ``install.sh``::
 
-    APP_OWNER="${NOVA_VE_OWNER:-${SUDO_USER:-ubuntu}}"
+    APP_OWNER="${NOVA_VE_SERVICE_USER:-${NOVA_VE_OWNER:-nova-ve}}"
 
 The user must exist on the host (``id <user>`` succeeds); otherwise the helper
 raises :class:`AppOwnerError` and the CLI fails loudly. Lines 77-82 of
@@ -37,11 +37,11 @@ class AppOwner:
 def resolve(env: dict[str, str] | None = None) -> AppOwner:
     """Resolve ``APP_OWNER`` from the process environment (or an override map).
 
-    Resolution order matches ``install.sh:76``:
+    Resolution order matches the installer after #228:
 
-    1. ``NOVA_VE_OWNER`` if set and non-empty.
-    2. ``SUDO_USER`` if set and non-empty.
-    3. Hard default: ``"ubuntu"``.
+    1. ``NOVA_VE_SERVICE_USER`` if set and non-empty.
+    2. ``NOVA_VE_OWNER`` if set and non-empty (compatibility alias).
+    3. Hard default: ``"nova-ve"``.
 
     The resolved name is then validated via :func:`pwd.getpwnam`; if the user
     does not exist on the host, :class:`AppOwnerError` is raised with a message
@@ -49,15 +49,15 @@ def resolve(env: dict[str, str] | None = None) -> AppOwner:
     """
     env_map = env if env is not None else os.environ
 
+    service_user = (env_map.get("NOVA_VE_SERVICE_USER") or "").strip()
     nova_owner = (env_map.get("NOVA_VE_OWNER") or "").strip()
-    sudo_user = (env_map.get("SUDO_USER") or "").strip()
 
-    if nova_owner:
+    if service_user:
+        candidate, source = service_user, "NOVA_VE_SERVICE_USER"
+    elif nova_owner:
         candidate, source = nova_owner, "NOVA_VE_OWNER"
-    elif sudo_user:
-        candidate, source = sudo_user, "SUDO_USER"
     else:
-        candidate, source = "ubuntu", "default"
+        candidate, source = "nova-ve", "default"
 
     try:
         pw = pwd.getpwnam(candidate)
@@ -65,8 +65,8 @@ def resolve(env: dict[str, str] | None = None) -> AppOwner:
         raise AppOwnerError(
             f"APP_OWNER resolution failed: user {candidate!r} (from {source}) "
             f"does not exist on this host. Resolution sites tried in order: "
-            f"NOVA_VE_OWNER (env={nova_owner!r}), SUDO_USER (env={sudo_user!r}), "
-            f"default 'ubuntu'."
+            f"NOVA_VE_SERVICE_USER (env={service_user!r}), "
+            f"NOVA_VE_OWNER (env={nova_owner!r}), default 'nova-ve'."
         ) from exc
 
     try:

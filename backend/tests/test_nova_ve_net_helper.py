@@ -80,7 +80,7 @@ def _seed_pid(mod, pid: int, *, kind: str = "docker", cgroup: str | None = None)
             "pid": pid,
             "kind": kind,
             "lab_id": "lab-test",
-            "node_id": "node-test",
+            "node_id": 1,
             "started_at": 0,
             "generation": 1,
         }
@@ -97,6 +97,13 @@ def _seed_pid(mod, pid: int, *, kind: str = "docker", cgroup: str | None = None)
     (pid_dir / "cgroup").write_text(cgroup)
     if kind == "qemu":
         (pid_dir / "comm").write_text("qemu-system-x86_64\n")
+        qmp_path = mod.RUNTIME_ROOT / "tmp" / "lab-test" / "1" / "qmp.sock"
+        cmdline = [
+            "/usr/bin/qemu-system-x86_64",
+            "-qmp",
+            f"unix:{qmp_path},server,nowait",
+        ]
+        (pid_dir / "cmdline").write_bytes(b"\0".join(arg.encode() for arg in cmdline) + b"\0")
     else:
         (pid_dir / "comm").write_text("dockerd-shim\n")
 
@@ -447,6 +454,43 @@ def test_pid_taking_verb_rejects_unregistered_pid(helper, capsys):
     err = capsys.readouterr().err
     assert "pid ownership check FAILED" in err
     assert not helper._test_calls
+
+
+def test_qemu_process_signal_authorizes_registry_qemu_pid(helper, monkeypatch):
+    _seed_pid(helper, 5555, kind="qemu")
+    calls: list[tuple[int, int]] = []
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        calls.append((pid, sig))
+
+    monkeypatch.setattr(helper.os, "killpg", fake_killpg)
+
+    rc = helper.main(["qemu-process-signal", "5555", "term"])
+
+    assert rc == 0
+    assert calls == [(5555, helper.signal.SIGTERM)]
+    assert not helper._test_calls
+
+
+def test_qemu_process_signal_rejects_non_qemu_registry_pid(helper, monkeypatch):
+    _seed_pid(helper, 4242, kind="docker")
+    monkeypatch.setattr(helper.os, "killpg", lambda _pid, _sig: pytest.fail("no kill"))
+
+    rc = helper.main(["qemu-process-signal", "4242", "term"])
+
+    assert rc == 2
+
+
+def test_qemu_process_signal_rejects_qemu_without_matching_qmp(helper, monkeypatch):
+    _seed_pid(helper, 5555, kind="qemu")
+    (helper._test_proc_root / "5555" / "cmdline").write_bytes(
+        b"/usr/bin/qemu-system-x86_64\0-qmp\0unix:/tmp/other.sock,server,nowait\0"
+    )
+    monkeypatch.setattr(helper.os, "killpg", lambda _pid, _sig: pytest.fail("no kill"))
+
+    rc = helper.main(["qemu-process-signal", "5555", "term"])
+
+    assert rc == 2
 
 
 def test_addr_add_rejects_bad_cidr(helper):
