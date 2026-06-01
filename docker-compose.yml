@@ -1,20 +1,42 @@
 services:
+  db-init:
+    image: alpine:3.21
+    restart: "no"
+    volumes:
+      - labdata:/data
+    entrypoint:
+      - sh
+      - -c
+      - |
+        if [ ! -f /data/db_password ]; then
+          echo "Generating random database password..."
+          tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32 > /data/db_password
+          chmod 600 /data/db_password
+          echo "Done."
+        else
+          echo "Database password already exists."
+        fi
+
   db:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: nova
-      POSTGRES_PASSWORD: nova
-      POSTGRES_DB: novadb
+      POSTGRES_USER: ${DB_USER:-nova}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_DB: ${DB_NAME:-novadb}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - labdata:/run/secrets:ro
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nova -d novadb"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-nova} -d ${DB_NAME:-novadb}"]
       interval: 5s
       timeout: 5s
       retries: 5
+    depends_on:
+      db-init:
+        condition: service_completed_successfully
 
   backend:
     build:
@@ -22,8 +44,9 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+asyncpg://nova:nova@db:5432/novadb
-      SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+      DB_HOST: db
+      # DATABASE_URL is auto-constructed from /data/db_password + the DB_* vars above.
+      # Set DATABASE_URL explicitly to override: postgresql+asyncpg://user:pass@host:5432/db
       BASE_DATA_DIR: /data
       LABS_DIR: /data/labs
       IMAGES_DIR: /data/images
@@ -34,6 +57,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
+      db-init:
+        condition: service_completed_successfully
       db:
         condition: service_healthy
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
