@@ -35,8 +35,18 @@ if [[ -f /etc/nova-ve/backend.env ]]; then
   set -a && source /etc/nova-ve/backend.env && set +a
 fi
 
-PSQL_URL="${DATABASE_URL:-postgresql+asyncpg://nova:nova@127.0.0.1:5432/novadb}"
-PSQL_URL="${PSQL_URL/postgresql+asyncpg:/postgresql:}"
+if [[ -z "${DATABASE_URL:-}" ]]; then
+  PW_FILE="${BASE_DATA_DIR:-/var/lib/nova-ve}/db_password"
+  if [[ -f "${PW_FILE}" ]]; then
+    DB_PASS=$(cat "${PW_FILE}")
+    DATABASE_URL="postgresql+asyncpg://${DB_USER:-nova}:${DB_PASS}@${DB_HOST:-127.0.0.1}:${DB_PORT:-5432}/${DB_NAME:-novadb}"
+  else
+    echo "DATABASE_URL not set and no db_password file at ${PW_FILE}" >&2
+    exit 1
+  fi
+fi
+
+PSQL_URL="${DATABASE_URL/postgresql+asyncpg:/postgresql:}"
 ADMIN_USERNAME="${NOVA_VE_ADMIN_USERNAME:-admin}"
 if [[ -z "${NOVA_VE_ADMIN_PASSWORD:-}" ]]; then
   echo "NOVA_VE_ADMIN_PASSWORD must be set for smoke-check.sh" >&2
