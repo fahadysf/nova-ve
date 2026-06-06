@@ -1,0 +1,17 @@
+type: qemu
+name: Cisco Catalyst 9000v
+description: Cisco Catalyst 9000v
+icon_type: switch
+cpu: 4
+ram: 24576
+ethernet: 9
+console_type: telnet
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -boot order=cd
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - GigabitEthernet0/0
+  - GigabitEthernet1/0/{port}

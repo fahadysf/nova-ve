@@ -1,0 +1,16 @@
+type: qemu
+name: Fortinet FortiGate
+description: Fortinet FortiGate
+icon_type: firewall
+cpu: 1
+ram: 2048
+ethernet: 4
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -no-user-config -nodefaults -display none -vga std -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: port{port}

@@ -1,0 +1,17 @@
+type: qemu
+name: Aruba Virtual Mobility Controller
+description: Aruba Virtual Mobility Controller
+icon_type: router
+cpu: 3
+ram: 4096
+ethernet: 4
+console_type: vnc
+qemu_options: -machine type=pc,accel=kvm -no-user-config -nodefaults -display none -vga std -rtc base=utc -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - Not in Use
+  - GigabitEthernet0/0/{n}

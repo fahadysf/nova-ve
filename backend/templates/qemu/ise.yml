@@ -1,0 +1,15 @@
+type: qemu
+name: Cisco ISE
+description: Cisco Identity Services Engine
+icon_type: server
+cpu: 4
+ram: 8192
+console_type: vnc
+cpulimit: 0
+qemu_options: -machine type=pc,accel=kvm -smbios type=1,product=KVM -no-user-config -nodefaults -display none -vga std -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: GigabitEthernet {n}

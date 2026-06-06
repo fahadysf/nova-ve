@@ -1,0 +1,17 @@
+type: qemu
+name: Cisco ASAv
+description: Cisco ASAv
+icon_type: firewall
+cpu: 1
+ram: 2048
+ethernet: 8
+console_type: telnet
+qemu_options: -machine type=pc-1.0,accel=kvm -nodefconfig -nodefaults -display none -vga std -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - Management0/0
+  - GigabitEthernet0/{n}

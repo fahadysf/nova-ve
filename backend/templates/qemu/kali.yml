@@ -1,0 +1,15 @@
+type: qemu
+name: Kali Linux
+description: Kali Linux
+icon_type: server
+cpu: 2
+ram: 4096
+console_type: vnc
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -boot order=dc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{n}

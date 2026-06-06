@@ -1,0 +1,17 @@
+type: qemu
+name: ExtremeXOS
+description: ExtremeXOS
+icon_type: switch
+cpu: 1
+ram: 2048
+ethernet: 3
+console_type: telnet
+qemu_options: -machine type=pc,accel=kvm -cpu Nehalem -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - Mgmt
+  - port{port}

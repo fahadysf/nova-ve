@@ -1,0 +1,16 @@
+type: qemu
+name: Check Point Security Gateway
+description: Check Point Security Gateway
+icon_type: firewall
+cpu: 4
+ram: 6144
+ethernet: 4
+console_type: telnet
+qemu_nic: vmxnet3
+qemu_options: -machine type=pc,accel=kvm -no-user-config -nodefaults -display none -vga std -rtc base=utc -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{n}
