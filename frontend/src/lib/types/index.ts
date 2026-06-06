@@ -198,6 +198,8 @@ export interface NetworkCreateConfig {
   dhcp_start?: string;
   dhcp_end?: string;
   egress_interface?: string;
+  /** NAT-Cloud only — ID of an existing owner returned by /api/system/clouds. */
+  shared_cloud_id?: string;
   /** Bridge-Cloud only — name of the host-owned br-eth* bridge. */
   host_bridge?: string;
 }

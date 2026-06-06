@@ -315,6 +315,7 @@ reconcile_nat_cloud_runtime() {
   local skipped=0
   local failed=0
   local lab_file
+  declare -A seen_nat_cloud_cidrs=()
   while IFS= read -r -d '' lab_file; do
     local rows
     rows="$(
@@ -329,7 +330,8 @@ reconcile_nat_cloud_runtime() {
             ((.value.config.dhcp // true) | tostring),
             (.value.config.dhcp_start // ""),
             (.value.config.dhcp_end // ""),
-            (.value.runtime.egress_interface // .value.config.egress_interface // "")
+            (.value.runtime.egress_interface // .value.config.egress_interface // ""),
+            (.value.config.shared_cloud_id // "")
           ]
         | @tsv
       ' "${lab_file}" 2>/dev/null || true
@@ -338,11 +340,21 @@ reconcile_nat_cloud_runtime() {
       continue
     fi
 
-    while IFS=$'\t' read -r bridge cidr gateway dhcp_enabled dhcp_start dhcp_end egress; do
+    while IFS=$'\t' read -r bridge cidr gateway dhcp_enabled dhcp_start dhcp_end egress shared_cloud_id; do
+      if [[ -n "${shared_cloud_id}" ]]; then
+        skipped=$((skipped + 1))
+        continue
+      fi
       if [[ -z "${bridge}" || -z "${cidr}" ]]; then
         skipped=$((skipped + 1))
         continue
       fi
+      if [[ -n "${seen_nat_cloud_cidrs[${cidr}]:-}" ]]; then
+        echo "WARN: duplicate NAT-Cloud owner CIDR ${cidr} on ${bridge}; already owned by ${seen_nat_cloud_cidrs[${cidr}]}; skipping." >&2
+        skipped=$((skipped + 1))
+        continue
+      fi
+      seen_nat_cloud_cidrs["${cidr}"]="${bridge}"
       if ! ip link show "${bridge}" >/dev/null 2>&1; then
         skipped=$((skipped + 1))
         continue
@@ -380,7 +392,7 @@ reconcile_nat_cloud_runtime() {
       fi
       applied=$((applied + 1))
     done <<< "${rows}"
-  done < <(find "${labs_dir}" -type f -name '*.json' -print0)
+  done < <(find "${labs_dir}" -type f -name '*.json' -print0 | sort -z)
 
   echo "NAT-Cloud runtime reconciliation: applied=${applied} skipped=${skipped} failed=${failed}."
   return 0

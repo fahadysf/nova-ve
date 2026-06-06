@@ -26,6 +26,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import get_settings
 from app.services import host_net
+from app.services.cloud_inventory_service import (
+    find_nat_cloud_owner,
+    list_nat_clouds,
+    nat_cloud_ipam_lock,
+    owner_cidrs,
+    references_to_cloud,
+)
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.link_service import _refcount, _recompute_mac_registry
@@ -131,8 +138,10 @@ def _existing_network_cidrs(networks: dict) -> list[ipaddress.IPv4Network]:
     return out
 
 
-def _allocate_nat_cloud_cidr(networks: dict) -> ipaddress.IPv4Network:
+def _allocate_nat_cloud_cidr(networks: dict, extra_used: list[ipaddress.IPv4Network] | None = None) -> ipaddress.IPv4Network:
     used = _existing_network_cidrs(networks)
+    if extra_used:
+        used.extend(extra_used)
     for candidate in _settings_nat_cloud_pool().subnets(new_prefix=24):
         if any(candidate.overlaps(existing) for existing in used):
             continue
@@ -143,11 +152,20 @@ def _allocate_nat_cloud_cidr(networks: dict) -> ipaddress.IPv4Network:
     )
 
 
-def _normalize_nat_cloud_config(raw_config: dict, networks: dict) -> dict:
-    cidr = _validate_cidr(raw_config["cidr"]) if raw_config.get("cidr") else _allocate_nat_cloud_cidr(networks)
+def _normalize_nat_cloud_config(
+    raw_config: dict,
+    networks: dict,
+    *,
+    host_used: list[ipaddress.IPv4Network] | None = None,
+) -> dict:
+    cidr = (
+        _validate_cidr(raw_config["cidr"])
+        if raw_config.get("cidr")
+        else _allocate_nat_cloud_cidr(networks, host_used)
+    )
     if cidr.prefixlen > 24:
         raise NetworkServiceError(422, "NAT-Cloud CIDR must be /24 or larger")
-    for existing in _existing_network_cidrs(networks):
+    for existing in [*_existing_network_cidrs(networks), *(host_used or [])]:
         if cidr.overlaps(existing):
             raise NetworkServiceError(
                 409,
@@ -200,6 +218,34 @@ def _normalize_nat_cloud_config(raw_config: dict, networks: dict) -> dict:
     if raw_config.get("egress_interface"):
         config["egress_interface"] = str(raw_config["egress_interface"]).strip()
     return config
+
+
+def _normalize_shared_nat_cloud_config(shared_cloud_id: str) -> tuple[dict, dict]:
+    owner = find_nat_cloud_owner(shared_cloud_id)
+    if owner is None:
+        raise NetworkServiceError(
+            404,
+            "NAT-Cloud shared_cloud_id does not reference an existing owner.",
+            extra={"shared_cloud_id": shared_cloud_id},
+        )
+    for item in list_nat_clouds():
+        if item.get("id") == shared_cloud_id and not item.get("safe_for_reuse", True):
+            raise NetworkServiceError(
+                409,
+                "NAT-Cloud owner is not safe to reuse because its CIDR collides with another owner.",
+                extra={"shared_cloud_id": shared_cloud_id, "warning": item.get("warning")},
+            )
+    owner_config = owner.network.get("config") or {}
+    if not isinstance(owner_config, dict) or not owner_config.get("cidr"):
+        raise NetworkServiceError(
+            409,
+            "NAT-Cloud owner is missing reusable configuration.",
+            extra={"shared_cloud_id": shared_cloud_id},
+        )
+    config = dict(owner_config)
+    config["shared_cloud_id"] = shared_cloud_id
+    runtime = dict(owner.network.get("runtime") or {})
+    return config, runtime
 
 
 def _bridge_gateway_cidr(config: dict) -> str:
@@ -523,6 +569,60 @@ class NetworkService:
                 if not isinstance(bridge, str) or not bridge:
                     bridge = host_net.bridge_name(lab_id, network_id)
 
+                config = network.get("config") or {}
+                shared_cloud_id = (
+                    str(config.get("shared_cloud_id") or "").strip()
+                    if isinstance(config, dict)
+                    else ""
+                )
+                if str(network.get("type", "")) == NAT_CLOUD_TYPE and shared_cloud_id:
+                    owner = find_nat_cloud_owner(shared_cloud_id)
+                    if owner is None:
+                        skipped.append(
+                            {
+                                "bridge": bridge,
+                                "network_id": network_id,
+                                "reason": "shared NAT-Cloud owner is missing",
+                            }
+                        )
+                        continue
+                    owner_bridge = owner.bridge_name or host_net.bridge_name(
+                        owner.lab_id, owner.network_id
+                    )
+                    try:
+                        if owner.lab_path == normalized:
+                            owner_network = networks.get(str(owner.network_id))
+                            if isinstance(owner_network, dict):
+                                if self._ensure_nat_cloud_runtime(owner_network, owner_bridge):
+                                    dirty = True
+                        else:
+                            with lab_lock(owner.lab_path, labs_dir):
+                                owner_data = LabService.read_lab_json_static(owner.lab_path)
+                                owner_networks = owner_data.get("networks") or {}
+                                owner_network = owner_networks.get(str(owner.network_id))
+                                if isinstance(owner_network, dict):
+                                    if self._ensure_nat_cloud_runtime(owner_network, owner_bridge):
+                                        owner_networks[str(owner.network_id)] = owner_network
+                                        owner_data["networks"] = owner_networks
+                                        LabService.write_lab_json_static(owner.lab_path, owner_data)
+                        nat_cloud.append(
+                            {
+                                "network_id": network_id,
+                                "bridge": owner_bridge,
+                                "shared_cloud_id": shared_cloud_id,
+                            }
+                        )
+                        ensured.append(owner_bridge)
+                    except (NetworkServiceError, host_net.HostNetError, OSError) as exc:
+                        skipped.append(
+                            {
+                                "bridge": owner_bridge,
+                                "network_id": network_id,
+                                "reason": str(exc),
+                            }
+                        )
+                    continue
+
                 # Bridge-Cloud: host-owned bridge, NEVER fingerprint or add.
                 # Verify-only.  Distinguish via runtime.driver (set at create
                 # time) AND network.type (defensive, covers migrations).
@@ -660,175 +760,199 @@ class NetworkService:
         if not raw_name:
             raise NetworkServiceError(422, "Network name must be non-empty.")
 
-        with lab_lock(normalized, labs_dir):
-            data = LabService.read_lab_json_static(normalized)
-            lab_id = str(data.get("id") or normalized)
-            networks = data.setdefault("networks", {})
-            if _network_name_in_use(networks, raw_name):
-                raise NetworkServiceError(
-                    409,
-                    f"A network named {raw_name!r} already exists in this lab.",
-                    extra={"name": raw_name},
-                )
-            normalized_config = (
-                _normalize_nat_cloud_config(raw_config, networks)
-                if network_type == NAT_CLOUD_TYPE
-                else dict(raw_config)
-            )
-            # Bridge-Cloud: host-owned bridge.  Validate config.host_bridge
-            # name + existence BEFORE allocating an id or persisting state.
-            if network_type == BRIDGE_CLOUD_TYPE:
-                host_bridge = normalized_config.get("host_bridge")
-                if not isinstance(host_bridge, str) or not host_net.RE_HOST_BRIDGE_NAME.fullmatch(host_bridge):
+        create_lock = nat_cloud_ipam_lock() if network_type == NAT_CLOUD_TYPE else nullcontext()
+        with create_lock:
+            with lab_lock(normalized, labs_dir):
+                data = LabService.read_lab_json_static(normalized)
+                lab_id = str(data.get("id") or normalized)
+                networks = data.setdefault("networks", {})
+                if _network_name_in_use(networks, raw_name):
                     raise NetworkServiceError(
-                        400,
-                        "config.host_bridge must match ^br-eth[0-9]+$",
-                        extra={"host_bridge": host_bridge},
+                        409,
+                        f"A network named {raw_name!r} already exists in this lab.",
+                        extra={"name": raw_name},
                     )
-                if not host_net.bridge_exists(host_bridge):
-                    raise NetworkServiceError(
-                        404,
-                        f"Host bridge {host_bridge!r} not found.  Run "
-                        "provision-ubuntu-2604.sh on the host first.",
-                        extra={"host_bridge": host_bridge},
-                    )
-            next_id = max(
-                (int(key) for key in networks.keys() if str(key).isdigit()),
-                default=0,
-            ) + 1
-            bridge = (
-                normalized_config["host_bridge"]
-                if network_type == BRIDGE_CLOUD_TYPE
-                else host_net.bridge_name(lab_id, next_id)
-            )
-            network = {
-                "id": next_id,
-                "name": raw_name,
-                "type": network_type,
-                "left": int(request.get("left", 0)),
-                "top": int(request.get("top", 0)),
-                "icon": "01-Cloud-Default.svg",
-                "width": 0,
-                "style": "Solid",
-                "linkstyle": "Straight",
-                "color": "",
-                "label": "",
-                "visibility": True,
-                "implicit": False,
-                "smart": -1,
-                "config": normalized_config,
-                "runtime": {
-                    "bridge_name": bridge,
-                    # US-401: provisioning-backend metadata for the
-                    # reconciliation loop (US-402). ``driver`` mirrors
-                    # the network's ``type`` vocabulary; ``created_at``
-                    # is an ISO-8601 UTC timestamp.  For bridge_cloud
-                    # ``driver`` is the discriminator the dispatcher in
-                    # ``host_net.link_master_any`` keys off.
-                    "driver": (
-                        network_type
-                        if network_type in (NAT_CLOUD_TYPE, BRIDGE_CLOUD_TYPE)
-                        else "linux_bridge"
-                    ),
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                    # US-204c: seed an empty free-list. Counter-based
-                    # allocation would exhaust a /24 in 250 cycles even
-                    # with one container; the free-list does not.
-                    "used_ips": [],
-                    "first_offset": (
-                        NAT_CLOUD_STATIC_FIRST_OFFSET
-                        if network_type == NAT_CLOUD_TYPE
-                        else DEFAULT_FIRST_OFFSET
-                    ),
-                },
-            }
-            if network_type == NAT_CLOUD_TYPE:
-                network["runtime"].update(
-                    {
-                        "gateway": normalized_config["gateway"],
-                        "dhcp": normalized_config.get("dhcp", True),
-                        "dhcp_start": normalized_config["dhcp_start"],
-                        "dhcp_end": normalized_config["dhcp_end"],
-                    }
-                )
-            networks[str(next_id)] = network
-            data.pop("topology", None)
-            # Persist BEFORE provisioning so on-disk state never leads the
-            # kernel state. Any provisioning or ownership failure rolls it back.
-            LabService.write_lab_json_static(normalized, data)
-            try:
-                if network_type == BRIDGE_CLOUD_TYPE:
-                    # Bridge-Cloud: host-owned bridge, existence validated
-                    # above.  No bridge_add, no fingerprint, no NAT, no
-                    # dnsmasq — the post-JSON-write step is a no-op.
-                    pass
-                elif host_net.bridge_exists(bridge):
-                    status = host_net.bridge_fingerprint_check(bridge, lab_id, next_id)
-                    if status != "match":
-                        raise host_net.HostNetBridgeOwnershipError(
-                            _bridge_ownership_message(bridge, lab_id, next_id)
+                shared_cloud_id = ""
+                if network_type == NAT_CLOUD_TYPE:
+                    requested_shared = raw_config.get("shared_cloud_id")
+                    if requested_shared is not None:
+                        shared_cloud_id = str(requested_shared).strip()
+                    if shared_cloud_id:
+                        normalized_config, owner_runtime = _normalize_shared_nat_cloud_config(shared_cloud_id)
+                    else:
+                        normalized_config = _normalize_nat_cloud_config(
+                            raw_config,
+                            networks,
+                            host_used=owner_cidrs(),
                         )
+                        owner_runtime = {}
                 else:
-                    host_net.bridge_add(bridge)
-                    try:
-                        host_net.bridge_fingerprint_write(bridge, lab_id, next_id)
-                    except Exception:
-                        try:
-                            host_net.bridge_del(bridge)
-                        except host_net.HostNetError as rollback_exc:
-                            logger.error(
-                                "create_network: bridge fingerprint rollback failed for %s (%s)",
-                                bridge,
-                                rollback_exc,
-                            )
-                        raise
-                if network_type == NAT_CLOUD_TYPE:
-                    self._ensure_nat_cloud_runtime(network, bridge)
-            except host_net.HostNetBridgeOwnershipError:
-                networks.pop(str(next_id), None)
-                data["networks"] = networks
-                LabService.write_lab_json_static(normalized, data)
-                raise
-            except NetworkServiceError:
-                networks.pop(str(next_id), None)
-                data["networks"] = networks
-                LabService.write_lab_json_static(normalized, data)
-                if network_type == NAT_CLOUD_TYPE:
-                    config = network.get("config") or {}
-                    runtime = network.get("runtime") or {}
-                    self._cleanup_nat_cloud_runtime(
-                        bridge,
-                        str(config.get("cidr") or ""),
-                        str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
-                    )
-                raise
-            except (host_net.HostNetError, OSError) as exc:
-                # Roll back the JSON write — never leave inconsistent state.
-                networks.pop(str(next_id), None)
-                data["networks"] = networks
-                LabService.write_lab_json_static(normalized, data)
-                if network_type == NAT_CLOUD_TYPE:
-                    config = network.get("config") or {}
-                    runtime = network.get("runtime") or {}
-                    self._cleanup_nat_cloud_runtime(
-                        bridge,
-                        str(config.get("cidr") or ""),
-                        str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
-                    )
-                logger.error(
-                    "create_network: bridge provisioning failed for %s (%s); rolled back lab.json",
-                    bridge,
-                    exc,
+                    normalized_config = dict(raw_config)
+                    owner_runtime = {}
+                # Bridge-Cloud: host-owned bridge.  Validate config.host_bridge
+                # name + existence BEFORE allocating an id or persisting state.
+                if network_type == BRIDGE_CLOUD_TYPE:
+                    host_bridge = normalized_config.get("host_bridge")
+                    if not isinstance(host_bridge, str) or not host_net.RE_HOST_BRIDGE_NAME.fullmatch(host_bridge):
+                        raise NetworkServiceError(
+                            400,
+                            "config.host_bridge must match ^br-eth[0-9]+$",
+                            extra={"host_bridge": host_bridge},
+                        )
+                    if not host_net.bridge_exists(host_bridge):
+                        raise NetworkServiceError(
+                            404,
+                            f"Host bridge {host_bridge!r} not found.  Run "
+                            "provision-ubuntu-2604.sh on the host first.",
+                            extra={"host_bridge": host_bridge},
+                        )
+                next_id = max(
+                    (int(key) for key in networks.keys() if str(key).isdigit()),
+                    default=0,
+                ) + 1
+                bridge = (
+                    normalized_config["host_bridge"]
+                    if network_type == BRIDGE_CLOUD_TYPE
+                    else owner_runtime.get("bridge_name")
+                    if network_type == NAT_CLOUD_TYPE and shared_cloud_id and owner_runtime.get("bridge_name")
+                    else host_net.bridge_name(lab_id, next_id)
                 )
-                raise NetworkServiceError(
-                    409,
-                    f"Failed to provision bridge {bridge}: {exc}",
-                    extra={"bridge": bridge},
-                ) from exc
-            if network_type == NAT_CLOUD_TYPE:
+                network = {
+                    "id": next_id,
+                    "name": raw_name,
+                    "type": network_type,
+                    "left": int(request.get("left", 0)),
+                    "top": int(request.get("top", 0)),
+                    "icon": "01-Cloud-Default.svg",
+                    "width": 0,
+                    "style": "Solid",
+                    "linkstyle": "Straight",
+                    "color": "",
+                    "label": "",
+                    "visibility": True,
+                    "implicit": False,
+                    "smart": -1,
+                    "config": normalized_config,
+                    "runtime": {
+                        "bridge_name": bridge,
+                        # US-401: provisioning-backend metadata for the
+                        # reconciliation loop (US-402). ``driver`` mirrors
+                        # the network's ``type`` vocabulary; ``created_at``
+                        # is an ISO-8601 UTC timestamp.  For bridge_cloud
+                        # ``driver`` is the discriminator the dispatcher in
+                        # ``host_net.link_master_any`` keys off.
+                        "driver": (
+                            network_type
+                            if network_type in (NAT_CLOUD_TYPE, BRIDGE_CLOUD_TYPE)
+                            else "linux_bridge"
+                        ),
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                        # US-204c: seed an empty free-list. Counter-based
+                        # allocation would exhaust a /24 in 250 cycles even
+                        # with one container; the free-list does not.
+                        "used_ips": [],
+                        "first_offset": (
+                            NAT_CLOUD_STATIC_FIRST_OFFSET
+                            if network_type == NAT_CLOUD_TYPE
+                            else DEFAULT_FIRST_OFFSET
+                        ),
+                    },
+                }
+                if network_type == NAT_CLOUD_TYPE:
+                    network["runtime"].update(
+                        {
+                            "gateway": normalized_config["gateway"],
+                            "dhcp": normalized_config.get("dhcp", True),
+                            "dhcp_start": normalized_config["dhcp_start"],
+                            "dhcp_end": normalized_config["dhcp_end"],
+                            "shared_owner": not bool(shared_cloud_id),
+                            "shared_reference": bool(shared_cloud_id),
+                        }
+                    )
+                networks[str(next_id)] = network
+                data.pop("topology", None)
+                # Persist BEFORE provisioning so on-disk state never leads the
+                # kernel state. Any provisioning or ownership failure rolls it back.
                 LabService.write_lab_json_static(normalized, data)
-            _recompute_mac_registry(normalized, data)
-            payload = _serialize_network(network, 0)
+                try:
+                    if network_type == BRIDGE_CLOUD_TYPE:
+                        # Bridge-Cloud: host-owned bridge, existence validated
+                        # above.  No bridge_add, no fingerprint, no NAT, no
+                        # dnsmasq — the post-JSON-write step is a no-op.
+                        pass
+                    elif network_type == NAT_CLOUD_TYPE and shared_cloud_id:
+                        # Reference records attach to the owner bridge and
+                        # mutate owner IPAM only. Runtime exists on owner.
+                        pass
+                    elif host_net.bridge_exists(bridge):
+                        status = host_net.bridge_fingerprint_check(bridge, lab_id, next_id)
+                        if status != "match":
+                            raise host_net.HostNetBridgeOwnershipError(
+                                _bridge_ownership_message(bridge, lab_id, next_id)
+                            )
+                    else:
+                        host_net.bridge_add(bridge)
+                        try:
+                            host_net.bridge_fingerprint_write(
+                                bridge, lab_id, next_id
+                            )
+                        except Exception:
+                            try:
+                                host_net.bridge_del(bridge)
+                            except host_net.HostNetError as rollback_exc:
+                                logger.error(
+                                    "create_network: bridge fingerprint rollback failed for %s (%s)",
+                                    bridge,
+                                    rollback_exc,
+                                )
+                            raise
+                    if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
+                        self._ensure_nat_cloud_runtime(network, bridge)
+                except host_net.HostNetBridgeOwnershipError:
+                    networks.pop(str(next_id), None)
+                    data["networks"] = networks
+                    LabService.write_lab_json_static(normalized, data)
+                    raise
+                except NetworkServiceError:
+                    networks.pop(str(next_id), None)
+                    data["networks"] = networks
+                    LabService.write_lab_json_static(normalized, data)
+                    if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
+                        config = network.get("config") or {}
+                        runtime = network.get("runtime") or {}
+                        self._cleanup_nat_cloud_runtime(
+                            bridge,
+                            str(config.get("cidr") or ""),
+                            str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
+                        )
+                    raise
+                except (host_net.HostNetError, OSError) as exc:
+                    # Roll back the JSON write — never leave inconsistent state.
+                    networks.pop(str(next_id), None)
+                    data["networks"] = networks
+                    LabService.write_lab_json_static(normalized, data)
+                    if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
+                        config = network.get("config") or {}
+                        runtime = network.get("runtime") or {}
+                        self._cleanup_nat_cloud_runtime(
+                            bridge,
+                            str(config.get("cidr") or ""),
+                            str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
+                        )
+                    logger.error(
+                        "create_network: bridge provisioning failed for %s (%s); rolled back lab.json",
+                        bridge,
+                        exc,
+                    )
+                    raise NetworkServiceError(
+                        409,
+                        f"Failed to provision bridge {bridge}: {exc}",
+                        extra={"bridge": bridge},
+                    ) from exc
+                if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
+                    LabService.write_lab_json_static(normalized, data)
+                _recompute_mac_registry(normalized, data)
+                payload = _serialize_network(network, 0)
 
         await ws_hub.publish(normalized, "network_created", {"network": dict(payload)})
         return payload
@@ -837,76 +961,117 @@ class NetworkService:
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
-        with lab_lock(normalized, labs_dir):
-            data = LabService.read_lab_json_static(normalized)
-            networks = data.get("networks", {}) or {}
-            network = networks.get(str(network_id))
-            if not isinstance(network, dict):
-                raise NetworkServiceError(404, "Network does not exist.")
-            if network.get("implicit") is True:
-                raise NetworkServiceError(404, "Network does not exist.")
-            count = _refcount(data, int(network_id))
-            if count > 0:
-                raise NetworkServiceError(
-                    409,
-                    "Cannot delete network with active attachments.",
-                    extra={"count": count},
-                )
-            removed = dict(network)
-            networks.pop(str(network_id), None)
-            data["networks"] = networks
-            data.pop("topology", None)
-            LabService.write_lab_json_static(normalized, data)
-            _recompute_mac_registry(normalized, data)
-            # Tear down the bridge AFTER the JSON write commits. Best-effort:
-            # a bridge that has already been removed (e.g. by the orphan
-            # sweeper from US-206) is logged but not propagated as a 5xx —
-            # the network record is gone either way.
-            runtime = network.get("runtime") or {}
-            bridge = runtime.get("bridge_name")
-            if not bridge:
-                # Pre-Wave-6 record — recompute the name to clean up.
-                lab_id = str(data.get("id") or normalized)
-                try:
-                    bridge = host_net.bridge_name(lab_id, int(network_id))
-                except Exception:  # noqa: BLE001 — defensive
-                    bridge = None
-            if bridge:
-                network_driver = runtime.get("driver")
-                if (
-                    str(network.get("type", "")) == BRIDGE_CLOUD_TYPE
-                    or network_driver == BRIDGE_CLOUD_TYPE
-                ):
-                    # Bridge-Cloud: host-owned bridge.  Lab cleanup MUST
-                    # NOT call bridge_del or remove the fingerprint.  The
-                    # 409 refcount guard above already prevents premature
-                    # delete with active attachments.
-                    logger.info(
-                        "delete_network: host-owned bridge %s preserved (driver=bridge_cloud)",
-                        bridge,
+        with nat_cloud_ipam_lock():
+            with lab_lock(normalized, labs_dir):
+                data = LabService.read_lab_json_static(normalized)
+                networks = data.get("networks", {}) or {}
+                network = networks.get(str(network_id))
+                if not isinstance(network, dict):
+                    raise NetworkServiceError(404, "Network does not exist.")
+                if network.get("implicit") is True:
+                    raise NetworkServiceError(404, "Network does not exist.")
+                count = _refcount(data, int(network_id))
+                if count > 0:
+                    raise NetworkServiceError(
+                        409,
+                        "Cannot delete network with active attachments.",
+                        extra={"count": count},
                     )
-                else:
-                    if str(network.get("type", "")) == NAT_CLOUD_TYPE:
-                        config = network.get("config") or {}
-                        self._cleanup_nat_cloud_runtime(
-                            bridge,
-                            str(config.get("cidr") or ""),
-                            str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
-                        )
+                config = network.get("config") or {}
+                shared_cloud_id = (
+                    str(config.get("shared_cloud_id") or "").strip()
+                    if isinstance(config, dict)
+                    else ""
+                )
+                is_nat_cloud = str(network.get("type", "")) == NAT_CLOUD_TYPE
+                if is_nat_cloud and not shared_cloud_id:
+                    owner_id = None
+                    for item in list_nat_clouds():
+                        if (
+                            item.get("lab_path") == normalized
+                            and int(item.get("network_id") or 0) == int(network_id)
+                            and not item.get("is_reference")
+                        ):
+                            owner_id = str(item.get("id"))
+                            break
+                    if owner_id:
+                        refs = references_to_cloud(owner_id)
+                        if refs:
+                            raise NetworkServiceError(
+                                409,
+                                "Cannot delete NAT-Cloud owner while it is used by another lab.",
+                                extra={
+                                    "shared_cloud_id": owner_id,
+                                    "references": [
+                                        {
+                                            "lab_path": ref.lab_path,
+                                            "network_id": ref.network_id,
+                                            "network_name": ref.network_name,
+                                        }
+                                        for ref in refs
+                                    ],
+                                },
+                            )
+                removed = dict(network)
+                networks.pop(str(network_id), None)
+                data["networks"] = networks
+                data.pop("topology", None)
+                LabService.write_lab_json_static(normalized, data)
+                _recompute_mac_registry(normalized, data)
+                # Tear down the bridge AFTER the JSON write commits. Best-effort:
+                # a bridge that has already been removed (e.g. by the orphan
+                # sweeper from US-206) is logged but not propagated as a 5xx —
+                # the network record is gone either way.
+                runtime = network.get("runtime") or {}
+                bridge = runtime.get("bridge_name")
+                if not bridge:
+                    # Pre-Wave-6 record — recompute the name to clean up.
+                    lab_id = str(data.get("id") or normalized)
                     try:
-                        host_net.bridge_del(bridge)
-                    except host_net.HostNetEINVAL:
+                        bridge = host_net.bridge_name(lab_id, int(network_id))
+                    except Exception:  # noqa: BLE001 — defensive
+                        bridge = None
+                if bridge:
+                    network_driver = runtime.get("driver")
+                    if (
+                        str(network.get("type", "")) == BRIDGE_CLOUD_TYPE
+                        or network_driver == BRIDGE_CLOUD_TYPE
+                    ):
+                        # Bridge-Cloud: host-owned bridge.  Lab cleanup MUST
+                        # NOT call bridge_del or remove the fingerprint.  The
+                        # 409 refcount guard above already prevents premature
+                        # delete with active attachments.
                         logger.info(
-                            "delete_network: bridge %s already absent; nothing to do",
+                            "delete_network: host-owned bridge %s preserved (driver=bridge_cloud)",
                             bridge,
                         )
-                    except host_net.HostNetError as exc:
-                        logger.warning(
-                            "delete_network: bridge_del(%s) failed (%s); "
-                            "JSON record removed regardless",
+                    elif is_nat_cloud and shared_cloud_id:
+                        logger.info(
+                            "delete_network: shared NAT-Cloud reference %s removed; owner bridge %s preserved",
+                            shared_cloud_id,
                             bridge,
-                            exc,
                         )
+                    else:
+                        if is_nat_cloud:
+                            self._cleanup_nat_cloud_runtime(
+                                bridge,
+                                str(config.get("cidr") or ""),
+                                str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
+                            )
+                        try:
+                            host_net.bridge_del(bridge)
+                        except host_net.HostNetEINVAL:
+                            logger.info(
+                                "delete_network: bridge %s already absent; nothing to do",
+                                bridge,
+                            )
+                        except host_net.HostNetError as exc:
+                            logger.warning(
+                                "delete_network: bridge_del(%s) failed (%s); "
+                                "JSON record removed regardless",
+                                bridge,
+                                exc,
+                            )
 
         await ws_hub.publish(normalized, "network_deleted", {"network": removed})
         return removed
@@ -914,6 +1079,31 @@ class NetworkService:
     # ------------------------------------------------------------------
     # US-204c — IPAM free-list allocator
     # ------------------------------------------------------------------
+
+    def _ipam_target(self, lab_path: str, network_id: int) -> tuple[str, int]:
+        """Return the lab/network record that owns IPAM for this network."""
+        normalized = _normalize_relative_lab_path(lab_path)
+        data = LabService.read_lab_json_static(normalized)
+        networks = data.get("networks", {}) or {}
+        network = networks.get(str(network_id))
+        if not isinstance(network, dict):
+            raise NetworkServiceError(404, "Network does not exist.")
+        config = network.get("config") or {}
+        shared_cloud_id = (
+            str(config.get("shared_cloud_id") or "").strip()
+            if isinstance(config, dict)
+            else ""
+        )
+        if not shared_cloud_id:
+            return normalized, int(network_id)
+        owner = find_nat_cloud_owner(shared_cloud_id)
+        if owner is None:
+            raise NetworkServiceError(
+                409,
+                "NAT-Cloud owner is missing; cannot allocate from shared cloud.",
+                extra={"shared_cloud_id": shared_cloud_id},
+            )
+        return owner.lab_path, owner.network_id
 
     def _allocate_ip(self, lab_path: str, network_id: int) -> str:
         """Reserve and return the lowest free IP from ``network.config.cidr``.
@@ -932,75 +1122,78 @@ class NetworkService:
                 or the CIDR cannot be parsed.
             NetworkServiceError(409): the subnet has no free addresses.
         """
-        normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
-        with lab_lock(normalized, labs_dir):
-            data = LabService.read_lab_json_static(normalized)
-            networks = data.get("networks", {}) or {}
-            network = networks.get(str(network_id))
-            if not isinstance(network, dict):
-                raise NetworkServiceError(404, "Network does not exist.")
-            config = network.get("config") or {}
-            cidr_value = config.get("cidr") if isinstance(config, dict) else None
-            if not cidr_value:
-                raise NetworkServiceError(
-                    422,
-                    "Network has no config.cidr; allocate_ip not applicable.",
-                    extra={"network_id": int(network_id)},
+        with nat_cloud_ipam_lock():
+            target_lab_path = _normalize_relative_lab_path(lab_path)
+            with lab_lock(target_lab_path, labs_dir):
+                owner_lab_path, owner_network_id = self._ipam_target(target_lab_path, network_id)
+            with lab_lock(owner_lab_path, labs_dir):
+                data = LabService.read_lab_json_static(owner_lab_path)
+                networks = data.get("networks", {}) or {}
+                network = networks.get(str(owner_network_id))
+                if not isinstance(network, dict):
+                    raise NetworkServiceError(404, "Network does not exist.")
+                config = network.get("config") or {}
+                cidr_value = config.get("cidr") if isinstance(config, dict) else None
+                if not cidr_value:
+                    raise NetworkServiceError(
+                        422,
+                        "Network has no config.cidr; allocate_ip not applicable.",
+                        extra={"network_id": int(network_id)},
+                    )
+                net = _validate_cidr(cidr_value)
+
+                runtime = network.setdefault("runtime", {})
+                used_raw = runtime.get("used_ips") or []
+                # Defensive: tolerate persisted garbage (None, non-string)
+                # and keep only addresses that parse and live in the CIDR.
+                used: set = set()
+                for entry in used_raw:
+                    if not isinstance(entry, str):
+                        continue
+                    try:
+                        addr = ipaddress.IPv4Address(entry)
+                    except ValueError:
+                        continue
+                    if addr in net:
+                        used.add(addr)
+
+                first_offset = int(runtime.get("first_offset") or DEFAULT_FIRST_OFFSET)
+                if first_offset < 1:
+                    first_offset = 1
+                network_addr = net.network_address
+                broadcast_addr = net.broadcast_address
+                start_int = int(network_addr) + first_offset
+                end_int = int(broadcast_addr) - 1  # exclusive of broadcast
+                if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+                    end_int = min(end_int, int(network_addr) + NAT_CLOUD_STATIC_LAST_OFFSET)
+
+                chosen: Optional[ipaddress.IPv4Address] = None
+                for candidate_int in range(start_int, end_int + 1):
+                    candidate = ipaddress.IPv4Address(candidate_int)
+                    if candidate in used:
+                        continue
+                    chosen = candidate
+                    break
+
+                if chosen is None:
+                    raise NetworkServiceError(
+                        409,
+                        "subnet exhausted, please widen CIDR",
+                        extra={"network_id": int(network_id), "cidr": str(net)},
+                    )
+
+                used.add(chosen)
+                runtime["used_ips"] = sorted(
+                    (str(addr) for addr in used),
+                    key=lambda s: int(ipaddress.IPv4Address(s)),
                 )
-            net = _validate_cidr(cidr_value)
-
-            runtime = network.setdefault("runtime", {})
-            used_raw = runtime.get("used_ips") or []
-            # Defensive: tolerate persisted garbage (None, non-string)
-            # and keep only addresses that parse and live in the CIDR.
-            used: set = set()
-            for entry in used_raw:
-                if not isinstance(entry, str):
-                    continue
-                try:
-                    addr = ipaddress.IPv4Address(entry)
-                except ValueError:
-                    continue
-                if addr in net:
-                    used.add(addr)
-
-            first_offset = int(runtime.get("first_offset") or DEFAULT_FIRST_OFFSET)
-            if first_offset < 1:
-                first_offset = 1
-            network_addr = net.network_address
-            broadcast_addr = net.broadcast_address
-            start_int = int(network_addr) + first_offset
-            end_int = int(broadcast_addr) - 1  # exclusive of broadcast
-            if str(network.get("type", "")) == NAT_CLOUD_TYPE:
-                end_int = min(end_int, int(network_addr) + NAT_CLOUD_STATIC_LAST_OFFSET)
-
-            chosen: Optional[ipaddress.IPv4Address] = None
-            for candidate_int in range(start_int, end_int + 1):
-                candidate = ipaddress.IPv4Address(candidate_int)
-                if candidate in used:
-                    continue
-                chosen = candidate
-                break
-
-            if chosen is None:
-                raise NetworkServiceError(
-                    409,
-                    "subnet exhausted, please widen CIDR",
-                    extra={"network_id": int(network_id), "cidr": str(net)},
-                )
-
-            used.add(chosen)
-            runtime["used_ips"] = sorted(
-                (str(addr) for addr in used),
-                key=lambda s: int(ipaddress.IPv4Address(s)),
-            )
-            runtime.setdefault("first_offset", first_offset)
-            networks[str(network_id)] = network
-            data["networks"] = networks
-            data.pop("topology", None)
-            LabService.write_lab_json_static(normalized, data)
+                runtime.setdefault("first_offset", first_offset)
+                networks[str(owner_network_id)] = network
+                data["networks"] = networks
+                data.pop("topology", None)
+                LabService.write_lab_json_static(owner_lab_path, data)
 
         return str(chosen)
 
@@ -1026,33 +1219,65 @@ class NetworkService:
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
-        release_lab_lock_cm = (
-            nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
-        )
-
-        with release_lab_lock_cm:
+        if _lab_lock_held:
             data = LabService.read_lab_json_static(normalized)
             networks = data.get("networks", {}) or {}
             network = networks.get(str(network_id))
             if not isinstance(network, dict):
                 return False
-            runtime = network.get("runtime") or {}
-            used = list(runtime.get("used_ips") or [])
-            if ip not in used:
-                return False
-            used.remove(ip)
-            runtime["used_ips"] = sorted(
-                used,
-                key=lambda s: int(ipaddress.IPv4Address(s))
-                if _is_ipv4(s)
-                else 0,
+            config = network.get("config") or {}
+            shared_cloud_id = (
+                str(config.get("shared_cloud_id") or "").strip()
+                if isinstance(config, dict)
+                else ""
             )
-            network["runtime"] = runtime
-            networks[str(network_id)] = network
-            data["networks"] = networks
-            data.pop("topology", None)
-            LabService.write_lab_json_static(normalized, data)
-            return True
+            if shared_cloud_id:
+                owner = find_nat_cloud_owner(shared_cloud_id)
+                if owner is None:
+                    return False
+                target_lab_path = owner.lab_path
+                target_network_id = owner.network_id
+                target_lock_cm = (
+                    nullcontext()
+                    if target_lab_path == normalized
+                    else lab_lock(target_lab_path, labs_dir)
+                )
+            else:
+                target_lab_path = normalized
+                target_network_id = int(network_id)
+                target_lock_cm = nullcontext()
+            with target_lock_cm:
+                return self._release_ip_from_owner(target_lab_path, target_network_id, ip)
+
+        with nat_cloud_ipam_lock():
+            with lab_lock(normalized, labs_dir):
+                target_lab_path, target_network_id = self._ipam_target(normalized, network_id)
+            with lab_lock(target_lab_path, labs_dir):
+                return self._release_ip_from_owner(target_lab_path, target_network_id, ip)
+
+    def _release_ip_from_owner(self, lab_path: str, network_id: int, ip: str) -> bool:
+        data = LabService.read_lab_json_static(lab_path)
+        networks = data.get("networks", {}) or {}
+        network = networks.get(str(network_id))
+        if not isinstance(network, dict):
+            return False
+        runtime = network.get("runtime") or {}
+        used = list(runtime.get("used_ips") or [])
+        if ip not in used:
+            return False
+        used.remove(ip)
+        runtime["used_ips"] = sorted(
+            used,
+            key=lambda s: int(ipaddress.IPv4Address(s))
+            if _is_ipv4(s)
+            else 0,
+        )
+        network["runtime"] = runtime
+        networks[str(network_id)] = network
+        data["networks"] = networks
+        data.pop("topology", None)
+        LabService.write_lab_json_static(lab_path, data)
+        return True
 
     async def patch_network(
         self,

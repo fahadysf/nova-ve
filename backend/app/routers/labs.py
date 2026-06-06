@@ -28,6 +28,10 @@ from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleD
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
+from app.services.cloud_inventory_service import (
+    SharedCloudReferenceError,
+    assert_no_external_nat_cloud_references_for_scope,
+)
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import (
     TemplateError,
@@ -2525,7 +2529,15 @@ async def delete_lab(
                 "status": "fail",
                 "message": "Access denied.",
             }
-        await lab_service.delete_lab(lab)
+        try:
+            await lab_service.delete_lab(lab)
+        except SharedCloudReferenceError as exc:
+            return {
+                "code": 409,
+                "status": "fail",
+                "message": exc.message,
+                "data": {"references": exc.references},
+            }
         return {
             "code": 200,
             "status": "success",
@@ -2546,6 +2558,15 @@ async def delete_lab(
                 "code": 403,
                 "status": "fail",
                 "message": "Access denied.",
+            }
+        try:
+            assert_no_external_nat_cloud_references_for_scope(scoped_path)
+        except SharedCloudReferenceError as exc:
+            return {
+                "code": 409,
+                "status": "fail",
+                "message": exc.message,
+                "data": {"references": exc.references},
             }
         filepath.unlink()
         return {

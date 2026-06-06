@@ -26,6 +26,19 @@
     addrs: string[];
   }
 
+  interface NatCloud {
+    id: string;
+    lab_name: string;
+    lab_path: string;
+    network_name: string;
+    cidr?: string | null;
+    gateway?: string | null;
+    bridge_name?: string | null;
+    is_reference?: boolean;
+    safe_for_reuse?: boolean;
+    warning?: string | null;
+  }
+
   const dispatch = createEventDispatcher<{
     confirm: { name: string; type: NetworkType; config?: NetworkCreateConfig };
     cancel: void;
@@ -39,8 +52,14 @@
   let dhcpStart = '';
   let dhcpEnd = '';
   let egressInterface = '';
+  let natCloudMode: 'new' | 'existing' = 'new';
+  let selectedNatCloudId = '';
+  let natClouds: NatCloud[] = [];
   let selectedHostBridge = '';
   let hostBridges: HostBridge[] = [];
+  let natCloudsLoading = false;
+  let natCloudsLoaded = false;
+  let natCloudsError: string | null = null;
   let hostBridgesLoading = false;
   let hostBridgesLoaded = false;
   let hostBridgesError: string | null = null;
@@ -62,8 +81,13 @@
       dhcpStart = '';
       dhcpEnd = '';
       egressInterface = '';
+      natCloudMode = 'new';
+      selectedNatCloudId = '';
+      natClouds = [];
       selectedHostBridge = '';
       hostBridges = [];
+      natCloudsError = null;
+      natCloudsLoaded = false;
       hostBridgesError = null;
       hostBridgesLoaded = false;
       void focusName();
@@ -71,17 +95,52 @@
     wasOpen = open;
   }
 
-  // Fetch host bridges exactly once per (open, bridge_cloud) selection.
-  // ``hostBridgesLoaded`` becomes the terminal flag: empty results or
-  // errors are still "loaded" so we don't refetch in a reactive loop.
+  // Fetch the admin cloud inventory for NAT-Cloud reuse. Bridge-Cloud keeps
+  // its own fallback path so NAT inventory failures cannot poison host-bridge
+  // selection later in the same modal session.
+  $: needsNatCloudInventory = open && type === 'nat_cloud' && natCloudMode === 'existing';
+  $: if (needsNatCloudInventory && !natCloudsLoaded && !natCloudsLoading) {
+    void loadCloudInventory();
+  }
   $: if (open && type === 'bridge_cloud' && !hostBridgesLoaded && !hostBridgesLoading) {
     void loadHostBridges();
   }
 
+  $: reusableNatClouds = natClouds.filter((cloud) => !cloud.is_reference && cloud.safe_for_reuse !== false);
+  $: if (type === 'nat_cloud' && natCloudMode === 'existing' && !selectedNatCloudId && reusableNatClouds.length > 0) {
+    selectedNatCloudId = reusableNatClouds[0].id;
+  }
   $: trimmedName = name.trim();
   $: canSubmit =
     trimmedName.length > 0 &&
+    (type !== 'nat_cloud' || natCloudMode !== 'existing' || selectedNatCloudId.length > 0) &&
     (type !== 'bridge_cloud' || selectedHostBridge.length > 0);
+
+  async function loadCloudInventory() {
+    natCloudsLoading = true;
+    natCloudsError = null;
+    try {
+      const resp = await fetch('/api/system/clouds', { credentials: 'include' });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const payload = await resp.json();
+      const data = payload?.data ?? {};
+      natClouds = (data.nat_clouds ?? []) as NatCloud[];
+      hostBridges = (data.bridge_clouds ?? []) as HostBridge[];
+      if (hostBridges.length > 0 && !selectedHostBridge) {
+        selectedHostBridge = hostBridges[0].host_bridge;
+      }
+    } catch (err) {
+      natCloudsError = err instanceof Error ? err.message : String(err);
+      natClouds = [];
+    } finally {
+      natCloudsLoading = false;
+      // Terminal state — empty results and errors both count as
+      // "loaded" so the reactive fetch trigger does not refire.
+      natCloudsLoaded = true;
+    }
+  }
 
   async function loadHostBridges() {
     hostBridgesLoading = true;
@@ -92,18 +151,15 @@
         throw new Error(`HTTP ${resp.status}`);
       }
       const payload = await resp.json();
-      const list = (payload?.data ?? []) as HostBridge[];
-      hostBridges = list;
-      if (list.length > 0 && !selectedHostBridge) {
-        selectedHostBridge = list[0].host_bridge;
+      hostBridges = (payload?.data ?? []) as HostBridge[];
+      if (hostBridges.length > 0 && !selectedHostBridge) {
+        selectedHostBridge = hostBridges[0].host_bridge;
       }
     } catch (err) {
       hostBridgesError = err instanceof Error ? err.message : String(err);
       hostBridges = [];
     } finally {
       hostBridgesLoading = false;
-      // Terminal state — empty results and errors both count as
-      // "loaded" so the reactive fetch trigger does not refire.
       hostBridgesLoaded = true;
     }
   }
@@ -122,12 +178,16 @@
     if (!canSubmit) return;
     const config: NetworkCreateConfig = {};
     if (type === 'nat_cloud') {
-      if (cidr.trim()) config.cidr = cidr.trim();
-      if (gateway.trim()) config.gateway = gateway.trim();
-      config.dhcp = dhcp;
-      if (dhcpStart.trim()) config.dhcp_start = dhcpStart.trim();
-      if (dhcpEnd.trim()) config.dhcp_end = dhcpEnd.trim();
-      if (egressInterface.trim()) config.egress_interface = egressInterface.trim();
+      if (natCloudMode === 'existing') {
+        config.shared_cloud_id = selectedNatCloudId;
+      } else {
+        if (cidr.trim()) config.cidr = cidr.trim();
+        if (gateway.trim()) config.gateway = gateway.trim();
+        config.dhcp = dhcp;
+        if (dhcpStart.trim()) config.dhcp_start = dhcpStart.trim();
+        if (dhcpEnd.trim()) config.dhcp_end = dhcpEnd.trim();
+        if (egressInterface.trim()) config.egress_interface = egressInterface.trim();
+      }
     } else if (type === 'bridge_cloud') {
       config.host_bridge = selectedHostBridge;
     }
@@ -222,58 +282,108 @@
         </label>
 
         {#if type === 'nat_cloud'}
-          <div class="grid gap-3 rounded-xl border border-slate-800 bg-slate-900/30 p-3 sm:grid-cols-2">
-            <label class="block space-y-1.5 sm:col-span-2">
-              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">CIDR</span>
-              <input
-                bind:value={cidr}
-                type="text"
-                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
-                placeholder="Auto from NAT-Cloud pool"
-              />
-            </label>
-            <label class="block space-y-1.5">
-              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Gateway</span>
-              <input
-                bind:value={gateway}
-                type="text"
-                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
-                placeholder=".1"
-              />
-            </label>
-            <label class="block space-y-1.5">
-              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Egress</span>
-              <input
-                bind:value={egressInterface}
-                type="text"
-                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
-                placeholder="Default route"
-              />
-            </label>
-            <label class="flex items-center gap-2 sm:col-span-2">
-              <input bind:checked={dhcp} type="checkbox" class="h-4 w-4 rounded border-slate-700 bg-slate-900" />
-              <span class="text-xs text-slate-300">Enable DHCP</span>
-            </label>
-            <label class="block space-y-1.5">
-              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">DHCP start</span>
-              <input
-                bind:value={dhcpStart}
-                type="text"
-                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
-                placeholder=".100"
-                disabled={!dhcp}
-              />
-            </label>
-            <label class="block space-y-1.5">
-              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">DHCP end</span>
-              <input
-                bind:value={dhcpEnd}
-                type="text"
-                class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
-                placeholder=".254"
-                disabled={!dhcp}
-              />
-            </label>
+          <div class="space-y-3 rounded-xl border border-slate-800 bg-slate-900/30 p-3">
+            <div class="grid grid-cols-2 rounded-xl border border-slate-800 bg-slate-950/60 p-1">
+              <button
+                type="button"
+                class={`rounded-lg px-3 py-1.5 text-xs transition ${natCloudMode === 'new' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-100'}`}
+                on:click={() => (natCloudMode = 'new')}
+              >
+                New
+              </button>
+              <button
+                type="button"
+                class={`rounded-lg px-3 py-1.5 text-xs transition ${natCloudMode === 'existing' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-100'}`}
+                on:click={() => (natCloudMode = 'existing')}
+              >
+                Existing
+              </button>
+            </div>
+
+            {#if natCloudMode === 'existing'}
+              <label class="block space-y-1.5">
+                <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">NAT-Cloud</span>
+                {#if natCloudsLoading}
+                  <div class="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-400">
+                    Loading NAT-Clouds...
+                  </div>
+                {:else if natCloudsError}
+                  <div class="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                    Failed to list NAT-Clouds: {natCloudsError}
+                  </div>
+                {:else if reusableNatClouds.length === 0}
+                  <div class="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                    No reusable NAT-Clouds found.
+                  </div>
+                {:else}
+                  <select
+                    bind:value={selectedNatCloudId}
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                    data-testid="network-nat-cloud-select"
+                  >
+                    {#each reusableNatClouds as cloud}
+                      <option value={cloud.id}>
+                        {cloud.network_name} - {cloud.cidr ?? 'no CIDR'} - {cloud.lab_name}
+                      </option>
+                    {/each}
+                  </select>
+                {/if}
+              </label>
+            {:else}
+              <div class="grid gap-3 sm:grid-cols-2">
+                <label class="block space-y-1.5 sm:col-span-2">
+                  <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">CIDR</span>
+                  <input
+                    bind:value={cidr}
+                    type="text"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                    placeholder="Auto from NAT-Cloud pool"
+                  />
+                </label>
+                <label class="block space-y-1.5">
+                  <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Gateway</span>
+                  <input
+                    bind:value={gateway}
+                    type="text"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                    placeholder=".1"
+                  />
+                </label>
+                <label class="block space-y-1.5">
+                  <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Egress</span>
+                  <input
+                    bind:value={egressInterface}
+                    type="text"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                    placeholder="Default route"
+                  />
+                </label>
+                <label class="flex items-center gap-2 sm:col-span-2">
+                  <input bind:checked={dhcp} type="checkbox" class="h-4 w-4 rounded border-slate-700 bg-slate-900" />
+                  <span class="text-xs text-slate-300">Enable DHCP</span>
+                </label>
+                <label class="block space-y-1.5">
+                  <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">DHCP start</span>
+                  <input
+                    bind:value={dhcpStart}
+                    type="text"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                    placeholder=".100"
+                    disabled={!dhcp}
+                  />
+                </label>
+                <label class="block space-y-1.5">
+                  <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">DHCP end</span>
+                  <input
+                    bind:value={dhcpEnd}
+                    type="text"
+                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                    placeholder=".254"
+                    disabled={!dhcp}
+                  />
+                </label>
+              </div>
+            {/if}
           </div>
         {/if}
 
