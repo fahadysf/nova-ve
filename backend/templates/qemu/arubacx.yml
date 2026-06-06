@@ -1,0 +1,17 @@
+type: qemu
+name: Aruba CX Virtual Switch
+description: Aruba CX
+icon_type: switch
+cpu: 2
+ram: 4096
+ethernet: 7
+console_type: telnet
+qemu_options: -machine type=pc-1.0,accel=kvm -no-user-config -nodefaults -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - mgmt
+  - 1/1/{port}

@@ -1,0 +1,16 @@
+type: qemu
+name: Huawei CloudEngine 6800V
+description: Huawei CloudEngine 6800V
+icon_type: switch
+cpu: 2
+ram: 2048
+ethernet: 22
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=q35,accel=kvm -nodefaults -rtc base=utc -cpu host
+capabilities:
+  machine: q35
+  hotplug: true
+  max_nics: 8
+interface_naming:
+  format: 10GE1/0/{port}

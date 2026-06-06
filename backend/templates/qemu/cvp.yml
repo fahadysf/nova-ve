@@ -1,0 +1,15 @@
+type: qemu
+name: Arista CloudVision Portal
+description: Arista CloudVision Portal
+icon_type: server
+cpu: 8
+ram: 22528
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -boot order=cd
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{n}

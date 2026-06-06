@@ -1,0 +1,15 @@
+type: qemu
+name: OpenWrt
+description: OpenWrt
+icon_type: router
+cpu: 1
+ram: 2048
+ethernet: 4
+console_type: telnet
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{n}

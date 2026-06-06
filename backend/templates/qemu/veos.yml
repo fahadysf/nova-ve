@@ -1,0 +1,18 @@
+type: qemu
+name: Arista vEOS
+description: Arista vEOS
+icon_type: switch
+cpu: 1
+ram: 2048
+ethernet: 9
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -display none -no-user-config -rtc base=utc -boot order=d
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - Management1
+  - Ethernet1/{port}

@@ -1,0 +1,15 @@
+type: qemu
+name: VMware ESXi
+description: VMware ESXi
+icon_type: server
+cpu: 2
+ram: 4096
+ethernet: 4
+console_type: vnc
+qemu_options: -machine pc,accel=kvm -no-user-config -nodefaults -display none -vga std -rtc base=utc -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: vmnic{n}

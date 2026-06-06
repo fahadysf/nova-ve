@@ -1,0 +1,15 @@
+type: qemu
+name: Juniper Session Smart Router
+description: Juniper Session Smart Router
+icon_type: router
+cpu: 4
+ram: 8192
+ethernet: 8
+console_type: telnet
+qemu_options: -machine type=pc-1.0,accel=kvm -cpu host -no-user-config -nodefaults -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: ge-0-{n}

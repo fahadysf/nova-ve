@@ -1,0 +1,16 @@
+type: qemu
+name: Proxmox VE
+description: Proxmox VE
+icon_type: server
+cpu: 4
+ram: 8192
+ethernet: 2
+console_type: vnc
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -boot order=cd -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{n}

@@ -1,0 +1,21 @@
+type: qemu
+name: Juniper vQFX RE
+description: Juniper vQFX RE
+icon_type: switch
+cpu: 2
+ram: 3072
+ethernet: 15
+console_type: telnet
+architecture: i386
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - em0 / fxp0
+  - em1 / int
+  - em2 / mgmt
+  - xe-0/0/{n}

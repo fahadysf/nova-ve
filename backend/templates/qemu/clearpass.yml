@@ -1,0 +1,15 @@
+type: qemu
+name: Aruba ClearPass
+description: Aruba ClearPass
+icon_type: server
+cpu: 2
+ram: 4096
+ethernet: 2
+console_type: vnc
+qemu_options: -machine type=pc,accel=kvm -no-user-config -nodefaults -display none -vga std -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{port}
