@@ -63,6 +63,7 @@ def instance_id(monkeypatch, tmp_path: Path) -> str:
 def settings(monkeypatch, labs_dir):
     s = SimpleNamespace(LABS_DIR=labs_dir)
     monkeypatch.setattr(network_service_mod, "get_settings", lambda: s)
+    monkeypatch.setattr("app.services.cloud_inventory_service.get_settings", lambda: s)
     monkeypatch.setattr("app.services.lab_service.get_settings", lambda: s)
     monkeypatch.setattr("app.services.link_service.get_settings", lambda: s)
     return s
@@ -124,8 +125,7 @@ def helper_mocks(monkeypatch):
     return calls
 
 
-def _seed_lab(labs_dir: Path, lab_id: str = "lab-uuid-aaa") -> str:
-    name = "lab.json"
+def _seed_lab(labs_dir: Path, lab_id: str = "lab-uuid-aaa", *, name: str = "lab.json") -> str:
     (labs_dir / name).write_text(
         json.dumps(
             {
@@ -283,6 +283,152 @@ async def test_create_nat_cloud_skips_overlapping_existing_cidr(
 
     assert payload["id"] == 2
     assert payload["config"]["cidr"] == "10.255.1.0/24"
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_skips_host_wide_existing_cidr(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    first_lab = _seed_lab(labs_dir, lab_id="lab-nat-owner-a", name="owner-a.json")
+    second_lab = _seed_lab(labs_dir, lab_id="lab-nat-owner-b", name="owner-b.json")
+
+    first = await NetworkService().create_network(
+        first_lab,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+    second = await NetworkService().create_network(
+        second_lab,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+
+    assert first["config"]["cidr"] == "10.255.0.0/24"
+    assert second["config"]["cidr"] == "10.255.1.0/24"
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_reference_reuses_owner_bridge_without_provisioning(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    owner_lab = _seed_lab(labs_dir, lab_id="lab-nat-owner", name="owner.json")
+    ref_lab = _seed_lab(labs_dir, lab_id="lab-nat-ref", name="ref.json")
+    owner = await NetworkService().create_network(
+        owner_lab,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+    helper_mocks["bridge_add"].clear()
+    helper_mocks["nat_apply"].clear()
+
+    shared_cloud_id = "nat-cloud:lab-nat-owner:1"
+    ref = await NetworkService().create_network(
+        ref_lab,
+        {
+            "name": "shared-internet",
+            "type": "nat_cloud",
+            "config": {"shared_cloud_id": shared_cloud_id},
+        },
+    )
+
+    assert ref["config"]["shared_cloud_id"] == shared_cloud_id
+    assert ref["config"]["cidr"] == owner["config"]["cidr"]
+    assert ref["runtime"]["bridge_name"] == owner["runtime"]["bridge_name"]
+    assert ref["runtime"]["shared_reference"] is True
+    assert helper_mocks["bridge_add"] == []
+    assert helper_mocks["nat_apply"] == []
+
+
+@pytest.mark.asyncio
+async def test_shared_nat_cloud_allocates_and_releases_on_owner_ipam(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    owner_lab = _seed_lab(labs_dir, lab_id="lab-nat-ipam-owner", name="owner.json")
+    ref_lab = _seed_lab(labs_dir, lab_id="lab-nat-ipam-ref", name="ref.json")
+    await NetworkService().create_network(
+        owner_lab,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+    await NetworkService().create_network(
+        ref_lab,
+        {
+            "name": "shared-internet",
+            "type": "nat_cloud",
+            "config": {"shared_cloud_id": "nat-cloud:lab-nat-ipam-owner:1"},
+        },
+    )
+    svc = NetworkService()
+
+    first = svc._allocate_ip(ref_lab, 1)
+    second = svc._allocate_ip(owner_lab, 1)
+
+    assert first == "10.255.0.2"
+    assert second == "10.255.0.3"
+    owner_saved = json.loads((labs_dir / owner_lab).read_text())
+    ref_saved = json.loads((labs_dir / ref_lab).read_text())
+    assert owner_saved["networks"]["1"]["runtime"]["used_ips"] == [
+        "10.255.0.2",
+        "10.255.0.3",
+    ]
+    assert ref_saved["networks"]["1"]["runtime"]["used_ips"] == []
+
+    assert svc._release_ip(ref_lab, 1, first) is True
+    owner_saved = json.loads((labs_dir / owner_lab).read_text())
+    assert owner_saved["networks"]["1"]["runtime"]["used_ips"] == ["10.255.0.3"]
+
+
+@pytest.mark.asyncio
+async def test_shared_nat_cloud_release_with_lab_lock_held_same_lab_owner(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-same-lab-ref")
+    await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+    await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "shared-internet",
+            "type": "nat_cloud",
+            "config": {"shared_cloud_id": "nat-cloud:lab-nat-same-lab-ref:1"},
+        },
+    )
+    svc = NetworkService()
+    ip = svc._allocate_ip(lab_name, 2)
+    assert ip == "10.255.0.2"
+
+    from app.services.lab_lock import lab_lock
+
+    with lab_lock(lab_name, settings.LABS_DIR, timeout_s=2.0):
+        removed = svc._release_ip(lab_name, 2, ip, _lab_lock_held=True)
+
+    assert removed is True
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["used_ips"] == []
+
+
+@pytest.mark.asyncio
+async def test_delete_nat_cloud_owner_rejects_external_references(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    owner_lab = _seed_lab(labs_dir, lab_id="lab-nat-delete-owner", name="owner.json")
+    ref_lab = _seed_lab(labs_dir, lab_id="lab-nat-delete-ref", name="ref.json")
+    await NetworkService().create_network(
+        owner_lab,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+    await NetworkService().create_network(
+        ref_lab,
+        {
+            "name": "shared-internet",
+            "type": "nat_cloud",
+            "config": {"shared_cloud_id": "nat-cloud:lab-nat-delete-owner:1"},
+        },
+    )
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().delete_network(owner_lab, 1)
+
+    assert exc.value.code == 409
+    assert "used by another lab" in exc.value.message
 
 
 @pytest.mark.asyncio

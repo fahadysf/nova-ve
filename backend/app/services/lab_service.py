@@ -9,6 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.lab import LabMeta
 from app.services import host_net
+from app.services.cloud_inventory_service import (
+    assert_no_external_nat_cloud_references_for_scope,
+)
 
 
 SCHEMA_VERSION = 2
@@ -241,6 +244,18 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
         ):
             logger.info(
                 "delete_lab: host-owned bridge %s preserved (driver=bridge_cloud)",
+                bridge,
+            )
+            continue
+        config = network.get("config") or {}
+        if (
+            str(network.get("type", "")) == NAT_CLOUD_TYPE
+            and isinstance(config, dict)
+            and config.get("shared_cloud_id")
+        ):
+            logger.info(
+                "delete_lab: shared NAT-Cloud reference %s preserved owner bridge %s",
+                config.get("shared_cloud_id"),
                 bridge,
             )
             continue
@@ -513,6 +528,7 @@ class LabService:
 
     async def delete_lab(self, lab: LabMeta) -> None:
         filepath = _lab_file_path(lab.filename)
+        assert_no_external_nat_cloud_references_for_scope(lab.filename)
         if filepath.exists():
             try:
                 data = LabService.read_lab_json_static(lab.filename)
