@@ -41,17 +41,24 @@ PY
 DOCKER_HOST_VALUE="$(detect_docker_host)"
 ADMIN_PASSWORD="${NOVA_VE_ADMIN_PASSWORD:-$(generate_password)}"
 SECRET_KEY="${SECRET_KEY:-$(generate_password)}"
+DB_PASSWORD="${DB_PASSWORD:-$(generate_password)}"
 GUACAMOLE_SECRET="${GUACAMOLE_JSON_SECRET_KEY:-$(generate_secret)}"
 GUACAMOLE_DB_PASSWORD="${GUACAMOLE_DB_PASSWORD:-$(generate_password)}"
 
 mkdir -p "${LOCAL_ROOT}" "${LABS_DIR}" "${IMAGES_DIR}" "${TMP_DIR}" "${GUACAMOLE_STATE_DIR}/db"
+printf '%s\n' "${DB_PASSWORD}" > "${LOCAL_ROOT}/db_password"
+chmod 600 "${LOCAL_ROOT}/db_password"
 cp -f "${REPO_ROOT}/backend/labs/alpine-docker-demo.json" "${LABS_DIR}/alpine-docker-demo.json"
 
 cat > "${ENV_FILE}" <<EOF
-DATABASE_URL=postgresql+asyncpg://nova:nova@127.0.0.1:5432/novadb
 SECRET_KEY=${SECRET_KEY}
 DEBUG=True
 COOKIE_SECURE=False
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_USER=nova
+DB_NAME=novadb
+DB_PASSWORD=${DB_PASSWORD}
 BASE_DATA_DIR=${LOCAL_ROOT}
 LABS_DIR=${LABS_DIR}
 IMAGES_DIR=${IMAGES_DIR}

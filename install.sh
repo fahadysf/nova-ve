@@ -184,6 +184,26 @@ INSTANCE_ID="$(cat /etc/nova-ve/instance_id 2>/dev/null || echo '<missing>')"
 GIT_COMMIT="$(sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" rev-parse --short HEAD)"
 GENERATED_AT="$(date --iso-8601=seconds)"
 DEMO_IMAGES_STATUS="$(cat /var/lib/nova-ve/.demo-images-status 2>/dev/null || echo unknown)"
+BASE_DATA_DIR="${BASE_DATA_DIR:-/var/lib/nova-ve}"
+LABS_DIR="${LABS_DIR:-${BASE_DATA_DIR}/labs}"
+IMAGES_DIR="${IMAGES_DIR:-${BASE_DATA_DIR}/images}"
+TMP_DIR="${TMP_DIR:-${BASE_DATA_DIR}/tmp}"
+COOKIE_SECURE="${COOKIE_SECURE:-False}"
+COOKIE_SAMESITE="${COOKIE_SAMESITE:-lax}"
+DB_HOST="${DB_HOST:-localhost}"
+DB_PORT="${DB_PORT:-5432}"
+DB_USER="${DB_USER:-nova}"
+DB_NAME="${DB_NAME:-novadb}"
+DB_PASSWORD_FILE="${BASE_DATA_DIR}/db_password"
+DATABASE_URL_SUMMARY="${DATABASE_URL:-}"
+if [[ -z "${DATABASE_URL_SUMMARY}" ]]; then
+  DATABASE_URL_SUMMARY="auto: postgresql+asyncpg://${DB_USER}:<${DB_PASSWORD_FILE}>@${DB_HOST}:${DB_PORT}/${DB_NAME}"
+fi
+GUACAMOLE_PUBLIC_PATH="${GUACAMOLE_PUBLIC_PATH:-/html5/}"
+GUACAMOLE_TARGET_HOST="${GUACAMOLE_TARGET_HOST:-host.docker.internal}"
+GUACAMOLE_STATE_DIR="${GUACAMOLE_STATE_DIR:-/var/lib/nova-ve/guacamole}"
+GUACAMOLE_DATA_SOURCE="${GUACAMOLE_DATA_SOURCE:-postgresql}"
+GUACAMOLE_JSON_EXPIRE_SECONDS="${GUACAMOLE_JSON_EXPIRE_SECONDS:-300}"
 
 cat > "${SUMMARY_PATH}" <<EOF
 # nova-ve install summary
@@ -207,6 +227,15 @@ cat > "${SUMMARY_PATH}" <<EOF
 Full env file (mode 0600, root-owned) lives at \`${ENV_FILE}\`.
 This summary is mode 0600, owned by \`root\`.
 
+Retrieve generated credentials later:
+
+\`\`\`
+sudo awk -F= '/^NOVA_VE_ADMIN_USERNAME=/{print "admin username: " \$2}' ${ENV_FILE}
+sudo awk -F= '/^NOVA_VE_ADMIN_PASSWORD=/{print "admin password: " \$2}' ${ENV_FILE}
+sudo cat ${DB_PASSWORD_FILE}
+sudo awk -F= '/^GUACAMOLE_DB_PASSWORD=/{print "guacamole db password: " \$2}' ${ENV_FILE}
+\`\`\`
+
 ## Demo images (#191)
 
 Status: \`${DEMO_IMAGES_STATUS}\` (one of: \`ok\`, \`skipped\`, \`failed\`, \`unknown\`)
@@ -227,6 +256,7 @@ Skip on next install: \`NOVA_VE_SKIP_DEMO_IMAGES=1 curl -fsSL ... | sudo bash\`.
 | Path | Purpose |
 |------|---------|
 | \`${ENV_FILE}\` | All backend env vars: SECRET_KEY, DATABASE_URL, NOVA_VE_ADMIN_*, GUACAMOLE_* |
+| \`${DB_PASSWORD_FILE}\` | Generated application database password used when DATABASE_URL is unset |
 | \`/etc/nova-ve/instance_id\` | Stable per-host UUID (used in bridge / iface naming) |
 | \`/etc/sudoers.d/nova-ve\` | NOPASSWD rule: \`${APP_OWNER} -> /opt/nova-ve/bin/nova-ve-net.py *\` |
 | \`/etc/caddy/Caddyfile\` | Front door on :80 (SPA + reverse-proxy /api,/ws -> :8000, /html5 -> :8081) |
@@ -252,7 +282,12 @@ Skip on next install: \`NOVA_VE_SKIP_DEMO_IMAGES=1 curl -fsSL ... | sudo bash\`.
 | Var | Value on this host |
 |-----|--------------------|
 | \`SECRET_KEY\` | (random, see ${ENV_FILE}) |
-| \`DATABASE_URL\` | \`${DATABASE_URL}\` |
+| \`DATABASE_URL\` | \`${DATABASE_URL_SUMMARY}\` |
+| \`DB_HOST\` | \`${DB_HOST}\` |
+| \`DB_PORT\` | \`${DB_PORT}\` |
+| \`DB_USER\` | \`${DB_USER}\` |
+| \`DB_NAME\` | \`${DB_NAME}\` |
+| \`DB_PASSWORD_FILE\` | \`${DB_PASSWORD_FILE}\` |
 | \`BASE_DATA_DIR\` | \`${BASE_DATA_DIR}\` |
 | \`LABS_DIR\` | \`${LABS_DIR}\` |
 | \`IMAGES_DIR\` | \`${IMAGES_DIR}\` |

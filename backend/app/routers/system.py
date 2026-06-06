@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_admin, get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
+from app.services.cloud_inventory_service import list_nat_clouds
 from app.services.bridge_cloud_service import list_bridge_clouds
 from app.services.node_runtime_service import NodeRuntimeService
 import psutil
@@ -109,6 +110,22 @@ async def get_bridge_clouds(
         "code": 200,
         "status": "success",
         "data": await list_bridge_clouds(),
+    }
+
+
+@router.get("/system/clouds")
+async def get_clouds(
+    current_user: UserRead = Depends(get_current_admin),
+):
+    """Enumerate reusable host cloud resources for network creation."""
+    return {
+        "code": 200,
+        "status": "success",
+        "data": {
+            "nat_clouds": list_nat_clouds(),
+            "bridge_clouds": await list_bridge_clouds(),
+            "shared_bridges": [],
+        },
     }
 
 

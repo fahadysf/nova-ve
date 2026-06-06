@@ -190,3 +190,88 @@ async def test_route_requires_auth():
         resp = await client.get("/api/system/bridge-clouds")
     # Either 401 or 403 acceptable depending on auth dep behaviour.
     assert resp.status_code in (401, 403), resp.status_code
+
+
+@pytest.mark.asyncio
+async def test_cloud_inventory_route_requires_admin_and_lists_nat_clouds(monkeypatch, tmp_path):
+    import json
+    from httpx import ASGITransport, AsyncClient
+    from app.dependencies import get_current_admin
+    from app.main import app
+    from app.routers import system as system_router
+
+    labs_dir = tmp_path / "labs"
+    labs_dir.mkdir()
+    (labs_dir / "owner.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "id": "owner-lab",
+                "meta": {"name": "Owner Lab"},
+                "networks": {
+                    "1": {
+                        "id": 1,
+                        "name": "Internet",
+                        "type": "nat_cloud",
+                        "config": {
+                            "cidr": "10.255.7.0/24",
+                            "gateway": "10.255.7.1",
+                            "dhcp": True,
+                            "dhcp_start": "10.255.7.100",
+                            "dhcp_end": "10.255.7.254",
+                        },
+                        "runtime": {"bridge_name": "noveownn1"},
+                    }
+                },
+            }
+        )
+    )
+    (labs_dir / "ref.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "id": "ref-lab",
+                "meta": {"name": "Ref Lab"},
+                "networks": {
+                    "1": {
+                        "id": 1,
+                        "name": "Shared Internet",
+                        "type": "nat_cloud",
+                        "config": {"shared_cloud_id": "nat-cloud:owner-lab:1"},
+                        "runtime": {"bridge_name": "noveownn1"},
+                    }
+                },
+            }
+        )
+    )
+
+    settings = SimpleNamespace(LABS_DIR=labs_dir)
+    monkeypatch.setattr("app.services.cloud_inventory_service.get_settings", lambda: settings)
+
+    async def fake_bridge_clouds():
+        return []
+
+    monkeypatch.setattr(system_router, "list_bridge_clouds", fake_bridge_clouds)
+
+    app.dependency_overrides[get_current_admin] = lambda: SimpleNamespace(
+        id=1,
+        username="admin",
+        role="admin",
+    )
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/system/clouds")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["bridge_clouds"] == []
+    assert data["shared_bridges"] == []
+    owner = next(item for item in data["nat_clouds"] if item["is_reference"] is False)
+    reference = next(item for item in data["nat_clouds"] if item["is_reference"] is True)
+    assert owner["id"] == "nat-cloud:owner-lab:1"
+    assert owner["cidr"] == "10.255.7.0/24"
+    assert owner["safe_for_reuse"] is True
+    assert reference["shared_cloud_id"] == "nat-cloud:owner-lab:1"

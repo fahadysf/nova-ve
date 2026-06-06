@@ -1,6 +1,6 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for ``app.config.Settings`` — US-402 discovery cadence knob."""
+"""Tests for ``app.config.Settings``."""
 
 import pytest
 from pydantic import ValidationError
@@ -80,3 +80,52 @@ def test_nat_cloud_pool_too_small_raises(monkeypatch):
     with pytest.raises(ValidationError) as exc:
         Settings()
     assert "NAT_CLOUD_POOL" in str(exc.value)
+
+
+def test_get_settings_resolves_missing_secrets_from_data_dir(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("SECRET_KEY", "")
+    monkeypatch.setenv("BASE_DATA_DIR", str(tmp_path))
+    (tmp_path / "db_password").write_text("strong-db-password", encoding="ascii")
+
+    settings = get_settings()
+
+    assert (
+        settings.DATABASE_URL
+        == "postgresql+asyncpg://nova:strong-db-password@localhost:5432/novadb"
+    )
+    secret_file = tmp_path / "secret_key"
+    assert settings.SECRET_KEY == secret_file.read_text(encoding="ascii")
+    assert len(settings.SECRET_KEY) == 64
+
+
+def test_get_settings_reuses_persisted_secret_key(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("SECRET_KEY", "")
+    monkeypatch.setenv("BASE_DATA_DIR", str(tmp_path))
+    (tmp_path / "db_password").write_text("strong-db-password", encoding="ascii")
+    (tmp_path / "secret_key").write_text("a" * 64, encoding="ascii")
+
+    assert get_settings().SECRET_KEY == "a" * 64
+
+
+def test_get_settings_rejects_known_database_default(monkeypatch):
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgresql+asyncpg://nova:nova@localhost:5432/novadb"
+    )
+
+    with pytest.raises(ValidationError) as exc:
+        get_settings()
+
+    assert "nova:nova" in str(exc.value)
+
+
+def test_get_settings_requires_database_url_or_password_file(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("SECRET_KEY", "")
+    monkeypatch.setenv("BASE_DATA_DIR", str(tmp_path))
+
+    with pytest.raises(ValueError) as exc:
+        get_settings()
+
+    assert "db_password" in str(exc.value)

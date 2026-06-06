@@ -207,12 +207,9 @@ class HypervisorClient:
     def request(self, command: str) -> _Reply:
         """Send one command, read until the terminal reply line.
 
-        Dynamips 0.2.14 replies use the format ``CODE text`` (space
-        separator) for data/continuation lines (typically code 101) and
-        ``CODE-text`` (dash separator) for the TERMINAL line. ``100-OK``
-        is the canonical success terminator; ``1xx-message`` is a
-        single-line success; ``2xx-message`` is a single-line error.
-        This is the inverse of SMTP-style protocols — beware.
+        Dynamips replies use ``CODE-text`` lines for continuations and a
+        terminal ``CODE text`` line. A single-line success or error is
+        therefore also space-separated, e.g. ``100 OK`` or ``209 invalid``.
         """
         if self._sock is None:
             self.connect()
@@ -229,9 +226,9 @@ class HypervisorClient:
             sep = raw[3]
             payload = raw[4:]
             lines.append(payload)
-            if sep == "-":
+            if sep == " ":
                 break
-            if sep != " ":
+            if sep != "-":
                 raise DynamipsError(f"unknown reply separator {sep!r} in {raw!r}")
         reply = _Reply(code=code, lines=lines)
         if not reply.ok:

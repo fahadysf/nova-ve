@@ -278,6 +278,18 @@ def test_installer_defaults_to_dedicated_service_account():
     assert 'NOVA_VE_REPO_DIR="${REPO_DIR}"' in body
 
 
+def test_installer_summary_documents_generated_credentials():
+    body = INSTALL_SH.read_text()
+    assert 'DATABASE_URL_SUMMARY="${DATABASE_URL:-}"' in body
+    assert 'DB_PASSWORD_FILE="${BASE_DATA_DIR}/db_password"' in body
+    assert "auto: postgresql+asyncpg://${DB_USER}:<${DB_PASSWORD_FILE}>" in body
+    assert "Retrieve generated credentials later:" in body
+    assert "/^NOVA_VE_ADMIN_PASSWORD=/" in body
+    assert "sudo cat ${DB_PASSWORD_FILE}" in body
+    assert "| \\`${DB_PASSWORD_FILE}\\` | Generated application database password" in body
+    assert "| \\`DATABASE_URL\\` | \\`${DATABASE_URL_SUMMARY}\\` |" in body
+
+
 def test_provisioner_renders_sudoers_for_service_account():
     body = PROVISION_SH.read_text()
     sudoers = SUDOERS_TEMPLATE.read_text()
@@ -286,6 +298,34 @@ def test_provisioner_renders_sudoers_for_service_account():
     assert "render_template \"${sudoers_src}\" \"${sudoers_tmp}\"" in body
     assert "__APP_OWNER__ ALL=(root) NOPASSWD:" in sudoers
     assert "ubuntu ALL=(root) NOPASSWD:" not in sudoers
+
+
+def test_provisioner_generates_secret_env_values_after_comment_only_example():
+    body = PROVISION_SH.read_text()
+    assert (
+        'install -m 0600 "${REPO_ROOT}/deploy/env/backend.env.example" "${ENV_FILE}"'
+        in body
+    )
+    assert 'ensure_env_var "SECRET_KEY"' in body
+    assert 'ensure_env_var "NOVA_VE_ADMIN_PASSWORD"' in body
+    assert 'ensure_env_var "GUACAMOLE_JSON_SECRET_KEY"' in body
+    assert 'BASE_DATA_DIR:-/var/lib/nova-ve}/db_password' in body
+
+
+def test_provisioner_no_longer_creates_default_database_password():
+    body = PROVISION_SH.read_text()
+    assert "CREATE ROLE nova LOGIN PASSWORD 'nova'" not in body
+    assert "ALTER ROLE ${db_user} WITH PASSWORD" in body
+    assert "cat \"${pw_file}\"" in body
+    assert 'chown "${APP_OWNER}:${APP_GROUP}" "${pw_file}"' in body
+    assert 'chmod 0600 "${pw_file}"' in body
+
+
+def test_local_rancher_setup_does_not_emit_default_database_url():
+    body = (DEPLOY_SCRIPTS / "setup-local-rancher.sh").read_text()
+    assert "postgresql+asyncpg://nova:nova" not in body
+    assert "DB_PASSWORD=" in body
+    assert '${LOCAL_ROOT}/db_password' in body
 
 
 def test_import_wrapper_defaults_to_its_checkout_when_env_missing():

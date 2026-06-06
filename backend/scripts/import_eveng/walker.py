@@ -177,7 +177,7 @@ def walk_docker(source_root: Path, dest_root: Path) -> list[MigrationItem]:
                 src_dir=ctx,
                 dst_dir=dst_dir,
                 files=[],
-                meta={"build_context": str(ctx), "image_tag": f"nova-ve-{image_key}:latest"},
+                meta={"build_context": str(ctx), "image_tag": f"nova-ve/{image_key}:latest"},
             )
         )
     return items

@@ -137,6 +137,26 @@ ensure_env_var() {
   fi
 }
 
+generate_urlsafe_secret() {
+  local nbytes="$1"
+  "${PYTHON_BIN}" - "${nbytes}" <<'PY'
+import secrets
+import sys
+
+print(secrets.token_urlsafe(int(sys.argv[1])))
+PY
+}
+
+generate_hex_secret() {
+  local nbytes="$1"
+  "${PYTHON_BIN}" - "${nbytes}" <<'PY'
+import secrets
+import sys
+
+print(secrets.token_hex(int(sys.argv[1])))
+PY
+}
+
 ensure_database() {
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "+ ensure PostgreSQL role nova exists"
@@ -144,10 +164,35 @@ ensure_database() {
     return 0
   fi
 
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'nova') THEN CREATE ROLE nova LOGIN PASSWORD 'nova'; END IF; END \$\$;"
+  if [[ -f "${ENV_FILE}" ]]; then
+    # shellcheck disable=SC1090
+    set -a; source "${ENV_FILE}"; set +a
+  fi
 
-  if ! sudo -u postgres psql -Atqc "SELECT 1 FROM pg_database WHERE datname='novadb'" | grep -q '^1$'; then
-    sudo -u postgres createdb -O nova novadb
+  local db_user="${DB_USER:-nova}"
+  local db_name="${DB_NAME:-novadb}"
+  local pw_file="${BASE_DATA_DIR:-/var/lib/nova-ve}/db_password"
+  local db_password
+  local escaped_password
+  if [[ ! "${db_user}" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    echo "DB_USER must be a PostgreSQL identifier (${db_user})" >&2
+    exit 1
+  fi
+  if [[ ! "${db_name}" =~ ^[a-z_][a-z0-9_]*$ ]]; then
+    echo "DB_NAME must be a PostgreSQL identifier (${db_name})" >&2
+    exit 1
+  fi
+  if [[ ! -s "${pw_file}" ]]; then
+    echo "Database password file is missing or empty: ${pw_file}" >&2
+    exit 1
+  fi
+  db_password="$(cat "${pw_file}")"
+  escaped_password="${db_password//\'/\'\'}"
+
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${db_user}') THEN CREATE ROLE ${db_user} LOGIN PASSWORD '${escaped_password}'; ELSE ALTER ROLE ${db_user} WITH PASSWORD '${escaped_password}'; END IF; END \$\$;"
+
+  if ! sudo -u postgres psql -Atqc "SELECT 1 FROM pg_database WHERE datname='${db_name}'" | grep -q '^1$'; then
+    sudo -u postgres createdb -O "${db_user}" "${db_name}"
   fi
 }
 
@@ -165,38 +210,60 @@ ensure_backend_env() {
   local public_path
   local target_host
   local expire_seconds
+  local base_data_dir
+  local database_url
+  local db_host
+  local db_name
+  local db_password
+  local db_port
+  local db_user
+  local pw_file
+  local secret_current
   install -d -m 0700 "${ENV_DIR}"
   if [[ ! -f "${ENV_FILE}" ]]; then
     local secret
     local admin_password
-    secret="$("${PYTHON_BIN}" - <<'PY'
-import secrets
-print(secrets.token_urlsafe(48))
-PY
-)"
-    admin_password="$("${PYTHON_BIN}" - <<'PY'
-import secrets
-print(secrets.token_urlsafe(24))
-PY
-)"
-    guacamole_secret="$("${PYTHON_BIN}" - <<'PY'
-import secrets
-print(secrets.token_hex(16))
-PY
-)"
-    guacamole_db_password="$("${PYTHON_BIN}" - <<'PY'
-import secrets
-print(secrets.token_urlsafe(24))
-PY
-)"
-    install -m 0600 /dev/null "${ENV_FILE}"
-    sed \
-      -e "s|^SECRET_KEY=.*|SECRET_KEY=${secret}|" \
-      -e "s|^NOVA_VE_ADMIN_PASSWORD=.*|NOVA_VE_ADMIN_PASSWORD=${admin_password}|" \
-      -e "s|^GUACAMOLE_DB_PASSWORD=.*|GUACAMOLE_DB_PASSWORD=${guacamole_db_password}|" \
-      -e "s|^GUACAMOLE_DATABASE_URL=.*|GUACAMOLE_DATABASE_URL=postgresql+asyncpg://guacuser:${guacamole_db_password}@127.0.0.1:5433/guacdb|" \
-      -e "s|^GUACAMOLE_JSON_SECRET_KEY=.*|GUACAMOLE_JSON_SECRET_KEY=${guacamole_secret}|" \
-      "${REPO_ROOT}/deploy/env/backend.env.example" > "${ENV_FILE}"
+    secret="$(generate_urlsafe_secret 48)"
+    admin_password="$(generate_urlsafe_secret 24)"
+    guacamole_secret="$(generate_hex_secret 16)"
+    guacamole_db_password="$(generate_urlsafe_secret 24)"
+    install -m 0600 "${REPO_ROOT}/deploy/env/backend.env.example" "${ENV_FILE}"
+    ensure_env_var "SECRET_KEY" "${secret}"
+    ensure_env_var "NOVA_VE_ADMIN_USERNAME" "admin"
+    ensure_env_var "NOVA_VE_ADMIN_PASSWORD" "${admin_password}"
+    ensure_env_var "NOVA_VE_ADMIN_EMAIL" "admin@nova-ve.local"
+    ensure_env_var "NOVA_VE_ADMIN_NAME" "Administrator"
+    ensure_env_var "GUACAMOLE_DB_PASSWORD" "${guacamole_db_password}"
+    ensure_env_var "GUACAMOLE_DATABASE_URL" "postgresql+asyncpg://guacuser:${guacamole_db_password}@127.0.0.1:5433/guacdb"
+    ensure_env_var "GUACAMOLE_JSON_SECRET_KEY" "${guacamole_secret}"
+  fi
+
+  secret_current="$(awk -F= '/^SECRET_KEY=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  if [[ -z "${secret_current}" || "${secret_current}" == "change-me-in-production" || "${secret_current}" == "dev-secret-change-me" ]]; then
+    ensure_env_var "SECRET_KEY" "$(generate_urlsafe_secret 48)"
+  fi
+
+  base_data_dir="$(awk -F= '/^BASE_DATA_DIR=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  base_data_dir="${base_data_dir:-/var/lib/nova-ve}"
+  pw_file="${base_data_dir}/db_password"
+  install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0750 "${base_data_dir}"
+  if [[ ! -s "${pw_file}" ]]; then
+    db_password="$(generate_urlsafe_secret 24)"
+    install -m 0600 -o "${APP_OWNER}" -g "${APP_GROUP}" /dev/null "${pw_file}"
+    printf '%s\n' "${db_password}" > "${pw_file}"
+  else
+    db_password="$(cat "${pw_file}")"
+  fi
+  chown "${APP_OWNER}:${APP_GROUP}" "${pw_file}"
+  chmod 0600 "${pw_file}"
+
+  database_url="$(awk -F= '/^DATABASE_URL=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  if [[ "${database_url}" == *"nova:nova"* ]]; then
+    db_user="$(awk -F= '/^DB_USER=/{print $2}' "${ENV_FILE}" | tail -n1)"
+    db_name="$(awk -F= '/^DB_NAME=/{print $2}' "${ENV_FILE}" | tail -n1)"
+    db_host="$(awk -F= '/^DB_HOST=/{print $2}' "${ENV_FILE}" | tail -n1)"
+    db_port="$(awk -F= '/^DB_PORT=/{print $2}' "${ENV_FILE}" | tail -n1)"
+    ensure_env_var "DATABASE_URL" "postgresql+asyncpg://${db_user:-nova}:${db_password}@${db_host:-127.0.0.1}:${db_port:-5432}/${db_name:-novadb}"
   fi
 
   public_path="$(awk -F= '/^GUACAMOLE_PUBLIC_PATH=/{print $2}' "${ENV_FILE}" | tail -n1)"
@@ -224,19 +291,11 @@ PY
     printf 'GUACAMOLE_JSON_EXPIRE_SECONDS=300\n' >> "${ENV_FILE}"
   fi
   if [[ -z "${guacamole_secret}" ]]; then
-    guacamole_secret="$("${PYTHON_BIN}" - <<'PY'
-import secrets
-print(secrets.token_hex(16))
-PY
-)"
+    guacamole_secret="$(generate_hex_secret 16)"
     printf 'GUACAMOLE_JSON_SECRET_KEY=%s\n' "${guacamole_secret}" >> "${ENV_FILE}"
   fi
   if [[ -z "${guacamole_db_password}" ]]; then
-    guacamole_db_password="$("${PYTHON_BIN}" - <<'PY'
-import secrets
-print(secrets.token_urlsafe(24))
-PY
-)"
+    guacamole_db_password="$(generate_urlsafe_secret 24)"
     printf 'GUACAMOLE_DB_PASSWORD=%s\n' "${guacamole_db_password}" >> "${ENV_FILE}"
   fi
   if [[ -z "${guacamole_database_url}" ]]; then
@@ -315,6 +374,7 @@ reconcile_nat_cloud_runtime() {
   local skipped=0
   local failed=0
   local lab_file
+  declare -A seen_nat_cloud_cidrs=()
   while IFS= read -r -d '' lab_file; do
     local rows
     rows="$(
@@ -329,7 +389,8 @@ reconcile_nat_cloud_runtime() {
             ((.value.config.dhcp // true) | tostring),
             (.value.config.dhcp_start // ""),
             (.value.config.dhcp_end // ""),
-            (.value.runtime.egress_interface // .value.config.egress_interface // "")
+            (.value.runtime.egress_interface // .value.config.egress_interface // ""),
+            (.value.config.shared_cloud_id // "")
           ]
         | @tsv
       ' "${lab_file}" 2>/dev/null || true
@@ -338,11 +399,21 @@ reconcile_nat_cloud_runtime() {
       continue
     fi
 
-    while IFS=$'\t' read -r bridge cidr gateway dhcp_enabled dhcp_start dhcp_end egress; do
+    while IFS=$'\t' read -r bridge cidr gateway dhcp_enabled dhcp_start dhcp_end egress shared_cloud_id; do
+      if [[ -n "${shared_cloud_id}" ]]; then
+        skipped=$((skipped + 1))
+        continue
+      fi
       if [[ -z "${bridge}" || -z "${cidr}" ]]; then
         skipped=$((skipped + 1))
         continue
       fi
+      if [[ -n "${seen_nat_cloud_cidrs[${cidr}]:-}" ]]; then
+        echo "WARN: duplicate NAT-Cloud owner CIDR ${cidr} on ${bridge}; already owned by ${seen_nat_cloud_cidrs[${cidr}]}; skipping." >&2
+        skipped=$((skipped + 1))
+        continue
+      fi
+      seen_nat_cloud_cidrs["${cidr}"]="${bridge}"
       if ! ip link show "${bridge}" >/dev/null 2>&1; then
         skipped=$((skipped + 1))
         continue
@@ -380,7 +451,7 @@ reconcile_nat_cloud_runtime() {
       fi
       applied=$((applied + 1))
     done <<< "${rows}"
-  done < <(find "${labs_dir}" -type f -name '*.json' -print0)
+  done < <(find "${labs_dir}" -type f -name '*.json' -print0 | sort -z)
 
   echo "NAT-Cloud runtime reconciliation: applied=${applied} skipped=${skipped} failed=${failed}."
   return 0
