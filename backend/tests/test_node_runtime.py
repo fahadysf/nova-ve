@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import secrets
@@ -139,6 +140,9 @@ class _FakeProcess:
 
 
 def _decrypt_guacamole_payload_value(payload: str, secret_key: str) -> dict:
+    raw = base64.b64decode(payload.encode("utf-8"))
+    iv = raw[:16]
+    ciphertext = raw[16:]
     decrypted = subprocess.run(
         [
             "openssl",
@@ -148,12 +152,10 @@ def _decrypt_guacamole_payload_value(payload: str, secret_key: str) -> dict:
             "-K",
             secret_key,
             "-iv",
-            "00000000000000000000000000000000",
+            iv.hex(),
             "-nosalt",
-            "-base64",
-            "-A",
         ],
-        input=payload.encode("utf-8"),
+        input=ciphertext,
         capture_output=True,
         check=True,
     ).stdout

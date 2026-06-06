@@ -40,6 +40,10 @@ class NetworkConfig(BaseModel):
     # validated at the service layer against ``^br-eth[0-9]+$`` and a
     # ``host_net.bridge_exists`` probe.
     host_bridge: Optional[str] = None
+    # NAT-Cloud reuse: opaque ID returned by /api/system/clouds. When set on
+    # type=="nat_cloud", the record is a reference to the owner cloud and
+    # shares owner runtime/IPAM instead of creating a new subnet.
+    shared_cloud_id: Optional[str] = None
 
 
 class NetworkRuntime(BaseModel):

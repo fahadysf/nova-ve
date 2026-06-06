@@ -36,7 +36,7 @@ Each `*.bin` file under `addons/iol/bin/` becomes one image. **The `iourc` licen
 
 ## Docker images
 
-Docker is the only kind that does not byte-copy. Each `addons/docker/<image>/` directory containing a `Dockerfile` becomes a build unit: the importer runs `docker build` against the source context and writes a single `image.txt` marker file at `docker/<image>/image.txt` recording the resulting tag (`nova-ve-<image>:latest` by default).
+Docker is the only kind that does not byte-copy. Each `addons/docker/<image>/` directory containing a `Dockerfile` becomes a build unit: the importer runs `docker build` against the source context and writes a single `image.txt` marker file at `docker/<image>/image.txt` recording the resulting tag (`nova-ve/<image>:latest` by default).
 
 Implications:
 
