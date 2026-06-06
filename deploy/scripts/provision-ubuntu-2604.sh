@@ -246,14 +246,16 @@ ensure_backend_env() {
   base_data_dir="$(awk -F= '/^BASE_DATA_DIR=/{print $2}' "${ENV_FILE}" | tail -n1)"
   base_data_dir="${base_data_dir:-/var/lib/nova-ve}"
   pw_file="${base_data_dir}/db_password"
+  install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0750 "${base_data_dir}"
   if [[ ! -s "${pw_file}" ]]; then
     db_password="$(generate_urlsafe_secret 24)"
-    install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0750 "${base_data_dir}"
     install -m 0600 -o "${APP_OWNER}" -g "${APP_GROUP}" /dev/null "${pw_file}"
     printf '%s\n' "${db_password}" > "${pw_file}"
   else
     db_password="$(cat "${pw_file}")"
   fi
+  chown "${APP_OWNER}:${APP_GROUP}" "${pw_file}"
+  chmod 0600 "${pw_file}"
 
   database_url="$(awk -F= '/^DATABASE_URL=/{print $2}' "${ENV_FILE}" | tail -n1)"
   if [[ "${database_url}" == *"nova:nova"* ]]; then
