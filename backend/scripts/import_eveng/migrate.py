@@ -13,7 +13,7 @@ Per-kind specifics:
 - ``dynamips``: copies the ``*.image`` file verbatim into a per-image dir.
 - ``iol``: copies the ``*.bin`` plus ``iourc`` license; if ``iourc`` is missing
   from the source, the migration record is flagged ``needs-manual-review``.
-- ``docker``: invokes ``docker build -t nova-ve-<image>:latest <ctx>`` and
+- ``docker``: invokes ``docker build -t nova-ve/<image>:latest <ctx>`` and
   emits a ``image.txt`` marker file in the destination dir with the resolved
   image tag. The build command is mockable for tests.
 """

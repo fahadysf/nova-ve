@@ -215,7 +215,7 @@ def _emit_dry_run_plan(items, mode, manifest: ImportManifest) -> None:
     """
     for item in items:
         if not item.files and item.kind == KIND_DOCKER:
-            tag = str(item.meta.get("image_tag", f"nova-ve-{item.image_key}:latest"))
+            tag = str(item.meta.get("image_tag", f"nova-ve/{item.image_key}:latest"))
             manifest.imported.append(
                 ImportedEntry(
                     src=str(item.src_dir),
