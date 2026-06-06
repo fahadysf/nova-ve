@@ -1,0 +1,18 @@
+type: qemu
+name: Juniper vJunos-switch
+description: Juniper vJunos-switch
+icon_type: switch
+cpu: 4
+ram: 8192
+ethernet: 11
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -smbios type=1,product=VM-VEX -cpu IvyBridge,ibpb=on,md-clear=on,spec-ctrl=on,ssbd=on,vmx=on
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - em0
+  - ge-0/0/{n}

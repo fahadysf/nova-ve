@@ -1,0 +1,16 @@
+type: qemu
+name: Juniper vRR
+description: Juniper vRR
+icon_type: router
+cpu: 1
+ram: 2048
+ethernet: 4
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: em{n}

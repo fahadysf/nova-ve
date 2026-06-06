@@ -1,0 +1,16 @@
+type: qemu
+name: VMware SD-WAN Gateway
+description: VMware SD-WAN Gateway
+icon_type: router
+cpu: 4
+ram: 8192
+ethernet: 2
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -boot order=dc -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{n}

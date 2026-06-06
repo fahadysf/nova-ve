@@ -1,0 +1,16 @@
+type: qemu
+name: Juniper Olive
+description: Juniper Olive
+icon_type: router
+cpu: 1
+ram: 4096
+ethernet: 4
+console_type: telnet
+architecture: i386
+qemu_options: -machine type=pc-1.0,accel=kvm -no-user-config -nodefaults -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: em{n}

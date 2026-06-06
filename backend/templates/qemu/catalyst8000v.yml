@@ -1,0 +1,16 @@
+type: qemu
+name: Cisco Catalyst 8000V
+description: Cisco Catalyst 8000V
+icon_type: router
+cpu: 1
+ram: 4096
+ethernet: 4
+console_type: telnet
+qemu_nic: vmxnet3
+qemu_options: -machine type=pc,accel=kvm -cpu host -no-user-config -nodefaults -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: GigabitEthernet{port}

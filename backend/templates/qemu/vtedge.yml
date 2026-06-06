@@ -1,0 +1,17 @@
+type: qemu
+name: Cisco SD-WAN vEdge
+description: Cisco SD-WAN vEdge
+icon_type: router
+cpu: 1
+ram: 2048
+ethernet: 5
+console_type: telnet
+qemu_options: -machine type=pc,accel=kvm -cpu host -vga std -usbdevice tablet -boot order=dc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - eth0
+  - ge0/{n}

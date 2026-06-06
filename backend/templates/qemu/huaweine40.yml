@@ -1,0 +1,16 @@
+type: qemu
+name: Huawei NE40
+description: Huawei NE40
+icon_type: router
+cpu: 2
+ram: 2048
+ethernet: 12
+console_type: telnet
+qemu_nic: vmxnet3
+qemu_options: -machine type=pc,accel=kvm -usbdevice tablet -boot order=cd
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: GigabitEthernet0/0/{n}

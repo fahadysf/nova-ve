@@ -1,0 +1,15 @@
+type: qemu
+name: Linux
+description: Linux
+icon_type: server
+cpu: 2
+ram: 4096
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -vga virtio -usbdevice tablet -boot order=cd -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: eth{n}

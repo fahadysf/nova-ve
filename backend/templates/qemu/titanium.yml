@@ -1,0 +1,17 @@
+type: qemu
+name: Cisco NX-OSv Titanium
+description: Cisco NX-OSv Titanium
+icon_type: switch
+cpu: 1
+ram: 4096
+ethernet: 4
+console_type: telnet
+qemu_options: -machine type=pc,accel=kvm -no-user-config -nodefaults -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - mgmt0
+  - Ethernet2/{port}

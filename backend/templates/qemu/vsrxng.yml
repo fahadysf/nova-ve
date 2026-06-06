@@ -1,0 +1,18 @@
+type: qemu
+name: Juniper vSRX NextGen
+description: Juniper vSRX NextGen
+icon_type: firewall
+cpu: 2
+ram: 4096
+ethernet: 4
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -cpu host -no-user-config -nodefaults -rtc base=utc
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - fxp0
+  - ge-0/0/{n}

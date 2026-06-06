@@ -1,0 +1,20 @@
+type: qemu
+name: Cisco IOS XRv 9000
+description: Cisco IOS XRv 9000
+icon_type: router
+cpu: 4
+ram: 16384
+ethernet: 7
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -enable-kvm -smbios 'type=1,manufacturer=cisco,product=Cisco IOS XRv 9000' -machine type=pc,accel=kvm,usb=off -no-user-config -nodefaults -rtc base=utc,driftfix=slew -global kvm-pit.lost_tick_policy=discard -no-hpet -realtime mlock=off -no-shutdown -boot order=c -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - MgmtEth0/RP0/CPU0/0
+  - Internal use 1
+  - Internal use 2
+  - GigabitEthernet0/0/0/{n}

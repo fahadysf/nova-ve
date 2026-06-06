@@ -1,0 +1,18 @@
+type: qemu
+name: Juniper vQFX PFE
+description: Juniper vQFX PFE
+icon_type: switch
+cpu: 2
+ram: 2048
+ethernet: 2
+console_type: vnc
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -boot order=cd
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - em0 / fxp0
+  - em1 / int
+  - xe-0/0/{n}

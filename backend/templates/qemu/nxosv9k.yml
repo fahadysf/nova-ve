@@ -1,0 +1,18 @@
+type: qemu
+name: Cisco Nexus 9000v
+description: Cisco Nexus 9000v
+icon_type: switch
+cpu: 2
+ram: 8192
+ethernet: 8
+console_type: telnet
+cpulimit: 0
+qemu_options: -machine type=pc,accel=kvm -enable-kvm
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - mgmt0
+  - Ethernet1/{port}

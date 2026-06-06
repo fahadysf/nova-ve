@@ -1,0 +1,24 @@
+type: qemu
+name: Cisco IOSvL2
+description: Cisco IOSvL2
+icon_type: switch
+cpu: 1
+ram: 1024
+ethernet: 8
+console_type: telnet
+qemu_options: -machine type=pc,accel=kvm -no-user-config -nodefaults -rtc base=utc -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - GigabitEthernet0/0
+  - GigabitEthernet0/1
+  - GigabitEthernet0/2
+  - GigabitEthernet0/3
+  - GigabitEthernet1/0
+  - GigabitEthernet1/1
+  - GigabitEthernet1/2
+  - GigabitEthernet1/3
+  - GigabitEthernet{port}

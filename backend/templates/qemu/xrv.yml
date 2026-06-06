@@ -1,0 +1,18 @@
+type: qemu
+name: Cisco IOS XRv
+description: Cisco IOS XRv
+icon_type: router
+cpu: 1
+ram: 3072
+ethernet: 4
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm,usb=off -no-user-config -nodefaults -rtc base=utc,driftfix=slew -global kvm-pit.lost_tick_policy=discard -no-hpet -realtime mlock=off -no-shutdown -boot order=c
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - MgmtEth0/0/CPU0/0
+  - GigabitEthernet0/0/0/{n}

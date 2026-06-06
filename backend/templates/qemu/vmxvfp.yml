@@ -1,0 +1,19 @@
+type: qemu
+name: Juniper vMX VFP
+description: Juniper vMX VFP
+icon_type: router
+cpu: 3
+ram: 4096
+ethernet: 12
+console_type: telnet
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format:
+  - em0 / fxp0
+  - em1 / int
+  - ge-0/0/{n}

@@ -1,0 +1,16 @@
+type: qemu
+name: Huawei AR1000V
+description: Huawei AR1000V
+icon_type: router
+cpu: 1
+ram: 2048
+ethernet: 6
+console_type: vnc
+qemu_nic: virtio-net-pci
+qemu_options: -machine type=pc,accel=kvm -vga std -usbdevice tablet -boot order=cd -cpu host
+capabilities:
+  machine: pc
+  hotplug: false
+  max_nics: 8
+interface_naming:
+  format: GigabitEthernet0/0/{n}
