@@ -1,4 +1,12 @@
+import os
+
 import pytest
+
+
+os.environ.setdefault(
+    "DATABASE_URL", "postgresql+asyncpg://nova:test-password@localhost:5432/novadb"
+)
+os.environ.setdefault("SECRET_KEY", "test-secret-key-for-backend-suite-000000")
 
 
 def _stub_host_net_for_qemu_start(monkeypatch):

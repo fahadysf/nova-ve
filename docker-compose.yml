@@ -2,6 +2,8 @@ services:
   db-init:
     image: alpine:3.21
     restart: "no"
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD:-}
     volumes:
       - labdata:/data
     entrypoint:
@@ -10,7 +12,12 @@ services:
       - |
         if [ ! -f /data/db_password ]; then
           echo "Generating random database password..."
-          tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32 > /data/db_password
+          umask 077
+          if [ -n "$${DB_PASSWORD:-}" ]; then
+            printf '%s\n' "$${DB_PASSWORD}" > /data/db_password
+          else
+            tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32 > /data/db_password
+          fi
           chmod 600 /data/db_password
           echo "Done."
         else
@@ -45,6 +52,9 @@ services:
     restart: unless-stopped
     environment:
       DB_HOST: db
+      DB_PORT: ${DB_PORT:-5432}
+      DB_USER: ${DB_USER:-nova}
+      DB_NAME: ${DB_NAME:-novadb}
       # DATABASE_URL is auto-constructed from /data/db_password + the DB_* vars above.
       # Set DATABASE_URL explicitly to override: postgresql+asyncpg://user:pass@host:5432/db
       BASE_DATA_DIR: /data

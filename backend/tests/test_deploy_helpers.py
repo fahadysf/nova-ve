@@ -288,6 +288,32 @@ def test_provisioner_renders_sudoers_for_service_account():
     assert "ubuntu ALL=(root) NOPASSWD:" not in sudoers
 
 
+def test_provisioner_generates_secret_env_values_after_comment_only_example():
+    body = PROVISION_SH.read_text()
+    assert (
+        'install -m 0600 "${REPO_ROOT}/deploy/env/backend.env.example" "${ENV_FILE}"'
+        in body
+    )
+    assert 'ensure_env_var "SECRET_KEY"' in body
+    assert 'ensure_env_var "NOVA_VE_ADMIN_PASSWORD"' in body
+    assert 'ensure_env_var "GUACAMOLE_JSON_SECRET_KEY"' in body
+    assert 'BASE_DATA_DIR:-/var/lib/nova-ve}/db_password' in body
+
+
+def test_provisioner_no_longer_creates_default_database_password():
+    body = PROVISION_SH.read_text()
+    assert "CREATE ROLE nova LOGIN PASSWORD 'nova'" not in body
+    assert "ALTER ROLE ${db_user} WITH PASSWORD" in body
+    assert "cat \"${pw_file}\"" in body
+
+
+def test_local_rancher_setup_does_not_emit_default_database_url():
+    body = (DEPLOY_SCRIPTS / "setup-local-rancher.sh").read_text()
+    assert "postgresql+asyncpg://nova:nova" not in body
+    assert "DB_PASSWORD=" in body
+    assert '${LOCAL_ROOT}/db_password' in body
+
+
 def test_import_wrapper_defaults_to_its_checkout_when_env_missing():
     body = IMPORT_EVENG_SH.read_text()
     assert 'SCRIPT_REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"' in body

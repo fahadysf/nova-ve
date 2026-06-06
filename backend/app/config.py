@@ -13,6 +13,16 @@ logger = logging.getLogger("nova-ve")
 _KNOWN_WEAK_KEYS = frozenset({"change-me-in-production", "dev-secret-change-me"})
 
 
+def _validate_database_url_value(value: str) -> str:
+    cleaned = value.strip()
+    if "nova:nova" in cleaned:
+        raise ValueError(
+            "DATABASE_URL must not use the example credentials (nova:nova); "
+            "set a strong database password"
+        )
+    return cleaned
+
+
 def _default_docker_host() -> str:
     explicit = os.getenv("DOCKER_HOST", "").strip()
     if explicit:
@@ -30,7 +40,7 @@ class Settings(BaseSettings):
     # App
     APP_NAME: str = "nova-ve"
     DEBUG: bool = False
-    # SECRET_KEY is resolved by _ensure_secret_key() after model construction.
+    # SECRET_KEY is resolved by _resolve_secret_key() after model construction.
     # When set via env / .env file it's used directly (after validation).
     # When NOT set, the key is auto-generated on first run and persisted to
     # BASE_DATA_DIR/secret_key so it survives restarts.
@@ -104,15 +114,8 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_database_url(cls, value: str) -> str:
         if not value or not value.strip():
-            raise ValueError(
-                "DATABASE_URL must be set via environment variable or .env file"
-            )
-        if "nova:nova" in value:
-            raise ValueError(
-                "DATABASE_URL must not use the example credentials (nova:nova); "
-                "set a strong database password"
-            )
-        return value.strip()
+            return ""
+        return _validate_database_url_value(value)
 
     @field_validator("SECRET_KEY", mode="before")
     @classmethod
@@ -167,6 +170,7 @@ def _resolve_secret_key(settings: Settings) -> None:
     ``BASE_DATA_DIR/secret_key`` so it survives restarts.
     """
     if settings.SECRET_KEY and settings.SECRET_KEY.strip():
+        settings.SECRET_KEY = settings.SECRET_KEY.strip()
         return
 
     key_file = settings.BASE_DATA_DIR / "secret_key"
@@ -187,6 +191,7 @@ def _resolve_secret_key(settings: Settings) -> None:
     key = secrets.token_hex(32)
     key_file.parent.mkdir(parents=True, exist_ok=True)
     key_file.write_text(key, encoding="ascii")
+    key_file.chmod(0o600)
     settings.SECRET_KEY = key
     logger.info("Generated new SECRET_KEY and persisted to %s", key_file)
 
@@ -200,6 +205,7 @@ def _resolve_database_url(settings: Settings) -> None:
     or the deploy provisioning script).
     """
     if settings.DATABASE_URL and settings.DATABASE_URL.strip():
+        settings.DATABASE_URL = _validate_database_url_value(settings.DATABASE_URL)
         return
 
     pw_file = settings.BASE_DATA_DIR / "db_password"
@@ -214,7 +220,7 @@ def _resolve_database_url(settings: Settings) -> None:
             "ensure the db-init service or provisioning script has run"
         )
 
-    settings.DATABASE_URL = (
+    settings.DATABASE_URL = _validate_database_url_value(
         f"postgresql+asyncpg://{settings.DB_USER}:{password}"
         f"@{settings.DB_HOST}:{settings.DB_PORT}/{settings.DB_NAME}"
     )
