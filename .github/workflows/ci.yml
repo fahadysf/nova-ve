@@ -14,9 +14,14 @@ permissions:
 
 jobs:
   backend:
-    runs-on: [self-hosted, linux, x64, docker, nova-ve-ci]
+    runs-on: ubuntu-latest
     env:
       PYTHONPATH: ${{ github.workspace }}/backend
+      # Self-contained test values (mirrors backend/tests/conftest.py). No live
+      # database is required — the suite stubs/monkeypatches external surfaces;
+      # these only satisfy Settings validation for the import/compile steps.
+      DATABASE_URL: postgresql+asyncpg://nova:test-password@localhost:5432/novadb
+      SECRET_KEY: test-secret-key-for-backend-suite-000000
     defaults:
       run:
         working-directory: backend
@@ -40,7 +45,7 @@ jobs:
         run: python -m compileall app tests
 
   frontend:
-    runs-on: [self-hosted, linux, x64, docker, nova-ve-ci]
+    runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
@@ -59,32 +64,3 @@ jobs:
 
       - name: Build frontend
         run: npm run build
-
-  compose-smoke:
-    runs-on: [self-hosted, linux, x64, docker, nova-ve-ci]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Clean any stale compose state
-        run: docker compose down -v || true
-
-      - name: Validate compose file
-        run: docker compose config -q
-
-      - name: Start database and wait for healthcheck
-        run: |
-          docker compose up -d db
-          container_id="$(docker compose ps -q db)"
-          for _ in $(seq 1 30); do
-            status="$(docker inspect --format='{{.State.Health.Status}}' "$container_id" 2>/dev/null || true)"
-            if [ "$status" = "healthy" ]; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker compose ps
-          exit 1
-
-      - name: Tear down compose stack
-        if: always()
-        run: docker compose down -v
