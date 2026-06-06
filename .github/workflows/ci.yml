@@ -22,6 +22,14 @@ jobs:
       # these only satisfy Settings validation for the import/compile steps.
       DATABASE_URL: postgresql+asyncpg://nova:test-password@localhost:5432/novadb
       SECRET_KEY: test-secret-key-for-backend-suite-000000
+      # Redirect the data dirs (default /var/lib/nova-ve) into the workspace.
+      # A few tests exercise real env-driven Settings rather than a tmp
+      # monkeypatch, so the configured tree must exist and be writable.
+      BASE_DATA_DIR: ${{ github.workspace }}/.nova-data
+      LABS_DIR: ${{ github.workspace }}/.nova-data/labs
+      IMAGES_DIR: ${{ github.workspace }}/.nova-data/images
+      TMP_DIR: ${{ github.workspace }}/.nova-data/tmp
+      USER_TEMPLATES_DIR: ${{ github.workspace }}/.nova-data/templates
     defaults:
       run:
         working-directory: backend
@@ -34,6 +42,10 @@ jobs:
 
       - name: Install backend dependencies
         run: python -m pip install -r requirements.txt
+
+      - name: Create data directory tree
+        working-directory: ${{ github.workspace }}
+        run: mkdir -p .nova-data/labs .nova-data/images .nova-data/tmp .nova-data/templates
 
       - name: Run backend tests
         run: python -m pytest
