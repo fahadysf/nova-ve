@@ -505,10 +505,13 @@ run apt-get install -y --no-install-recommends \
   docker-compose-v2 \
   dnsmasq \
   nftables \
+  iproute2 \
   python3 \
   python3-venv \
   nodejs \
   npm \
+  qemu-system-x86 \
+  qemu-utils \
   cmake \
   libelf-dev \
   libpcap-dev
