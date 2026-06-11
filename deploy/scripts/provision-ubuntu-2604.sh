@@ -246,7 +246,10 @@ ensure_backend_env() {
   base_data_dir="$(awk -F= '/^BASE_DATA_DIR=/{print $2}' "${ENV_FILE}" | tail -n1)"
   base_data_dir="${base_data_dir:-/var/lib/nova-ve}"
   pw_file="${base_data_dir}/db_password"
-  install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0750 "${base_data_dir}"
+  # 0755 (not 0750): the caddy user must traverse this directory to reach the
+  # webroot at ${base_data_dir}/www; secrets inside (db_password, backend.env)
+  # are individually protected with mode 0600.
+  install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 "${base_data_dir}"
   if [[ ! -s "${pw_file}" ]]; then
     db_password="$(generate_urlsafe_secret 24)"
     install -m 0600 -o "${APP_OWNER}" -g "${APP_GROUP}" /dev/null "${pw_file}"
