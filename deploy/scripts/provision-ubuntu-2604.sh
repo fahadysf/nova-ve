@@ -17,6 +17,10 @@ CADDY_TEMPLATE="${REPO_ROOT}/deploy/templates/Caddyfile.tpl"
 BACKEND_SERVICE_TEMPLATE="${REPO_ROOT}/deploy/templates/nova-ve-backend.service.tpl"
 PYTHON_BIN="${NOVA_VE_PYTHON_BIN:-python3}"
 GUACAMOLE_COMPOSE_SCRIPT="${REPO_ROOT}/deploy/scripts/run-guacamole.sh"
+# tmpfs sentinel the bridge-cloud flip drops when it defers its reboot to the
+# installer wrapper (see bridge_cloud_flip / install.sh).  On /run so it is
+# cleared automatically on the next boot.  install.sh must use the same path.
+BRIDGE_CLOUD_REBOOT_SENTINEL="${NOVA_VE_BRIDGE_CLOUD_REBOOT_SENTINEL:-/run/nova-ve-bridge-cloud-reboot-pending}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -930,6 +934,26 @@ bridge_cloud_flip() {
   source /opt/nova-ve/bin/nova-ve-marker.sh
   _write_marker_atomic naming-flipped
 
+  # When invoked by install.sh (NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT=1) we do NOT
+  # reboot here: the wrapper still has to write nova-ve-install-summary.md (the
+  # only on-disk record of the generated admin password) and print the
+  # credentials banner.  Rebooting inline races that work and usually wins, so
+  # fresh installs ended up with no summary on disk.  Instead we drop a tmpfs
+  # sentinel (auto-cleared on the next boot) and let install.sh run the
+  # countdown + reboot as its very last step.  Standalone provisioner runs
+  # leave the flag unset and reboot inline exactly as before.
+  if [[ "${NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT:-0}" == "1" ]]; then
+    : > "${BRIDGE_CLOUD_REBOOT_SENTINEL}"
+    echo "bridge-cloud: naming flip staged; reboot deferred to installer."
+    return 0
+  fi
+
+  bridge_cloud_reboot_now
+}
+
+# Print the abort banner, count down, then reboot.  Shared by the standalone
+# provisioner path and by install.sh's deferred-reboot path.
+bridge_cloud_reboot_now() {
   echo
   echo "==============================================================="
   echo "  bridge-cloud: reboot required to apply the iface naming flip"
@@ -1038,4 +1062,7 @@ fi
 # Bridge-Cloud naming flip + post-boot scaffolding.  Always-on with a
 # 30-second Ctrl-C abort window per plan §2 D4.  Re-runs on already-
 # migrated hosts log "already migrated" and return without rebooting.
+# When run under install.sh the actual reboot is deferred to the wrapper
+# (NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT=1) so the install summary is written
+# first; standalone runs reboot inline.
 bridge_cloud_flip
