@@ -162,9 +162,16 @@ if [[ ! -x "${PROVISIONER}" ]]; then
 fi
 
 log "Running ${PROVISIONER} (this can take 10-20 min on a fresh box)..."
+# Defer the bridge-cloud naming-flip reboot back to us: the provisioner stages
+# the flip and drops ${REBOOT_SENTINEL} instead of rebooting inline, so we can
+# write the install summary (the only on-disk copy of the generated admin
+# password) and print the credentials banner before the host goes down.
+REBOOT_SENTINEL="/run/nova-ve-bridge-cloud-reboot-pending"
 NOVA_VE_SERVICE_USER="${APP_OWNER}" \
 NOVA_VE_OWNER="${APP_OWNER}" \
 NOVA_VE_REPO_DIR="${REPO_DIR}" \
+NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT=1 \
+NOVA_VE_BRIDGE_CLOUD_REBOOT_SENTINEL="${REBOOT_SENTINEL}" \
 SUDO_USER="${APP_OWNER}" \
 bash "${PROVISIONER}"
 
@@ -336,3 +343,26 @@ cat <<EOF
  Admin:   ${NOVA_VE_ADMIN_USERNAME} / ${NOVA_VE_ADMIN_PASSWORD}
 ==========================================================================
 EOF
+
+# Deferred bridge-cloud reboot. The provisioner staged the iface naming flip
+# and asked us to reboot (sentinel on tmpfs, cleared on the next boot). We do
+# it now -- AFTER the summary is on disk and the credentials are printed -- so
+# the operator never loses the generated admin password to a premature reboot.
+if [[ -e "${REBOOT_SENTINEL}" ]]; then
+  rm -f "${REBOOT_SENTINEL}"
+  cat <<EOF
+
+==========================================================================
+ A reboot is required to apply the bridge-cloud interface naming flip.
+ Your credentials are saved at ${SUMMARY_PATH} and in ${ENV_FILE}.
+ Press Ctrl-C within 30 seconds to abort the reboot.
+==========================================================================
+EOF
+  for i in $(seq 30 -1 1); do
+    printf '[install.sh] reboot in %ss -- Ctrl-C to abort\n' "${i}"
+    sleep 1
+  done
+  # --ignore-inhibitors overrides block-mode inhibitors (e.g. the
+  # unattended-upgrades-shutdown lock); --no-block lets systemd-shutdown run.
+  systemctl reboot --ignore-inhibitors --no-block || systemctl --force --force reboot
+fi
