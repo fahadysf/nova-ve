@@ -321,6 +321,17 @@ def test_provisioner_no_longer_creates_default_database_password():
     assert 'chmod 0600 "${pw_file}"' in body
 
 
+def test_provisioner_keeps_base_data_dir_world_traversable():
+    # Regression: the credential-hardening pass set /var/lib/nova-ve to 0750,
+    # which locked the caddy user out of the webroot (${BASE_DATA_DIR}/www)
+    # and broke every fresh install with HTTP 403 on "/". The base data dir
+    # must stay 0755; secrets inside it are individually chmod 0600.
+    body = PROVISION_SH.read_text()
+    assert '-m 0750 "${base_data_dir}"' not in body
+    assert 'install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 "${base_data_dir}"' in body
+    assert "install -d -o \"${APP_OWNER}\" -g \"${APP_GROUP}\" -m 0755 /var/lib/nova-ve" in body
+
+
 def test_local_rancher_setup_does_not_emit_default_database_url():
     body = (DEPLOY_SCRIPTS / "setup-local-rancher.sh").read_text()
     assert "postgresql+asyncpg://nova:nova" not in body
