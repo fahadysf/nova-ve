@@ -35,9 +35,7 @@ RUN set -eux; \
       xterm \
       xvfb \
       xfce4 \
-      xfce4-goodies \
-      xfce4-terminal \
-      xubuntu-desktop-minimal; \
+      xfce4-terminal; \
     rm -f /usr/sbin/policy-rc.d; \
     apt-get clean; \
     rm -rf /var/lib/apt/lists/*

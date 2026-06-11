@@ -321,6 +321,28 @@ def test_provisioner_no_longer_creates_default_database_password():
     assert 'chmod 0600 "${pw_file}"' in body
 
 
+def test_provisioner_installs_required_runtime_packages():
+    # Issue #230: the backend defaults to /usr/bin/qemu-system-x86_64 and
+    # /usr/bin/qemu-img, but the provisioner never installed the packages
+    # providing them, so QEMU nodes failed on a clean install. iproute2
+    # provides the ip/bridge binaries the backend and nova-ve-net.py shell
+    # out to; pin it explicitly rather than relying on the base image.
+    body = PROVISION_SH.read_text()
+    assert "qemu-system-x86 \\" in body
+    assert "qemu-utils \\" in body
+    assert "iproute2 \\" in body
+
+
+def test_demo_image_build_excludes_heavy_images():
+    # Install-time demo images are alpine-only; the Ubuntu XFCE desktop
+    # image is documented as a manual build instead.
+    body = (DEPLOY_SCRIPTS / "build-demo-images.sh").read_text()
+    assert 'build_demo_image "nova-ve/alpine-telnet:latest"' in body
+    assert 'build_demo_image "nova-ve/alpine-vnc:latest"' in body
+    assert 'build_demo_image "nova-ve/ubuntu-2604-xfce-vnc' not in body
+    assert 'pull_if_missing "ubuntu:26.04"' not in body
+
+
 def test_provisioner_keeps_base_data_dir_world_traversable():
     # Regression: the credential-hardening pass set /var/lib/nova-ve to 0750,
     # which locked the caddy user out of the webroot (${BASE_DATA_DIR}/www)
