@@ -343,6 +343,34 @@ def test_demo_image_build_excludes_heavy_images():
     assert 'pull_if_missing "ubuntu:26.04"' not in body
 
 
+def test_provisioner_defers_bridge_cloud_reboot_to_installer():
+    # Regression: the bridge-cloud naming flip used to reboot inline at the end
+    # of provisioning, killing install.sh before it wrote the install summary
+    # (the only on-disk copy of the generated admin password). Under
+    # NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT=1 the provisioner must drop a sentinel
+    # and return instead of rebooting, leaving the reboot to install.sh.
+    body = PROVISION_SH.read_text()
+    assert '"${NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT:-0}" == "1"' in body
+    assert ': > "${BRIDGE_CLOUD_REBOOT_SENTINEL}"' in body
+    # The actual reboot lives in a helper the defer branch does NOT call.
+    assert "bridge_cloud_reboot_now()" in body
+    assert "BRIDGE_CLOUD_REBOOT_SENTINEL=" in body
+
+
+def test_installer_reboots_after_writing_summary():
+    # install.sh must request the deferred reboot and only perform it after the
+    # summary file (and credentials banner) are written, using the same tmpfs
+    # sentinel path the provisioner drops.
+    body = INSTALL_SH.read_text()
+    assert "NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT=1" in body
+    assert 'REBOOT_SENTINEL="/run/nova-ve-bridge-cloud-reboot-pending"' in body
+    # The reboot guard must appear AFTER the summary is written to disk.
+    summary_pos = body.index('chmod 0600 "${SUMMARY_PATH}"')
+    reboot_pos = body.index('if [[ -e "${REBOOT_SENTINEL}" ]]; then')
+    assert summary_pos < reboot_pos
+    assert "systemctl reboot --ignore-inhibitors --no-block" in body
+
+
 def test_provisioner_keeps_base_data_dir_world_traversable():
     # Regression: the credential-hardening pass set /var/lib/nova-ve to 0750,
     # which locked the caddy user out of the webroot (${BASE_DATA_DIR}/www)
