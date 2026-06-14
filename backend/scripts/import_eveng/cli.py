@@ -1,8 +1,8 @@
 """argparse entry point for the EVE-NG importer CLI (#183).
 
-This module wires the user-facing flag set; #184 will plug in the walker and
-copy logic. Today the CLI only emits an empty manifest in ``--dry-run`` mode and
-exits 0 — sufficient to integration-test the scaffold and the manifest schema.
+This module wires the user-facing flag set, walks the source addon tree, and
+dispatches to the migration orchestrator. The shell wrapper at
+``deploy/scripts/import-eveng-templates.sh`` is the normal operator entrypoint.
 """
 
 from __future__ import annotations
