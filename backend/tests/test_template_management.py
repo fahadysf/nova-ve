@@ -142,6 +142,35 @@ def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(
     assert "paloalto-10.1.1" in service.list_images("qemu", "paloalto")
 
 
+def test_builtin_fortinet_template_matches_fgt_image_aliases(
+    monkeypatch, template_settings
+):
+    template_settings.TEMPLATES_DIR = REPO_ROOT / "backend" / "templates"
+    monkeypatch.setattr(
+        "app.services.template_service.get_settings", lambda: template_settings
+    )
+
+    image_names = [
+        "fortinet-FGT-v7.4.3",
+        "vendor-FGT-v7.2.8",
+        "paloalto-10.1.1",
+    ]
+    for image_name in image_names:
+        image_dir = template_settings.IMAGES_DIR / "qemu" / image_name
+        image_dir.mkdir(parents=True)
+        (image_dir / "virtioa.qcow2").write_text("image")
+
+    service = TemplateService()
+    fortinet = service.list_templates("qemu")["fortinet"]
+    images = service.list_images("qemu", "fortinet")
+
+    assert fortinet["name"] == "Fortinet FortiGate"
+    assert fortinet["image_aliases"] == ["fortinet-", "-fgt-"]
+    assert "fortinet-FGT-v7.4.3" in images
+    assert "vendor-FGT-v7.2.8" in images
+    assert "paloalto-10.1.1" not in images
+
+
 @pytest.mark.asyncio
 async def test_create_node_uses_template_defaults_and_validates_image(prepared_template_data):
     current_user = SimpleNamespace(username="admin", role="admin")
