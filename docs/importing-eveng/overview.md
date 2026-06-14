@@ -35,14 +35,16 @@ This non-destructive default is the inversion of the original spec, made during 
 On a host installed by `install.sh`, use the wrapper from the service checkout:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+./deploy/scripts/import-eveng-templates.sh --dry-run
+sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
 The first command is a non-mutating plan. The second command performs the import with the same defaults. Those commands use the defaults most operators want:
 
 | Purpose | Default |
 |---|---|
+| Service checkout | `${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}` |
 | Source tree | `/opt/unetlab` |
 | Image destination | `/var/lib/nova-ve/images` |
 | Generated templates | `/var/lib/nova-ve/templates` |
@@ -57,7 +59,8 @@ The wrapper sources `/etc/nova-ve/backend.env`, changes into the installed backe
 Always plan the run before executing it.
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+./deploy/scripts/import-eveng-templates.sh --dry-run
 ```
 
 The dry run walks the source tree, evaluates each file's idempotency check (sha256 vs the existing destination), and emits a planned manifest on stdout. No filesystem mutation, no manifest written. If `/opt/unetlab` is missing or empty, the planned manifest is empty (`imported: []`, `skipped: []`, `templates: []`, `errors: []`).
@@ -69,7 +72,8 @@ The dry run walks the source tree, evaluates each file's idempotency check (sha2
 Once the dry-run looks correct, drop the `--dry-run` flag:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
 This copies every file, verifies sha256 at the destination, and writes the manifest to `--manifest` (default `/var/lib/nova-ve/import-manifest.json`). **Sources are preserved.** Re-running the same command is idempotent: anything whose destination already matches the source sha256 lands in `manifest.skipped[]` with `reason: "exists, sha256 match"`.
@@ -79,7 +83,8 @@ This copies every file, verifies sha256 at the destination, and writes the manif
 If you have verified the migration and want to reclaim the source disk space:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --delete-source
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+sudo ./deploy/scripts/import-eveng-templates.sh --delete-source
 ```
 
 `--delete-source` copies + sha256-verifies + deletes the source file *only after* the verify succeeds. If verification fails for any file, the source for that file is **not** deleted; the failure lands in `manifest.errors[]` and the run continues.

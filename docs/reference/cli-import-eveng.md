@@ -8,8 +8,9 @@ The wrapper is the normal operator entrypoint. It sources `/etc/nova-ve/backend.
 On a standard installed host, the one-shot flow is:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+./deploy/scripts/import-eveng-templates.sh --dry-run
+sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
 ## Synopsis
@@ -51,20 +52,21 @@ sudo deploy/scripts/import-eveng-templates.sh
 
 ```bash
 # Dry-run plan first. This may be run without sudo:
-/var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+./deploy/scripts/import-eveng-templates.sh --dry-run
 
 # Real run (non-destructive default):
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+sudo ./deploy/scripts/import-eveng-templates.sh
 
 # Reclaim source disk after verification succeeds:
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --delete-source
+sudo ./deploy/scripts/import-eveng-templates.sh --delete-source
 
 # Only QEMU images, by trimming the source tree first:
 sudo rsync -a /opt/unetlab-from-eveng/addons/qemu/ /tmp/eveng-qemu-only/addons/qemu/
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --source /tmp/eveng-qemu-only
+sudo ./deploy/scripts/import-eveng-templates.sh --source /tmp/eveng-qemu-only
 
 # Copy images only, without generating templates:
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --templates-dir -
+sudo ./deploy/scripts/import-eveng-templates.sh --templates-dir -
 ```
 
 ## Related
