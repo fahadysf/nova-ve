@@ -4,11 +4,18 @@ This section walks an operator through migrating an existing EVE-NG (or UNetLab 
 
 The end state: every supported addon directory under `/opt/unetlab/addons/...` is materialised under `/var/lib/nova-ve/images/<kind>/<key>/`, every priority-vendor template is converted to a nova-ve template under `/var/lib/nova-ve/templates/`, and the operator can instantiate nodes from each migrated template through the nova-ve UI.
 
-The importer ships as a venv'd Python module (`backend/scripts/import_eveng`) and a root-asserter shell wrapper at `deploy/scripts/import-eveng-templates.sh`.
+Use the one-shot shell wrapper for normal migrations:
+
+```bash
+sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
+sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+```
+
+The wrapper sources the installed nova-ve environment, finds the backend virtual environment, copies addon assets into `/var/lib/nova-ve/images`, writes generated templates under `/var/lib/nova-ve/templates`, and records `/var/lib/nova-ve/import-manifest.json`. The Python module (`backend/scripts/import_eveng`) is the implementation detail behind that wrapper.
 
 ## Pages in this section
 
-- [Overview](overview.md) — flags table, prerequisites, and run order (`--dry-run` → real → optional `--delete-source`).
+- [Overview](overview.md) — one-shot wrapper usage, prerequisites, and run order (`--dry-run` → real → optional `--delete-source`).
 - [Importing images](images.md) — per-kind source → destination mapping for qemu / dynamips / iol / docker, plus boot-disk precedence and verification recipes.
 - [Vendor coverage](vendor-coverage.md) — which vendor adapters can emit a nova-ve template natively.
 - [Reading the manifest](manifest.md) — the manifest JSON shape, handling `needs-manual-review`, and rollback.

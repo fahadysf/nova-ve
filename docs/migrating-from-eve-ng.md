@@ -4,16 +4,42 @@ nova-ve includes an importer for EVE-NG, UNetLab, and PNETLab addon trees. It co
 
 The default import mode is **non-destructive**. Source files are preserved unless you explicitly choose a destructive mode.
 
+## One-Shot Import Script
+
+On a normal installed nova-ve host, use the one-shot wrapper installed with the git checkout. With the default paths, you only need two commands after the EVE-NG tree is available at `/opt/unetlab`:
+
+```bash
+sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
+sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+```
+
+The first command is a dry-run plan; the second performs the import. The wrapper reads `/etc/nova-ve/backend.env`, finds the backend virtual environment, and uses these defaults:
+
+| Purpose | Default |
+|---|---|
+| Source EVE-NG tree | `/opt/unetlab` |
+| nova-ve image destination | `/var/lib/nova-ve/images` |
+| Generated template destination | `/var/lib/nova-ve/templates` |
+| Run manifest | `/var/lib/nova-ve/import-manifest.json` |
+
+If the EVE-NG source is on another machine, copy it to the nova-ve host first:
+
+```bash
+sudo rsync -a --info=progress2 \
+  root@old-eveng-host:/opt/unetlab/ \
+  /opt/unetlab/
+```
+
+The importer migrates addon assets and templates, not saved EVE-NG lab topologies. After a successful run, imported templates appear in the nova-ve add-node flow alongside built-in templates.
+
+`--dry-run` and `--help` may be run without sudo. The real import requires sudo because it writes nova-ve-owned image, template, and manifest files.
+
 ## Plan First
 
 Run a dry run before the first real import:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh \
-  --source /opt/unetlab \
-  --dest /var/lib/nova-ve/images \
-  --manifest /var/lib/nova-ve/import-manifest.json \
-  --dry-run
+sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
 ```
 
 `--dry-run` walks the source tree and prints the planned summary without writing images, templates, or `import-manifest.json`.
@@ -23,10 +49,7 @@ sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh \
 When the plan looks correct, run the importer without `--dry-run`:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh \
-  --source /opt/unetlab \
-  --dest /var/lib/nova-ve/images \
-  --manifest /var/lib/nova-ve/import-manifest.json
+sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
 ```
 
 By default, the importer copies files, verifies sha256 at the destination, and keeps the source tree intact. Re-running the same command is idempotent: files that already match are skipped and recorded in the manifest.
@@ -36,11 +59,7 @@ By default, the importer copies files, verifies sha256 at the destination, and k
 Use `--delete-source` only when you intentionally want source files removed after a successful verified copy:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh \
-  --source /opt/unetlab \
-  --dest /var/lib/nova-ve/images \
-  --manifest /var/lib/nova-ve/import-manifest.json \
-  --delete-source
+sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --delete-source
 ```
 
 `--delete-source` is an explicit opt-in. Do not use it until you have a backup or have verified that the imported destination is the authoritative copy.

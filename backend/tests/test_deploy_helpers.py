@@ -395,6 +395,20 @@ def test_import_wrapper_defaults_to_its_checkout_when_env_missing():
     assert 'REPO_DIR="${NOVA_VE_REPO_DIR:-${SCRIPT_REPO_DIR}}"' in body
 
 
+def test_import_wrapper_allows_read_only_commands_without_root():
+    body = IMPORT_EVENG_SH.read_text()
+    assert "READ_ONLY=0" in body
+    assert "--dry-run|--help|-h)" in body
+    assert '[ "$EUID" -ne 0 ] && [ "$READ_ONLY" -ne 1 ]' in body
+    assert "--dry-run and --help may be run without sudo." in body
+
+
+def test_import_wrapper_tolerates_unreadable_env_for_non_root_dry_run():
+    body = IMPORT_EVENG_SH.read_text()
+    assert 'if [ -r "$ENV_FILE" ]; then' in body
+    assert "exists but is not readable; using checkout defaults" in body
+
+
 def test_vyos_installer_resolves_default_owner_group_from_account():
     body = INSTALL_VYOS_SH.read_text()
     assert 'OWNER_GROUP="$(id -gn "${OWNER_USER}")"' in body
