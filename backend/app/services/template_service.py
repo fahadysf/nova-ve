@@ -741,6 +741,39 @@ class TemplateError(Exception):
     pass
 
 
+def _validate_image_aliases(payload: Any, source: str) -> list[str]:
+    if payload is None:
+        return []
+    if not isinstance(payload, list):
+        raise TemplateError(f"image_aliases on {source} must be a list of strings.")
+    aliases: list[str] = []
+    for item in payload:
+        if not isinstance(item, str) or not item.strip():
+            raise TemplateError(
+                f"image_aliases on {source} must contain only non-empty strings."
+            )
+        aliases.append(item.strip().lower())
+    return aliases
+
+
+def _matches_template_image_name(template: "TemplateDefinition", image_name: str) -> bool:
+    image_match = image_name.strip().lower()
+    if not image_match:
+        return False
+
+    candidates = [
+        candidate
+        for candidate in [template.name.strip().lower(), *template.image_aliases]
+        if candidate
+    ]
+    if not candidates:
+        return True
+    return any(
+        candidate in image_match or image_match in candidate
+        for candidate in candidates
+    )
+
+
 _INTERFACE_NAMING_FORMAT_PLACEHOLDERS = ("{n}", "{slot}", "{port}")
 
 
@@ -866,6 +899,7 @@ class TemplateDefinition:
     raw: dict[str, Any] = field(default_factory=dict)
     interface_naming: dict[str, Any] | None = None
     capabilities: dict[str, Any] = field(default_factory=dict)
+    image_aliases: list[str] = field(default_factory=list)
     # #206 — when this entry was synthesized from a paired-template child block
     # (vs loaded from a per-type YAML), ``paired_parent`` is the originating
     # paired template key. Surfaced in the catalog response so the frontend can
@@ -889,6 +923,7 @@ class TemplateDefinition:
             "cpulimit": self.cpulimit,
             "extras": dict(self.extras),
             "capabilities": dict(self.capabilities),
+            "image_aliases": list(self.image_aliases),
         }
 
 
@@ -990,18 +1025,13 @@ class TemplateService:
         image_root = self.images_dir / template_type
         if image_root.exists():
             apply_name_filter = template_type != "docker"
-            template_match = template.name.strip().lower()
             for child in sorted(image_root.iterdir()):
                 image_info = self._image_info(child)
                 if not image_info:
                     continue
-                if apply_name_filter and template_match:
-                    folder_match = str(image_info["image"]).strip().lower()
-                    if (
-                        folder_match
-                        and template_match not in folder_match
-                        and folder_match not in template_match
-                    ):
+                if apply_name_filter:
+                    folder_match = str(image_info["image"])
+                    if not _matches_template_image_name(template, folder_match):
                         continue
                 images[image_info["image"]] = image_info
 
@@ -1265,6 +1295,9 @@ class TemplateService:
             capabilities = _validate_capabilities(
                 payload.get("capabilities"), template_type, source=str(template_path)
             )
+            image_aliases = _validate_image_aliases(
+                payload.get("image_aliases"), source=str(template_path)
+            )
             templates.append(
                 TemplateDefinition(
                     key=key,
@@ -1281,6 +1314,7 @@ class TemplateService:
                     raw=payload,
                     interface_naming=interface_naming,
                     capabilities=capabilities,
+                    image_aliases=image_aliases,
                 )
             )
 

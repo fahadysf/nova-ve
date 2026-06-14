@@ -2,6 +2,9 @@ type: qemu
 name: Fortinet FortiGate
 description: Fortinet FortiGate
 icon_type: firewall
+image_aliases:
+  - "fortinet-"
+  - "-fgt-"
 cpu: 1
 ram: 2048
 ethernet: 4
