@@ -7,8 +7,9 @@ The end state: every supported addon directory under `/opt/unetlab/addons/...` i
 Use the one-shot shell wrapper for normal migrations:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+./deploy/scripts/import-eveng-templates.sh --dry-run
+sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
 The wrapper sources the installed nova-ve environment, finds the backend virtual environment, copies addon assets into `/var/lib/nova-ve/images`, writes generated templates under `/var/lib/nova-ve/templates`, and records `/var/lib/nova-ve/import-manifest.json`. The Python module (`backend/scripts/import_eveng`) is the implementation detail behind that wrapper.

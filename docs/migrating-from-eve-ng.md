@@ -9,14 +9,16 @@ The default import mode is **non-destructive**. Source files are preserved unles
 On a normal installed nova-ve host, use the one-shot wrapper installed with the git checkout. With the default paths, you only need two commands after the EVE-NG tree is available at `/opt/unetlab`:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+./deploy/scripts/import-eveng-templates.sh --dry-run
+sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
 The first command is a dry-run plan; the second performs the import. The wrapper reads `/etc/nova-ve/backend.env`, finds the backend virtual environment, and uses these defaults:
 
 | Purpose | Default |
 |---|---|
+| Service checkout | `${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}` |
 | Source EVE-NG tree | `/opt/unetlab` |
 | nova-ve image destination | `/var/lib/nova-ve/images` |
 | Generated template destination | `/var/lib/nova-ve/templates` |
@@ -39,7 +41,8 @@ The importer migrates addon assets and templates, not saved EVE-NG lab topologie
 Run a dry run before the first real import:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry-run
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+./deploy/scripts/import-eveng-templates.sh --dry-run
 ```
 
 `--dry-run` walks the source tree and prints the planned summary without writing images, templates, or `import-manifest.json`.
@@ -49,7 +52,8 @@ sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --dry
 When the plan looks correct, run the importer without `--dry-run`:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
 By default, the importer copies files, verifies sha256 at the destination, and keeps the source tree intact. Re-running the same command is idempotent: files that already match are skipped and recorded in the manifest.
@@ -59,7 +63,8 @@ By default, the importer copies files, verifies sha256 at the destination, and k
 Use `--delete-source` only when you intentionally want source files removed after a successful verified copy:
 
 ```bash
-sudo /var/lib/nova-ve/nova-ve-git/deploy/scripts/import-eveng-templates.sh --delete-source
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+sudo ./deploy/scripts/import-eveng-templates.sh --delete-source
 ```
 
 `--delete-source` is an explicit opt-in. Do not use it until you have a backup or have verified that the imported destination is the authoritative copy.
