@@ -50,6 +50,7 @@
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
   import { deriveEdges, parseIfaceInterfaceIndex, type DiscoveredLink } from '$lib/services/canvasEdges';
+  import { syncTopologyCanvasLocalState } from '$lib/services/topologyCanvasState';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -463,18 +464,35 @@
     links !== lastLinksRef ||
     defaults !== lastDefaultsRef
   ) {
-    const _linksChanged = links !== lastLinksRef;
-    lastNodesRef = nodes;
-    lastNetworksRef = networks;
-    lastTopologyRef = topology;
-    lastLinksRef = links;
-    lastDefaultsRef = defaults;
-    localNodes = deepClone(nodes);
-    localNetworks = deepClone(networks);
-    localTopology = deepClone(topology);
-    if (_linksChanged) localLinks = deepClone(links);
-    localDefaults = deepClone(defaults);
-    publishFlowState();
+    const synced = syncTopologyCanvasLocalState(
+      {
+        nodes: localNodes,
+        networks: localNetworks,
+        topology: localTopology,
+        links: localLinks,
+        defaults: localDefaults,
+      },
+      {
+        nodes: lastNodesRef,
+        networks: lastNetworksRef,
+        topology: lastTopologyRef,
+        links: lastLinksRef,
+        defaults: lastDefaultsRef,
+      },
+      { nodes, networks, topology, links, defaults }
+    );
+
+    localNodes = synced.local.nodes;
+    localNetworks = synced.local.networks;
+    localTopology = synced.local.topology;
+    localLinks = synced.local.links;
+    localDefaults = synced.local.defaults;
+    lastNodesRef = synced.refs.nodes;
+    lastNetworksRef = synced.refs.networks;
+    lastTopologyRef = synced.refs.topology;
+    lastLinksRef = synced.refs.links;
+    lastDefaultsRef = synced.refs.defaults;
+    if (synced.changed) publishFlowState();
   }
 
   $: if (
