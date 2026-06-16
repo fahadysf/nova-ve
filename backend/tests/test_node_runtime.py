@@ -1565,7 +1565,150 @@ def test_iol_and_dynamips_return_unavailable(patched_settings):
         result = service.read_live_mac(f"lab-{runtime_type}", 9, 0, lab_data=lab_data)
         assert result["state"] == "unavailable"
         assert result["runtime_type"] == runtime_type
-        assert "not implemented" in (result["reason"] or "").lower()
+        assert result["reason"] == f"{runtime_type} live-mac read is not supported"
+
+
+def test_iol_start_uses_isolated_launcher_identity_and_tap_wiring(
+    monkeypatch, patched_settings
+):
+    from app.services import host_net
+    from app.services.runtime.iol import IolRecord
+
+    image_dir = patched_settings.IMAGES_DIR / "iol" / "i86bi-linux-l3"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "i86bi-linux-l3.bin"
+    image_path.write_text("fake-iol")
+
+    lab_data = {
+        "schema": 2,
+        "id": "lab-iol-runtime",
+        "meta": {"name": "iol"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "7": {
+                "id": 7,
+                "name": "iol-7",
+                "type": "iol",
+                "image": "i86bi-linux-l3",
+                "console": "telnet",
+                "ram": 512,
+                "ethernet": 2,
+                "interfaces": [
+                    {"index": 0, "name": "e0/0", "network_id": 1},
+                    {"index": 1, "name": "e0/1", "network_id": 2},
+                ],
+            }
+        },
+        "networks": {
+            "1": {
+                "id": 1,
+                "name": "net-a",
+                "type": "linux_bridge",
+                "runtime": {"bridge_name": "br-a", "driver": "linux_bridge"},
+            },
+            "2": {
+                "id": 2,
+                "name": "net-b",
+                "type": "linux_bridge",
+                "runtime": {"bridge_name": "br-b", "driver": "linux_bridge"},
+            },
+        },
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }
+    calls: dict[str, list] = {
+        "bridge_exists": [],
+        "tap_add": [],
+        "link_master_any": [],
+        "link_up": [],
+        "runtime_pids": [],
+    }
+    monkeypatch.setattr(
+        host_net,
+        "bridge_exists",
+        lambda bridge: calls["bridge_exists"].append(bridge) or True,
+    )
+    monkeypatch.setattr(
+        host_net, "tap_name", lambda lab_id, node_id, iface: f"tap-{node_id}-{iface}"
+    )
+    monkeypatch.setattr(host_net, "tap_exists", lambda tap: False)
+    monkeypatch.setattr(host_net, "tap_add", lambda tap: calls["tap_add"].append(tap))
+    monkeypatch.setattr(
+        host_net,
+        "link_master_any",
+        lambda tap, bridge, driver=None: calls["link_master_any"].append(
+            (tap, bridge, driver)
+        ),
+    )
+    monkeypatch.setattr(host_net, "link_up", lambda tap: calls["link_up"].append(tap))
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.psutil.Process",
+        lambda pid: SimpleNamespace(
+            create_time=lambda: 777.0,
+            cpu_percent=lambda interval=0.0: 0.0,
+            memory_info=lambda: SimpleNamespace(rss=0),
+            is_running=lambda: True,
+            status=lambda: "sleeping",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.runtime_pids.register",
+        lambda pid, kind, lab_id, node_id: calls["runtime_pids"].append(
+            (pid, kind, lab_id, node_id)
+        ),
+    )
+
+    captured: dict[str, object] = {}
+
+    def fake_start_node(**kwargs):
+        captured.update(kwargs)
+        for attachment in kwargs["attachments"]:
+            kwargs["tap_factory"](
+                int(attachment["interface_index"]),
+                attachment["bridge_name"],
+                attachment.get("driver"),
+            )
+        return IolRecord(
+            lab_id=kwargs["lab_id"],
+            node_id=kwargs["node_id"],
+            application_id=101,
+            bridge_id=613,
+            iol_bridge_name="nve-iol-test",
+            image_path=image_path,
+            work_dir=kwargs["work_dir"],
+            console_port=kwargs["console_port"],
+            pid=9007,
+            pid_create_time=777.0,
+            command=[str(image_path), "101"],
+            stdout_log=kwargs["work_dir"] / "stdout.log",
+            stderr_log=kwargs["work_dir"] / "stderr.log",
+            tap_names=["tap-7-0", "tap-7-1"],
+            ubridge_pid=9008,
+            ubridge_port=19008,
+            ubridge_bridges=["nve-iol-test", "nve-iolp-test-0", "nve-iolp-test-1"],
+            udp_ports=[20000, 20001, 20002, 20003],
+        )
+
+    monkeypatch.setattr(
+        "app.services.runtime.iol.IolLauncher.start_node",
+        staticmethod(fake_start_node),
+    )
+
+    runtime = NodeRuntimeService().start_node(lab_data, 7)
+
+    assert runtime["kind"] == "iol"
+    assert runtime["application_id"] == 101
+    assert runtime["bridge_id"] == 613
+    assert runtime["tap_names"] == ["tap-7-0", "tap-7-1"]
+    assert captured["images_root"] == patched_settings.IMAGES_DIR / "iol"
+    assert [a["bridge_name"] for a in captured["attachments"]] == ["br-a", "br-b"]
+    assert calls["bridge_exists"] == ["br-a", "br-b"]
+    assert calls["tap_add"] == ["tap-7-0", "tap-7-1"]
+    assert calls["link_master_any"] == [
+        ("tap-7-0", "br-a", "linux_bridge"),
+        ("tap-7-1", "br-b", "linux_bridge"),
+    ]
+    assert calls["runtime_pids"] == [(9007, "iol", "lab-iol-runtime", 7)]
 
 
 # ---------------------------------------------------------------------------

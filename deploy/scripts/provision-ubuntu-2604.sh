@@ -492,7 +492,9 @@ run apt-get update
 # c3725 in hypervisor mode — confirmed reproducer logged with a core
 # dump but no useful stderr. We build the GNS3 community fork (0.2.24,
 # many crash fixes) from source instead via ``install_dynamips``.
-# ``cmake``, ``libelf-dev``, ``libpcap-dev`` are its build deps.
+# ``cmake``, ``libelf-dev``, ``libpcap-dev`` are Dynamips/uBridge build deps.
+# ``libcap2-bin`` provides setcap so uBridge can attach TAP/raw sockets when
+# launched by the nova-ve service account.
 run apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
@@ -518,7 +520,8 @@ run apt-get install -y --no-install-recommends \
   qemu-utils \
   cmake \
   libelf-dev \
-  libpcap-dev
+  libpcap-dev \
+  libcap2-bin
 
 # Build + install dynamips 0.2.24 (GNS3 community fork). Idempotent:
 # skipped if /usr/local/bin/dynamips is already at that version or
@@ -990,6 +993,27 @@ install_dynamips() {
   "${target}" --version 2>&1 | sed -n '1p' || true
 }
 install_dynamips
+
+install_ubridge() {
+  local target=/usr/local/bin/ubridge
+  local desired_version="0.9.19"
+  if [[ -x "${target}" ]] && "${target}" -v 2>&1 | grep -q "${desired_version}"; then
+    echo "uBridge ${desired_version} already installed at ${target}; refreshing capabilities."
+    run setcap cap_net_admin,cap_net_raw+ep "${target}"
+    return 0
+  fi
+  local src=/var/lib/nova-ve/.build/ubridge
+  run mkdir -p "${src}"
+  if [[ ! -d "${src}/.git" ]]; then
+    run git clone --depth=1 --branch=v"${desired_version}" \
+      https://github.com/GNS3/ubridge.git "${src}"
+  fi
+  run bash -c "cd '${src}' && make -j\$(nproc) >/dev/null"
+  run install -m 0755 "${src}/ubridge" "${target}"
+  run setcap cap_net_admin,cap_net_raw+ep "${target}"
+  "${target}" -v 2>&1 | sed -n '1p' || true
+}
+install_ubridge
 
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/templates /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole /var/lib/nova-ve/guacamole/db /var/lib/nova-ve/runtime "${FRONTEND_ROOT}"

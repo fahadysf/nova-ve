@@ -7,12 +7,12 @@ US-201/US-203: the privileged ``nova-ve-net.py`` helper authorizes pid-taking
 verbs against ``/var/lib/nova-ve/runtime/pids.json``. This module owns the
 read-modify-write cycle for that file.
 
-Schema (one entry per running container/QEMU process)::
+Schema (one entry per running process/container runtime)::
 
     [
         {
             "pid": int,
-            "kind": "docker" | "qemu",
+            "kind": "docker" | "qemu" | "iol",
             "lab_id": str,
             "node_id": int,
             "started_at": float,
@@ -137,7 +137,7 @@ def register(
     """
     if not isinstance(pid, int) or pid <= 0:
         raise ValueError(f"invalid pid: {pid!r}")
-    if kind not in ("docker", "qemu"):
+    if kind not in ("docker", "qemu", "iol"):
         raise ValueError(f"unknown kind: {kind!r}")
     entry = {
         "pid": pid,

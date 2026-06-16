@@ -19,7 +19,8 @@
 #   3. Runs deploy/scripts/provision-ubuntu-2604.sh which:
 #        - installs all OS packages: docker.io, docker-compose-v2, postgresql,
 #          caddy, nodejs+npm, python3+venv, build-essential, libpq-dev, jq,
-#          openssl, dnsmasq, nftables, iproute2, qemu-system-x86, qemu-utils;
+#          openssl, dnsmasq, nftables, iproute2, qemu-system-x86, qemu-utils,
+#          and source-built Dynamips/uBridge runtime helpers;
 #        - creates /var/lib/nova-ve/{labs,images,tmp,guacamole,runtime,www};
 #        - generates random secrets into /etc/nova-ve/backend.env;
 #        - bootstraps the host postgres role/db (nova/nova/novadb);
