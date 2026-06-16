@@ -36,6 +36,26 @@ class IolError(RuntimeError):
     """Raised on IOL launch, bridge, or console failures."""
 
 
+_TELNET_IAC = 255
+_TELNET_WILL = 251
+_TELNET_DO = 253
+_TELNET_SB = 250
+_TELNET_SE = 240
+_TELNET_ECHO = 1
+_TELNET_SUPPRESS_GO_AHEAD = 3
+_TELNET_OPTION_COMMANDS = {251, 252, 253, 254}  # WILL, WONT, DO, DONT
+_TELNET_SERVER_NEGOTIATION = bytes(
+    [
+        _TELNET_IAC,
+        _TELNET_WILL,
+        _TELNET_ECHO,
+        _TELNET_IAC,
+        _TELNET_WILL,
+        _TELNET_SUPPRESS_GO_AHEAD,
+    ]
+)
+
+
 @dataclass
 class IolRecord:
     lab_id: str
@@ -160,6 +180,49 @@ class _UbridgeClient:
         return _Reply(code=100, lines=lines)
 
 
+class _TelnetInputFilter:
+    """Strip telnet command bytes before forwarding client input to IOS."""
+
+    def __init__(self) -> None:
+        self._state = "data"
+
+    def feed(self, data: bytes) -> bytes:
+        output = bytearray()
+        for byte in data:
+            if self._state == "data":
+                if byte == _TELNET_IAC:
+                    self._state = "iac"
+                else:
+                    output.append(byte)
+                continue
+
+            if self._state == "iac":
+                if byte == _TELNET_IAC:
+                    output.append(_TELNET_IAC)
+                    self._state = "data"
+                elif byte in _TELNET_OPTION_COMMANDS:
+                    self._state = "option"
+                elif byte == _TELNET_SB:
+                    self._state = "subnegotiation"
+                else:
+                    self._state = "data"
+                continue
+
+            if self._state == "option":
+                self._state = "data"
+                continue
+
+            if self._state == "subnegotiation":
+                if byte == _TELNET_IAC:
+                    self._state = "subnegotiation_iac"
+                continue
+
+            if self._state == "subnegotiation_iac":
+                self._state = "data" if byte == _TELNET_SE else "subnegotiation"
+
+        return bytes(output)
+
+
 class IolConsoleBridge:
     """Tiny TCP-to-PTY bridge for IOL stdio consoles."""
 
@@ -176,7 +239,7 @@ class IolConsoleBridge:
         self.listen_port = listen_port
         self.log_path = log_path
         self._server: socket.socket | None = None
-        self._clients: list[socket.socket] = []
+        self._clients: dict[socket.socket, _TelnetInputFilter] = {}
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._run,
@@ -206,16 +269,14 @@ class IolConsoleBridge:
                 client.close()
             except OSError:
                 pass
+        self._clients.clear()
         try:
             os.close(self.master_fd)
         except OSError:
             pass
 
     def _drop_client(self, client: socket.socket) -> None:
-        try:
-            self._clients.remove(client)
-        except ValueError:
-            pass
+        self._clients.pop(client, None)
         try:
             client.close()
         except OSError:
@@ -238,7 +299,8 @@ class IolConsoleBridge:
                         try:
                             client, _ = self._server.accept()
                             client.setblocking(False)
-                            self._clients.append(client)
+                            client.sendall(_TELNET_SERVER_NEGOTIATION)
+                            self._clients[client] = _TelnetInputFilter()
                         except OSError:
                             pass
                         continue
@@ -265,6 +327,9 @@ class IolConsoleBridge:
                         continue
                     if not data:
                         self._drop_client(item)
+                        continue
+                    data = self._clients[item].feed(data)
+                    if not data:
                         continue
                     try:
                         os.write(self.master_fd, data)
