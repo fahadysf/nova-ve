@@ -171,6 +171,35 @@ def test_builtin_fortinet_template_matches_fgt_image_aliases(
     assert "paloalto-10.1.1" not in images
 
 
+def test_builtin_iol_template_matches_imported_i86bi_linux_folders(
+    monkeypatch, template_settings
+):
+    template_settings.TEMPLATES_DIR = REPO_ROOT / "backend" / "templates"
+    monkeypatch.setattr(
+        "app.services.template_service.get_settings", lambda: template_settings
+    )
+
+    image_names = [
+        "i86bi_Linux-L3-AdvEnterpriseK9-M2-157-18-May-2018",
+        "i86bi-linux-l2-adventerprisek9-15.2",
+        "c7200-adventerprisek9",
+    ]
+    for image_name in image_names:
+        image_dir = template_settings.IMAGES_DIR / "iol" / image_name
+        image_dir.mkdir(parents=True)
+        (image_dir / f"{image_name}.bin").write_text("image")
+
+    service = TemplateService()
+    iol = service.list_templates("iol")["iol"]
+    images = service.list_images("iol", "iol")
+
+    assert iol["name"] == "IOL"
+    assert iol["image_aliases"] == ["i86bi_linux", "i86bi-linux"]
+    assert "i86bi_Linux-L3-AdvEnterpriseK9-M2-157-18-May-2018" in images
+    assert "i86bi-linux-l2-adventerprisek9-15.2" in images
+    assert "c7200-adventerprisek9" not in images
+
+
 @pytest.mark.asyncio
 async def test_create_node_uses_template_defaults_and_validates_image(prepared_template_data):
     current_user = SimpleNamespace(username="admin", role="admin")
