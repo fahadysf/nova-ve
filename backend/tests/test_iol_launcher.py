@@ -1,7 +1,17 @@
 from pathlib import Path
 
 from app.services import runtime_pids
-from app.services.runtime.iol import IolLauncher
+from app.services.runtime.iol import (
+    _TELNET_DO,
+    _TELNET_ECHO,
+    _TELNET_IAC,
+    _TELNET_SB,
+    _TELNET_SE,
+    _TELNET_SERVER_NEGOTIATION,
+    _TELNET_SUPPRESS_GO_AHEAD,
+    _TelnetInputFilter,
+    IolLauncher,
+)
 
 
 def test_iol_application_id_is_deterministic_and_avoids_active_ids():
@@ -84,6 +94,47 @@ def test_iol_environment_is_inherited_when_iourc_is_absent(tmp_path: Path):
     env = IolLauncher.build_environment(IolLauncher.resolve_iourc(image))
 
     assert env is None
+
+
+def test_iol_console_advertises_remote_echo_to_telnet_clients():
+    assert _TELNET_SERVER_NEGOTIATION == bytes(
+        [
+            _TELNET_IAC,
+            251,
+            _TELNET_ECHO,
+            _TELNET_IAC,
+            251,
+            _TELNET_SUPPRESS_GO_AHEAD,
+        ]
+    )
+
+
+def test_iol_telnet_filter_strips_negotiation_and_preserves_input():
+    parser = _TelnetInputFilter()
+
+    filtered = parser.feed(
+        bytes([_TELNET_IAC, _TELNET_DO, _TELNET_ECHO])
+        + b"show"
+        + bytes([_TELNET_IAC, _TELNET_DO, _TELNET_SUPPRESS_GO_AHEAD])
+        + b" clock\r"
+    )
+
+    assert filtered == b"show clock\r"
+
+
+def test_iol_telnet_filter_handles_split_subnegotiation():
+    parser = _TelnetInputFilter()
+
+    assert parser.feed(bytes([_TELNET_IAC, _TELNET_SB, 31, 0, 80])) == b""
+    assert parser.feed(bytes([0, 24, _TELNET_IAC, _TELNET_SE]) + b"x") == b"x"
+
+
+def test_iol_telnet_filter_preserves_escaped_iac_data():
+    parser = _TelnetInputFilter()
+
+    assert parser.feed(b"a" + bytes([_TELNET_IAC, _TELNET_IAC]) + b"b") == (
+        b"a" + bytes([_TELNET_IAC]) + b"b"
+    )
 
 
 def test_iol_exec_not_found_message_explains_existing_32_bit_image(tmp_path: Path):
