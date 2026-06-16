@@ -365,6 +365,8 @@ class IolLauncher:
                     stderr=slave_fd,
                     start_new_session=True,
                 )
+            except FileNotFoundError as exc:
+                raise IolError(cls.exec_not_found_message(image_path, exc)) from exc
             finally:
                 os.close(slave_fd)
             with cls._lock:
@@ -504,6 +506,18 @@ class IolLauncher:
             command.append("-l")
         command.append(str(application_id))
         return command
+
+    @staticmethod
+    def exec_not_found_message(image_path: Path, exc: FileNotFoundError) -> str:
+        if image_path.exists():
+            return (
+                f"could not execute IOL image {image_path}: {exc}. "
+                "The file exists, so the host is likely missing the ELF loader "
+                "or shared libraries required by this image. Most IOL images are "
+                "32-bit i386 binaries; re-run the nova-ve installer to install "
+                "the 32-bit runtime packages."
+            )
+        return f"IOL image executable not found: {image_path}"
 
     @staticmethod
     def resolve_image(node: dict[str, Any], images_root: Path | None = None) -> Path:

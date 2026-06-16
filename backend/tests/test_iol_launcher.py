@@ -63,6 +63,18 @@ def test_iol_image_resolution_supports_importer_directory_layout(tmp_path: Path)
     assert resolved == image
 
 
+def test_iol_exec_not_found_message_explains_existing_32_bit_image(tmp_path: Path):
+    image = tmp_path / "i86bi-linux.bin"
+    image.write_text("fake")
+
+    message = IolLauncher.exec_not_found_message(
+        image, FileNotFoundError(2, "No such file or directory", str(image))
+    )
+
+    assert "file exists" in message
+    assert "32-bit runtime packages" in message
+
+
 def test_runtime_pid_registry_accepts_iol_kind(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("NOVA_VE_PIDS_JSON", str(tmp_path / "pids.json"))
 
