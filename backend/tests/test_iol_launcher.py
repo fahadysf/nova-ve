@@ -63,6 +63,29 @@ def test_iol_image_resolution_supports_importer_directory_layout(tmp_path: Path)
     assert resolved == image
 
 
+def test_iol_environment_uses_iourc_next_to_image(tmp_path: Path):
+    image_dir = tmp_path / "i86bi-linux-l3"
+    image_dir.mkdir()
+    image = image_dir / "i86bi-linux-l3.bin"
+    image.write_text("fake")
+    iourc = image_dir / "iourc"
+    iourc.write_text("[license]\n")
+
+    env = IolLauncher.build_environment(IolLauncher.resolve_iourc(image))
+
+    assert env is not None
+    assert env["IOURC"] == str(iourc)
+
+
+def test_iol_environment_is_inherited_when_iourc_is_absent(tmp_path: Path):
+    image = tmp_path / "i86bi-linux-l3.bin"
+    image.write_text("fake")
+
+    env = IolLauncher.build_environment(IolLauncher.resolve_iourc(image))
+
+    assert env is None
+
+
 def test_iol_exec_not_found_message_explains_existing_32_bit_image(tmp_path: Path):
     image = tmp_path / "i86bi-linux.bin"
     image.write_text("fake")

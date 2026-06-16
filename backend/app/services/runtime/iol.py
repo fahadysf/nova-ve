@@ -56,9 +56,10 @@ class IolRecord:
     ubridge_port: int
     ubridge_bridges: list[str]
     udp_ports: list[int]
+    iourc_path: Path | None = None
 
     def as_runtime(self) -> dict[str, Any]:
-        return {
+        runtime = {
             "kind": "iol",
             "lab_id": self.lab_id,
             "node_id": self.node_id,
@@ -81,6 +82,9 @@ class IolRecord:
             "ubridge_bridges": self.ubridge_bridges,
             "udp_ports": self.udp_ports,
         }
+        if self.iourc_path is not None:
+            runtime["iourc_path"] = str(self.iourc_path)
+        return runtime
 
 
 @dataclass
@@ -325,6 +329,9 @@ class IolLauncher:
         iol_bridge_name = cls.iol_bridge_name(lab_id, node_id, app_id)
         stdout_log = work_dir / "stdout.log"
         stderr_log = work_dir / "stderr.log"
+        stdout_log.unlink(missing_ok=True)
+        stderr_log.unlink(missing_ok=True)
+        iourc_path = cls.resolve_iourc(image_path)
 
         process: subprocess.Popen[bytes] | None = None
         bridge: IolConsoleBridge | None = None
@@ -363,6 +370,7 @@ class IolLauncher:
                     stdin=slave_fd,
                     stdout=slave_fd,
                     stderr=slave_fd,
+                    env=cls.build_environment(iourc_path),
                     start_new_session=True,
                 )
             except FileNotFoundError as exc:
@@ -409,6 +417,7 @@ class IolLauncher:
                 ubridge_port=ubridge_port,
                 ubridge_bridges=ubridge_bridges,
                 udp_ports=udp_ports,
+                iourc_path=iourc_path,
             )
         except Exception:
             if bridge is not None:
@@ -546,6 +555,21 @@ class IolLauncher:
         if nested.is_file():
             return nested
         raise IolError(f"IOL image not found under {images_root}: {image}")
+
+    @staticmethod
+    def resolve_iourc(image_path: Path) -> Path | None:
+        candidate = image_path.parent / "iourc"
+        if candidate.is_file():
+            return candidate
+        return None
+
+    @staticmethod
+    def build_environment(iourc_path: Path | None) -> dict[str, str] | None:
+        if iourc_path is None:
+            return None
+        env = os.environ.copy()
+        env["IOURC"] = str(iourc_path)
+        return env
 
     @staticmethod
     def application_id(lab_id: str, node_id: int, active_ids: set[int]) -> int:
