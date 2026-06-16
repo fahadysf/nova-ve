@@ -1466,6 +1466,13 @@ async def start_node(
 ):
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    try:
         # The runtime backends are synchronous and can block for tens
         # of seconds (Dynamips IOS boot, QEMU image-copy at first boot,
         # Docker image pull). Run them in a worker thread so the
@@ -1473,11 +1480,11 @@ async def start_node(
         await asyncio.to_thread(NodeRuntimeService().start_node, data, node_id)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
-    except FileNotFoundError:
+    except FileNotFoundError as e:
         return {
-            "code": 404,
+            "code": 400,
             "status": "fail",
-            "message": "Lab does not exist (60038).",
+            "message": f"Runtime dependency or executable not found: {e}",
         }
     except NodeRuntimeError as e:
         return {

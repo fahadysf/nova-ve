@@ -495,6 +495,8 @@ run apt-get update
 # ``cmake``, ``libelf-dev``, ``libpcap-dev`` are Dynamips/uBridge build deps.
 # ``libcap2-bin`` provides setcap so uBridge can attach TAP/raw sockets when
 # launched by the nova-ve service account.
+# IOL/IOU images are commonly 32-bit i386 ELF binaries. The lib32*/libc6-i386
+# runtime packages provide /lib/ld-linux.so.2 and common 32-bit shared libs.
 run apt-get install -y --no-install-recommends \
   ca-certificates \
   curl \
@@ -521,7 +523,11 @@ run apt-get install -y --no-install-recommends \
   cmake \
   libelf-dev \
   libpcap-dev \
-  libcap2-bin
+  libcap2-bin \
+  libc6-i386 \
+  lib32gcc-s1 \
+  lib32stdc++6 \
+  lib32z1
 
 # Build + install dynamips 0.2.24 (GNS3 community fork). Idempotent:
 # skipped if /usr/local/bin/dynamips is already at that version or
