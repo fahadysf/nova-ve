@@ -331,6 +331,8 @@ class NodeRuntimeService:
             runtime = self._start_qemu_node(lab_data, node)
         elif node.get("type") == "docker":
             runtime = self._start_docker_node(lab_data, node)
+        elif node.get("type") in ("iol", "iou"):
+            runtime = self._start_iol_node(lab_data, node)
         elif node.get("type") == "dynamips":
             runtime = self._start_dynamips_node(lab_data, node)
         else:
@@ -458,7 +460,7 @@ class NodeRuntimeService:
                 "planned_mac": planned_mac,
                 "live_mac": None,
                 "runtime_type": runtime_type,
-                "reason": "runtime adapter not implemented",
+                "reason": f"{runtime_type} live-mac read is not supported",
             }
 
         if runtime_type == "qemu":
@@ -690,6 +692,8 @@ class NodeRuntimeService:
             return
         if kind == "docker":
             self._stop_docker_runtime(runtime)
+        elif kind == "iol":
+            self._stop_iol_runtime(runtime)
         elif kind == "dynamips":
             self._stop_dynamips_runtime(runtime)
 
@@ -4940,6 +4944,110 @@ class NodeRuntimeService:
         # more. ``network_names`` is retained on the runtime record only
         # for backwards-compatibility with live-MAC reads — we do NOT
         # prune any docker network here.
+
+    # ------------------------------------------------------------------
+    # IOL / IOU (process-runtime, uBridge-driven)
+    # ------------------------------------------------------------------
+
+    def _start_iol_node(
+        self, lab_data: dict[str, Any], node: dict[str, Any]
+    ) -> dict[str, Any]:
+        from app.services.runtime.iol import IolError, IolLauncher
+
+        lab_id = self._lab_id(lab_data)
+        node_id = int(node["id"])
+        attachments = self._qemu_attachments(lab_data, node)
+        for attachment in attachments:
+            bridge = attachment["bridge_name"]
+            if not host_net.bridge_exists(bridge):
+                raise NodeRuntimeError(
+                    f"Bridge {bridge} for network_id={attachment['network_id']} "
+                    f"is not present on the host; provision it via create_network "
+                    f"before starting the node."
+                )
+
+        provisioned_taps: list[str] = []
+
+        def _tap_factory(
+            interface_index: int,
+            bridge_name: str,
+            driver: str | None = None,
+        ) -> str:
+            tap = host_net.tap_name(lab_id, node_id, interface_index)
+            if not host_net.tap_exists(tap):
+                host_net.tap_add(tap)
+                provisioned_taps.append(tap)
+            host_net.link_master_any(tap, bridge_name, driver=driver)
+            host_net.link_up(tap)
+            return tap
+
+        console_port = self._allocate_console_port("telnet")
+        active_ids = self._active_iol_application_ids()
+        try:
+            record = IolLauncher.start_node(
+                lab_id=lab_id,
+                node_id=node_id,
+                node=node,
+                images_root=self.settings.IMAGES_DIR / "iol",
+                work_dir=self._work_dir(lab_id, node_id),
+                console_port=console_port,
+                attachments=attachments,
+                tap_factory=_tap_factory,
+                active_application_ids=active_ids,
+            )
+        except IolError as exc:
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise NodeRuntimeError(str(exc)) from exc
+        except Exception:
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            raise
+
+        runtime = record.as_runtime()
+        try:
+            runtime_pids.register(int(runtime["pid"]), "iol", lab_id, node_id)
+        except Exception as exc:
+            self._stop_iol_runtime(runtime)
+            raise NodeRuntimeError(
+                f"Failed to register IOL PID in runtime registry: {exc}"
+            ) from exc
+        return runtime
+
+    def _active_iol_application_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for runtime in list(self._registry.values()):
+            if runtime.get("kind") != "iol":
+                continue
+            try:
+                if self._is_runtime_alive(runtime):
+                    ids.add(int(runtime.get("application_id", 0)))
+            except Exception:
+                continue
+        return ids
+
+    def _stop_iol_runtime(self, runtime: dict[str, Any]) -> None:
+        from app.services.runtime.iol import IolLauncher
+
+        try:
+            IolLauncher.stop_runtime(runtime)
+        except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            _logger.warning(
+                "iol.stop.failed",
+                extra={
+                    "lab_id": runtime.get("lab_id"),
+                    "node_id": runtime.get("node_id"),
+                    "pid": runtime.get("pid"),
+                    "error": str(exc),
+                },
+            )
+        for tap in runtime.get("tap_names", []) or []:
+            host_net.try_link_del(tap)
+        self._unregister_pid(runtime.get("pid"))
+        lab_id = runtime.get("lab_id", "")
+        node_id = runtime.get("node_id")
+        if lab_id and node_id is not None:
+            host_net.sweep_node_host_ifaces(lab_id, int(node_id))
 
     # ------------------------------------------------------------------
     # Dynamips (process-runtime, hypervisor-driven)

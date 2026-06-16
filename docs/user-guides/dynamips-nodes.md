@@ -127,7 +127,8 @@ The frontend's node-edit modal will let you override `idlepc`,
 |---|---|
 | Node refuses to start with `no idle-PC value...` | Add `idlepc` to the template, or set it under the node's extras |
 | One Dynamips node pegs a CPU core | Idle-PC is set but wrong for this IOS build — extract it once via the Dynamips hypervisor `vm extract_idle_pc` command and update the template |
-| `dynamips` binary not found | `apt-get install dynamips` (Ubuntu 26.04 universe). The installer adds this automatically; reinstall the host package if you removed it manually |
+| `dynamips` binary not found | Re-run the nova-ve installer. It builds the supported GNS3 Dynamips fork under `/usr/local/bin/dynamips` |
+| `ubridge` binary not found when starting IOL | Re-run the nova-ve installer. It builds uBridge under `/usr/local/bin/ubridge` and applies the TAP/raw-socket capabilities needed by IOL networking |
 | Imported EVE-NG c2691 / c2600 template shows `needs-manual-review` | Only c3725 and c7200 are runtime-supported in Phase 1; other chassis are matched but disabled until their runtime path lands |
 
 ## Phase 1 limitations recap
@@ -138,9 +139,13 @@ The frontend's node-edit modal will let you override `idlepc`,
   CLI subcommand is Phase 1B. For now: rely on EVE-NG-imported idle-PCs
   or set them manually.
 
-## What's next
+## IOL / IOU nodes
 
-Phase 2 adds IOL (Cisco "IOS on Linux" binaries — Cisco-internal
-binaries that you must supply along with a valid `iourc` license file).
-Phase 3 aliases the `iou` node type onto the same IOL backend. See
-the project plan for details.
+IOL nodes run imported `*.bin` images from
+`/var/lib/nova-ve/images/iol/<image-key>/`. nova-ve launches each node with a
+per-node IOU application id, writes a matching `NETMAP` in that node's runtime
+directory, and uses uBridge to connect each declared interface to the lab's
+Linux bridge through an isolated UDP-to-TAP bridge.
+
+Link changes for IOL are start-time only, like Dynamips. Stop and restart the
+affected node after adding, removing, or moving an IOL link.
