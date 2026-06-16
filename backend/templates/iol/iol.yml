@@ -1,5 +1,8 @@
 type: iol
 name: IOL
+image_aliases:
+  - i86bi_linux
+  - i86bi-linux
 cpulimit: 1
 icon_type: router
 cpu: 1
