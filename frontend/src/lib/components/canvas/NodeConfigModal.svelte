@@ -12,7 +12,7 @@
     NodeCatalogTemplate,
     NodeData,
   } from '$lib/types';
-  import { apiGetData } from '$lib/api';
+  import { apiGetData, apiRequest } from '$lib/api';
   import { validateInterfaceNamingScheme } from '$lib/services/interfaceNaming';
 
   export let open = false;
@@ -23,7 +23,20 @@
   export let labPath = '';
 
   type NodeTypeKey = NodeData['type'];
+  type ConsoleModeValue = NodeData['console'];
+  type ConsoleOption = { value: ConsoleModeValue; label: string };
   type ExtrasMap = Record<string, unknown>;
+  type IourcStatus = {
+    installed: boolean;
+    directory: string;
+    path: string | null;
+    filename: string | null;
+    size: number | null;
+    hostname: string;
+    fqdn: string;
+    ips: string[];
+    host_id: string | null;
+  };
 
   type CreateSubmitPayload = {
     type: NodeTypeKey;
@@ -74,6 +87,19 @@
     { key: 'iol', label: 'IOL', icon: Network },
     { key: 'dynamips', label: 'Dynamips', icon: HardDrive },
   ];
+  const CONSOLE_OPTIONS_BY_TYPE: Record<NodeTypeKey, ReadonlyArray<ConsoleOption>> = {
+    qemu: [
+      { value: 'vnc', label: 'vnc' },
+      { value: 'telnet', label: 'telnet' },
+    ],
+    docker: [
+      { value: 'telnet', label: 'telnet' },
+      { value: 'vnc', label: 'vnc' },
+      { value: 'rdp', label: 'rdp' },
+    ],
+    iol: [{ value: 'telnet', label: 'telnet' }],
+    dynamips: [{ value: 'telnet', label: 'telnet' }],
+  };
   const DEFAULT_INTERFACE_NAMING = '';
   const DOCKER_INTERFACE_NAMING_FIXED = 'eth{n}';
 
@@ -116,6 +142,15 @@
   let dirty: Record<string, boolean> = {};
   let lastSignature = '';
   let lastImageConsoleDefaultsSignature = '';
+  let iourcStatus: IourcStatus | null = null;
+  let iourcLoading = false;
+  let iourcError = '';
+  let lastIourcStatusSignature = '';
+  let showIourcUpload = false;
+  let iourcUploadFile: File | null = null;
+  let iourcUploading = false;
+  let iourcUploadError = '';
+  let displayedCapabilities: NodeCatalogTemplate['capabilities'] | null = null;
 
   function templateId(template: NodeCatalogTemplate): string {
     return `${template.type}:${template.key}`;
@@ -134,6 +169,29 @@
     return (catalog?.templates ?? []).filter(
       (template) => template.type === type && !template.paired_parent
     );
+  }
+
+  function consoleOptionsForType(type: NodeTypeKey, current: ConsoleModeValue): ConsoleOption[] {
+    const options = [...CONSOLE_OPTIONS_BY_TYPE[type]];
+    if (current === 'serial' && !options.some((option) => option.value === 'serial')) {
+      options.push({ value: 'serial', label: 'serial (paired-template)' });
+    }
+    return options;
+  }
+
+  function fallbackConsoleModeForType(type: NodeTypeKey, requested: ConsoleModeValue): ConsoleModeValue {
+    if (requested === 'serial') return requested;
+    return CONSOLE_OPTIONS_BY_TYPE[type].some((option) => option.value === requested)
+      ? requested
+      : CONSOLE_OPTIONS_BY_TYPE[type][0].value;
+  }
+
+  function displayedCapabilitiesFor(template: NodeCatalogTemplate | undefined) {
+    if (!template?.capabilities) return null;
+    if (template.type === 'iol') {
+      return { ...template.capabilities, hotplug: false, machine: null };
+    }
+    return template.capabilities;
   }
 
   function pairedTemplates(): NodeCatalogPairedTemplate[] {
@@ -240,7 +298,7 @@
       cpu = node.cpu;
       ram = node.ram;
       ethernet = node.ethernet;
-      consoleMode = node.console;
+      consoleMode = fallbackConsoleModeForType(node.type, node.console);
       delay = node.delay ?? 0;
       interfaceNamingScheme = node.interface_naming_scheme ?? DEFAULT_INTERFACE_NAMING;
       const baseExtras = defaultExtrasFromTemplate(matchingTemplate);
@@ -284,7 +342,7 @@
       cpu = setIfClean('cpu', cpu, 1);
       ram = setIfClean('ram', ram, 1024);
       ethernet = setIfClean('ethernet', ethernet, 1);
-      consoleMode = setIfClean('consoleMode', consoleMode, 'telnet');
+      consoleMode = setIfClean('consoleMode', consoleMode, fallbackConsoleModeForType(selectedType, 'telnet'));
       delay = setIfClean('delay', delay, 0);
       namePrefix = setIfClean('namePrefix', namePrefix, 'Node');
       extras = force ? {} : extras;
@@ -296,7 +354,11 @@
     cpu = setIfClean('cpu', cpu, template.defaults.cpu);
     ram = setIfClean('ram', ram, template.defaults.ram);
     ethernet = setIfClean('ethernet', ethernet, template.defaults.ethernet);
-    consoleMode = setIfClean('consoleMode', consoleMode, template.defaults.console_type);
+    consoleMode = setIfClean(
+      'consoleMode',
+      consoleMode,
+      fallbackConsoleModeForType(template.type, template.defaults.console_type),
+    );
     delay = setIfClean('delay', delay, template.defaults.delay);
     namePrefix = setIfClean('namePrefix', namePrefix, template.name);
 
@@ -407,7 +469,7 @@
           cpu,
           ram,
           ethernet,
-          console: consoleMode,
+          console: fallbackConsoleModeForType(node.type, consoleMode),
           delay,
           extras,
           interface_naming_scheme: normalizedInterfaceNamingScheme(),
@@ -452,7 +514,7 @@
         cpu,
         ram,
         ethernet,
-        console: consoleMode,
+        console: fallbackConsoleModeForType(template.type, consoleMode),
         delay,
         extras,
         interface_naming_scheme: normalizedInterfaceNamingScheme(),
@@ -464,19 +526,35 @@
     applyTemplateDefaults(selectedTemplate);
   }
 
-  $: selectedTemplate = templateForId(selectedTemplateId);
-  $: selectedImageOption = imageOptionFor(selectedTemplate, image);
-  $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
-  $: visiblePairedTemplates = catalog ? pairedTemplates() : [];
-  $: selectedPairedTemplate = pairedTemplateKey ? pairedTemplateForKey(pairedTemplateKey) : undefined;
-  $: pairedActive = mode === 'create' && Boolean(selectedPairedTemplate);
-  $: interfaceNamingError = interfaceNamingErrorFor(interfaceNamingScheme, selectedType);
-  $: selectedInterfaceNamingPreset = presetValueFor(interfaceNamingScheme);
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
   $: if (open && catalog && signature !== lastSignature) {
     lastSignature = signature;
     lastImageConsoleDefaultsSignature = '';
     initializeForm();
+  }
+  $: selectedTemplate = templateForId(selectedTemplateId);
+  $: displayedCapabilities = displayedCapabilitiesFor(selectedTemplate);
+  $: selectedImageOption = imageOptionFor(selectedTemplate, image);
+  $: currentConsoleType = mode === 'edit' && node ? node.type : selectedTemplate?.type ?? selectedType;
+  $: consoleOptions = consoleOptionsForType(currentConsoleType, consoleMode);
+  $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
+  $: visiblePairedTemplates = catalog ? pairedTemplates() : [];
+  $: selectedPairedTemplate = pairedTemplateKey ? pairedTemplateForKey(pairedTemplateKey) : undefined;
+  $: pairedActive = mode === 'create' && Boolean(selectedPairedTemplate);
+  $: iourcRelevant = !pairedActive && selectedTemplate?.type === 'iol';
+  $: interfaceNamingError = interfaceNamingErrorFor(interfaceNamingScheme, selectedType);
+  $: selectedInterfaceNamingPreset = presetValueFor(interfaceNamingScheme);
+  $: iourcStatusSignature = `${open}:${iourcRelevant}:${selectedTemplate?.key ?? ''}`;
+  $: if (iourcStatusSignature !== lastIourcStatusSignature) {
+    lastIourcStatusSignature = iourcStatusSignature;
+    if (open && iourcRelevant) {
+      void fetchIourcStatus();
+    } else {
+      iourcStatus = null;
+      iourcLoading = false;
+      iourcError = '';
+      showIourcUpload = false;
+    }
   }
   $: imageConsoleDefaultsSignature = `${open}:${selectedTemplate?.type ?? ''}:${selectedTemplate?.key ?? ''}:${image}:${selectedImageOption?.vnc_port ?? ''}`;
   $: if (open && catalog && imageConsoleDefaultsSignature !== lastImageConsoleDefaultsSignature) {
@@ -514,6 +592,55 @@
       previewError = true;
     } finally {
       previewLoading = false;
+    }
+  }
+
+  async function fetchIourcStatus() {
+    iourcLoading = true;
+    iourcError = '';
+    try {
+      iourcStatus = await apiGetData<IourcStatus>('/system/iourc', { suppressToast: true });
+    } catch {
+      iourcStatus = null;
+      iourcError = 'IOURC status unavailable.';
+    } finally {
+      iourcLoading = false;
+    }
+  }
+
+  function openIourcUpload() {
+    iourcUploadFile = null;
+    iourcUploadError = '';
+    showIourcUpload = true;
+  }
+
+  function onIourcFileChange(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    iourcUploadFile = input.files?.[0] ?? null;
+    iourcUploadError = '';
+  }
+
+  async function uploadIourc() {
+    if (!iourcUploadFile) {
+      iourcUploadError = 'Select an IOURC license file first.';
+      return;
+    }
+    const body = new FormData();
+    body.append('file', iourcUploadFile);
+    iourcUploading = true;
+    iourcUploadError = '';
+    try {
+      const response = await apiRequest<IourcStatus>('/system/iourc', {
+        method: 'POST',
+        body,
+        suppressToast: true,
+      });
+      iourcStatus = response.data;
+      showIourcUpload = false;
+    } catch (error) {
+      iourcUploadError = error instanceof Error ? error.message : 'Upload failed.';
+    } finally {
+      iourcUploading = false;
     }
   }
 
@@ -753,15 +880,46 @@
                   disabled={isStoppedOnly('console')}
                   class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 >
-                  <option value="telnet">telnet</option>
-                  <option value="vnc">vnc</option>
-                  <option value="rdp">rdp</option>
-                  {#if consoleMode === 'serial'}
-                    <option value="serial">serial (paired-template)</option>
-                  {/if}
+                  {#each consoleOptions as option}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
                 </select>
               </label>
             </div>
+
+            {#if iourcRelevant}
+              <div class="rounded-2xl border border-slate-800 bg-slate-900/40 p-4" data-testid="iourc-status-panel">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">IOURC license</div>
+                    {#if iourcLoading}
+                      <div class="mt-1 text-sm text-slate-400">Checking license status…</div>
+                    {:else if iourcError}
+                      <div class="mt-1 text-sm text-amber-300">{iourcError}</div>
+                    {:else if iourcStatus?.installed}
+                      <div class="mt-1 text-sm text-emerald-300">Installed</div>
+                      <div class="mt-1 text-xs text-slate-500">
+                        {iourcStatus.filename ?? 'iourc'} · {iourcStatus.size ?? 0} bytes
+                      </div>
+                    {:else}
+                      <div class="mt-1 text-sm text-amber-300">Not available</div>
+                      <div class="mt-1 text-xs text-slate-500">
+                        Upload an IOURC file or place one in {iourcStatus?.directory ?? '/var/lib/nova-ve/iourc'}.
+                      </div>
+                    {/if}
+                  </div>
+                  {#if !iourcStatus?.installed}
+                    <button
+                      type="button"
+                      class="rounded-full border border-blue-500/40 bg-blue-500/15 px-3 py-1.5 text-sm text-blue-100 transition hover:bg-blue-500/25"
+                      on:click={openIourcUpload}
+                    >
+                      Upload IOURC
+                    </button>
+                  {/if}
+                </div>
+              </div>
+            {/if}
 
             <div class="grid gap-4 md:grid-cols-3">
               <label class="block">
@@ -1014,8 +1172,8 @@
               </div>
             {/if}
 
-            {#if selectedTemplate?.capabilities}
-              {@const caps = selectedTemplate.capabilities}
+            {#if displayedCapabilities}
+              {@const caps = displayedCapabilities}
               <div class="rounded-2xl border border-slate-700 bg-slate-900/60 p-4" data-testid="capabilities-banner">
                 <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Capabilities</div>
                 <div class="mt-2 flex flex-wrap gap-2 text-[11px]">
@@ -1080,6 +1238,87 @@
           </div>
         </form>
       {/if}
+    </div>
+  </div>
+{/if}
+
+{#if showIourcUpload && iourcRelevant}
+  <div class="fixed inset-0 z-[60] flex items-center justify-center bg-slate-950/70 p-4 backdrop-blur-sm">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Upload IOURC license"
+      class="w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-950 p-5 shadow-2xl shadow-black/50"
+    >
+      <div class="flex items-start justify-between gap-4">
+        <div>
+          <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">IOURC license</div>
+          <div class="mt-1 text-base font-semibold text-slate-100">Upload license file</div>
+        </div>
+        <button
+          type="button"
+          class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-800 bg-slate-900 text-slate-300 transition hover:border-blue-500/40 hover:text-white"
+          aria-label="Close IOURC upload"
+          on:click={() => (showIourcUpload = false)}
+        >
+          ×
+        </button>
+      </div>
+
+      <div class="mt-4 rounded-xl border border-slate-800 bg-slate-900/60 p-3 text-xs text-slate-300">
+        <div class="grid gap-2 sm:grid-cols-2">
+          <div>
+            <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Hostname</div>
+            <div class="mt-0.5 font-mono text-slate-100">{iourcStatus?.hostname ?? 'unknown'}</div>
+          </div>
+          <div>
+            <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">FQDN</div>
+            <div class="mt-0.5 font-mono text-slate-100">{iourcStatus?.fqdn ?? 'unknown'}</div>
+          </div>
+          <div>
+            <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Host ID</div>
+            <div class="mt-0.5 font-mono text-slate-100">{iourcStatus?.host_id ?? 'unavailable'}</div>
+          </div>
+          <div>
+            <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">IP addresses</div>
+            <div class="mt-0.5 font-mono text-slate-100">{iourcStatus?.ips?.length ? iourcStatus.ips.join(', ') : 'unavailable'}</div>
+          </div>
+        </div>
+      </div>
+
+      <label class="mt-4 block">
+        <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">License file</div>
+        <input
+          type="file"
+          accept=".iourc,text/plain"
+          on:change={onIourcFileChange}
+          class="block w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-100 file:mr-3 file:rounded-lg file:border-0 file:bg-blue-500/20 file:px-3 file:py-1.5 file:text-sm file:text-blue-100"
+        />
+      </label>
+
+      {#if iourcUploadError}
+        <div class="mt-3 rounded-xl border border-red-500/40 bg-red-500/10 p-3 text-sm text-red-200">
+          {iourcUploadError}
+        </div>
+      {/if}
+
+      <div class="mt-5 flex justify-end gap-3">
+        <button
+          type="button"
+          class="rounded-full border border-slate-800 px-4 py-2 text-sm text-slate-300 transition hover:border-blue-500/40 hover:text-white"
+          on:click={() => (showIourcUpload = false)}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          disabled={!iourcUploadFile || iourcUploading}
+          class="rounded-full border border-blue-500/40 bg-blue-500/15 px-4 py-2 text-sm text-blue-100 transition hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-60"
+          on:click={uploadIourc}
+        >
+          {iourcUploading ? 'Uploading…' : 'Upload'}
+        </button>
+      </div>
     </div>
   </div>
 {/if}

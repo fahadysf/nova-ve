@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from app.services import iourc_service
+
 
 _logger = logging.getLogger("nova-ve.runtime.iol")
 
@@ -622,11 +624,11 @@ class IolLauncher:
         raise IolError(f"IOL image not found under {images_root}: {image}")
 
     @staticmethod
-    def resolve_iourc(image_path: Path) -> Path | None:
+    def resolve_iourc(image_path: Path, system_root: Path | None = None) -> Path | None:
         candidate = image_path.parent / "iourc"
         if candidate.is_file():
             return candidate
-        return None
+        return iourc_service.find_iourc_file(system_root)
 
     @staticmethod
     def build_environment(iourc_path: Path | None) -> dict[str, str] | None:

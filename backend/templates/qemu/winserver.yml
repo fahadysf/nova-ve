@@ -4,7 +4,7 @@ description: Microsoft Windows Server
 icon_type: server
 cpu: 4
 ram: 4096
-console_type: rdp
+console_type: vnc
 qemu_options: -machine type=pc,accel=kvm -cpu host,+fsgsbase -vga qxl -usbdevice tablet -boot order=dc
 capabilities:
   machine: pc

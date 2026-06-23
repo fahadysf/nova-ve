@@ -339,14 +339,14 @@
   }
 
   function resolveNodeCapabilities(node: NodeData): TemplateCapabilities {
-    if (node.capabilities) {
-      return node.capabilities;
-    }
-
-    const templateCapabilities = nodeCatalog?.templates.find(
+    const templateCapabilities = node.capabilities ?? nodeCatalog?.templates.find(
       (template) => template.key === node.template && template.type === node.type
     )?.capabilities;
-    return templateCapabilities ?? defaultTemplateCapabilities;
+    const capabilities = templateCapabilities ?? defaultTemplateCapabilities;
+    if (node.type === 'iol') {
+      return { ...capabilities, hotplug: false, machine: null };
+    }
+    return capabilities;
   }
 
   function resolveEndpointNode(endpoint: DragEndpoint | null): NodeData | null {

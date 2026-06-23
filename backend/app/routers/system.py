@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
@@ -7,6 +8,7 @@ from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services.cloud_inventory_service import list_nat_clouds
 from app.services.bridge_cloud_service import list_bridge_clouds
+from app.services import iourc_service
 from app.services.node_runtime_service import NodeRuntimeService
 import psutil
 
@@ -92,6 +94,43 @@ async def get_settings_route(
             "numa": "0",
             "realtime_update": "eco",
         },
+    }
+
+
+@router.get("/system/iourc")
+async def get_iourc_status(
+    current_user: UserRead = Depends(get_current_user),
+):
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "IOURC license status fetched.",
+        "data": iourc_service.status().as_dict(),
+    }
+
+
+@router.post("/system/iourc")
+async def upload_iourc(
+    file: UploadFile = File(...),
+    current_user: UserRead = Depends(get_current_user),
+):
+    content = await file.read(iourc_service.IOURC_MAX_BYTES + 1)
+    try:
+        saved = iourc_service.store_uploaded_iourc(content)
+    except iourc_service.IourcError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "code": 400,
+                "status": "fail",
+                "message": str(exc),
+            },
+        )
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "IOURC license uploaded.",
+        "data": saved.as_dict(),
     }
 
 

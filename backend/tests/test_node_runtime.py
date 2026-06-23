@@ -384,6 +384,29 @@ async def test_start_node_fails_when_qemu_image_missing(monkeypatch, patched_set
 
 
 @pytest.mark.asyncio
+async def test_start_node_rejects_legacy_qemu_rdp_console(monkeypatch, patched_settings, sample_lab):
+    recorded_runs = []
+    _mock_runtime_binaries(monkeypatch)
+    _stub_host_net_for_qemu_start(monkeypatch)
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", _fake_subprocess_run_factory(recorded_runs))
+
+    rdp_lab = dict(sample_lab)
+    rdp_lab["nodes"] = {
+        "1": {
+            **sample_lab["nodes"]["1"],
+            "template": "win",
+            "console": "rdp",
+        }
+    }
+    (patched_settings.LABS_DIR / "sample.json").write_text(json.dumps(rdp_lab))
+
+    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+
+    assert response["code"] == 400
+    assert "QEMU RDP consoles are not supported" in response["message"]
+
+
+@pytest.mark.asyncio
 async def test_rdp_file_generation_uses_console_runtime(monkeypatch, patched_settings, sample_lab):
     monkeypatch.setattr(
         "app.routers.labs.NodeRuntimeService",

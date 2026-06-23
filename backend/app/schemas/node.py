@@ -6,6 +6,26 @@ from pydantic import BaseModel, Field, model_validator
 from app.schemas.port import PortPosition
 
 
+ConsoleMode = Literal["telnet", "vnc", "rdp"]
+
+SUPPORTED_CONSOLE_MODES_BY_TYPE: dict[str, set[str]] = {
+    "qemu": {"telnet", "vnc"},
+    "docker": {"telnet", "vnc", "rdp"},
+    "iol": {"telnet"},
+    "dynamips": {"telnet"},
+}
+
+
+def validate_console_mode_for_type(node_type: str, console: str) -> None:
+    allowed = SUPPORTED_CONSOLE_MODES_BY_TYPE.get(node_type, {"telnet"})
+    if console not in allowed:
+        allowed_list = ", ".join(sorted(allowed))
+        raise ValueError(
+            f"Console mode {console!r} is not supported for {node_type} nodes; "
+            f"supported modes: {allowed_list}."
+        )
+
+
 class NodeInterfaceRuntime(BaseModel):
     """US-204b: per-interface runtime state used as the freshness oracle
     for stale-rollback detection.
@@ -93,7 +113,7 @@ class NodeCreate(BaseModel):
     type: Literal["qemu", "docker", "iol", "dynamips"] = "qemu"
     template: str
     image: str
-    console: Literal["telnet", "vnc", "rdp"] = "telnet"
+    console: ConsoleMode = "telnet"
     cpu: int = 1
     ram: int = 1024
     ethernet: int = 1
@@ -108,6 +128,7 @@ class NodeCreate(BaseModel):
     def _check_iface_naming_scheme(self):
         if self.type == 'docker' and self.interface_naming_scheme not in (None, 'eth{n}'):
             raise ValueError("Docker nodes use eth{n} naming; field is system-fixed")
+        validate_console_mode_for_type(self.type, self.console)
         return self
 
 
@@ -125,13 +146,19 @@ class NodeFromTemplate(BaseModel):
     template_key: str
     name: str
     image: str
-    console: Optional[Literal["telnet", "vnc", "rdp"]] = None
+    console: Optional[ConsoleMode] = None
     cpu: Optional[int] = None
     ram: Optional[int] = None
     ethernet: Optional[int] = None
     left: int = 0
     top: int = 0
     extras: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode='after')
+    def _check_console_mode(self):
+        if self.console is not None:
+            validate_console_mode_for_type(self.template_type, self.console)
+        return self
 
 
 class NodeFromPairedTemplate(BaseModel):
@@ -162,7 +189,7 @@ class NodeBatchCreate(BaseModel):
     type: Literal["qemu", "docker", "iol", "dynamips"] = "qemu"
     template: str
     image: str
-    console: Literal["telnet", "vnc", "rdp"] = "telnet"
+    console: ConsoleMode = "telnet"
     cpu: int = 1
     ram: int = 1024
     ethernet: int = 1
@@ -177,6 +204,7 @@ class NodeBatchCreate(BaseModel):
     def _check_iface_naming_scheme(self):
         if self.type == 'docker' and self.interface_naming_scheme not in (None, 'eth{n}'):
             raise ValueError("Docker nodes use eth{n} naming; field is system-fixed")
+        validate_console_mode_for_type(self.type, self.console)
         return self
 
 

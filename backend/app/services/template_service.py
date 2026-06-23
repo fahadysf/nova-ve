@@ -233,7 +233,9 @@ def _default_capabilities(template_type: str) -> dict[str, Any]:
     """Return capability defaults inferred from node type (backward-compat for templates without capabilities block)."""
     if template_type == "docker":
         return {"hotplug": True, "max_nics": _DOCKER_MAX_NICS_DEFAULT, "machine": None}
-    # qemu, iol, dynamips default to the runtime-capable q35 profile
+    if template_type == "iol":
+        return {"hotplug": False, "max_nics": _QEMU_MAX_NICS_DEFAULT, "machine": None}
+    # qemu and older/unknown runtime templates default to the runtime-capable q35 profile
     return {"hotplug": True, "max_nics": _QEMU_MAX_NICS_DEFAULT, "machine": "q35"}
 
 

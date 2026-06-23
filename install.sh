@@ -21,7 +21,7 @@
 #          caddy, nodejs+npm, python3+venv, build-essential, libpq-dev, jq,
 #          openssl, dnsmasq, nftables, iproute2, qemu-system-x86, qemu-utils,
 #          and source-built Dynamips/uBridge runtime helpers;
-#        - creates /var/lib/nova-ve/{labs,images,tmp,guacamole,runtime,www};
+#        - creates /var/lib/nova-ve/{labs,images,iourc,tmp,guacamole,runtime,www};
 #        - generates random secrets into /etc/nova-ve/backend.env;
 #        - bootstraps the host postgres role/db (nova/nova/novadb);
 #        - bootstraps the dockerized guacamole stack (guacdb/guacd/guacamole);
@@ -195,6 +195,7 @@ BASE_DATA_DIR="${BASE_DATA_DIR:-/var/lib/nova-ve}"
 LABS_DIR="${LABS_DIR:-${BASE_DATA_DIR}/labs}"
 IMAGES_DIR="${IMAGES_DIR:-${BASE_DATA_DIR}/images}"
 TMP_DIR="${TMP_DIR:-${BASE_DATA_DIR}/tmp}"
+IOURC_DIR="${IOURC_DIR:-${BASE_DATA_DIR}/iourc}"
 COOKIE_SECURE="${COOKIE_SECURE:-False}"
 COOKIE_SAMESITE="${COOKIE_SAMESITE:-lax}"
 DB_HOST="${DB_HOST:-localhost}"
@@ -280,6 +281,7 @@ Skip on next install: \`NOVA_VE_SKIP_DEMO_IMAGES=1 curl -fsSL ... | sudo bash\`.
 | \`/var/lib/nova-ve/www\` | Caddy webroot (built SPA) |
 | \`/var/lib/nova-ve/labs\` | Lab JSON files |
 | \`/var/lib/nova-ve/images\` | VM images (qemu/, etc.) |
+| \`/var/lib/nova-ve/iourc\` | System IOURC license directory for IOL / IOU nodes |
 | \`/var/lib/nova-ve/runtime\` | PID registry, namespace bookkeeping |
 | \`/var/lib/nova-ve/guacamole/db\` | Postgres data dir for the dockerized guacamole DB |
 | \`/var/lib/nova-ve/tmp\` | Scratch dir |
@@ -299,6 +301,7 @@ Skip on next install: \`NOVA_VE_SKIP_DEMO_IMAGES=1 curl -fsSL ... | sudo bash\`.
 | \`LABS_DIR\` | \`${LABS_DIR}\` |
 | \`IMAGES_DIR\` | \`${IMAGES_DIR}\` |
 | \`TMP_DIR\` | \`${TMP_DIR}\` |
+| \`IOURC_DIR\` | \`${IOURC_DIR}\` |
 | \`COOKIE_SECURE\` | \`${COOKIE_SECURE}\` |
 | \`COOKIE_SAMESITE\` | \`${COOKIE_SAMESITE}\` |
 | \`NOVA_VE_ADMIN_USERNAME\` | \`${NOVA_VE_ADMIN_USERNAME}\` |

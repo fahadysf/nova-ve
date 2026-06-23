@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.routers.labs import _default_interfaces
-from app.schemas.node import NodeBase, NodeCreate, NodeBatchCreate
+from app.schemas.node import NodeBase, NodeCreate, NodeBatchCreate, NodeFromTemplate
 from app.services.template_service import (
     TemplateError,
     _validate_interface_naming,
@@ -177,6 +177,27 @@ class TestNodeCreateValidator:
         )
         assert nc.interface_naming_scheme == "eth{n}"
 
+    def test_qemu_rejects_rdp_console(self):
+        with pytest.raises(ValidationError) as exc_info:
+            NodeCreate(
+                name="win",
+                type="qemu",
+                template="win",
+                image="win",
+                console="rdp",
+            )
+        assert "Console mode 'rdp' is not supported for qemu nodes" in str(exc_info.value)
+
+    def test_docker_accepts_rdp_console(self):
+        nc = NodeCreate(
+            name="rdp-container",
+            type="docker",
+            template="docker",
+            image="example/rdp:latest",
+            console="rdp",
+        )
+        assert nc.console == "rdp"
+
 
 class TestNodeBatchCreateValidator:
     def test_docker_rejects_custom_scheme(self):
@@ -199,6 +220,50 @@ class TestNodeBatchCreateValidator:
             interface_naming_scheme="eth{n}",
         )
         assert nb.interface_naming_scheme == "eth{n}"
+
+    def test_qemu_rejects_rdp_console(self):
+        with pytest.raises(ValidationError) as exc_info:
+            NodeBatchCreate(
+                name_prefix="win",
+                type="qemu",
+                template="win",
+                image="win",
+                console="rdp",
+            )
+        assert "Console mode 'rdp' is not supported for qemu nodes" in str(exc_info.value)
+
+    def test_docker_accepts_rdp_console(self):
+        nb = NodeBatchCreate(
+            name_prefix="rdp-container",
+            type="docker",
+            template="docker",
+            image="example/rdp:latest",
+            console="rdp",
+        )
+        assert nb.console == "rdp"
+
+
+class TestNodeFromTemplateValidator:
+    def test_qemu_rejects_rdp_console_override(self):
+        with pytest.raises(ValidationError) as exc_info:
+            NodeFromTemplate(
+                template_type="qemu",
+                template_key="win",
+                name="win",
+                image="win",
+                console="rdp",
+            )
+        assert "Console mode 'rdp' is not supported for qemu nodes" in str(exc_info.value)
+
+    def test_docker_accepts_rdp_console_override(self):
+        request = NodeFromTemplate(
+            template_type="docker",
+            template_key="docker",
+            name="rdp-container",
+            image="example/rdp:latest",
+            console="rdp",
+        )
+        assert request.console == "rdp"
 
 
 # ---------------------------------------------------------------------------

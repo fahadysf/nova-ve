@@ -32,7 +32,9 @@ Each `*.image` file under `addons/dynamips/` becomes a single-file image: it is 
 
 ## IOL images
 
-Each `*.bin` file under `addons/iol/bin/` becomes one image. **The `iourc` license file is copied alongside every IOL image** if it exists in the source bin directory. The importer records `meta.iourc_present` (`true` / `false`) on every IOL entry; entries with `iourc_present: false` will not boot at runtime — re-import or hand-copy the license file before instantiating an IOL node.
+Each `*.bin` file under `addons/iol/bin/` becomes one image. **The `iourc` license file is copied alongside every IOL image** if it exists in the source bin directory. The importer records `meta.iourc_present` (`true` / `false`) on every IOL entry.
+
+At runtime nova-ve first uses an image-local `iourc` next to the selected IOL image. If that file is absent, it falls back to the system IOURC directory, `/var/lib/nova-ve/iourc/` by default. Upload the license from the IOL node add modal, or place a valid file in that directory manually. The node add modal shows whether the system IOURC license is installed and displays the host identity details needed to prepare a license.
 
 ## Docker images
 

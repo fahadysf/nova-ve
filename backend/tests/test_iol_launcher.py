@@ -87,11 +87,39 @@ def test_iol_environment_uses_iourc_next_to_image(tmp_path: Path):
     assert env["IOURC"] == str(iourc)
 
 
+def test_iol_iourc_prefers_image_local_over_system(tmp_path: Path):
+    image_dir = tmp_path / "image"
+    image_dir.mkdir()
+    image = image_dir / "i86bi-linux-l3.bin"
+    image.write_text("fake")
+    local_iourc = image_dir / "iourc"
+    local_iourc.write_text("[local]\n")
+    system_dir = tmp_path / "system"
+    system_dir.mkdir()
+    (system_dir / "iourc").write_text("[system]\n")
+
+    assert IolLauncher.resolve_iourc(image, system_dir) == local_iourc
+
+
+def test_iol_iourc_falls_back_to_system_directory(tmp_path: Path):
+    image = tmp_path / "i86bi-linux-l3.bin"
+    image.write_text("fake")
+    system_dir = tmp_path / "system"
+    system_dir.mkdir()
+    system_iourc = system_dir / "iourc"
+    system_iourc.write_text("[system]\n")
+
+    env = IolLauncher.build_environment(IolLauncher.resolve_iourc(image, system_dir))
+
+    assert env is not None
+    assert env["IOURC"] == str(system_iourc)
+
+
 def test_iol_environment_is_inherited_when_iourc_is_absent(tmp_path: Path):
     image = tmp_path / "i86bi-linux-l3.bin"
     image.write_text("fake")
 
-    env = IolLauncher.build_environment(IolLauncher.resolve_iourc(image))
+    env = IolLauncher.build_environment(IolLauncher.resolve_iourc(image, tmp_path / "missing"))
 
     assert env is None
 

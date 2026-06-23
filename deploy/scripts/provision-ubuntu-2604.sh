@@ -215,6 +215,7 @@ ensure_backend_env() {
   local target_host
   local expire_seconds
   local base_data_dir
+  local iourc_dir
   local database_url
   local db_host
   local db_name
@@ -254,6 +255,10 @@ ensure_backend_env() {
   # webroot at ${base_data_dir}/www; secrets inside (db_password, backend.env)
   # are individually protected with mode 0600.
   install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 "${base_data_dir}"
+  iourc_dir="$(awk -F= '/^IOURC_DIR=/{print $2}' "${ENV_FILE}" | tail -n1)"
+  iourc_dir="${iourc_dir:-${base_data_dir}/iourc}"
+  ensure_env_var "IOURC_DIR" "${iourc_dir}"
+  install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0700 "${iourc_dir}"
   if [[ ! -s "${pw_file}" ]]; then
     db_password="$(generate_urlsafe_secret 24)"
     install -m 0600 -o "${APP_OWNER}" -g "${APP_GROUP}" /dev/null "${pw_file}"
@@ -1023,6 +1028,7 @@ install_ubridge
 
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs /var/lib/nova-ve/images /var/lib/nova-ve/templates /var/lib/nova-ve/tmp /var/lib/nova-ve/guacamole /var/lib/nova-ve/guacamole/db /var/lib/nova-ve/runtime "${FRONTEND_ROOT}"
+run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0700 /var/lib/nova-ve/iourc
 run chown -R "${APP_OWNER}:${APP_GROUP}" /var/lib/nova-ve
 install_nova_ve_net_helper
 run systemctl enable docker
