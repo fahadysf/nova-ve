@@ -8,6 +8,7 @@ ENV_FILE="${LOCAL_ROOT}/backend.env"
 LABS_DIR="${LOCAL_ROOT}/labs"
 IMAGES_DIR="${LOCAL_ROOT}/images"
 TMP_DIR="${LOCAL_ROOT}/tmp"
+IOURC_DIR="${LOCAL_ROOT}/iourc"
 GUACAMOLE_STATE_DIR="${LOCAL_ROOT}/guacamole"
 
 detect_docker_host() {
@@ -45,7 +46,7 @@ DB_PASSWORD="${DB_PASSWORD:-$(generate_password)}"
 GUACAMOLE_SECRET="${GUACAMOLE_JSON_SECRET_KEY:-$(generate_secret)}"
 GUACAMOLE_DB_PASSWORD="${GUACAMOLE_DB_PASSWORD:-$(generate_password)}"
 
-mkdir -p "${LOCAL_ROOT}" "${LABS_DIR}" "${IMAGES_DIR}" "${TMP_DIR}" "${GUACAMOLE_STATE_DIR}/db"
+mkdir -p "${LOCAL_ROOT}" "${LABS_DIR}" "${IMAGES_DIR}" "${TMP_DIR}" "${IOURC_DIR}" "${GUACAMOLE_STATE_DIR}/db"
 printf '%s\n' "${DB_PASSWORD}" > "${LOCAL_ROOT}/db_password"
 chmod 600 "${LOCAL_ROOT}/db_password"
 cp -f "${REPO_ROOT}/backend/labs/alpine-docker-demo.json" "${LABS_DIR}/alpine-docker-demo.json"
@@ -63,6 +64,7 @@ BASE_DATA_DIR=${LOCAL_ROOT}
 LABS_DIR=${LABS_DIR}
 IMAGES_DIR=${IMAGES_DIR}
 TMP_DIR=${TMP_DIR}
+IOURC_DIR=${IOURC_DIR}
 DOCKER_HOST=${DOCKER_HOST_VALUE}
 GUACAMOLE_PUBLIC_PATH=/html5/
 GUACAMOLE_INTERNAL_URL=http://127.0.0.1:18081/html5/

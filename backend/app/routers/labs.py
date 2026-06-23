@@ -22,6 +22,7 @@ from app.schemas.node import (
     NodeFromPairedTemplate,
     NodeFromTemplate,
     NodeUpdate,
+    validate_console_mode_for_type,
 )
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
@@ -223,6 +224,15 @@ def _validate_node_update_request(node: dict, request: NodeUpdate, node_running:
             blocked_list = ", ".join(blocked_fields)
             return f"Stop the node before changing: {blocked_list}."
 
+    if "console" in requested_fields and _changed("console"):
+        try:
+            validate_console_mode_for_type(
+                str(node.get("type", "qemu")),
+                str(payload.get("console", "")),
+            )
+        except ValueError as exc:
+            return str(exc)
+
     if "image" in requested_fields and _changed("image"):
         try:
             TemplateService().validate_node_request(
@@ -296,6 +306,23 @@ def _build_node_payload(
         ),
         "extras": merged_extras,
     }
+
+
+def _console_mode_from_create_request(request: NodeCreate | NodeBatchCreate, template) -> str:
+    if "console" in request.model_fields_set:
+        return str(request.console)
+    return str(template.console_type or "telnet")
+
+
+def _validate_create_console_request(request: NodeCreate | NodeBatchCreate, template) -> str | None:
+    try:
+        validate_console_mode_for_type(
+            str(request.type),
+            _console_mode_from_create_request(request, template),
+        )
+    except ValueError as exc:
+        return str(exc)
+    return None
 
 
 @router.post("/")
@@ -662,6 +689,13 @@ async def create_node(
             "status": "fail",
             "message": str(exc),
         }
+    console_error = _validate_create_console_request(request, template)
+    if console_error:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": console_error,
+        }
 
     node = _build_node_payload(
         node_id=next_id,
@@ -739,12 +773,22 @@ async def create_node_from_template(
         }
 
     # Build a NodeCreate from the template defaults, allowing per-request overrides.
+    console_mode = request.console or template_def.console_type or "telnet"
+    try:
+        validate_console_mode_for_type(request.template_type, console_mode)
+    except ValueError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+
     node_create = NodeCreate(
         name=request.name,
         type=request.template_type,
         template=request.template_key,
         image=request.image,
-        console=request.console or template_def.console_type or "telnet",
+        console=console_mode,
         cpu=request.cpu if request.cpu is not None else template_def.cpu,
         ram=request.ram if request.ram is not None else template_def.ram,
         ethernet=request.ethernet if request.ethernet is not None else template_def.ethernet,
@@ -1207,6 +1251,13 @@ async def create_nodes_batch(
             "code": 400,
             "status": "fail",
             "message": str(exc),
+        }
+    console_error = _validate_create_console_request(request, template)
+    if console_error:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": console_error,
         }
 
     created_nodes = []

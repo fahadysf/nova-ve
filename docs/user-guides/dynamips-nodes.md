@@ -147,5 +147,11 @@ per-node IOU application id, writes a matching `NETMAP` in that node's runtime
 directory, and uses uBridge to connect each declared interface to the lab's
 Linux bridge through an isolated UDP-to-TAP bridge.
 
+IOL / IOU nodes need an IOURC license. nova-ve uses an image-local `iourc` file
+when one exists beside the selected image, otherwise it looks in the system
+license directory (`/var/lib/nova-ve/iourc/` by default). The IOL node add
+modal shows the system license status and can upload a license file into that
+directory.
+
 Link changes for IOL are start-time only, like Dynamips. Stop and restart the
 affected node after adding, removing, or moving an IOL link.

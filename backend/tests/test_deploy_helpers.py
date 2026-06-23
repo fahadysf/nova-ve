@@ -382,11 +382,26 @@ def test_provisioner_keeps_base_data_dir_world_traversable():
     assert "install -d -o \"${APP_OWNER}\" -g \"${APP_GROUP}\" -m 0755 /var/lib/nova-ve" in body
 
 
+def test_provisioner_creates_private_iourc_dir_for_service_account():
+    body = PROVISION_SH.read_text()
+    assert 'ensure_env_var "IOURC_DIR" "${iourc_dir}"' in body
+    assert 'install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0700 "${iourc_dir}"' in body
+    assert "install -d -o \"${APP_OWNER}\" -g \"${APP_GROUP}\" -m 0700 /var/lib/nova-ve/iourc" in body
+
+
+def test_installer_summary_documents_iourc_dir():
+    body = INSTALL_SH.read_text()
+    assert 'IOURC_DIR="${IOURC_DIR:-${BASE_DATA_DIR}/iourc}"' in body
+    assert "| \\`IOURC_DIR\\` | \\`${IOURC_DIR}\\` |" in body
+    assert "System IOURC license directory for IOL / IOU nodes" in body
+
+
 def test_local_rancher_setup_does_not_emit_default_database_url():
     body = (DEPLOY_SCRIPTS / "setup-local-rancher.sh").read_text()
     assert "postgresql+asyncpg://nova:nova" not in body
     assert "DB_PASSWORD=" in body
     assert '${LOCAL_ROOT}/db_password' in body
+    assert "IOURC_DIR=" in body
 
 
 def test_import_wrapper_defaults_to_its_checkout_when_env_missing():

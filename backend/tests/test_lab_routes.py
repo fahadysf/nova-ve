@@ -221,6 +221,25 @@ def test_validate_node_update_running_blocks_actual_cpu_change():
     assert error == "Stop the node before changing: cpu."
 
 
+def test_validate_node_update_rejects_qemu_rdp_console_change():
+    node = {
+        "name": "win",
+        "type": "qemu",
+        "template": "win",
+        "image": "win",
+        "cpu": 4,
+        "ram": 4096,
+        "ethernet": 1,
+        "console": "vnc",
+        "delay": 0,
+        "extras": {},
+        "icon": "Server.png",
+    }
+    request = NodeUpdate(console="rdp")
+    error = _validate_node_update_request(node, request, node_running=False)
+    assert "Console mode 'rdp' is not supported for qemu nodes" in str(error)
+
+
 @pytest.mark.asyncio
 async def test_update_node_renames_running_node(monkeypatch, patched_route_settings):
     """End-to-end PUT /labs/.../nodes/{id} must succeed when the modal

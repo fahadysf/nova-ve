@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.routers import labs
-from app.schemas.node import NodeFromTemplate
+from app.schemas.node import NodeCreate, NodeFromTemplate
 from app.services.template_service import TemplateService
 
 
@@ -218,6 +218,78 @@ async def test_from_template_endpoint_creates_node(patched_split):
     assert node["template"] == "csr"
     assert node["cpu"] == 2  # inherited from template
     assert node["ram"] == 4096  # inherited from template
+
+
+@pytest.mark.asyncio
+async def test_from_template_rejects_qemu_rdp_template_default(patched_split):
+    settings = patched_split
+    (settings.TEMPLATES_DIR / "qemu").mkdir()
+    (settings.TEMPLATES_DIR / "qemu" / "win.yml").write_text(
+        "type: qemu\nname: Windows\ncpu: 4\nram: 4096\nethernet: 1\nconsole_type: rdp\nicon_type: server\ncpulimit: 1\n"
+    )
+    image_dir = settings.IMAGES_DIR / "qemu" / "win"
+    image_dir.mkdir(parents=True)
+    (image_dir / "hda.qcow2").write_text("base")
+    (settings.LABS_DIR / "demo.json").write_text(json.dumps({
+        "schema": 2,
+        "id": "lab-rdp-template",
+        "meta": {"name": "demo"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {},
+        "networks": {},
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }))
+
+    response = await labs.create_node_from_template(
+        "demo.json",
+        NodeFromTemplate(
+            template_type="qemu",
+            template_key="win",
+            name="win",
+            image="win",
+        ),
+        current_user=_admin(),
+    )
+
+    assert response["code"] == 400
+    assert "Console mode 'rdp' is not supported for qemu nodes" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_create_node_rejects_qemu_rdp_template_default(patched_split):
+    settings = patched_split
+    (settings.TEMPLATES_DIR / "qemu").mkdir()
+    (settings.TEMPLATES_DIR / "qemu" / "win.yml").write_text(
+        "type: qemu\nname: Windows\ncpu: 4\nram: 4096\nethernet: 1\nconsole_type: rdp\nicon_type: server\ncpulimit: 1\n"
+    )
+    image_dir = settings.IMAGES_DIR / "qemu" / "win"
+    image_dir.mkdir(parents=True)
+    (image_dir / "hda.qcow2").write_text("base")
+    (settings.LABS_DIR / "demo.json").write_text(json.dumps({
+        "schema": 2,
+        "id": "lab-rdp-template-direct",
+        "meta": {"name": "demo"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {},
+        "networks": {},
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }))
+
+    response = await labs.create_node(
+        "demo.json",
+        NodeCreate(
+            name="win",
+            type="qemu",
+            template="win",
+            image="win",
+        ),
+        current_user=_admin(),
+    )
+
+    assert response["code"] == 400
+    assert "Console mode 'rdp' is not supported for qemu nodes" in response["message"]
 
 
 @pytest.mark.asyncio

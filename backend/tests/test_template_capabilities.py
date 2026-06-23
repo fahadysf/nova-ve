@@ -36,8 +36,9 @@ def test_default_capabilities_qemu():
 
 def test_default_capabilities_iol():
     caps = _default_capabilities("iol")
-    assert caps["hotplug"] is True
+    assert caps["hotplug"] is False
     assert caps["max_nics"] == 8
+    assert caps["machine"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,11 @@ def test_validate_capabilities_none_returns_defaults_for_qemu():
 def test_validate_capabilities_none_returns_defaults_for_docker():
     caps = _validate_capabilities(None, "docker", "test.yml")
     assert caps == {"hotplug": True, "max_nics": 99, "machine": None}
+
+
+def test_validate_capabilities_none_returns_defaults_for_iol():
+    caps = _validate_capabilities(None, "iol", "test.yml")
+    assert caps == {"hotplug": False, "max_nics": 8, "machine": None}
 
 
 def test_validate_capabilities_full_qemu():

@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     LABS_DIR: Path = Path("/var/lib/nova-ve/labs")
     IMAGES_DIR: Path = Path("/var/lib/nova-ve/images")
     TMP_DIR: Path = Path("/var/lib/nova-ve/tmp")
+    IOURC_DIR: Path = Path("/var/lib/nova-ve/iourc")
     TEMPLATES_DIR: Path = Path(__file__).resolve().parents[1] / "templates"
     # USER_TEMPLATES_DIR (#185): operator-imported templates (e.g. from the
     # EVE-NG importer #182). Walked alongside the builtin TEMPLATES_DIR; on

@@ -1844,6 +1844,11 @@ class NodeRuntimeService:
         stdout_log = work_dir / "stdout.log"
         stderr_log = work_dir / "stderr.log"
         console_mode = node.get("console", "telnet")
+        if console_mode == "rdp":
+            raise NodeRuntimeError(
+                "QEMU RDP consoles are not supported. Use VNC or telnet for QEMU nodes; "
+                "RDP is only supported for Docker nodes that publish an RDP service."
+            )
         console_port = self._allocate_console_port(console_mode)
         accel = "kvm" if Path("/dev/kvm").exists() else "tcg"
 

@@ -1,6 +1,6 @@
 # Console access
 
-nova-ve uses Apache Guacamole for HTML5 consoles. Telnet, VNC, RDP, and SSH backends all funnel through Guacamole so you only need a browser — no native client required.
+nova-ve uses Apache Guacamole for HTML5 consoles. Telnet, VNC, and supported RDP backends all funnel through Guacamole so you only need a browser — no native client required.
 
 ## Opening a console
 
@@ -23,11 +23,11 @@ You can flip modes any time — existing consoles re-flow into the new layout.
 
 | Runtime | Default console | Notes |
 |---|---|---|
-| Docker | Telnet (via `nova-ve/alpine-telnet:latest` or equivalent) | Container must run a telnet server on the configured port. The bundled alpine-telnet image does this for you. |
-| QEMU/KVM | VNC (default) or SPICE | The boot disk's display is wired to a Guacamole-reachable VNC server. SPICE is preferred for higher-quality bitmap traffic when supported by the guest. |
+| Docker | Telnet, VNC, or RDP | Container must run a matching service on the configured container-side port. VNC images can override the port with `vnc_port`; RDP defaults to container port `3389`. |
+| QEMU/KVM | VNC or telnet | VNC is the expected graphical console for desktop/server guests such as Windows. QEMU RDP is not advertised because RDP runs inside the guest OS and needs guest IP and credential handling. |
 | IOL / Dynamips | Telnet | Vendor IOL and Dynamips images speak telnet on a per-node port. |
 
-The exact console type is template-defined; blank nodes default to telnet (Docker) or VNC (QEMU).
+The exact console type is template-defined and constrained by node type. Blank nodes default to the safest supported console for their runtime.
 
 ## Closing / minimizing
 
@@ -42,5 +42,6 @@ A few common causes:
 
 - **The node is not running yet.** Wait for the emerald running badge.
 - **Telnet console: the container has not bound its telnet server yet.** Give it 1–2 seconds after start; the bundled alpine-telnet image takes a moment.
-- **VNC console: the QEMU display is set to `none`.** Edit the template / blank node to enable a VNC display, then restart the node.
+- **VNC console: the guest has not produced display output yet.** Give the appliance or OS installer time to boot; if it stays blank, verify the template is using a VNC console.
+- **Docker RDP console: the container is not serving RDP on port `3389`.** Use a VNC/telnet console instead, or use an image that actually starts an RDP service.
 - **Guacamole-side issue.** Check `docker logs guacamole` on the host. See [Troubleshooting](../operations/troubleshooting.md).

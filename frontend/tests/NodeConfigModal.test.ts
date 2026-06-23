@@ -17,15 +17,21 @@
  */
 
 import { fireEvent, render, screen } from '@testing-library/svelte';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
 import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
 import NodeConfigModalHarness from './NodeConfigModalHarness.svelte';
+import { apiGetData, apiRequest } from '$lib/api';
 import type { NodeCatalog, NodeCatalogTemplate, NodeData, TemplateCapabilities } from '$lib/types';
 
 vi.mock('$lib/api', () => ({
   apiGetData: vi.fn(),
+  apiRequest: vi.fn(),
 }));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+});
 
 function makeTemplate(caps?: TemplateCapabilities): NodeCatalogTemplate {
   return {
@@ -95,6 +101,55 @@ function makeDockerTemplate(): NodeCatalogTemplate {
   };
 }
 
+function makeIolTemplate(caps?: TemplateCapabilities): NodeCatalogTemplate {
+  return {
+    key: 'iol',
+    type: 'iol',
+    name: 'Cisco IOL',
+    description: 'IOL image',
+    defaults: {
+      type: 'iol',
+      template: 'iol',
+      image: 'i86bi_Linux.bin',
+      icon_type: 'router',
+      icon: 'Router.png',
+      cpu: 1,
+      ram: 512,
+      ethernet: 4,
+      console_type: 'telnet',
+      delay: 0,
+      cpulimit: 1,
+    },
+    images: [{ image: 'i86bi_Linux.bin' }],
+    icon_options: ['Router.png'],
+    extras_schema: [],
+    ...(caps !== undefined ? { capabilities: caps } : {}),
+  };
+}
+
+function makeWindowsTemplate(): NodeCatalogTemplate {
+  const base = makeTemplate();
+  return {
+    ...base,
+    key: 'win',
+    name: 'Windows',
+    description: 'Windows VM',
+    defaults: {
+      ...base.defaults,
+      template: 'win',
+      image: 'win',
+      icon_type: 'server',
+      icon: 'Server.png',
+      cpu: 4,
+      ram: 4096,
+      ethernet: 1,
+      console_type: 'rdp',
+    },
+    images: [{ image: 'win' }],
+    icon_options: ['Server.png'],
+  };
+}
+
 function makeCatalog(...templates: NodeCatalogTemplate[]): NodeCatalog {
   return {
     templates,
@@ -136,6 +191,15 @@ function interfaceNamingInput(): HTMLInputElement {
   return input as HTMLInputElement;
 }
 
+function consoleSelect(): HTMLSelectElement {
+  const label = screen.getByText('Console').closest('label');
+  const select = label?.querySelector('select');
+  if (!select) {
+    throw new Error('Console select not found');
+  }
+  return select as HTMLSelectElement;
+}
+
 describe('NodeConfigModal capabilities banner — static paths', () => {
   it('renders without error when catalog template has hotplug=true', async () => {
     const catalog = makeCatalog(makeTemplate({ hotplug: true, max_nics: 8, machine: 'q35' }));
@@ -167,6 +231,28 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     expect(screen.queryByTestId('capabilities-banner')).toBeNull();
   });
 
+  it('shows IOL as restart-required even if the catalog marks hotplug true', async () => {
+    const catalog = makeCatalog(makeIolTemplate({ hotplug: true, max_nics: 8, machine: null }));
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      installed: true,
+      directory: '/var/lib/nova-ve/iourc',
+      path: '/var/lib/nova-ve/iourc/iourc',
+      filename: 'iourc',
+      size: 12,
+      hostname: 'nova-host',
+      fqdn: 'nova-host',
+      ips: ['192.0.2.10'],
+      host_id: '00000000',
+    });
+
+    render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
+    await tick();
+
+    expect(screen.getByTestId('capabilities-banner')).toBeTruthy();
+    expect(screen.getByText('Restart required to change topology')).toBeTruthy();
+    expect(screen.queryByText('Hot-plug supported')).toBeNull();
+  });
+
   it('TemplateCapabilities type accepts all three variants (type-level smoke)', () => {
     const qemu: TemplateCapabilities = { hotplug: true, max_nics: 8, machine: 'q35' };
     const docker: TemplateCapabilities = { hotplug: true, max_nics: 99, machine: null };
@@ -175,6 +261,132 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     expect(qemu.machine).toBe('q35');
     expect(docker.machine).toBeNull();
     expect(legacy.hotplug).toBe(false);
+  });
+
+  it('does not offer rdp for qemu templates and falls back to vnc', async () => {
+    const catalog = makeCatalog(makeWindowsTemplate());
+    render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
+    await tick();
+
+    const select = consoleSelect();
+    expect(select.value).toBe('vnc');
+    expect([...select.options].map((option) => option.value)).toEqual(['vnc', 'telnet']);
+  });
+
+  it('keeps rdp available for docker templates', async () => {
+    const catalog = makeCatalog(makeDockerTemplate());
+    render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
+    await tick();
+
+    expect([...consoleSelect().options].map((option) => option.value)).toEqual(['telnet', 'vnc', 'rdp']);
+  });
+
+  it('limits iol templates to telnet consoles', async () => {
+    const catalog = makeCatalog(makeIolTemplate());
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      installed: true,
+      directory: '/var/lib/nova-ve/iourc',
+      path: '/var/lib/nova-ve/iourc/iourc',
+      filename: 'iourc',
+      size: 12,
+      hostname: 'nova-host',
+      fqdn: 'nova-host',
+      ips: ['192.0.2.10'],
+      host_id: '00000000',
+    });
+    render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
+    await tick();
+
+    expect([...consoleSelect().options].map((option) => option.value)).toEqual(['telnet']);
+  });
+
+  it('shows missing IOURC status and opens upload dialog with host details', async () => {
+    const catalog = makeCatalog(makeIolTemplate());
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      installed: false,
+      directory: '/var/lib/nova-ve/iourc',
+      path: null,
+      filename: null,
+      size: null,
+      hostname: 'nova-host',
+      fqdn: 'nova-host.example',
+      ips: ['192.0.2.10'],
+      host_id: 'abc12345',
+    });
+
+    render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
+
+    expect(await screen.findByText('Not available')).toBeTruthy();
+    await fireEvent.click(screen.getByRole('button', { name: 'Upload IOURC' }));
+    await tick();
+
+    expect(screen.getByRole('dialog', { name: 'Upload IOURC license' })).toBeTruthy();
+    expect(screen.getByText('nova-host')).toBeTruthy();
+    expect(screen.getByText('192.0.2.10')).toBeTruthy();
+  });
+
+  it('uploads IOURC file and refreshes installed state', async () => {
+    const catalog = makeCatalog(makeIolTemplate());
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      installed: false,
+      directory: '/var/lib/nova-ve/iourc',
+      path: null,
+      filename: null,
+      size: null,
+      hostname: 'nova-host',
+      fqdn: 'nova-host',
+      ips: [],
+      host_id: null,
+    });
+    vi.mocked(apiRequest).mockResolvedValueOnce({
+      code: 200,
+      status: 'success',
+      message: 'IOURC license uploaded.',
+      data: {
+        installed: true,
+        directory: '/var/lib/nova-ve/iourc',
+        path: '/var/lib/nova-ve/iourc/iourc',
+        filename: 'iourc',
+        size: 10,
+        hostname: 'nova-host',
+        fqdn: 'nova-host',
+        ips: [],
+        host_id: null,
+      },
+    });
+
+    render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
+
+    await screen.findByText('Not available');
+    await fireEvent.click(screen.getByRole('button', { name: 'Upload IOURC' }));
+    const input = screen.getByLabelText('License file') as HTMLInputElement;
+    const file = new File(['[license]\n'], 'iourc', { type: 'text/plain' });
+    await fireEvent.change(input, { target: { files: [file] } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Upload' }));
+    await tick();
+
+    expect(vi.mocked(apiRequest)).toHaveBeenCalledWith(
+      '/system/iourc',
+      expect.objectContaining({ method: 'POST', body: expect.any(FormData) }),
+    );
+    expect(screen.queryByRole('dialog', { name: 'Upload IOURC license' })).toBeNull();
+    expect(screen.getByText('Installed')).toBeTruthy();
+  });
+
+  it('normalizes legacy qemu rdp nodes to vnc on edit', async () => {
+    const catalog = makeCatalog(makeWindowsTemplate());
+    const node = makeNode({
+      template: 'win',
+      image: 'win',
+      console: 'rdp',
+      icon: 'Server.png',
+    });
+    render(NodeConfigModal, { props: { open: true, mode: 'edit', catalog, node } });
+    await tick();
+
+    const select = consoleSelect();
+    expect(select.value).toBe('vnc');
+    expect([...select.options].map((option) => option.value)).toEqual(['vnc', 'telnet']);
   });
 
   it('dispatches interface_naming_scheme in create payloads', async () => {
