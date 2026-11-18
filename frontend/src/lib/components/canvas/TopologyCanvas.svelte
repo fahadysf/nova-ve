@@ -946,17 +946,22 @@
     const left = Math.round(movedNode.position.x);
     const top = Math.round(movedNode.position.y);
 
-    if (decoded.type === 'node' && $labState.nodes[String(decoded.id)]) {
-      $labState.nodes[String(decoded.id)].left = left;
-      $labState.nodes[String(decoded.id)].top = top;
-      labState.setNodes({ ...$labState.nodes });
-      layoutDebouncer.pushNodePosition(decoded.id, left, top);
+    // #245 regression guard: never assign THROUGH $labState member paths —
+    // Svelte 5 legacy compilation turns `$store.x.y = v` into
+    // `store.set($store, …)`, and the labState facade has no `.set()`,
+    // which threw `TypeError: e.set is not a function` on every drag stop
+    // and silently killed all layout saves. Positions go through
+    // labState.applyDragStop; the debouncer only fires when adopted.
+    const applied =
+      decoded.type === 'node'
+        ? labState.applyDragStop('node', decoded.id, left, top)
+        : labState.applyDragStop('network', decoded.id, left, top);
+    if (!applied) {
+      return;
     }
-
-    if (decoded.type === 'network' && $labState.networks[String(decoded.id)]) {
-      $labState.networks[String(decoded.id)].left = left;
-      $labState.networks[String(decoded.id)].top = top;
-      labState.setNetworks({ ...$labState.networks });
+    if (decoded.type === 'node') {
+      layoutDebouncer.pushNodePosition(decoded.id, left, top);
+    } else {
       layoutDebouncer.pushNetworkPosition(decoded.id, left, top);
     }
   }

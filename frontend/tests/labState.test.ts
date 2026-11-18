@@ -207,4 +207,42 @@ describe('labState', () => {
     });
     expect(get(labState).revision).toBe(8);
   });
+
+  it('applyDragStop adopts rounded positions for nodes and networks', () => {
+    labState.applySnapshot({
+      nodes: { '1': node(1, 10, 20) },
+      networks: { '9': network(9, 30, 40) },
+      topology: [],
+      links: [],
+    });
+
+    // #245 regression: the component previously assigned through
+    // `$labState.nodes[id].left = v`, which Svelte 5 legacy compilation
+    // turned into `store.set($store, …)` — throwing `e.set is not a
+    // function` on every drag stop and killing all layout saves.
+    expect(labState.applyDragStop('node', 1, 121, 80)).toBe(true);
+    expect(labState.applyDragStop('network', 9, 10, 21)).toBe(true);
+
+    const state = get(labState);
+    expect(state.nodes['1'].left).toBe(121);
+    expect(state.nodes['1'].top).toBe(80);
+    expect(state.networks['9'].left).toBe(10);
+    expect(state.networks['9'].top).toBe(21);
+  });
+
+  it('applyDragStop reports false for unknown elements without changing state', () => {
+    labState.applySnapshot({
+      nodes: { '1': node(1, 10, 20) },
+      networks: {},
+      topology: [],
+      links: [],
+    });
+
+    expect(labState.applyDragStop('node', 99, 5, 5)).toBe(false);
+    expect(labState.applyDragStop('network', 1, 5, 5)).toBe(false); // wrong kind
+
+    const state = get(labState);
+    expect(state.nodes['1'].left).toBe(10);
+    expect(state.networks).toEqual({});
+  });
 });
