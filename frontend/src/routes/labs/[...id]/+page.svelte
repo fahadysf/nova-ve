@@ -26,7 +26,6 @@
   import { infoPanels } from '$lib/stores/infoPanels';
   import type {
     FolderListing,
-    LabDefaults,
     LabListItem,
     LabMeta,
     Link,
@@ -35,18 +34,13 @@
     TopologyLink
   } from '$lib/types';
   import type { LinkChangeEvent } from '$lib/stores/labWs';
+  // #245: labState is the single owner of lab editor state. The page holds
+  // no independent nodes/networks/topology/links/defaults copies — it reads
+  // $labState and writes through the store mutators.
+  import { labState } from '$lib/stores/labState';
 
   let labId = '';
-  let labMeta: LabMeta | null = null;
   let rootLabs: LabListItem[] = [];
-  let nodes: Record<string, NodeData> = {};
-  let networks: Record<string, NetworkData> = {};
-  let topology: TopologyLink[] = [];
-  // US-082: v2 links[] is the canvas source of truth for edges. The /links
-  // endpoint returns the v2 records; the canvas falls back gracefully when
-  // empty.
-  let links: Link[] = [];
-  let labDefaults: LabDefaults = { link_style: 'orthogonal' };
   let loading = true;
   let error = '';
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
@@ -64,13 +58,12 @@
     floating: FloatingWindowState;
   };
   type ConsoleMode = 'tabbed' | 'floating';
+  // #245: 'changed' events are action notifications only — lab state lives
+  // in the labState store, so no state payloads ride along anymore.
   type CanvasChangeDetail = {
     reason: string;
     nodeId?: number;
     node?: NodeData;
-    nodes?: Record<string, NodeData>;
-    networks?: Record<string, NetworkData>;
-    topology?: TopologyLink[];
   };
   type ConsoleWorkspaceState = ConsoleBounds & {
     tabs: ConsoleTab[];
@@ -110,6 +103,10 @@
   let activeConsoleTabState: ConsoleTab | null = null;
   let consoleTabCounter = 0;
   let canvasContainerEl: HTMLDivElement | null = null;
+  // Bound to <TopologyCanvas bind:this> so reload paths can flush pending
+  // layout saves before GETting lab state (otherwise the GET races the
+  // 500ms debounced PUT and returns pre-edit positions).
+  let canvasRef: TopologyCanvas | null = null;
   let lastLoadedRoute = '';
   let dragState:
     | { startX: number; startY: number; originX: number; originY: number; windowId: number | null }
@@ -127,8 +124,8 @@
     'inline-flex items-center rounded-full border border-gray-700/80 bg-gray-950/80 px-2.5 py-1 text-[9px] uppercase tracking-[0.18em] text-gray-300';
   $: labId = $page.params.id ?? '';
   $: isLabIndexRoute = labId === '';
-  $: nodeList = Object.values(nodes).sort((a, b) => a.id - b.id);
-  $: networkList = Object.values(networks)
+  $: nodeList = Object.values($labState.nodes).sort((a, b) => a.id - b.id);
+  $: networkList = Object.values($labState.networks)
     .filter((network) => network.implicit !== true && network.visibility !== false)
     .sort((a, b) => a.id - b.id);
   $: totalVCpu = nodeList.reduce((total, node) => total + (node.cpu ?? 0), 0);
@@ -238,12 +235,7 @@
         }
         return left.file.localeCompare(right.file);
       });
-      labMeta = null;
-      nodes = {};
-      networks = {};
-      topology = [];
-      links = [];
-      labDefaults = { link_style: 'orthogonal' };
+      labState.reset();
       consoleWorkspace = null;
     } catch (e) {
       error = e instanceof ApiError ? e.message : 'Unable to load labs.';
@@ -285,11 +277,21 @@
         apiGetData<Link[]>(`/labs/${labId}/links`).catch(() => [] as Link[])
       ]);
 
-      labMeta = meta;
-      nodes = nodeData;
-      networks = networkData;
-      topology = topologyData ?? [];
-      links = linksData ?? [];
+      // One owner (#245): the snapshot lands in labState; the canvas and
+      // this page both read it. defaults stays whatever the store holds —
+      // the parallel GETs do not fetch it. Positions with a pending layout
+      // PUT (e.g. re-queued after a failed flush) survive the snapshot.
+      labState.setLabId(labId);
+      labState.applySnapshot(
+        {
+          meta,
+          nodes: nodeData,
+          networks: networkData,
+          topology: topologyData ?? [],
+          links: linksData ?? []
+        },
+        canvasRef ? canvasRef.pendingLayoutIds() : undefined
+      );
       if (consoleWorkspace) {
         const priorActiveTabId = consoleWorkspace.activeTabId;
         const tabs = consoleWorkspace.tabs
@@ -323,13 +325,6 @@
     }
   }
 
-  function syncNodeFromCanvas(nodeId: number, node: NodeData) {
-    nodes = {
-      ...nodes,
-      [String(nodeId)]: node,
-    };
-  }
-
   function removeConsoleTabForNode(nodeId: number) {
     const tabId = consoleWorkspace?.tabs.find((tab) => tab.nodeId === nodeId)?.id;
     if (tabId != null) {
@@ -345,44 +340,46 @@
     const nodeId = detail?.nodeId;
     const node = detail?.node;
 
-    if (detail?.nodes) {
-      nodes = detail.nodes;
-    }
-    if (detail?.networks) {
-      networks = detail.networks;
-    }
-    if (detail?.topology) {
-      topology = detail.topology;
-    }
-
     if (reason === 'node-start' && nodeId != null && node) {
-      syncNodeFromCanvas(nodeId, node);
+      labState.upsertNode(nodeId, node);
       return;
     }
 
     if (reason === 'node-start-pending' && nodeId != null && node) {
-      syncNodeFromCanvas(nodeId, node);
+      labState.upsertNode(nodeId, node);
       return;
     }
 
     if ((reason === 'node-stop' || reason === 'node-wipe') && nodeId != null && node) {
-      syncNodeFromCanvas(nodeId, node);
+      labState.upsertNode(nodeId, node);
       removeConsoleTabForNode(nodeId);
       return;
     }
 
     if ((reason === 'node-stop-pending' || reason === 'node-wipe-pending') && nodeId != null && node) {
-      syncNodeFromCanvas(nodeId, node);
+      labState.upsertNode(nodeId, node);
       return;
     }
 
     if (reason === 'node-edit' && nodeId != null && node) {
-      syncNodeFromCanvas(nodeId, node);
+      labState.upsertNode(nodeId, node);
       return;
     }
 
     if (reason === 'node-delete' && nodeId != null) {
       removeConsoleTabForNode(nodeId);
+      return;
+    }
+
+    // #245: a guarded write got 412 — the lab changed elsewhere. Re-adopt
+    // the server snapshot FIRST (applySnapshot keeps our pending positions
+    // and picks up the fresh revision), then retry the requeued flush with
+    // the new If-Match token.
+    if (reason === 'layout-conflict' && !isLabIndexRoute) {
+      await loadLab({ blocking: false });
+      if (canvasRef) {
+        await canvasRef.flushPendingLayout();
+      }
       return;
     }
 
@@ -395,9 +392,17 @@
       return;
     }
 
+    // Flush any debounced layout PUT before reloading: the GET below must
+    // observe the just-edited positions, not pre-edit ones. Without this,
+    // node-delete (which falls through to reload) races the 500ms layout
+    // debounce and reverts the canvas to the previous state.
+    if (canvasRef) {
+      await canvasRef.flushPendingLayout();
+    }
+
     // Paired-template creation adds N nodes + an implicit bridge + 2N link
     // halves in one shot; full lab reload is the simplest way to pick all of
-    // that up consistently in localNodes/localNetworks/localTopology.
+    // that up consistently in the labState store.
     if (reason === 'paired-create' && !isLabIndexRoute) {
       await loadLab({ blocking: false });
       return;
@@ -413,6 +418,9 @@
   }
 
   async function refreshLabManually() {
+    if (canvasRef) {
+      await canvasRef.flushPendingLayout();
+    }
     await loadLab();
   }
 
@@ -424,20 +432,10 @@
   function handleLinkChange(event: CustomEvent<LinkChangeEvent>) {
     const change = event.detail;
     if (change.kind === 'deleted') {
-      const targetId = change.link_id;
-      links = links.filter((l) => String(l.id) !== targetId);
+      labState.removeLink(change.link_id);
       return;
     }
-    const incoming = change.link;
-    const incomingId = String(incoming.id);
-    const idx = links.findIndex((l) => String(l.id) === incomingId);
-    if (idx === -1) {
-      links = [...links, incoming];
-    } else {
-      const next = links.slice();
-      next[idx] = incoming;
-      links = next;
-    }
+    labState.upsertLink(change.link);
   }
 
   function openLabFromIndex(lab: LabListItem) {
@@ -978,12 +976,12 @@
           <div class="min-w-0">
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab Editor</div>
             <div class="flex flex-wrap items-center gap-[0.15rem]">
-              <h1 class="truncate text-lg font-semibold tracking-tight text-gray-100">{labMeta?.name || labId}</h1>
+              <h1 class="truncate text-lg font-semibold tracking-tight text-gray-100">{$labState.meta?.name || labId}</h1>
               {#if consoleMode === 'tabbed'}
                 <span class={chromePillClass}>{consoleTabCount} consoles</span>
               {/if}
             </div>
-            <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{labMeta?.path || labId}</div>
+            <div class="mt-1 truncate font-mono text-[11px] text-gray-400">{$labState.meta?.path || labId}</div>
           </div>
         </div>
 
@@ -1090,16 +1088,12 @@
     </div>
   {:else}
     <div class="relative flex flex-1 overflow-hidden p-3">
-      <InfoPanelStack nodesById={nodes} networksById={networks} />
+      <InfoPanelStack nodesById={$labState.nodes} networksById={$labState.networks} />
       <div bind:this={canvasContainerEl} class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
         <SvelteFlowProvider>
           <TopologyCanvas
+            bind:this={canvasRef}
             labId={labId}
-            {nodes}
-            {networks}
-            {topology}
-            {links}
-            defaults={labDefaults}
             {consoleSelectorWindows}
             {consoleMinimizedWindows}
             on:console={(event) => openConsole(event.detail.node)}

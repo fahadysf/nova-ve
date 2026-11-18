@@ -632,9 +632,11 @@ async def test_update_topology_refuses_to_forge_network_runtime_or_type(
                 "topology": [],
                 "networks": {
                     "1": {
-                        # Layout fields (allowed) — should be persisted.
+                        # Positions are owned by PUT /layout — left/top
+                        # patches here are ignored (stale-echo revert guard).
                         "left": 222,
                         "top": 333,
+                        # Display field (allowed) — should be persisted.
                         "color": "#ff0000",
                         # Semantic fields (forbidden) — must NOT be persisted.
                         "type": "bridge_cloud",
@@ -653,9 +655,10 @@ async def test_update_topology_refuses_to_forge_network_runtime_or_type(
     # Reload from disk and verify the forgery did NOT land.
     persisted = json.loads(lab_path.read_text())
     record = persisted["networks"]["1"]
-    # Allowed fields persisted:
-    assert record["left"] == 222
-    assert record["top"] == 333
+    # Positions refused (owned by PUT /layout — values stay as seeded):
+    assert record["left"] == 100, "left/top patches must go through PUT /layout"
+    assert record["top"] == 100, "left/top patches must go through PUT /layout"
+    # Allowed display field persisted:
     assert record["color"] == "#ff0000"
     # Forbidden fields refused:
     assert record["type"] == "linux_bridge", "type forgery must be rejected"
@@ -665,3 +668,108 @@ async def test_update_topology_refuses_to_forge_network_runtime_or_type(
     assert record["id"] == 1, "id forgery must be rejected"
     assert record.get("implicit") in (None, False), \
         "implicit forgery must be rejected"
+
+
+def _seed_revision_lab(lab_path, revision):
+    """Seed a schema-2 lab with one node/network and an explicit meta.revision."""
+    meta = {"name": "rev-guard"}
+    if revision is not None:
+        meta["revision"] = revision
+    lab_path.parent.mkdir(parents=True, exist_ok=True)
+    lab_path.write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "id": "rev-guard",
+                "meta": meta,
+                "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+                "nodes": {
+                    "1": {
+                        "id": 1,
+                        "name": "node-1",
+                        "type": "qemu",
+                        "left": 100,
+                        "top": 100,
+                        "interfaces": [],
+                    }
+                },
+                "networks": {},
+                "links": [],
+                "defaults": {"link_style": "orthogonal"},
+            }
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_put_layout_if_match_revision_guard(monkeypatch, patched_route_settings):
+    """"#245: a stale If-Match must 412 instead of silently reverting state."""
+    lab_path = patched_route_settings.LABS_DIR / "rev-guard.json"
+    _seed_revision_lab(lab_path, revision=7)
+
+    _orphan_lab_overrides("admin")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        stale = await client.put(
+            "/api/labs/rev-guard.json/layout",
+            json={"nodes": [{"id": 1, "left": 5, "top": 5}]},
+            headers={"If-Match": "6"},
+        )
+        assert stale.status_code == 412, stale.text
+        assert stale.json()["revision"] == 7
+
+        ok = await client.put(
+            "/api/labs/rev-guard.json/layout",
+            json={"nodes": [{"id": 1, "left": 5, "top": 5}]},
+            headers={"If-Match": "7"},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["revision"] == 8
+
+        bare = await client.put(
+            "/api/labs/rev-guard.json/layout",
+            json={"nodes": [{"id": 1, "left": 6, "top": 6}]},
+        )
+        assert bare.status_code == 200, bare.text
+        assert bare.json()["revision"] == 9
+
+    app.dependency_overrides.clear()
+
+    persisted = json.loads(lab_path.read_text())
+    assert persisted["meta"]["revision"] == 9
+    assert persisted["nodes"]["1"]["left"] == 6
+
+
+@pytest.mark.asyncio
+async def test_update_topology_if_match_revision_guard(monkeypatch, patched_route_settings):
+    """#245: /topology carries the same guard; revision established on first write."""
+    lab_path = patched_route_settings.LABS_DIR / "rev-guard-topo.json"
+    _seed_revision_lab(lab_path, revision=None)
+
+    _orphan_lab_overrides("admin")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        stale = await client.put(
+            "/api/labs/rev-guard-topo.json/topology",
+            json={"topology": []},
+            headers={"If-Match": "5"},
+        )
+        assert stale.status_code == 412, stale.text
+        assert stale.json()["revision"] == 0
+
+        ok = await client.put(
+            "/api/labs/rev-guard-topo.json/topology",
+            json={"topology": [{"source": "node1", "destination": "network1", "network_id": 1}]},
+            headers={"If-Match": "0"},
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["revision"] == 1
+
+    app.dependency_overrides.clear()
+
+    persisted = json.loads(lab_path.read_text())
+    assert persisted["meta"]["revision"] == 1
+    # topology[] is never persisted (legacy derived view popped on write);
+    # links[] is the authoritative record.
+    assert persisted["links"][0]["from"] == {"node_id": 1, "interface_index": 0}
+    assert persisted["links"][0]["to"] == {"network_id": 1}

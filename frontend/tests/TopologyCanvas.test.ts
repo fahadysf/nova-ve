@@ -54,6 +54,10 @@ vi.mock('$lib/services/labApi', () => ({
     pushNetworkPosition: vi.fn(),
     pushViewport: vi.fn(),
     flush: vi.fn(async () => {}),
+    flushKeepalive: vi.fn(),
+    cancel: vi.fn(),
+    pending: vi.fn(() => false),
+    pendingPositionIds: vi.fn(() => ({ nodeIds: new Set(), networkIds: new Set() })),
   }),
 }));
 
@@ -78,6 +82,7 @@ vi.mock('$lib/stores/labWs', () => ({
 
 import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
 import { apiRequest } from '$lib/api';
+import { labState } from '$lib/stores/labState';
 
 function makeNode(
   id: number,
@@ -155,19 +160,24 @@ function nodeSlotEndpoint(nodeId: number, nodeName: string): NodeSlotEndpoint {
   };
 }
 
+// #245: the canvas no longer takes lab-state props — it renders the shared
+// labState store. Seed the store before each mount.
 function renderCanvas(
   nodes: Record<string, NodeData>,
   networks: Record<string, NetworkData> = {},
   links: Link[] = []
 ) {
+  labState.reset();
+  labState.applySnapshot({
+    nodes,
+    networks,
+    topology: [],
+    links,
+    defaults: { link_style: 'orthogonal' },
+  });
   return render(TopologyCanvas, {
     props: {
       labId: 'lab-hotplug',
-      nodes,
-      networks,
-      topology: [],
-      links,
-      defaults: { link_style: 'orthogonal' },
       consoleSelectorWindows: [],
       consoleMinimizedWindows: [],
     },
@@ -183,6 +193,7 @@ function driveConfirm(source: DragEndpoint, target: DragEndpoint) {
 
 afterEach(() => {
   dragLinkStore.cancel();
+  labState.reset();
   cleanup();
 });
 
