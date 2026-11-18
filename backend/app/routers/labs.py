@@ -2575,28 +2575,40 @@ async def get_lab(
     lab = await lab_service.get_lab_by_filename(scoped_path)
 
     if lab:
+        data = {
+            "id": str(lab.id),
+            "filename": lab.filename,
+            "name": lab.name,
+            "path": lab.path,
+            "owner": lab.owner,
+            "author": lab.author,
+            "description": lab.description,
+            "body": lab.body,
+            "version": lab.version,
+            "scripttimeout": lab.scripttimeout,
+            "countdown": lab.countdown,
+            "linkwidth": lab.linkwidth,
+            "grid": lab.grid,
+            "lock": lab.lock,
+            "sat": "-1",
+            "shared": [],
+        }
+        # #245: DB rows don't track the machine-owned concurrency revision —
+        # read it from the lab file so DB-registered labs get If-Match
+        # protection too. Files are the write-side choke point
+        # (write_lab_json_static bumps meta.revision on every write).
+        try:
+            file_data = _read_lab_data(scoped_path)
+            file_revision = (file_data.get("meta") or {}).get("revision")
+            if isinstance(file_revision, int):
+                data["revision"] = file_revision
+        except (FileNotFoundError, NotADirectoryError, IsADirectoryError, LegacyLabSchemaError, ValueError):
+            pass
         return {
             "code": 200,
             "status": "success",
             "message": "Lab has been loaded (60020).",
-            "data": {
-                "id": str(lab.id),
-                "filename": lab.filename,
-                "name": lab.name,
-                "path": lab.path,
-                "owner": lab.owner,
-                "author": lab.author,
-                "description": lab.description,
-                "body": lab.body,
-                "version": lab.version,
-                "scripttimeout": lab.scripttimeout,
-                "countdown": lab.countdown,
-                "linkwidth": lab.linkwidth,
-                "grid": lab.grid,
-                "lock": lab.lock,
-                "sat": "-1",
-                "shared": [],
-            },
+            "data": data,
         }
 
     try:
