@@ -7,7 +7,7 @@ import logging
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, Body, Depends
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,6 +107,34 @@ def _read_lab_data(lab_path: str) -> dict:
         if message.startswith(LEGACY_SCHEMA_ERROR):
             raise LegacyLabSchemaError(lab_path) from exc
         raise
+
+
+def _lab_revision(data: dict) -> int:
+    """Machine-owned optimistic-concurrency revision (#245)."""
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        return 0
+    try:
+        return int(meta.get("revision") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _if_match_mismatch(request: Request, data: dict) -> int | None:
+    """Server revision when an If-Match precondition fails, else None.
+
+    An absent header means no precondition — backward compatible with
+    older clients. Direct unit-test callers may pass a stub request with
+    an empty headers mapping.
+    """
+    expected = request.headers.get("if-match")
+    if expected is None:
+        return None
+    expected = expected.strip().strip('"')
+    current = _lab_revision(data)
+    if expected != str(current):
+        return current
+    return None
 
 
 def _user_root(current_user: UserRead) -> str:
@@ -476,6 +504,7 @@ async def get_topology(
 @router.put("/{lab_path:path}/topology")
 async def update_topology(
     lab_path: str,
+    request: Request,
     payload: dict | list = Body(...),
     current_user: UserRead = Depends(get_current_user),
 ):
@@ -507,14 +536,35 @@ async def update_topology(
                 "message": "Lab does not exist (60038).",
             }
 
+        # #245: same optimistic-concurrency guard as PUT /layout.
+        mismatch = _if_match_mismatch(request, data)
+        if mismatch is not None:
+            return JSONResponse(
+                status_code=412,
+                content={
+                    "code": 412,
+                    "status": "fail",
+                    "message": "Lab changed elsewhere; reload and re-apply (stale revision).",
+                    "revision": mismatch,
+                },
+            )
+
         if isinstance(payload, list):
             data["topology"] = payload
         else:
             data["topology"] = payload.get("topology", data.get("topology", []))
+            # Positions are owned exclusively by PUT /layout. Accepting
+            # left/top here lets a stale full-node echo (a client PUTting
+            # its whole localNodes after a racing reload) revert positions
+            # the layout endpoint already persisted — the "canvas resets to
+            # previous state" bug. Skip them for both nodes and networks.
+            _POSITION_FIELDS = frozenset({"left", "top"})
             for node_id, node_patch in payload.get("nodes", {}).items():
                 node = data.get("nodes", {}).get(str(node_id))
                 if node and isinstance(node_patch, dict):
                     for field, value in node_patch.items():
+                        if field in _POSITION_FIELDS:
+                            continue
                         if value is not None:
                             node[field] = value
             # Bridge-Cloud security boundary: PUT /topology accepts only
@@ -527,7 +577,7 @@ async def update_topology(
             # ``runtime.bridge_name=br-eth0`` and trick ``link_master_any``
             # into routing a TAP onto the physical host bridge.
             _NETWORK_TOPOLOGY_FIELDS = frozenset({
-                "name", "left", "top", "icon", "width",
+                "name", "icon", "width",
                 "style", "linkstyle", "color", "label",
                 "visibility", "smart",
             })
@@ -574,6 +624,9 @@ async def update_topology(
         "code": 200,
         "status": "success",
         "message": "Topology saved successfully.",
+        # #245: post-write revision so the client can update its cached
+        # token without a re-GET.
+        "revision": _lab_revision(data) + 1,
         "data": data.get("topology", []),
     }
 
@@ -2397,6 +2450,7 @@ def _layout_validate_and_collect_forbidden(body: dict) -> list[str]:
 @router.put("/{lab_path:path}/layout")
 async def put_layout(
     lab_path: str,
+    request: Request,
     body: dict = Body(...),
     current_user: UserRead = Depends(get_current_user),
 ):
@@ -2407,8 +2461,6 @@ async def put_layout(
 
     forbidden = _layout_validate_and_collect_forbidden(body)
     if forbidden:
-        from fastapi.responses import JSONResponse
-
         return JSONResponse(
             status_code=409,
             content={
@@ -2432,6 +2484,20 @@ async def put_layout(
             return _legacy_schema_response(exc)
         except FileNotFoundError:
             return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+
+        # #245: optimistic concurrency — a stale client (racing reload or a
+        # second tab) must get 412 instead of silently reverting newer state.
+        mismatch = _if_match_mismatch(request, data)
+        if mismatch is not None:
+            return JSONResponse(
+                status_code=412,
+                content={
+                    "code": 412,
+                    "status": "fail",
+                    "message": "Lab changed elsewhere; reload and re-apply (stale revision).",
+                    "revision": mismatch,
+                },
+            )
 
         for node_entry in body.get("nodes", []) or []:
             node_id = node_entry.get("id")
@@ -2481,6 +2547,9 @@ async def put_layout(
         "code": 200,
         "status": "success",
         "message": "Layout updated successfully.",
+        # #245: post-write revision so the client can update its cached
+        # token without a re-GET.
+        "revision": _lab_revision(data) + 1,
         "data": {
             "node_ids": affected_nodes,
             "network_ids": affected_networks,

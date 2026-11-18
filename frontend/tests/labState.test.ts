@@ -1,0 +1,210 @@
+// Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
+// SPDX-License-Identifier: Apache-2.0
+
+import { beforeEach, describe, expect, it } from 'vitest';
+import { get } from 'svelte/store';
+import { labState } from '$lib/stores/labState';
+import type { Link, NetworkData, NodeData } from '$lib/types';
+
+function node(id: number, left: number, top: number, name = `node-${id}`): NodeData {
+  return {
+    id,
+    name,
+    type: 'qemu',
+    template: 'vyos',
+    image: 'vyos',
+    console: 'telnet',
+    status: 0,
+    delay: 0,
+    cpu: 1,
+    ram: 1024,
+    ethernet: 1,
+    left,
+    top,
+    icon: 'Router.png',
+    interfaces: [],
+  };
+}
+
+function network(id: number, left: number, top: number): NetworkData {
+  return {
+    id,
+    name: `net-${id}`,
+    type: 'bridge',
+    left,
+    top,
+    icon: 'Cloud.png',
+    visibility: true,
+    count: 0,
+  };
+}
+
+function link(id: string): Link {
+  return {
+    id,
+    from: { node_id: 1, interface_index: 0 },
+    to: { network_id: 9 },
+    style_override: null,
+    label: '',
+    color: '',
+    width: '1',
+  };
+}
+
+describe('labState', () => {
+  beforeEach(() => {
+    labState.reset();
+  });
+
+  it('starts empty and reset() clears adopted state', () => {
+    expect(get(labState).nodes).toEqual({});
+    labState.setNodes({ '1': node(1, 0, 0) });
+    expect(Object.keys(get(labState).nodes)).toHaveLength(1);
+    labState.reset();
+    expect(get(labState).nodes).toEqual({});
+    expect(get(labState).labId).toBeNull();
+  });
+
+  it('applySnapshot adopts the incoming state authoritatively', () => {
+    labState.setNodes({ '1': node(1, 10, 10) });
+    labState.applySnapshot({
+      nodes: { '2': node(2, 20, 20, 'fresh') },
+      networks: {},
+      topology: [],
+      links: [],
+      defaults: { link_style: 'straight' },
+    });
+
+    const state = get(labState);
+    expect(Object.keys(state.nodes)).toEqual(['2']);
+    expect(state.nodes['2'].name).toBe('fresh');
+    expect(state.defaults.link_style).toBe('straight');
+  });
+
+  it('applySnapshot keeps current positions for ids with a pending layout PUT', () => {
+    labState.setNodes({ '1': node(1, 275, 315) });
+    labState.setNetworks({ '9': network(9, 500, 425) });
+
+    // Server snapshot raced the debounced save: OLD positions, NEW name.
+    const raced = node(1, 100, 120, 'renamed-elsewhere');
+    labState.applySnapshot(
+      {
+        nodes: { '1': raced },
+        networks: { '9': network(9, 360, 120) },
+        topology: [],
+        links: [],
+        defaults: { link_style: 'orthogonal' },
+      },
+      { nodeIds: new Set([1]), networkIds: new Set([9]) }
+    );
+
+    const state = get(labState);
+    expect(state.nodes['1'].left).toBe(275);
+    expect(state.nodes['1'].top).toBe(315);
+    expect(state.nodes['1'].name).toBe('renamed-elsewhere');
+    expect(state.networks['9'].left).toBe(500);
+    expect(state.networks['9'].top).toBe(425);
+  });
+
+  it('applySnapshot does not preserve ids missing from the snapshot', () => {
+    labState.setNodes({ '1': node(1, 275, 315), '2': node(2, 5, 5) });
+    labState.applySnapshot(
+      {
+        nodes: { '2': node(2, 20, 20) },
+        networks: {},
+        topology: [],
+        links: [],
+        defaults: { link_style: 'orthogonal' },
+      },
+      { nodeIds: new Set([1]) }
+    );
+
+    // Node 1 is gone from the snapshot (deleted server-side) even though it
+    // had a pending position; node 2 takes incoming coordinates.
+    expect(get(labState).nodes['1']).toBeUndefined();
+    expect(get(labState).nodes['2'].left).toBe(20);
+  });
+
+  it('field mutators replace state and notify synchronously', () => {
+    const seen: number[] = [];
+    const unsub = labState.subscribe((state) => seen.push(Object.keys(state.nodes).length));
+    unsub();
+    // (subscribe fired once with the empty state)
+
+    labState.setNodes({ '1': node(1, 1, 1) });
+    expect(Object.keys(get(labState).nodes)).toHaveLength(1);
+
+    labState.setTopology([
+      { source: 'node1', destination: 'network1', network_id: 1 },
+    ]);
+    expect(get(labState).topology).toHaveLength(1);
+  });
+
+  it('upsertNode / upsertLink / removeLink patch single entries', () => {
+    labState.setNodes({ '1': node(1, 1, 1) });
+    labState.upsertNode(1, node(1, 9, 9, 'moved'));
+    expect(get(labState).nodes['1'].name).toBe('moved');
+    expect(Object.keys(get(labState).nodes)).toHaveLength(1);
+
+    const first = link('lnk-1');
+    const second = link('lnk-2');
+    labState.setLinks([first]);
+    labState.upsertLink(second);
+    expect(get(labState).links).toHaveLength(2);
+
+    const replacedFirst = { ...first, label: 'updated' };
+    labState.upsertLink(replacedFirst);
+    expect(get(labState).links).toHaveLength(2);
+    expect(get(labState).links[0].label).toBe('updated');
+
+    labState.removeLink('lnk-1');
+    expect(get(labState).links.map((entry) => entry.id)).toEqual(['lnk-2']);
+  });
+
+  it('setLabId is idempotent for the same lab', () => {
+    labState.setLabId('demo.json');
+    const before = get(labState);
+    labState.setLabId('demo.json');
+    expect(get(labState)).toBe(before); // same reference — no spurious notify
+    labState.setLabId('other.json');
+    expect(get(labState).labId).toBe('other.json');
+  });
+
+  it('applySnapshot adopts meta.revision and setRevision updates state + meta (#245)', () => {
+    labState.applySnapshot({
+      meta: {
+        id: 'demo',
+        name: 'demo',
+        filename: 'demo.json',
+        path: '/demo.json',
+        owner: 'admin',
+        author: '',
+        description: '',
+        version: '4',
+        grid: false,
+        lock: false,
+        revision: 7,
+      },
+      nodes: {},
+      networks: {},
+      topology: [],
+      links: [],
+    });
+    expect(get(labState).revision).toBe(7);
+
+    // Post-write revision from a PUT response lands in both slots.
+    labState.setRevision(8);
+    const state = get(labState);
+    expect(state.revision).toBe(8);
+    expect(state.meta?.revision).toBe(8);
+
+    // Snapshots without a numeric revision keep the current token.
+    labState.applySnapshot({
+      nodes: {},
+      networks: {},
+      topology: [],
+      links: [],
+    });
+    expect(get(labState).revision).toBe(8);
+  });
+});

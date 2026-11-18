@@ -3,6 +3,8 @@ export interface ApiResponse<T> {
   status: 'success' | 'fail' | 'error' | 'unauthorized';
   message: string;
   data: T;
+  /** #245: post-write concurrency revision on guarded PUT responses. */
+  revision?: number;
   access_token?: string;
   token_type?: string;
   eve_uid?: string;
@@ -458,6 +460,12 @@ export interface LabMeta {
   author: string;
   description: string;
   version: string;
+  /**
+   * #245: machine-owned optimistic-concurrency revision, bumped by the
+   * backend on every lab.json write. Send as If-Match on PUT /layout and
+   * PUT /topology; distinct from the user-authored `version` field.
+   */
+  revision?: number;
   grid: boolean;
   lock: boolean;
   sat?: string;

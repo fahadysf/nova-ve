@@ -41,16 +41,20 @@
   import PortInfoPopover from '$lib/components/canvas/PortInfoPopover.svelte';
   import { selectedPortInfoStore, type SelectedPortInfo } from '$lib/stores/portInfo';
   import { toastStore } from '$lib/stores/toasts';
-  import { createLayoutDebouncer, type LayoutDebouncer } from '$lib/services/labApi';
+  import {
+    createLayoutDebouncer,
+    LayoutConflictError,
+    type LayoutDebouncer,
+  } from '$lib/services/labApi';
   import {
     closestPortPositionToBox,
     separatePortPositions,
     type NodeBox,
   } from '$lib/services/portLayout';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
+  import { labState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
   import { deriveEdges, parseIfaceInterfaceIndex, type DiscoveredLink } from '$lib/services/canvasEdges';
-  import { syncTopologyCanvasLocalState } from '$lib/services/topologyCanvasState';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -77,13 +81,8 @@
   } from '$lib/types';
 
   export let labId: string;
-  export let nodes: Record<string, NodeData> = {};
-  export let networks: Record<string, NetworkData> = {};
-  export let topology: TopologyLink[] = [];
   /** v2 links[] — the source of truth for edges (US-082). */
-  export let links: Link[] = [];
   /** v2 lab defaults (notably ``link_style`` for edge routing). */
-  export let defaults: LabDefaults = { link_style: 'orthogonal' };
   export let consoleSelectorWindows: ConsoleSelectorWindow[] = [];
   export let consoleMinimizedWindows: ConsoleMinimizedBar[] = [];
 
@@ -155,7 +154,24 @@
   const { fitView, screenToFlowPosition, zoomIn, zoomOut } = useSvelteFlow();
   const layoutDebouncer: LayoutDebouncer = createLayoutDebouncer(labId, {
     delayMs: 500,
+    // #245: guard writes with the store's revision; the response carries the
+    // post-write revision so the next write is checked against fresh state.
+    versionProvider: () => $labState.revision,
+    onApplied: (result) => {
+      const revision = (result as { revision?: unknown } | null)?.revision;
+      if (typeof revision === 'number') {
+        labState.setRevision(revision);
+      }
+    },
     onError: (err) => {
+      if (err instanceof LayoutConflictError) {
+        // The payload requeued; the page re-adopts the server snapshot
+        // (keeping our pending positions) and retries the flush with the
+        // fresh revision via the 'layout-conflict' handler.
+        toastStore.push('Lab changed in another session — reloading latest state.', 'error');
+        dispatchCanvasChange('layout-conflict');
+        return;
+      }
       const message = err instanceof Error ? err.message : 'Layout save failed';
       toastStore.push(message, 'error');
     },
@@ -179,7 +195,7 @@
   $: selectedPortInfo = $selectedPortInfoStore;
 
   function resolveInterfacePeerLabel(nodeId: number, interfaceIndex: number): string | null {
-    for (const link of localLinks) {
+    for (const link of $labState.links) {
       const fromMatches =
         link.from?.node_id === nodeId && link.from?.interface_index === interfaceIndex;
       const toMatches =
@@ -188,11 +204,11 @@
       const other = fromMatches ? link.to : link.from;
       if (!other) continue;
       if (typeof other.network_id === 'number') {
-        const network = localNetworks[String(other.network_id)];
+        const network = $labState.networks[String(other.network_id)];
         return network?.name ?? `network ${other.network_id}`;
       }
       if (typeof other.node_id === 'number') {
-        const peerNode = localNodes[String(other.node_id)];
+        const peerNode = $labState.nodes[String(other.node_id)];
         if (!peerNode) return `node ${other.node_id}`;
         const peerIface =
           typeof other.interface_index === 'number'
@@ -207,14 +223,14 @@
 
   function resolveNetworkPeerLabel(networkId: number): string | null {
     const peers: string[] = [];
-    for (const link of localLinks) {
+    for (const link of $labState.links) {
       const fromMatches = link.from?.network_id === networkId;
       const toMatches = link.to?.network_id === networkId;
       if (!fromMatches && !toMatches) continue;
       const other = fromMatches ? link.to : link.from;
       if (!other) continue;
       if (typeof other.node_id === 'number') {
-        const peerNode = localNodes[String(other.node_id)];
+        const peerNode = $labState.nodes[String(other.node_id)];
         const nodeLabel = peerNode?.name ?? `node ${other.node_id}`;
         const peerIface =
           peerNode && typeof other.interface_index === 'number'
@@ -222,7 +238,7 @@
             : undefined;
         peers.push(peerIface ? `${nodeLabel} · ${peerIface.name}` : nodeLabel);
       } else if (typeof other.network_id === 'number') {
-        const network = localNetworks[String(other.network_id)];
+        const network = $labState.networks[String(other.network_id)];
         peers.push(network?.name ?? `network ${other.network_id}`);
       }
     }
@@ -260,16 +276,6 @@
   const nodesStore = writable<Node[]>([]);
   const edgesStore = writable<Edge[]>([]);
 
-  let localNodes: Record<string, NodeData> = {};
-  let localNetworks: Record<string, NetworkData> = {};
-  let localTopology: TopologyLink[] = [];
-  let localLinks: Link[] = [];
-  let localDefaults: LabDefaults = { link_style: 'orthogonal' };
-  let lastNodesRef = nodes;
-  let lastNetworksRef = networks;
-  let lastTopologyRef = topology;
-  let lastLinksRef = links;
-  let lastDefaultsRef = defaults;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
   let saveState: 'idle' | 'saving' | 'saved' = 'idle';
   let selectedEdgeId: string | null = null;
@@ -353,7 +359,7 @@
     if (endpoint?.kind !== 'interface' && endpoint?.kind !== 'node-slot') {
       return null;
     }
-    return localNodes[String(endpoint.nodeId)] ?? null;
+    return $labState.nodes[String(endpoint.nodeId)] ?? null;
   }
 
   function blockedTopologyChangeNodes(snapshot: DragLinkSnapshot): NodeData[] {
@@ -422,17 +428,16 @@
           ? refreshedNode
           : { ...refreshedNode, transientStatus };
 
-      localNodes = {
-        ...localNodes,
+      labState.setNodes({
+        ...$labState.nodes,
         [String(nodeId)]: nextNode,
-      };
+      });
       publishFlowState();
       dispatchCanvasChange(
         refreshedNode.status === targetStatus ? `node-${action}` : `node-${action}-pending`,
         {
           nodeId,
           node: deepClone(nextNode),
-          nodes: deepClone(localNodes),
         }
       );
 
@@ -444,65 +449,16 @@
     return false;
   }
 
-  function syncLocalState() {
-    localNodes = deepClone(nodes);
-    localNetworks = deepClone(networks);
-    localTopology = deepClone(topology);
-    localLinks = deepClone(links);
-    localDefaults = deepClone(defaults);
-  }
-
   function publishFlowState() {
     nodesStore.set(buildFlowNodes());
     edgesStore.set(buildFlowEdges());
   }
 
-  $: if (
-    nodes !== lastNodesRef ||
-    networks !== lastNetworksRef ||
-    topology !== lastTopologyRef ||
-    links !== lastLinksRef ||
-    defaults !== lastDefaultsRef
-  ) {
-    const synced = syncTopologyCanvasLocalState(
-      {
-        nodes: localNodes,
-        networks: localNetworks,
-        topology: localTopology,
-        links: localLinks,
-        defaults: localDefaults,
-      },
-      {
-        nodes: lastNodesRef,
-        networks: lastNetworksRef,
-        topology: lastTopologyRef,
-        links: lastLinksRef,
-        defaults: lastDefaultsRef,
-      },
-      { nodes, networks, topology, links, defaults }
-    );
-
-    localNodes = synced.local.nodes;
-    localNetworks = synced.local.networks;
-    localTopology = synced.local.topology;
-    localLinks = synced.local.links;
-    localDefaults = synced.local.defaults;
-    lastNodesRef = synced.refs.nodes;
-    lastNetworksRef = synced.refs.networks;
-    lastTopologyRef = synced.refs.topology;
-    lastLinksRef = synced.refs.links;
-    lastDefaultsRef = synced.refs.defaults;
-    if (synced.changed) publishFlowState();
-  }
-
-  $: if (
-    !Object.keys(localNodes).length &&
-    !Object.keys(localNetworks).length &&
-    !localTopology.length &&
-    !localLinks.length
-  ) {
-    syncLocalState();
-  }
+  // #245: the canvas is a pure view of the shared labState store. Any store
+  // change — canvas mutations, loadLab snapshots, WS-driven updates —
+  // repaints the flow elements. The old props/lastXRef identity-diff sync
+  // and its local deep clones are gone.
+  $: if ($labState) publishFlowState();
 
   $: networkPaletteItems = paletteItems.filter(
     (item): item is PaletteNetworkItem => item.kind === 'network'
@@ -519,7 +475,7 @@
   }
 
   function nodeBox(nodeId: number): NodeBox | null {
-    const node = localNodes[String(nodeId)];
+    const node = $labState.nodes[String(nodeId)];
     if (!node) return null;
     return {
       x: node.left,
@@ -530,7 +486,7 @@
   }
 
   function networkBox(networkId: number): NodeBox | null {
-    const network = localNetworks[String(networkId)];
+    const network = $labState.networks[String(networkId)];
     if (!network) return null;
     return {
       x: network.left || 100,
@@ -564,10 +520,10 @@
 
   function implicitLinkPairsByNetwork(): Map<number, Link[]> {
     const pairs = new Map<number, Link[]>();
-    for (const link of localLinks) {
+    for (const link of $labState.links) {
       const networkId = link.to?.network_id;
       if (typeof networkId !== 'number') continue;
-      const network = localNetworks[String(networkId)];
+      const network = $labState.networks[String(networkId)];
       if (!network || network.implicit !== true || network.visibility) continue;
       if (!pairs.has(networkId)) pairs.set(networkId, []);
       pairs.get(networkId)!.push(link);
@@ -628,7 +584,7 @@
     const networkRefs = new Map<number, Record<string, ConnectionPointRef>>();
     const implicitPairs = implicitLinkPairsByNetwork();
 
-    for (const link of localLinks) {
+    for (const link of $labState.links) {
       for (const key of ['from', 'to'] as const) {
         const endpoint = link[key];
         const port = endpointPortPosition(link, key, implicitPairs);
@@ -683,7 +639,7 @@
     const flowNodes: Node[] = [];
     const connectionPointPositions = buildConnectionPointPositions();
 
-    for (const node of Object.values(localNodes)) {
+    for (const node of Object.values($labState.nodes)) {
       flowNodes.push({
         id: `node${node.id}`,
         type: 'device',
@@ -710,7 +666,7 @@
     }
 
     const linkIdsByNetwork = new Map<number, string[]>();
-    for (const link of localLinks) {
+    for (const link of $labState.links) {
       if (!link?.id) continue;
       const networkId = link.to?.network_id;
       if (typeof networkId !== 'number') continue;
@@ -718,7 +674,7 @@
       linkIdsByNetwork.get(networkId)!.push(link.id);
     }
 
-    for (const network of Object.values(localNetworks)) {
+    for (const network of Object.values($labState.networks)) {
       // Implicit bridges normally render as paired collapsed edges (handled
       // in canvasEdges.ts) and the bridge node itself stays hidden. But an
       // implicit network with refcount != 2 is in a broken state — orphan
@@ -782,7 +738,7 @@
       }
     }
 
-    return deriveEdges(localLinks, localDefaults, discoveredList, divergentByLinkId, localNetworks);
+    return deriveEdges($labState.links, $labState.defaults, discoveredList, divergentByLinkId, $labState.networks);
   }
 
   $: {
@@ -829,7 +785,7 @@
       return;
     }
 
-    const node = localNodes[String(decoded.id)];
+    const node = $labState.nodes[String(decoded.id)];
     if (!node) {
       return;
     }
@@ -905,16 +861,39 @@
     saveState = 'saving';
     saveTimer = setTimeout(async () => {
       try {
-        await apiRequest(`/labs/${labId}/topology`, {
+        const expected = $labState.revision;
+        const result = await apiRequest<{ revision?: number }>(`/labs/${labId}/topology`, {
           method: 'PUT',
+          headers:
+            expected !== null && expected !== undefined
+              ? { 'If-Match': String(expected) }
+              : undefined,
+          // Topology-only payload. Node/network deletion is already
+          // persisted by DELETE /nodes/{id} and DELETE /networks/{id}
+          // (both filter topology[] server-side). Echoing full
+          // $labState.nodes/$labState.networks here re-sent positions captured
+          // before a racing loadLab() reload, reverting layout saves
+          // that PUT /layout had already persisted. Positions travel
+          // exclusively via layoutDebouncer → PUT /layout.
           body: {
-            topology: localTopology,
-            nodes: localNodes,
-            networks: localNetworks
+            topology: $labState.topology
           }
         });
+        if (typeof result?.revision === 'number') {
+          labState.setRevision(result.revision);
+        }
         saveState = 'saved';
-      } catch (_error) {
+      } catch (error) {
+        if (error instanceof ApiError && error.statusCode === 412) {
+          // #245: lab changed elsewhere. Surface it and let the page
+          // re-adopt the server snapshot, then retry the (queued) layout
+          // flush; the topology payload itself is re-sent by the next
+          // mutation, so no retry here.
+          saveState = 'idle';
+          toastStore.push('Lab changed in another session — reloading latest state.', 'error');
+          dispatchCanvasChange('layout-conflict');
+          return;
+        }
         saveState = 'idle';
       }
     }, 500);
@@ -932,9 +911,9 @@
 
   function recalculateNetworks() {
     const usage = new Map<number, number>();
-    const nextNetworks = { ...localNetworks };
+    const nextNetworks = { ...$labState.networks };
 
-    for (const node of Object.values(localNodes)) {
+    for (const node of Object.values($labState.nodes)) {
       for (const iface of node.interfaces ?? []) {
         if (iface.network_id > 0) {
           usage.set(iface.network_id, (usage.get(iface.network_id) ?? 0) + 1);
@@ -950,7 +929,7 @@
       }
     }
 
-    localNetworks = nextNetworks;
+    labState.setNetworks(nextNetworks);
   }
 
   function handleNodeDragStop(event: CustomEvent<{ targetNode: Node | null }>) {
@@ -967,17 +946,17 @@
     const left = Math.round(movedNode.position.x);
     const top = Math.round(movedNode.position.y);
 
-    if (decoded.type === 'node' && localNodes[String(decoded.id)]) {
-      localNodes[String(decoded.id)].left = left;
-      localNodes[String(decoded.id)].top = top;
-      localNodes = { ...localNodes };
+    if (decoded.type === 'node' && $labState.nodes[String(decoded.id)]) {
+      $labState.nodes[String(decoded.id)].left = left;
+      $labState.nodes[String(decoded.id)].top = top;
+      labState.setNodes({ ...$labState.nodes });
       layoutDebouncer.pushNodePosition(decoded.id, left, top);
     }
 
-    if (decoded.type === 'network' && localNetworks[String(decoded.id)]) {
-      localNetworks[String(decoded.id)].left = left;
-      localNetworks[String(decoded.id)].top = top;
-      localNetworks = { ...localNetworks };
+    if (decoded.type === 'network' && $labState.networks[String(decoded.id)]) {
+      $labState.networks[String(decoded.id)].left = left;
+      $labState.networks[String(decoded.id)].top = top;
+      labState.setNetworks({ ...$labState.networks });
       layoutDebouncer.pushNetworkPosition(decoded.id, left, top);
     }
   }
@@ -992,7 +971,7 @@
     const prefix = 'link:';
     if (edgeId.startsWith(prefix)) {
       const linkId = edgeId.slice(prefix.length);
-      const index = localLinks.findIndex((entry) => entry.id === linkId);
+      const index = $labState.links.findIndex((entry) => entry.id === linkId);
       return index >= 0 ? [index] : [];
     }
 
@@ -1002,7 +981,7 @@
     if (!Array.isArray(implicitLinkIds)) return [];
 
     const ids = new Set(implicitLinkIds.map((id) => String(id)));
-    return localLinks
+    return $labState.links
       .map((entry, index) => (entry?.id && ids.has(String(entry.id)) ? index : -1))
       .filter((index) => index >= 0);
   }
@@ -1058,7 +1037,7 @@
       });
       const serverLink = response.data;
       if (serverLink && serverLink.id) {
-        localLinks = [...localLinks, serverLink];
+        labState.setLinks([...$labState.links, serverLink]);
       }
       // Optimistically remove the discovered overlay immediately (HIGH-1).
       // The next discovery cycle would also clear it, but removing it now
@@ -1068,9 +1047,6 @@
       }
       publishFlowState();
       dispatchCanvasChange('topology', {
-        nodes: deepClone(localNodes),
-        networks: deepClone(localNetworks),
-        topology: deepClone(localTopology),
       });
       toastStore.push('Promoted discovered link to declared link.', 'info');
     } catch (error) {
@@ -1092,20 +1068,20 @@
 
     const deleteIndexes = new Set(indexes);
     const linksToDelete = indexes
-      .map((index) => localLinks[index])
+      .map((index) => $labState.links[index])
       .filter((link): link is Link => !!link?.id);
     // Capture pre-mutation snapshot for rollback on API failure.
-    const previousLinks = localLinks;
-    const previousNodes = localNodes;
-    const previousNetworks = localNetworks;
-    const previousTopology = localTopology;
+    const previousLinks = $labState.links;
+    const previousNodes = $labState.nodes;
+    const previousNetworks = $labState.networks;
+    const previousTopology = $labState.topology;
 
     for (const v2Link of linksToDelete) {
       if (
         typeof v2Link.from?.node_id === 'number' &&
         typeof v2Link.from.interface_index === 'number'
       ) {
-        const node = localNodes[String(v2Link.from.node_id)];
+        const node = $labState.nodes[String(v2Link.from.node_id)];
         const iface = node?.interfaces[v2Link.from.interface_index];
         if (iface) iface.network_id = 0;
       }
@@ -1113,28 +1089,25 @@
         typeof v2Link.to?.node_id === 'number' &&
         typeof v2Link.to.interface_index === 'number'
       ) {
-        const node = localNodes[String(v2Link.to.node_id)];
+        const node = $labState.nodes[String(v2Link.to.node_id)];
         const iface = node?.interfaces[v2Link.to.interface_index];
         if (iface) iface.network_id = 0;
       }
     }
 
-    localNodes = { ...localNodes };
-    localTopology = localTopology.filter((_, currentIndex) => !deleteIndexes.has(currentIndex));
-    localLinks = localLinks.filter((_, currentIndex) => !deleteIndexes.has(currentIndex));
+    labState.setNodes({ ...$labState.nodes });
+    labState.setTopology($labState.topology.filter((_, currentIndex) => !deleteIndexes.has(currentIndex)));
+    labState.setLinks($labState.links.filter((_, currentIndex) => !deleteIndexes.has(currentIndex)));
     recalculateNetworks();
     publishFlowState();
     dispatchCanvasChange('topology', {
-      nodes: deepClone(localNodes),
-      networks: deepClone(localNetworks),
-      topology: deepClone(localTopology),
     });
 
     // Issue #174 follow-up: link deletion is a v2 link operation. Use
     // DELETE /links/{id} (the proper REST surface) instead of the legacy
     // PUT /topology — that endpoint regenerates links[] from topology[]
     // and used to silently wipe ALL surviving links on this lab when the
-    // delete trimmed an entry from a localTopology that was already empty
+    // delete trimmed an entry from a $labState.topology that was already empty
     // (v2-only labs). tmp_ ids are placeholders for in-flight POST /links;
     // skip the DELETE because there's no server-side link yet.
     const persistedLinks = linksToDelete.filter((link) => !String(link.id).startsWith('tmp_'));
@@ -1150,15 +1123,12 @@
         )
       );
     } catch (error) {
-      localLinks = previousLinks;
-      localNodes = previousNodes;
-      localNetworks = previousNetworks;
-      localTopology = previousTopology;
+      labState.setLinks(previousLinks);
+      labState.setNodes(previousNodes);
+      labState.setNetworks(previousNetworks);
+      labState.setTopology(previousTopology);
       publishFlowState();
       dispatchCanvasChange('topology', {
-        nodes: deepClone(localNodes),
-        networks: deepClone(localNetworks),
-        topology: deepClone(localTopology),
       });
       const message =
         error instanceof ApiError
@@ -1176,14 +1146,14 @@
 
     const updateIndexes = new Set(indexes);
     const targets = indexes
-      .map((index) => localLinks[index])
+      .map((index) => $labState.links[index])
       .filter((link): link is Link => !!link?.id);
     if (targets.length === 0) return;
 
     const previousStyles = new Map(targets.map((link) => [link.id, link.style_override ?? null]));
-    localLinks = localLinks.map((link, i) =>
+    labState.setLinks($labState.links.map((link, i) =>
       updateIndexes.has(i) ? { ...link, style_override: style } : link
-    );
+    ));
     publishFlowState();
 
     // tmp_ ids are placeholders for in-flight POST /links; the eventual
@@ -1202,9 +1172,9 @@
         )
       );
     } catch (error) {
-      localLinks = localLinks.map((link, i) =>
+      labState.setLinks($labState.links.map((link, i) =>
         updateIndexes.has(i) ? { ...link, style_override: previousStyles.get(link.id) ?? null } : link
-      );
+      ));
       publishFlowState();
       const message = error instanceof Error ? error.message : 'Failed to update link style';
       toastStore.push(message, 'error');
@@ -1225,7 +1195,7 @@
       return;
     }
 
-    const node = localNodes[String(decoded.id)];
+    const node = $labState.nodes[String(decoded.id)];
     if (!node) {
       return;
     }
@@ -1237,20 +1207,17 @@
 
     if (action === 'delete') {
       await apiRequest(`/labs/${labId}/nodes/${decoded.id}`, { method: 'DELETE' });
-      const nextNodes = { ...localNodes };
+      const nextNodes = { ...$labState.nodes };
       delete nextNodes[String(decoded.id)];
-      localNodes = nextNodes;
-      localTopology = localTopology.filter(
+      labState.setNodes(nextNodes);
+      labState.setTopology($labState.topology.filter(
         (link) => link.source !== `node${decoded.id}` && link.destination !== `node${decoded.id}`
-      );
+      ));
       recalculateNetworks();
       publishFlowState();
       scheduleSave();
       dispatchCanvasChange('node-delete', {
         nodeId: decoded.id,
-        nodes: deepClone(localNodes),
-        networks: deepClone(localNetworks),
-        topology: deepClone(localTopology),
       });
       return;
     }
@@ -1263,12 +1230,11 @@
     }
     const token = ++nodeActionSequence;
     nodeActionTokens.set(decoded.id, token);
-    localNodes = { ...localNodes };
+    labState.setNodes({ ...$labState.nodes });
     publishFlowState();
     dispatchCanvasChange(`node-${action}-pending`, {
       nodeId: decoded.id,
       node: deepClone(node),
-      nodes: deepClone(localNodes),
     });
 
     try {
@@ -1287,22 +1253,20 @@
       }
 
       delete node.transientStatus;
-      localNodes = { ...localNodes };
+      labState.setNodes({ ...$labState.nodes });
       publishFlowState();
       dispatchCanvasChange('node-edit', {
         nodeId: decoded.id,
         node: deepClone(node),
-        nodes: deepClone(localNodes),
       });
       nodeActionTokens.delete(decoded.id);
     } catch (error) {
       delete node.transientStatus;
-      localNodes = { ...localNodes };
+      labState.setNodes({ ...$labState.nodes });
       publishFlowState();
       dispatchCanvasChange('node-edit', {
         nodeId: decoded.id,
         node: deepClone(node),
-        nodes: deepClone(localNodes),
       });
       nodeActionTokens.delete(decoded.id);
       throw error;
@@ -1321,24 +1285,21 @@
     }
 
     await apiRequest(`/labs/${labId}/networks/${decoded.id}`, { method: 'DELETE' });
-    const nextNetworks = { ...localNetworks };
+    const nextNetworks = { ...$labState.networks };
     delete nextNetworks[String(decoded.id)];
-    localNetworks = nextNetworks;
-    localTopology = localTopology.filter((link) => link.network_id !== decoded.id);
-    for (const node of Object.values(localNodes)) {
+    labState.setNetworks(nextNetworks);
+    labState.setTopology($labState.topology.filter((link) => link.network_id !== decoded.id));
+    for (const node of Object.values($labState.nodes)) {
       for (const iface of node.interfaces) {
         if (iface.network_id === decoded.id) {
           iface.network_id = 0;
         }
       }
     }
-    localNodes = { ...localNodes };
+    labState.setNodes({ ...$labState.nodes });
     publishFlowState();
     scheduleSave();
     dispatchCanvasChange('network-delete', {
-      nodes: deepClone(localNodes),
-      networks: deepClone(localNetworks),
-      topology: deepClone(localTopology),
     });
   }
 
@@ -1369,13 +1330,12 @@
     // single-record envelope chosen for write routes. List routes still use
     // ``data:``; ApiResponse<T>.data is therefore unset here.
     const created = (response as unknown as { network: NetworkData }).network;
-    localNetworks = {
-      ...localNetworks,
+    labState.setNetworks({
+      ...$labState.networks,
       [String(created.id)]: created
-    };
+    });
     publishFlowState();
     dispatchCanvasChange('network-create', {
-      networks: deepClone(localNetworks),
     });
   }
 
@@ -1386,8 +1346,8 @@
     // create suggested ``net-2`` which already exists, and the server
     // 409s. This walks the in-memory set to skip occupied slots.
     const used = new Set<string>();
-    for (const id of Object.keys(localNetworks)) {
-      const record = localNetworks[id];
+    for (const id of Object.keys($labState.networks)) {
+      const record = $labState.networks[id];
       if (record && typeof record.name === 'string') {
         const trimmed = record.name.trim().toLowerCase();
         if (trimmed) used.add(trimmed);
@@ -1474,9 +1434,9 @@
   ): { linkIndex: number; key: LinkEndpointKey } | null {
     if (target.kind === 'network') {
       if (target.endpointKey) {
-        const linkIndex = localLinks.findIndex((link) => link.id === target.linkId);
+        const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
         if (linkIndex < 0) return null;
-        const link = localLinks[linkIndex];
+        const link = $labState.links[linkIndex];
         const endpoint = link[target.endpointKey];
         if (endpoint?.network_id === target.networkId) {
           return { linkIndex, key: target.endpointKey };
@@ -1484,18 +1444,18 @@
         return null;
       }
 
-      const linkIndex = localLinks.findIndex((link) => link.id === target.linkId);
+      const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
       if (linkIndex < 0) return null;
-      const link = localLinks[linkIndex];
+      const link = $labState.links[linkIndex];
       if (link.from?.network_id === target.networkId) return { linkIndex, key: 'from' };
       if (link.to?.network_id === target.networkId) return { linkIndex, key: 'to' };
       return null;
     }
 
     if (target.linkId && target.endpointKey) {
-      const linkIndex = localLinks.findIndex((link) => link.id === target.linkId);
+      const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
       if (linkIndex < 0) return null;
-      const link = localLinks[linkIndex];
+      const link = $labState.links[linkIndex];
       const endpoint = link[target.endpointKey];
       if (
         endpoint?.node_id === target.nodeId &&
@@ -1506,7 +1466,7 @@
       return null;
     }
 
-    for (const [linkIndex, link] of localLinks.entries()) {
+    for (const [linkIndex, link] of $labState.links.entries()) {
       if (
         link.from?.node_id === target.nodeId &&
         link.from?.interface_index === target.interfaceIndex
@@ -1546,19 +1506,19 @@
       return;
     }
 
-    const link = localLinks[ref.linkIndex];
+    const link = $labState.links[ref.linkIndex];
     if (!link || String(link.id).startsWith('tmp_')) return;
 
-    const previousLinks = localLinks;
+    const previousLinks = $labState.links;
     const endpoint_positions = withEndpointPosition(
       link.endpoint_positions,
       ref.key,
       mode,
       port
     );
-    localLinks = localLinks.map((entry, index) =>
+    labState.setLinks($labState.links.map((entry, index) =>
       index === ref.linkIndex ? { ...entry, endpoint_positions } : entry
-    );
+    ));
     publishFlowState();
 
     try {
@@ -1568,7 +1528,7 @@
         suppressToast: true,
       });
     } catch (error) {
-      localLinks = previousLinks;
+      labState.setLinks(previousLinks);
       publishFlowState();
       const message =
         error instanceof Error ? error.message : 'Failed to persist connection point position';
@@ -1594,14 +1554,14 @@
       return;
     }
 
-    const node = localNodes[String(nodeId)];
+    const node = $labState.nodes[String(nodeId)];
     if (!node) return;
     const iface = node.interfaces[interfaceIndex];
     if (!iface) return;
 
     const previous = iface.port_position ?? null;
     iface.port_position = port;
-    localNodes = { ...localNodes };
+    labState.setNodes({ ...$labState.nodes });
     publishFlowState();
 
     try {
@@ -1612,7 +1572,7 @@
       });
     } catch (error) {
       iface.port_position = previous;
-      localNodes = { ...localNodes };
+      labState.setNodes({ ...$labState.nodes });
       publishFlowState();
       const message = error instanceof Error ? error.message : 'Failed to persist port position';
       toastStore.push(message, 'error');
@@ -1641,7 +1601,7 @@
         indexes.add(iface.index ?? index);
       }
     }
-    for (const link of localLinks) {
+    for (const link of $labState.links) {
       for (const endpoint of [link.from, link.to]) {
         if (endpoint?.node_id === node.id && typeof endpoint.interface_index === 'number') {
           indexes.add(endpoint.interface_index);
@@ -1737,7 +1697,7 @@
       postTo = { network_id: snap.source.networkId };
     }
 
-    // Optimistic insertion: append to localLinks with a temporary id so the
+    // Optimistic insertion: append to $labState.links with a temporary id so the
     // edge renders immediately. The server response replaces the temp id.
     const optimisticLink: Link = {
       id: tempId,
@@ -1749,7 +1709,7 @@
       width: '1',
     };
 
-    localLinks = [...localLinks, optimisticLink];
+    labState.setLinks([...$labState.links, optimisticLink]);
     publishFlowState();
     dragLinkStore.cancel();
     dragLinkSourceAnchor = null;
@@ -1767,16 +1727,13 @@
       });
       const serverLink = response.data;
       if (serverLink && serverLink.id) {
-        localLinks = localLinks.map((entry) => (entry.id === tempId ? serverLink : entry));
+        labState.setLinks($labState.links.map((entry) => (entry.id === tempId ? serverLink : entry)));
       }
       publishFlowState();
       dispatchCanvasChange('topology', {
-        nodes: deepClone(localNodes),
-        networks: deepClone(localNetworks),
-        topology: deepClone(localTopology),
       });
     } catch (error) {
-      localLinks = localLinks.filter((entry) => entry.id !== tempId);
+      labState.setLinks($labState.links.filter((entry) => entry.id !== tempId));
       publishFlowState();
       const message =
         error instanceof ApiError
@@ -1806,6 +1763,9 @@
       window.addEventListener('mousemove', handleWindowMouseMove);
       window.addEventListener('mouseup', handleWindowMouseUp);
       window.addEventListener('keydown', handleWindowKeyDown);
+      // Closing the tab inside the 500ms debounce window used to silently
+      // lose the last drag. keepalive fetch survives page teardown.
+      window.addEventListener('beforeunload', handleBeforeUnloadFlush);
     }
 
     if (typeof window !== 'undefined') {
@@ -1847,6 +1807,7 @@
         window.removeEventListener('mousemove', handleWindowMouseMove);
         window.removeEventListener('mouseup', handleWindowMouseUp);
         window.removeEventListener('keydown', handleWindowKeyDown);
+        window.removeEventListener('beforeunload', handleBeforeUnloadFlush);
       }
       void layoutDebouncer.flush();
       if (reconUnsub) {
@@ -1874,6 +1835,19 @@
 
   export async function flushPendingLayout(): Promise<void> {
     await layoutDebouncer.flush();
+  }
+
+  /**
+   * Positions still queued/in-flight to PUT /layout. The page passes these
+   * to labState.applySnapshot so a server snapshot racing a (possibly
+   * failed-and-requeued) layout save cannot adopt pre-drag coordinates.
+   */
+  export function pendingLayoutIds(): { nodeIds: Set<number>; networkIds: Set<number> } {
+    return layoutDebouncer.pendingPositionIds();
+  }
+
+  function handleBeforeUnloadFlush() {
+    layoutDebouncer.flushKeepalive();
   }
 
   async function handleNodeModalSubmit(
@@ -1931,14 +1905,13 @@
             top: Math.round(nodeCreateAnchor.y),
           }
         });
-        const nextNodes = { ...localNodes };
+        const nextNodes = { ...$labState.nodes };
         for (const node of response.data.nodes) {
           nextNodes[String(node.id)] = node;
         }
-        localNodes = nextNodes;
+        labState.setNodes(nextNodes);
         publishFlowState();
         dispatchCanvasChange('node-create', {
-          nodes: deepClone(localNodes),
         });
       } else if (event.detail.mode === 'create-paired') {
         await apiRequest<{ nodes: NodeData[]; links: unknown[] }>(
@@ -1955,22 +1928,21 @@
         );
         // Paired creation adds 2+ nodes plus an implicit bridge network and
         // the auto-link halves; route through the parent's full lab refresh
-        // path so localNetworks/localTopology stay consistent.
+        // path so $labState.networks/$labState.topology stay consistent.
         dispatchCanvasChange('paired-create', {});
       } else {
         const response = await apiRequest<NodeData>(`/labs/${labId}/nodes/${event.detail.nodeId}`, {
           method: 'PUT',
           body: event.detail.payload,
         });
-        localNodes = {
-          ...localNodes,
+        labState.setNodes({
+          ...$labState.nodes,
           [String(response.data.id)]: response.data,
-        };
+        });
         publishFlowState();
         dispatchCanvasChange('node-edit', {
           nodeId: response.data.id,
           node: deepClone(response.data),
-          nodes: deepClone(localNodes),
         });
       }
 
@@ -2396,8 +2368,8 @@
 
   <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
   <LinkConfirmModal
-    nodes={localNodes}
-    links={localLinks}
+    nodes={$labState.nodes}
+    links={$labState.links}
     on:confirm={handleLinkConfirm}
     on:cancel={handleLinkConfirmCancel}
   />
@@ -2425,7 +2397,7 @@
         mtu={null}
         duplex={null}
         anchorRect={selectedPortInfo.anchorRect}
-        placement={(localNodes[String(selectedPortInfo.nodeId)]?.interfaces?.[selectedPortInfo.interfaceIndex]
+        placement={($labState.nodes[String(selectedPortInfo.nodeId)]?.interfaces?.[selectedPortInfo.interfaceIndex]
           ?.port_position?.side ?? 'right') as 'top' | 'right' | 'bottom' | 'left'}
         onClose={closePortInfo}
       />

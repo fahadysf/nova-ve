@@ -240,7 +240,9 @@ cpulimit: 1
 
     topology_response = await labs.update_topology(
         "nested/lab.json",
-        {
+        # Stub Request — no If-Match header, so no precondition applies.
+        SimpleNamespace(headers={}),
+        payload={
             "topology": [{"source": "node1", "destination": "network1", "network_id": 1}],
             "nodes": {"1": {"left": 200, "top": 150, "interfaces": [{"name": "Gi1", "network_id": 1}]}},
             "networks": {"1": {"left": 410, "top": 255, "visibility": 0}},
@@ -250,9 +252,15 @@ cpulimit: 1
     assert topology_response["code"] == 200
 
     saved_lab = LabService.read_lab_json_static("nested/lab.json")
-    assert saved_lab["nodes"]["1"]["left"] == 200
+    # Positions are owned by PUT /layout: left/top patches via PUT /topology
+    # are ignored (nodes and networks alike) so a stale client echo cannot
+    # revert a persisted layout. The values below stay at what update_node /
+    # update_network wrote earlier in this test.
+    assert saved_lab["nodes"]["1"]["left"] == 120
+    assert saved_lab["nodes"]["1"]["top"] == 90
     assert saved_lab["nodes"]["1"]["interfaces"][0]["network_id"] == 1
-    assert saved_lab["networks"]["1"]["left"] == 410
+    assert saved_lab["networks"]["1"]["left"] == 400
+    assert saved_lab["networks"]["1"]["top"] == 250
     assert saved_lab["networks"]["1"]["visibility"] == 0
     assert saved_lab["topology"][0]["network_id"] == 1
 

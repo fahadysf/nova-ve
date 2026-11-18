@@ -36,6 +36,22 @@ export interface LayoutPayload {
   defaults?: LayoutDefaults;
 }
 
+/**
+ * #245: raised when the server rejects a guarded write with 412 — the lab
+ * changed elsewhere (another tab, another client) since the client last
+ * observed it. Carries the server's current revision so callers can
+ * re-adopt the snapshot and retry.
+ */
+export class LayoutConflictError extends Error {
+  readonly serverRevision: number | null;
+
+  constructor(message: string, serverRevision: number | null) {
+    super(message);
+    this.name = 'LayoutConflictError';
+    this.serverRevision = serverRevision;
+  }
+}
+
 export interface LayoutDebouncerOptions {
   /** Quiescence window before a PUT is issued. Defaults to 500ms. */
   delayMs?: number;
@@ -45,10 +61,24 @@ export interface LayoutDebouncerOptions {
    */
   request?: (
     path: string,
-    init: { method: 'PUT'; body: LayoutPayload; suppressToast?: boolean }
+    init: {
+      method: 'PUT';
+      body: LayoutPayload;
+      suppressToast?: boolean;
+      /** #245: If-Match token; the default requester maps it to a header. */
+      ifMatch?: string;
+    }
   ) => Promise<unknown>;
   /** Optional error sink so callers can surface failures (e.g. toasts). */
   onError?: (error: unknown) => void;
+  /**
+   * #245: current optimistic-concurrency revision (from labState). When it
+   * returns a value it is sent as If-Match; the backend answers 412 on
+   * mismatch instead of silently accepting a stale write.
+   */
+  versionProvider?: () => string | number | null | undefined;
+  /** Called after a successful PUT with the parsed response body. */
+  onApplied?: (result: unknown) => void;
 }
 
 export interface LayoutDebouncer {
@@ -57,8 +87,20 @@ export interface LayoutDebouncer {
   pushViewport(viewport: LabViewport): void;
   pushDefaultLinkStyle(style: LinkStyle): void;
   flush(): Promise<void>;
+  /**
+   * Fire the pending payload (if any) with `fetch(..., {keepalive: true})`
+   * without awaiting — for `beforeunload`, where only synchronous initiation
+   * survives the page teardown.
+   */
+  flushKeepalive(): void;
   cancel(): void;
   pending(): boolean;
+  /**
+   * Ids whose positions are queued or currently in flight. Callers use this
+   * to keep local (unsaved) coordinates from being clobbered by an incoming
+   * server snapshot racing the debounced PUT.
+   */
+  pendingPositionIds(): { nodeIds: Set<number>; networkIds: Set<number> };
 }
 
 interface PendingState {
@@ -68,18 +110,38 @@ interface PendingState {
   linkStyle: LinkStyle | null;
 }
 
-async function defaultRequester(
+/** Exported for tests: the fetch-based requester with If-Match/412 mapping. */
+export async function defaultRequester(
   path: string,
-  init: { method: 'PUT'; body: LayoutPayload; suppressToast?: boolean }
+  init: { method: 'PUT'; body: LayoutPayload; suppressToast?: boolean; ifMatch?: string }
 ): Promise<unknown> {
   const url = path.startsWith('/api/') ? path : `/api${path.startsWith('/') ? path : `/${path}`}`;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (init.ifMatch !== undefined) {
+    headers['If-Match'] = init.ifMatch;
+  }
   const response = await fetch(url, {
     method: init.method,
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     credentials: 'include',
     body: JSON.stringify(init.body),
   });
   if (!response.ok) {
+    if (response.status === 412) {
+      let serverRevision: number | null = null;
+      try {
+        const body = (await response.json()) as { revision?: unknown };
+        if (typeof body.revision === 'number') {
+          serverRevision = body.revision;
+        }
+      } catch {
+        /* body already consumed or not JSON */
+      }
+      throw new LayoutConflictError(
+        `Lab changed elsewhere (stale revision); server is at ${serverRevision ?? 'unknown'}`,
+        serverRevision
+      );
+    }
     throw new Error(`PUT ${url} failed with status ${response.status}`);
   }
   // Best-effort parse — some endpoints return an empty body on success.
@@ -147,6 +209,10 @@ export function createLayoutDebouncer(
   let state = emptyState();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let inflight: Promise<void> | null = null;
+  let inflightIds: { nodeIds: Set<number>; networkIds: Set<number> } = {
+    nodeIds: new Set(),
+    networkIds: new Set(),
+  };
 
   function clearTimer() {
     if (timer !== null) {
@@ -163,6 +229,30 @@ export function createLayoutDebouncer(
     }, delayMs);
   }
 
+  /**
+   * Merge a failed payload back into the pending state so the next push or
+   * flush retries it. Newer pushes always win: entries already queued are
+   * not overwritten, and null viewport/linkStyle slots are only filled.
+   */
+  function requeue(payload: LayoutPayload) {
+    for (const entry of payload.nodes ?? []) {
+      if (!state.nodes.has(entry.id)) {
+        state.nodes.set(entry.id, entry);
+      }
+    }
+    for (const entry of payload.networks ?? []) {
+      if (!state.networks.has(entry.id)) {
+        state.networks.set(entry.id, entry);
+      }
+    }
+    if (payload.viewport && state.viewport === null) {
+      state.viewport = payload.viewport;
+    }
+    if (payload.defaults?.link_style && state.linkStyle === null) {
+      state.linkStyle = payload.defaults.link_style;
+    }
+  }
+
   async function send(): Promise<void> {
     if (!hasContent(state)) {
       return;
@@ -170,18 +260,40 @@ export function createLayoutDebouncer(
     const payload = buildPayload(state);
     state = emptyState();
     const path = `/labs/${labPath}/layout`;
+    const expected = opts.versionProvider?.();
+    const ifMatch = expected === null || expected === undefined ? undefined : String(expected);
+    inflightIds = {
+      nodeIds: new Set((payload.nodes ?? []).map((entry) => entry.id)),
+      networkIds: new Set((payload.networks ?? []).map((entry) => entry.id)),
+    };
     inflight = (async () => {
       try {
-        await requester(path, { method: 'PUT', body: payload, suppressToast: true });
+        const result = await requester(path, {
+          method: 'PUT',
+          body: payload,
+          suppressToast: true,
+          ifMatch,
+        });
+        opts.onApplied?.(result);
       } catch (error) {
+        // Keep the payload queued: pending() stays true and the next push
+        // or flush retries it. Dropping it here is what made a transient
+        // failure silently revert the canvas on the next reload.
+        requeue(payload);
         if (opts.onError) {
           opts.onError(error);
         }
       } finally {
         inflight = null;
+        inflightIds = { nodeIds: new Set(), networkIds: new Set() };
       }
     })();
     await inflight;
+  }
+
+  function keepaliveUrl(): string {
+    const path = `/labs/${labPath}/layout`;
+    return path.startsWith('/api/') ? path : `/api${path.startsWith('/') ? path : `/${path}`}`;
   }
 
   return {
@@ -208,12 +320,46 @@ export function createLayoutDebouncer(
         await inflight;
       }
     },
+    flushKeepalive() {
+      if (!hasContent(state)) {
+        return;
+      }
+      const payload = buildPayload(state);
+      state = emptyState();
+      const expected = opts.versionProvider?.();
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (expected !== null && expected !== undefined) {
+        headers['If-Match'] = String(expected);
+      }
+      try {
+        void fetch(keepaliveUrl(), {
+          method: 'PUT',
+          headers,
+          credentials: 'include',
+          keepalive: true,
+          body: JSON.stringify(payload),
+        });
+      } catch {
+        // Page is tearing down; nothing further to do.
+      }
+    },
     cancel() {
       clearTimer();
       state = emptyState();
     },
     pending() {
-      return timer !== null || hasContent(state);
+      return timer !== null || hasContent(state) || inflight !== null;
+    },
+    pendingPositionIds() {
+      const nodeIds = new Set(inflightIds.nodeIds);
+      const networkIds = new Set(inflightIds.networkIds);
+      for (const id of state.nodes.keys()) {
+        nodeIds.add(id);
+      }
+      for (const id of state.networks.keys()) {
+        networkIds.add(id);
+      }
+      return { nodeIds, networkIds };
     },
   };
 }

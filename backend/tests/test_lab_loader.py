@@ -243,6 +243,9 @@ def test_v2_round_trip_identity(patched_loader_settings):
 
     lab_data = _v2_lab()
     expected_persisted = copy.deepcopy(lab_data)
+    # #245: write_lab_json_static bumps the machine-owned meta.revision on
+    # every write (0 → 1 for a fixture without one).
+    expected_persisted.setdefault("meta", {})["revision"] = 1
 
     LabService.write_lab_json_static("round-trip.json", copy.deepcopy(lab_data))
 
