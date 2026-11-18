@@ -74,5 +74,12 @@ jobs:
       - name: Run frontend checks
         run: npm run check
 
+      # #246: the vitest suite (components, stores, services, router
+      # benches) previously never gated main — only svelte-check and the
+      # production build did. Run it between the fast type check and the
+      # slow build so regressions surface first.
+      - name: Run frontend unit tests
+        run: npm test
+
       - name: Build frontend
         run: npm run build
