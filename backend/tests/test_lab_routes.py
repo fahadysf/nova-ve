@@ -773,3 +773,43 @@ async def test_update_topology_if_match_revision_guard(monkeypatch, patched_rout
     # links[] is the authoritative record.
     assert persisted["links"][0]["from"] == {"node_id": 1, "interface_index": 0}
     assert persisted["links"][0]["to"] == {"network_id": 1}
+
+
+@pytest.mark.asyncio
+async def test_get_lab_db_branch_exposes_file_revision(monkeypatch, patched_route_settings):
+    """#247 follow-up: DB-registered labs must expose meta.revision so the
+    frontend can send If-Match; without it they silently degrade to
+    unguarded writes."""
+    lab_path = patched_route_settings.LABS_DIR / "db-lab.json"
+    _seed_revision_lab(lab_path, revision=12)
+
+    class _FakeLabRow:
+        id = "db-1"
+        filename = "db-lab.json"
+        name = "db"
+        path = "/db-lab.json"
+        owner = "admin"
+        author = "tests"
+        description = ""
+        body = ""
+        version = "0"
+        scripttimeout = 300
+        countdown = 0
+        linkwidth = "1"
+        grid = True
+        lock = False
+
+    async def _db_row(self, filename):
+        return _FakeLabRow()
+
+    monkeypatch.setattr("app.services.lab_service.LabService.get_lab_by_filename", _db_row)
+    _orphan_lab_overrides("admin")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.get("/api/labs/db-lab.json")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["revision"] == 12
