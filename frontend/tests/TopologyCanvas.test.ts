@@ -48,17 +48,37 @@ vi.mock('$lib/api', () => {
   };
 });
 
+const { debouncerMocks } = vi.hoisted(() => ({
+  debouncerMocks: [] as Array<{
+    pushNodePosition: ReturnType<typeof vi.fn>;
+    pushNetworkPosition: ReturnType<typeof vi.fn>;
+    pushViewport: ReturnType<typeof vi.fn>;
+    flush: ReturnType<typeof vi.fn>;
+    flushKeepalive: ReturnType<typeof vi.fn>;
+    cancel: ReturnType<typeof vi.fn>;
+    pending: ReturnType<typeof vi.fn>;
+    pendingPositionIds: ReturnType<typeof vi.fn>;
+  }>,
+}));
+
 vi.mock('$lib/services/labApi', () => ({
-  createLayoutDebouncer: () => ({
-    pushNodePosition: vi.fn(),
-    pushNetworkPosition: vi.fn(),
-    pushViewport: vi.fn(),
-    flush: vi.fn(async () => {}),
-    flushKeepalive: vi.fn(),
-    cancel: vi.fn(),
-    pending: vi.fn(() => false),
-    pendingPositionIds: vi.fn(() => ({ nodeIds: new Set(), networkIds: new Set() })),
-  }),
+  LayoutConflictError: class LayoutConflictError extends Error {
+    serverRevision: number | null = null;
+  },
+  createLayoutDebouncer: () => {
+    const mock = {
+      pushNodePosition: vi.fn(),
+      pushNetworkPosition: vi.fn(),
+      pushViewport: vi.fn(),
+      flush: vi.fn(async () => {}),
+      flushKeepalive: vi.fn(),
+      cancel: vi.fn(),
+      pending: vi.fn(() => false),
+      pendingPositionIds: vi.fn(() => ({ nodeIds: new Set(), networkIds: new Set() })),
+    };
+    debouncerMocks.push(mock);
+    return mock;
+  },
 }));
 
 vi.mock('$lib/services/wsClient', () => ({
@@ -83,6 +103,8 @@ vi.mock('$lib/stores/labWs', () => ({
 import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
 import { apiRequest } from '$lib/api';
 import { labState } from '$lib/stores/labState';
+import { get } from 'svelte/store';
+import { tick } from 'svelte';
 
 function makeNode(
   id: number,

@@ -195,6 +195,37 @@ function createLabState() {
       );
     },
 
+    /**
+     * Apply a canvas drag-stop position for one node/network. Returns true
+     * when the element exists and the position was adopted. Centralised so
+     * components never assign through `$labState.x.y = v` — Svelte 5 legacy
+     * compilation turns that into `store.set($store, …)`, which the
+     * labState facade does not implement (`e.set is not a function`).
+     */
+    applyDragStop(kind: 'node' | 'network', id: number, left: number, top: number): boolean {
+      const key = String(id);
+      let applied = false;
+      store.update((state) => {
+        if (kind === 'node') {
+          const current = state.nodes[key];
+          if (!current) return state;
+          applied = true;
+          return {
+            ...state,
+            nodes: { ...state.nodes, [key]: { ...current, left, top } },
+          };
+        }
+        const current = state.networks[key];
+        if (!current) return state;
+        applied = true;
+        return {
+          ...state,
+          networks: { ...state.networks, [key]: { ...current, left, top } },
+        };
+      });
+      return applied;
+    },
+
     reset(): void {
       store.set(emptyState());
     },
