@@ -56,6 +56,15 @@ def test_arista_veos_convert_emits_aboot_cdrom_marker() -> None:
     assert out["console"] == "serial"
 
 
+def test_arista_veos_pins_machine_pc() -> None:
+    """#251: the EOS kernel cannot enumerate NICs behind q35 pcie-root-ports."""
+    a = AristaVEosAdapter()
+    out = a.convert({"image": "vEOS-lab-4.33.1F.qcow2", "ram": 2048}, Path("."))
+    assert out["capabilities"]["machine"] == "pc"
+    assert out["capabilities"]["hotplug"] is False
+    assert out["capabilities"]["max_nics"] == 8
+
+
 def test_arista_veos_clamps_unsupported_nic_to_virtio() -> None:
     """#250: e1000e has no EOS driver — import must clamp to a supported model."""
     a = AristaVEosAdapter()
