@@ -4,7 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { Handle, Position } from '@xyflow/svelte';
-  import { Info } from 'lucide-svelte';
+  import { Container, Info, Router, Server } from 'lucide-svelte';
   import PortLayer from './PortLayer.svelte';
   import { infoPanels } from '$lib/stores/infoPanels';
   import type { NodeInterface, PortPosition } from '$lib/types';
@@ -43,6 +43,11 @@
     }
   }
 
+  // Flat neutral card face (#254): type is carried by the icon glyph only —
+  // no type/template text on the node face.
+  const typeIcons = { docker: Container, iol: Router, dynamips: Router } as const;
+  $: typeIcon = (data.type && typeIcons[data.type as keyof typeof typeIcons]) || Server;
+
   $: running = data.status === 2;
   $: transitioning = data.transientStatus === 'starting' || data.transientStatus === 'stopping';
   $: interfaces = data.interfaces ?? [];
@@ -50,13 +55,8 @@
 </script>
 
 <div
-  class={`relative min-w-[9.5rem] rounded-xl border px-3 py-2.5 text-gray-100 shadow-lg shadow-black/20 ${
-    transitioning
-      ? 'border-amber-300/80 bg-gray-900'
-      : running
-        ? 'border-emerald-500/80 bg-gray-900'
-        : 'border-gray-700 bg-gray-800/95'
-  }`}
+  class="nb-card group relative min-w-[10.5rem] rounded-lg border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg)] px-3.5 py-2 transition-colors hover:border-[var(--card-canvas-border-hover)] hover:bg-[var(--card-canvas-bg-hover)]"
+  data-testid="custom-node-card"
 >
   <Handle
     type="source"
@@ -70,12 +70,31 @@
     id="default"
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
-  <div class="pb-3 pl-4 pr-1">
+  <div class="flex items-center gap-2.5 pb-3 pl-3 pr-1">
     <div
-      class="min-w-0 flex-1 break-words text-[10px] font-semibold leading-snug text-gray-100"
-      title={data.label}
+      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
     >
-      {data.label}
+      <svelte:component this={typeIcon} class="h-4 w-4" />
+    </div>
+    <div class="flex min-w-0 flex-col justify-center leading-tight">
+      <div class="flex items-center gap-1.5" title={data.label}>
+        <span
+          data-testid="node-status-dot"
+          class={`h-2 w-2 shrink-0 rounded-full transition-colors ${
+            transitioning
+              ? 'animate-pulse bg-amber-300'
+              : running
+                ? 'bg-emerald-400'
+                : 'bg-gray-500'
+          }`}
+        ></span>
+        <span class="truncate text-[13px] font-normal text-[var(--card-canvas-name-fg)]">
+          {data.label}
+        </span>
+      </div>
+      <div class="mt-0.5 whitespace-nowrap text-[11px] font-normal text-[var(--card-canvas-sub-fg)]">
+        {interfaces.length} NIC{interfaces.length === 1 ? '' : 's'} · {data.console ?? 'telnet'}
+      </div>
     </div>
   </div>
 
@@ -97,7 +116,7 @@
 
   <button
     type="button"
-    class="nodrag absolute bottom-1 left-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-gray-700 bg-gray-900/80 text-gray-400 transition hover:border-blue-500/40 hover:text-white"
+    class="nodrag absolute bottom-1 left-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg-hover)] text-[var(--card-canvas-sub-fg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:text-[var(--card-canvas-name-fg)]"
     aria-label="Open node info panel"
     title="Open info panel"
     data-testid="node-info-button"
@@ -107,3 +126,11 @@
     <Info class="h-3 w-3" />
   </button>
 </div>
+
+<style>
+  /* Selection halo (#254) — Svelte Flow marks the wrapping element with
+     .selected; ring the card itself so the halo hugs the rounded box. */
+  :global(.svelte-flow__node.selected) .nb-card {
+    box-shadow: 0 0 0 2px var(--card-canvas-halo);
+  }
+</style>
