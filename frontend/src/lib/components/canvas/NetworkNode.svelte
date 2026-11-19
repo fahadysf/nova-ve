@@ -80,12 +80,12 @@
   <!-- Frame-header look (#254): quiet band, name in the primary role and the
        connection count as a secondary line — network pills stay neutral
        grays, color is reserved for link state. -->
-  <div class="flex items-start justify-between gap-2 py-2 pl-3.5 pr-3.5 pb-4">
+  <div class="flex items-center justify-between gap-2 py-2 pb-3 pl-3.5 pr-4">
     <div class="flex min-w-0 items-center gap-2">
       <div
-        class="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
+        class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
       >
-        <Waypoints class="h-3.5 w-3.5" />
+        <Waypoints class="h-4 w-4" />
       </div>
       <div class="flex min-w-0 flex-col justify-center leading-tight">
         <div
@@ -103,13 +103,13 @@
 
   <button
     type="button"
-    class="nodrag absolute bottom-1 left-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg-hover)] text-[var(--card-canvas-sub-fg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:text-[var(--card-canvas-name-fg)]"
+    class="nodrag absolute bottom-1 right-1 inline-flex h-3 w-3 items-center justify-center rounded-full border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg-hover)] text-[var(--card-canvas-sub-fg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:text-[var(--card-canvas-name-fg)]"
     aria-label="Open network info panel"
     title="Open info panel"
     data-testid="network-info-button"
     on:click={openInfo}
     on:pointerdown|stopPropagation
   >
-    <Info class="h-2.5 w-2.5" />
+    <Info class="h-2 w-2" />
   </button>
 </div>
