@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { routeOrthogonal } from '$lib/services/router/orthogonal';
+import { routeOrthogonal, roundedOrthogonalPath } from '$lib/services/router/orthogonal';
 import type { RouteRequest } from '$lib/services/router';
 
 interface Fixture {
@@ -106,5 +106,58 @@ describe('orthogonal router fixtures', () => {
     await expect(
       routeOrthogonal(FIXTURES[3].req, ctrl.signal),
     ).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
+
+describe('roundedOrthogonalPath (#254 NetBird-style corners)', () => {
+  const R = 8;
+
+  it('keeps a straight two-point path as a bare line', () => {
+    const d = roundedOrthogonalPath(
+      [{ x: 0, y: 100 }, { x: 200, y: 100 }],
+      R,
+    );
+    expect(d).toBe('M 0,100 L 200,100');
+    expect(d).not.toContain('Q');
+  });
+
+  it('rounds an L-corner with a quadratic curve clamped to the radius', () => {
+    // 100px horizontal run then 100px vertical drop; radius 8 fits both legs.
+    const d = roundedOrthogonalPath(
+      [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }],
+      R,
+    );
+    // Cut-in at (100-8, 0), control at the corner, cut-out at (100, 8).
+    expect(d).toBe('M 0,0 L 92,0 Q 100,0 100,8 L 100,100');
+  });
+
+  it('clamps the radius to half the shortest adjacent leg', () => {
+    // 6px vertical leg before the corner: radius clamps to 3.
+    const d = roundedOrthogonalPath(
+      [{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 6 }, { x: 100, y: 6 }],
+      R,
+    );
+    // First corner: min(8, 50/2, 6/2) = 3 cuts BOTH legs — cut-in at 47, cut-out
+    // at (50,3); second corner: min(8, 3, 50/2) = 3 on both sides.
+    expect(d).toBe('M 0,0 L 47,0 Q 50,0 50,3 L 50,3 Q 50,6 53,6 L 100,6');
+  });
+
+  it('keeps degenerate corners sharp instead of emitting collapsing curves', () => {
+    const d = roundedOrthogonalPath(
+      [{ x: 0, y: 0 }, { x: 20, y: 0 }, { x: 20, y: 0.2 }, { x: 60, y: 0.2 }],
+      R,
+    );
+    expect(d).toContain('L 20,0');
+    // The sub-pixel corner never rounds (radius clamps to 0.1 < 0.5).
+    expect(d.split('Q').length - 1).toBe(0);
+  });
+
+  it('preserves endpoints exactly so the path lands on the port handles', () => {
+    const d = roundedOrthogonalPath(
+      [{ x: 12, y: 34 }, { x: 200, y: 34 }, { x: 200, y: 300 }, { x: 500, y: 300 }],
+      R,
+    );
+    expect(d.startsWith('M 12,34')).toBe(true);
+    expect(d.endsWith('L 500,300')).toBe(true);
   });
 });
