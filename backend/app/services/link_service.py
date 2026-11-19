@@ -607,7 +607,9 @@ class LinkService:
                 )
             except Exception as exc:
                 # Roll back lab.json — JSON file leads kernel state contract.
-                LabService.write_lab_json_static(normalized, original_snapshot)
+                # #248: restore the pre-operation snapshot (revision included)
+                # — no phantom bump on a failed create.
+                LabService.write_lab_json_static(normalized, original_snapshot, bump_revision=False)
                 _recompute_mac_registry(normalized, original_snapshot)
                 _logger.error(
                     "create_link: hot-attach failed (%s); rolled back lab.json",
@@ -622,7 +624,9 @@ class LinkService:
             # atomically with the rest of this create_link mutation.
             if stamped:
                 data.pop("topology", None)
-                LabService.write_lab_json_static(normalized, data)
+                # #248: runtime-stamp refresh after the create's real write —
+                # bookkeeping, don't bump again.
+                LabService.write_lab_json_static(normalized, data, bump_revision=False)
                 # ``link_payload`` was built before the generation was
                 # known; refresh it from the now-stamped link record so
                 # the API response carries the canonical value.

@@ -14,7 +14,7 @@ from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services import host_net
-from app.services.lab_service import LEGACY_SCHEMA_ERROR
+from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
 from app.services.link_service import (
     DuplicateLinkError,
     InterfaceAlreadyAttachedError,
@@ -179,6 +179,9 @@ async def create_link(
     }
     if network_payload is not None:
         response["network"] = network_payload
+    # #248: the create bumped meta.revision server-side; report it so the
+    # editor's next If-Match write doesn't spuriously 412.
+    response["revision"] = LabService.read_meta_revision_static(lab_path)
 
     return JSONResponse(status_code=200 if replayed else 201, content=response)
 
@@ -231,6 +234,8 @@ async def delete_link(
         "code": 200,
         "status": "success",
         "message": "Link deleted successfully.",
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(lab_path),
     }
 
 
@@ -271,4 +276,6 @@ async def patch_link(
         "status": "success",
         "message": "Link updated successfully.",
         "link": updated,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(lab_path),
     }

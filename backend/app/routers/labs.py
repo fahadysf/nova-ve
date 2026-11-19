@@ -766,6 +766,8 @@ async def create_node(
         "status": "success",
         "message": "Node created successfully.",
         "data": node,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -1096,7 +1098,7 @@ async def create_nodes_from_paired_template(
             # message instead of a generic 500. Pre-flight already catches
             # link/iface defects; this catches the scalar shape that pre-flight
             # doesn't (and shouldn't, to keep validator scope tight).
-            LabService.write_lab_json_static(scoped_path, snapshot)
+            LabService.write_lab_json_static(scoped_path, snapshot, bump_revision=False)
             _logger.exception(
                 "from-paired-template: node-creation phase failed for %s "
                 "(template defect); rolled back",
@@ -1114,7 +1116,7 @@ async def create_nodes_from_paired_template(
                 },
             )
         except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
-            LabService.write_lab_json_static(scoped_path, snapshot)
+            LabService.write_lab_json_static(scoped_path, snapshot, bump_revision=False)
             _logger.exception(
                 "from-paired-template: node-creation phase failed for %s; rolled back",
                 request.template_key,
@@ -1179,7 +1181,7 @@ async def create_nodes_from_paired_template(
                         done.get("id"),
                         comp_exc,
                     )
-            LabService.write_lab_json_static(scoped_path, snapshot)
+            LabService.write_lab_json_static(scoped_path, snapshot, bump_revision=False)
             _logger.exception(
                 "from-paired-template: link-creation phase failed for %s; rolled back",
                 request.template_key,
@@ -1264,6 +1266,8 @@ async def create_nodes_from_paired_template(
             "nodes": created_nodes,
             "links": created_links,
         },
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -1336,6 +1340,8 @@ async def create_nodes_batch(
         "data": {
             "nodes": created_nodes,
         },
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -1492,6 +1498,8 @@ async def update_node(
         "status": "success",
         "message": "Node updated successfully.",
         "data": enriched,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -1559,6 +1567,8 @@ async def delete_node(
         "code": 200,
         "status": "success",
         "message": "Node deleted successfully.",
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -2026,6 +2036,8 @@ async def create_network(
         "status": "success",
         "message": "Network created successfully.",
         "data": network,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -2110,6 +2122,8 @@ async def update_network(
         "status": "success",
         "message": "Network updated successfully.",
         "data": network,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -2178,6 +2192,8 @@ async def delete_network(
         "code": 200,
         "status": "success",
         "message": "Network deleted successfully.",
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(scoped_path),
     }
 
 
@@ -2300,6 +2316,8 @@ async def patch_node_interface(
         "status": "success",
         "message": "Interface updated successfully.",
         "interface": response_iface,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(normalized),
     }
 
 

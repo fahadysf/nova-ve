@@ -152,16 +152,24 @@
     link: LinkEdge
   } as unknown as Record<string, never>;
   const { fitView, screenToFlowPosition, zoomIn, zoomOut } = useSvelteFlow();
+
+  // #248: every mutating endpoint response carries the post-write lab
+  // revision; adopting it keeps the If-Match token fresh without a reload,
+  // so single-session edits no longer spuriously 412 on the next write.
+  function adoptRevision(response: unknown): void {
+    const revision = (response as { revision?: unknown } | null)?.revision;
+    if (typeof revision === 'number') {
+      labState.setRevision(revision);
+    }
+  }
+
   const layoutDebouncer: LayoutDebouncer = createLayoutDebouncer(labId, {
     delayMs: 500,
     // #245: guard writes with the store's revision; the response carries the
     // post-write revision so the next write is checked against fresh state.
     versionProvider: () => $labState.revision,
     onApplied: (result) => {
-      const revision = (result as { revision?: unknown } | null)?.revision;
-      if (typeof revision === 'number') {
-        labState.setRevision(revision);
-      }
+      adoptRevision(result);
     },
     onError: (err) => {
       if (err instanceof LayoutConflictError) {
@@ -1044,6 +1052,7 @@
       if (serverLink && serverLink.id) {
         labState.setLinks([...$labState.links, serverLink]);
       }
+      adoptRevision(response);
       // Optimistically remove the discovered overlay immediately (HIGH-1).
       // The next discovery cycle would also clear it, but removing it now
       // avoids a duplicate amber+gray edge flash while the cycle completes.
@@ -1119,7 +1128,7 @@
     if (persistedLinks.length === 0) return;
 
     try {
-      await Promise.all(
+      const responses = await Promise.all(
         persistedLinks.map((link) =>
           apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
             method: 'DELETE',
@@ -1127,6 +1136,7 @@
           })
         )
       );
+      responses.forEach(adoptRevision);
     } catch (error) {
       labState.setLinks(previousLinks);
       labState.setNodes(previousNodes);
@@ -1167,7 +1177,7 @@
     if (persistedTargets.length === 0) return;
 
     try {
-      await Promise.all(
+      const responses = await Promise.all(
         persistedTargets.map((link) =>
           apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
             method: 'PATCH',
@@ -1176,6 +1186,7 @@
           })
         )
       );
+      responses.forEach(adoptRevision);
     } catch (error) {
       labState.setLinks($labState.links.map((link, i) =>
         updateIndexes.has(i) ? { ...link, style_override: previousStyles.get(link.id) ?? null } : link
@@ -1211,7 +1222,8 @@
     }
 
     if (action === 'delete') {
-      await apiRequest(`/labs/${labId}/nodes/${decoded.id}`, { method: 'DELETE' });
+      const response = await apiRequest(`/labs/${labId}/nodes/${decoded.id}`, { method: 'DELETE' });
+      adoptRevision(response);
       const nextNodes = { ...$labState.nodes };
       delete nextNodes[String(decoded.id)];
       labState.setNodes(nextNodes);
@@ -1289,7 +1301,8 @@
       return;
     }
 
-    await apiRequest(`/labs/${labId}/networks/${decoded.id}`, { method: 'DELETE' });
+    const response = await apiRequest(`/labs/${labId}/networks/${decoded.id}`, { method: 'DELETE' });
+    adoptRevision(response);
     const nextNetworks = { ...$labState.networks };
     delete nextNetworks[String(decoded.id)];
     labState.setNetworks(nextNetworks);
@@ -1335,6 +1348,7 @@
     // single-record envelope chosen for write routes. List routes still use
     // ``data:``; ApiResponse<T>.data is therefore unset here.
     const created = (response as unknown as { network: NetworkData }).network;
+    adoptRevision(response);
     labState.setNetworks({
       ...$labState.networks,
       [String(created.id)]: created
@@ -1527,11 +1541,12 @@
     publishFlowState();
 
     try {
-      await apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
+      const response = await apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
         method: 'PATCH',
         body: { endpoint_positions },
         suppressToast: true,
       });
+      adoptRevision(response);
     } catch (error) {
       labState.setLinks(previousLinks);
       publishFlowState();
@@ -1570,11 +1585,15 @@
     publishFlowState();
 
     try {
-      await apiRequest(`/labs/${labId}/nodes/${nodeId}/interfaces/${interfaceIndex}`, {
-        method: 'PATCH',
-        body: { port_position: port },
-        suppressToast: true,
-      });
+      const response = await apiRequest(
+        `/labs/${labId}/nodes/${nodeId}/interfaces/${interfaceIndex}`,
+        {
+          method: 'PATCH',
+          body: { port_position: port },
+          suppressToast: true
+        }
+      );
+      adoptRevision(response);
     } catch (error) {
       iface.port_position = previous;
       labState.setNodes({ ...$labState.nodes });
@@ -1734,6 +1753,7 @@
       if (serverLink && serverLink.id) {
         labState.setLinks($labState.links.map((entry) => (entry.id === tempId ? serverLink : entry)));
       }
+      adoptRevision(response);
       publishFlowState();
       dispatchCanvasChange('topology', {
       });
@@ -1915,6 +1935,7 @@
           nextNodes[String(node.id)] = node;
         }
         labState.setNodes(nextNodes);
+        adoptRevision(response);
         publishFlowState();
         dispatchCanvasChange('node-create', {
         });
@@ -1944,6 +1965,7 @@
           ...$labState.nodes,
           [String(response.data.id)]: response.data,
         });
+        adoptRevision(response);
         publishFlowState();
         dispatchCanvasChange('node-edit', {
           nodeId: response.data.id,
