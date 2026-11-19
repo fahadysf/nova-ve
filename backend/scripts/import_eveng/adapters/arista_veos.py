@@ -50,6 +50,12 @@ class AristaVEosAdapter(VendorAdapter):
             "ram": int(raw["ram"]),
             "ethernet": int(raw.get("ethernet", 4)),
             "console": str(raw.get("console_type", "serial")),
+            # The EOS host kernel never scans subordinate PCIe buses, so
+            # NICs hung off q35 pcie-root-ports are invisible to the guest
+            # (bridges enumerate, devices behind them do not). Pin plain
+            # PCI (machine=pc, EVE-NG parity); this also disables NIC
+            # hot-plug, which is q35-only.
+            "capabilities": {"hotplug": False, "max_nics": 8, "machine": "pc"},
             "extras": {
                 "qemu_nic": _normalize_nic(raw.get("qemu_nic")),
                 # vEOS front-panel interfaces need its in-guest KVM data
