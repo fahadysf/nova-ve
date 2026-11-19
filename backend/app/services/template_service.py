@@ -455,6 +455,18 @@ def _qemu_extras_schema() -> list[dict[str, Any]]:
             "runtime": True,
         },
         {
+            "key": "nested_virt",
+            "label": "Nested virtualization",
+            "type": "select",
+            "options": [
+                {"value": "false", "label": "Off"},
+                {"value": "true", "label": "On"},
+            ],
+            "default": "false",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
             "key": "qemu_version",
             "label": "QEMU version",
             "type": "text",

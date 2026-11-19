@@ -113,6 +113,18 @@ def _extra_int(
     return parsed
 
 
+def _extra_bool(extras: dict[str, Any], key: str, default: bool = False) -> bool:
+    value = extras.get(key, default)
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _qemu_accel() -> str:
+    """Host acceleration selector: kvm when /dev/kvm exists, else tcg."""
+    return "kvm" if Path("/dev/kvm").exists() else "tcg"
+
+
 def _parse_qemu_tokens(tokens: list[str]) -> list[tuple[str, list[str]]]:
     """Group a QEMU argv list into [(flag, [value_tokens...]), ...].
 
@@ -1724,7 +1736,7 @@ class NodeRuntimeService:
         """
         node_id = int(node["id"])
         machine, max_nics, _ = self._resolve_qemu_machine(node)
-        accel = "kvm" if Path("/dev/kvm").exists() else "tcg"
+        accel = _qemu_accel()
         console_mode = node.get("console", "telnet")
         nic_model = _extra_str(extras, "qemu_nic") or "e1000"
         first_mac = node.get("firstmac") or extras.get("firstmac")
@@ -1742,7 +1754,17 @@ class NodeRuntimeService:
             "-uuid", str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node_id}"),
             "-drive", f"file={overlay_path},if=virtio,cache=writeback,format=qcow2",
         ]
-        cmd += ["-cpu", "host,vmx=off,svm=off"] if accel == "kvm" else ["-cpu", "max"]
+        # Issue #249: vEOS-class guests run their own hypervisor (KVM-in-KVM).
+        # With extras.nested_virt set, expose the host virt flags instead of
+        # masking vmx/svm off — otherwise the guest data plane never starts
+        # and front-panel interfaces never appear.
+        if accel == "kvm":
+            cpu_model = (
+                "host" if _extra_bool(extras, "nested_virt") else "host,vmx=off,svm=off"
+            )
+            cmd += ["-cpu", cpu_model]
+        else:
+            cmd += ["-cpu", "max"]
         if console_mode == "vnc":
             cmd += ["-vnc", f":{console_port - 5900}"]
         else:
@@ -1852,7 +1874,7 @@ class NodeRuntimeService:
                 "RDP is only supported for Docker nodes that publish an RDP service."
             )
         console_port = self._allocate_console_port(console_mode)
-        accel = "kvm" if Path("/dev/kvm").exists() else "tcg"
+        accel = _qemu_accel()
 
         qmp_socket_path = work_dir / "qmp.sock"
 
