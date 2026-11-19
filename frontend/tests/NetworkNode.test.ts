@@ -42,7 +42,7 @@ describe('NetworkNode', () => {
     expect(screen.queryByText('Network')).toBeNull();
   });
 
-  it('places the info button at the bottom-left corner inside the network box', () => {
+  it('places the info button at the bottom-right corner inside the network box', () => {
     render(NetworkNode, {
       props: {
         id: 'network7',
@@ -55,7 +55,7 @@ describe('NetworkNode', () => {
       },
     });
 
-    expect(screen.getByTestId('network-info-button')).toHaveClass('absolute', 'bottom-1', 'left-1');
+    expect(screen.getByTestId('network-info-button')).toHaveClass('absolute', 'bottom-1', 'right-1');
   });
 
   it('binds connected network handles to their persisted link endpoint', () => {
