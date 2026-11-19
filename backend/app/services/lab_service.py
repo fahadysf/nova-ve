@@ -558,7 +558,22 @@ class LabService:
         return data
 
     @staticmethod
-    def write_lab_json_static(filename: str, data: dict) -> None:
+    def read_meta_revision_static(filename: str) -> Optional[int]:
+        """Post-write `meta.revision` for endpoints that must report it (#248).
+
+        Reads the value from disk rather than predicting it, so multi-write
+        operations (e.g. create_link's persist + hot-attach stamp pass) report
+        the revision that actually landed.
+        """
+        try:
+            data = LabService.read_lab_json_static(filename)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+        revision = (data.get("meta") or {}).get("revision")
+        return revision if isinstance(revision, int) else None
+
+    @staticmethod
+    def write_lab_json_static(filename: str, data: dict, *, bump_revision: bool = True) -> None:
         filepath = _lab_file_path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
@@ -582,17 +597,24 @@ class LabService:
             cleaned["schema_version"] = SCHEMA_VERSION
 
         # #245: machine-owned optimistic-concurrency revision, bumped on
-        # every lab.json write (this is the single write choke point).
-        # Clients guard PUT /layout and PUT /topology with If-Match; a stale
-        # client gets 412 instead of silently reverting newer state. Kept
-        # under meta so GET /labs/{id}'s meta passthrough exposes it, and
+        # every user-facing lab.json write (this is the single write choke
+        # point). Clients guard PUT /layout and PUT /topology with If-Match;
+        # a stale client gets 412 instead of silently reverting newer state.
+        # Kept under meta so GET /labs/{id}'s meta passthrough exposes it, and
         # separate from the user-authored meta.version display field.
-        revision_meta = dict(cleaned.get("meta") or {})
-        try:
-            revision_meta["revision"] = int(revision_meta.get("revision") or 0) + 1
-        except (TypeError, ValueError):
-            revision_meta["revision"] = 1
-        cleaned["meta"] = revision_meta
+        # #248: server-internal bookkeeping writes (heartbeat status sync,
+        # planned_mac, runtime/bridge/link reconciliation, rollback restores,
+        # runtime stamps) pass bump_revision=False — they are not edits, and
+        # bumping here silently invalidated the editor's If-Match token,
+        # producing spurious 412s ("Lab changed in another session") in
+        # single-session use.
+        if bump_revision:
+            revision_meta = dict(cleaned.get("meta") or {})
+            try:
+                revision_meta["revision"] = int(revision_meta.get("revision") or 0) + 1
+            except (TypeError, ValueError):
+                revision_meta["revision"] = 1
+            cleaned["meta"] = revision_meta
 
         with open(filepath, "w") as f:
             json.dump(cleaned, f, indent=2)

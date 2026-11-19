@@ -604,7 +604,10 @@ class NetworkService:
                                     if self._ensure_nat_cloud_runtime(owner_network, owner_bridge):
                                         owner_networks[str(owner.network_id)] = owner_network
                                         owner_data["networks"] = owner_networks
-                                        LabService.write_lab_json_static(owner.lab_path, owner_data)
+                                        # #248: reconcile bookkeeping, not an edit.
+                                        LabService.write_lab_json_static(
+                                            owner.lab_path, owner_data, bump_revision=False
+                                        )
                         nat_cloud.append(
                             {
                                 "network_id": network_id,
@@ -726,7 +729,8 @@ class NetworkService:
                         )
 
             if dirty:
-                LabService.write_lab_json_static(normalized, data)
+                # #248: bridge reconcile is bookkeeping, not an edit.
+                LabService.write_lab_json_static(normalized, data, bump_revision=False)
 
         # QMP set_link calls are idempotent and read-only w.r.t. lab.json —
         # run outside the lock to avoid holding it for O(nodes × NICs × 2s).
@@ -911,12 +915,14 @@ class NetworkService:
                 except host_net.HostNetBridgeOwnershipError:
                     networks.pop(str(next_id), None)
                     data["networks"] = networks
-                    LabService.write_lab_json_static(normalized, data)
+                    # #248: rollback restores the pre-operation snapshot
+                    # (revision included) — no phantom bump on a failed create.
+                    LabService.write_lab_json_static(normalized, data, bump_revision=False)
                     raise
                 except NetworkServiceError:
                     networks.pop(str(next_id), None)
                     data["networks"] = networks
-                    LabService.write_lab_json_static(normalized, data)
+                    LabService.write_lab_json_static(normalized, data, bump_revision=False)
                     if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
                         config = network.get("config") or {}
                         runtime = network.get("runtime") or {}
@@ -930,7 +936,7 @@ class NetworkService:
                     # Roll back the JSON write — never leave inconsistent state.
                     networks.pop(str(next_id), None)
                     data["networks"] = networks
-                    LabService.write_lab_json_static(normalized, data)
+                    LabService.write_lab_json_static(normalized, data, bump_revision=False)
                     if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
                         config = network.get("config") or {}
                         runtime = network.get("runtime") or {}
@@ -950,7 +956,9 @@ class NetworkService:
                         extra={"bridge": bridge},
                     ) from exc
                 if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
-                    LabService.write_lab_json_static(normalized, data)
+                    # #248: runtime-info refresh after the create's real write
+                    # — bookkeeping, don't bump again.
+                    LabService.write_lab_json_static(normalized, data, bump_revision=False)
                 _recompute_mac_registry(normalized, data)
                 payload = _serialize_network(network, 0)
 
@@ -1193,7 +1201,8 @@ class NetworkService:
                 networks[str(owner_network_id)] = network
                 data["networks"] = networks
                 data.pop("topology", None)
-                LabService.write_lab_json_static(owner_lab_path, data)
+                # #248: DHCP allocation bookkeeping, not an edit.
+                LabService.write_lab_json_static(owner_lab_path, data, bump_revision=False)
 
         return str(chosen)
 
@@ -1276,7 +1285,8 @@ class NetworkService:
         networks[str(network_id)] = network
         data["networks"] = networks
         data.pop("topology", None)
-        LabService.write_lab_json_static(lab_path, data)
+        # #248: DHCP release bookkeeping, not an edit.
+        LabService.write_lab_json_static(lab_path, data, bump_revision=False)
         return True
 
     async def patch_network(

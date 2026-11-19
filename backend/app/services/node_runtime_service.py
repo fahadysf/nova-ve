@@ -958,7 +958,9 @@ class NodeRuntimeService:
                     if current_status == expected_status:
                         continue
                     node["status"] = expected_status
-                    LabService.write_lab_json_static(filename, data)
+                    # #248: status reconcile is bookkeeping, not an edit —
+                    # don't invalidate editors' If-Match tokens.
+                    LabService.write_lab_json_static(filename, data, bump_revision=False)
             except Exception:
                 _logger.exception(
                     "heartbeat: failed to reconcile lab=%s node=%s", lab_id, node_id
@@ -4574,7 +4576,8 @@ class NodeRuntimeService:
             # Strip the read-time topology shim so the writer does not
             # regenerate links[] from a stale snapshot.
             data.pop("topology", None)
-            LabService.write_lab_json_static(target.name, data)
+            # #248: MAC assignment on start is runtime bookkeeping, not an edit.
+            LabService.write_lab_json_static(target.name, data, bump_revision=False)
 
     def _docker_force_remove(self, docker_binary: str, container_name: str) -> None:
         """Force-remove a container, swallowing any error (best-effort cleanup)."""

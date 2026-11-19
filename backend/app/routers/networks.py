@@ -21,7 +21,7 @@ from app.openapi import COMMON_RESPONSES
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.user import UserRead
 from app.services.host_net import HostNetBridgeOwnershipError
-from app.services.lab_service import LEGACY_SCHEMA_ERROR
+from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
 from app.services.network_service import NetworkServiceError, network_service
 
 
@@ -112,6 +112,8 @@ async def create_network(
             "status": "success",
             "message": "Network created successfully.",
             "network": payload,
+            # #248: post-write revision for the editor's next If-Match write.
+            "revision": LabService.read_meta_revision_static(lab_path),
         },
     )
 
@@ -141,6 +143,8 @@ async def delete_network(
         "code": 200,
         "status": "success",
         "message": "Network deleted successfully.",
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(lab_path),
     }
 
 
@@ -176,6 +180,8 @@ async def patch_network(
         "message": "Network updated successfully.",
         "event": event_type,
         "network": payload,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(lab_path),
     }
 
 
