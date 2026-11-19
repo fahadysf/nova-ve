@@ -235,10 +235,13 @@ describe('TopologyCanvas hotplug gate', () => {
     expect(get(dragLinkStore).state).toBe('confirming');
   });
 
-  it('gates link confirm for running non-hotplug nodes when dragging from the new-connection slot', async () => {
+  it('opens the interface picker for running non-hotplug nodes from the new-connection slot', async () => {
+    // Unused interfaces are only reachable via the node slot (ports render
+    // only for linked interfaces) and the picker only offers existing boot
+    // NICs — a host-only attach that works live on any machine type.
     renderCanvas(
       {
-        '1': makeNode(1, 'edge-a', 2, { hotplug: false, max_nics: 8, machine: 'pc' }),
+        '1': makeNode(1, 'edge-a', 2, { hotplug: false, max_nics: 8, machine: 'pc' }, 2),
       },
       {
         '9': makeNetwork(9, 'bridge-a'),
@@ -247,11 +250,11 @@ describe('TopologyCanvas hotplug gate', () => {
 
     driveConfirm(nodeSlotEndpoint(1, 'edge-a'), networkEndpoint(9, 'bridge-a'));
 
-    const banner = await screen.findByTestId('topology-hotplug-banner');
-    expect(banner).toHaveTextContent('Restart required to change topology');
-    expect(banner).toHaveTextContent('edge-a');
-    expect(screen.queryByTestId('link-confirm-modal')).toBeNull();
-    expect(get(dragLinkStore).state).toBe('idle');
+    await waitFor(() => {
+      expect(screen.getByTestId('link-source-interface-select')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('topology-hotplug-banner')).toBeNull();
+    expect(get(dragLinkStore).state).toBe('confirming');
   });
 
   it('gates link confirm for running IOL nodes even on boot interfaces', async () => {
