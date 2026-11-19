@@ -456,6 +456,9 @@ def test_us303_rejects_when_hotplug_capable_false(
 
     svc = NodeRuntimeService()
     _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, hotplug_capable=False, monkeypatch=monkeypatch)
+    # The hotplug gate now sits after the bridge precheck — stub it so the
+    # hotplug rejection is what this test actually observes.
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: True)
 
     fake_qmp = _FakeQmp()
     svc._qmp_client = fake_qmp
@@ -465,6 +468,57 @@ def test_us303_rejects_when_hotplug_capable_false(
     assert "hotplug" in str(exc_info.value).lower()
     # No QMP traffic at all.
     assert fake_qmp.calls == []
+
+
+def test_boot_nic_attach_allowed_without_hotplug(
+    lab_settings, monkeypatch, _instance_id
+):
+    """Boot-time NICs attach host-only (issue #174) regardless of hotplug
+    capability — the q35 hot-plug gate only guards interfaces beyond the
+    boot-time set. This is what lets pc-machine templates (e.g. vEOS,
+    #251) take live link changes without a restart.
+    """
+    lab_id = "labboonic"
+    _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+
+    svc = NodeRuntimeService()
+    runtime = _seed_qemu_runtime(
+        svc,
+        lab_id=lab_id,
+        node_id=1,
+        hotplug_capable=False,
+        tap_names=["tap0", "tap1"],
+        monkeypatch=monkeypatch,
+    )
+    runtime["boot_ethernet"] = 4
+
+    calls = _patch_host_net(monkeypatch)
+    monkeypatch.setattr(host_net, "tap_exists", lambda n: True)
+    monkeypatch.setattr(
+        host_net,
+        "link_master_any",
+        lambda i, b, driver=None: calls.setdefault("link_master_any", []).append((i, b)),
+    )
+    qmp_calls: list[tuple[str, dict | None]] = []
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_qmp_command",
+        lambda self, sock, cmd, args=None, **_kw: qmp_calls.append((cmd, args))
+        or {"return": {}},
+    )
+
+    attachment = svc.attach_qemu_interface(lab_id, 1, network_id=5, interface_index=1)
+
+    assert int(attachment.get("interface_index", -1)) == 1
+    assert calls.get("link_master_any"), "boot-NIC attach must bridge the TAP"
+    assert any(cmd == "set_link" for cmd, _args in qmp_calls), (
+        "boot-NIC attach must drive the guest carrier up"
+    )
 
 
 def test_us303_rejects_duplicate_interface_index(

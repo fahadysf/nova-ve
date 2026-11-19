@@ -13,7 +13,10 @@ from typing import Any, ClassVar
 
 from .base import VendorAdapter
 
-_IMAGE_RE = re.compile(r"vEOS-lab-.*\.(?:qcow2|vmdk)$", re.IGNORECASE)
+# Matches the EVE-NG two-disk layout (``vEOS-lab-*.qcow2|.vmdk``) and the
+# common short image names (``veos-4.33.1.1F``, ``VEOS_4.31.F``) so veos*
+# imports are detected as Arista instead of falling through to generic_linux.
+_IMAGE_RE = re.compile(r"^(?:veos(?:[-_.][^/]*)?)$", re.IGNORECASE)
 
 # vEOS only ships drivers for these emulated NICs. Anything else (EVE-NG
 # labs can carry e1000e, vmxnet3, ...) leaves the guest with zero
@@ -54,8 +57,12 @@ class AristaVEosAdapter(VendorAdapter):
             # NICs hung off q35 pcie-root-ports are invisible to the guest
             # (bridges enumerate, devices behind them do not). Pin plain
             # PCI (machine=pc, EVE-NG parity); this also disables NIC
-            # hot-plug, which is q35-only.
+            # hot-plug, which is q35-only. Boot-NIC links still attach
+            # host-only, so live topology changes keep working.
             "capabilities": {"hotplug": False, "max_nics": 8, "machine": "pc"},
+            # Arista EOS naming: NIC 0 is the management port (Ma1), the
+            # rest are front-panel Ethernet{port}.
+            "interface_naming": {"format": "Ma1,Et{port}"},
             "extras": {
                 "qemu_nic": _normalize_nic(raw.get("qemu_nic")),
                 # vEOS front-panel interfaces need its in-guest KVM data

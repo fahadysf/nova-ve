@@ -36,6 +36,16 @@ def test_arista_veos_matches_qcow2_and_vmdk() -> None:
     assert a.match({"image": "vEOS-Lab-4.21.0F.QCOW2"}) is True  # case-insensitive
 
 
+def test_arista_veos_matches_short_veos_image_names() -> None:
+    """Short image names (veos*) must detect as Arista, not generic_linux."""
+    a = AristaVEosAdapter()
+    assert a.match({"image": "veos-4.33.1.1F"}) is True
+    assert a.match({"image": "veos-4.33.1.1F.qcow2"}) is True
+    assert a.match({"image": "VEOS_4.31.F"}) is True
+    assert a.match({"image": "nveos-4.33"}) is False
+    assert a.match({"image": "alpine-veos"}) is False
+
+
 def test_arista_veos_rejects_other_vendor_images() -> None:
     a = AristaVEosAdapter()
     assert a.match({"image": "csr1000v-universalk9.qcow2"}) is False
@@ -53,6 +63,7 @@ def test_arista_veos_convert_emits_aboot_cdrom_marker() -> None:
     assert out["extras"]["boot_cdrom"] == "aboot-veos.iso"
     assert out["extras"]["qemu_nic"] == "virtio-net-pci"
     assert out["extras"]["nested_virt"] == "true"
+    assert out["interface_naming"] == {"format": "Ma1,Et{port}"}
     assert out["console"] == "serial"
 
 

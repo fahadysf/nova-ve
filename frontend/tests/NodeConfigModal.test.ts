@@ -249,7 +249,7 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     await tick();
 
     expect(screen.getByTestId('capabilities-banner')).toBeTruthy();
-    expect(screen.getByText('Restart required to change topology')).toBeTruthy();
+    expect(screen.getByText('Live link changes: boot NICs only')).toBeTruthy();
     expect(screen.queryByText('Hot-plug supported')).toBeNull();
   });
 
