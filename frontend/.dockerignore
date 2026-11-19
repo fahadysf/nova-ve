@@ -1,0 +1,5 @@
+# Keep the image's npm-install'd (linux) node_modules — a plain COPY . .
+# would otherwise overwrite them with the build host's platform binaries.
+node_modules
+test-results
+build

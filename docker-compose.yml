@@ -23,6 +23,14 @@ services:
         else
           echo "Database password already exists."
         fi
+        # Instance ID for bridge/TAP name derivation (host_net.get_instance_id).
+        # Same kernel-UUID format as provision-ubuntu-2604.sh ensure_instance_id.
+        if [ ! -s /data/instance_id ]; then
+          cat /proc/sys/kernel/random/uuid > /data/instance_id
+          echo "Generated instance ID: $$(cat /data/instance_id)"
+        else
+          echo "Instance ID already exists: $$(cat /data/instance_id)"
+        fi
 
   db:
     image: postgres:16-alpine
@@ -61,9 +69,13 @@ services:
       LABS_DIR: /data/labs
       IMAGES_DIR: /data/images
       TMP_DIR: /data/tmp
+      # Provisioned by db-init into the shared volume; without this the
+      # backend exits at startup (host_net.get_instance_id).
+      NOVA_VE_INSTANCE_ID_FILE: /data/instance_id
     volumes:
+      # Labs/images/tmp persist in the volume — deliberately NOT bind-mounted
+      # from the repo so UI edits never dirty the working tree.
       - labdata:/data
-      - ./backend/labs:/data/labs:ro
     ports:
       - "8000:8000"
     depends_on:
@@ -71,7 +83,14 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    # UI-sandbox bootstrap: schema + bootstrap admin (idempotent; generated
+    # password is printed to logs unless NOVA_VE_ADMIN_PASSWORD is set), then
+    # the API. Node start/stop and consoles are expected to fail here — no
+    # QEMU/Docker socket and no Guacamole in this stack (#252).
+    command: >
+      sh -c "alembic upgrade head &&
+             python -m scripts.seed &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
 
   frontend:
     build:
@@ -85,6 +104,8 @@ services:
       - /app/node_modules
     environment:
       - NODE_ENV=development
+      # Vite proxies /api + /VERSION to the backend service, not localhost.
+      - NOVA_VE_BACKEND_ORIGIN=http://backend:8000
     command: npm run dev -- --host 0.0.0.0
 
 volumes:
