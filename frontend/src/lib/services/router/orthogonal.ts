@@ -705,6 +705,71 @@ export function countCrossings(segments: Segment[]): number {
 
 // ---------- serialize -------------------------------------------------------
 
+/** Corner rounding radius for orthogonal connections (#254, NetBird-style). */
+export const ORTHOGONAL_CORNER_RADIUS = 8;
+
+interface PathPoint {
+  x: number;
+  y: number;
+}
+
+function pointToward(from: PathPoint, toward: PathPoint, dist: number): PathPoint {
+  const len = Math.hypot(toward.x - from.x, toward.y - from.y);
+  if (len === 0) return { ...from };
+  const t = dist / len;
+  return { x: from.x + (toward.x - from.x) * t, y: from.y + (toward.y - from.y) * t };
+}
+
+/**
+ * Emit an SVG path for a polyline with rounded right-angle corners.
+ *
+ * Each interior corner is cut back by `radius` on both adjacent segments and
+ * replaced with a quadratic bezier (control point at the corner). The radius
+ * clamps to half of each adjacent segment so short runs never overshoot; a
+ * corner on a zero-length run stays sharp. Pure geometry — CSS cannot round
+ * path geometry (stroke-linejoin only rounds the stroke outline at
+ * strokeWidth/2), so the corners are baked into the `d` string like React
+ * Flow's getSmoothStepPath does.
+ */
+export function roundedOrthogonalPath(
+  points: PathPoint[],
+  radius: number = ORTHOGONAL_CORNER_RADIUS,
+): string {
+  if (points.length < 2) return '';
+  let d = `M ${points[0].x},${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = points[i - 1];
+    const corner = points[i];
+    const next = points[i + 1];
+    const inLen = Math.hypot(corner.x - prev.x, corner.y - prev.y);
+    const outLen = Math.hypot(next.x - corner.x, next.y - corner.y);
+    const r = Math.min(radius, inLen / 2, outLen / 2);
+    if (r < 0.5) {
+      // Degenerate run(s) — keep the sharp corner.
+      d += ` L ${corner.x},${corner.y}`;
+      continue;
+    }
+    const cutIn = pointToward(corner, prev, r);
+    const cutOut = pointToward(corner, next, r);
+    d += ` L ${cutIn.x},${cutIn.y} Q ${corner.x},${corner.y} ${cutOut.x},${cutOut.y}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L ${last.x},${last.y}`;
+  return d;
+}
+
+/** Polyline points from contiguous axis-aligned segments (deduping seams). */
+function segmentsToPoints(segments: Segment[]): PathPoint[] {
+  const pts: PathPoint[] = [{ x: segments[0].x1, y: segments[0].y1 }];
+  for (const s of segments) {
+    const last = pts[pts.length - 1];
+    if (Math.abs(s.x2 - last.x) > 0.01 || Math.abs(s.y2 - last.y) > 0.01) {
+      pts.push({ x: s.x2, y: s.y2 });
+    }
+  }
+  return pts;
+}
+
 function serialize(segments: Segment[]): {
   d: string;
   bends: number;
@@ -713,17 +778,17 @@ function serialize(segments: Segment[]): {
   if (segments.length === 0) {
     return { d: '', bends: 0, lengthPx: 0 };
   }
-  let d = `M ${segments[0].x1},${segments[0].y1}`;
-  d += ` L ${segments[0].x2},${segments[0].y2}`;
   let lengthPx = Math.abs(segments[0].x2 - segments[0].x1) +
     Math.abs(segments[0].y2 - segments[0].y1);
   let bends = 0;
   for (let i = 1; i < segments.length; i++) {
     const s = segments[i];
-    d += ` L ${s.x2},${s.y2}`;
     lengthPx += Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1);
     bends++;
   }
+  // bends counts corners (unchanged by rounding); metrics stay on the sharp
+  // geometry so consumers see stable values.
+  const d = roundedOrthogonalPath(segmentsToPoints(segments));
   return { d, bends, lengthPx };
 }
 
