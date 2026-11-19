@@ -52,7 +52,23 @@ def test_arista_veos_convert_emits_aboot_cdrom_marker() -> None:
     assert out["kind"] == "qemu"
     assert out["extras"]["boot_cdrom"] == "aboot-veos.iso"
     assert out["extras"]["qemu_nic"] == "virtio-net-pci"
+    assert out["extras"]["nested_virt"] == "true"
     assert out["console"] == "serial"
+
+
+def test_arista_veos_clamps_unsupported_nic_to_virtio() -> None:
+    """#250: e1000e has no EOS driver — import must clamp to a supported model."""
+    a = AristaVEosAdapter()
+    raw = {"image": "vEOS-lab-4.33.1F.qcow2", "ram": 2048, "qemu_nic": "e1000e"}
+    out = a.convert(raw, Path("."))
+    assert out["extras"]["qemu_nic"] == "virtio-net-pci"
+
+
+def test_arista_veos_keeps_supported_nic_passthrough() -> None:
+    a = AristaVEosAdapter()
+    raw = {"image": "vEOS-lab-4.33.1F.qcow2", "ram": 2048, "qemu_nic": "e1000"}
+    out = a.convert(raw, Path("."))
+    assert out["extras"]["qemu_nic"] == "e1000"
 
 
 # ---- Mikrotik CHR -----------------------------------------------------
