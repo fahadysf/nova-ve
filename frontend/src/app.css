@@ -130,6 +130,20 @@
   --edge-default: var(--gray-400);
   --edge-label-fg: var(--gray-300);
 
+  /* Canvas cards (#254) — neutral flat-card visual language for node cards
+     and network pills: flat surface, hairline border, quiet secondary text,
+     color reserved for the status dot and the selection halo. */
+  --card-canvas-bg: #1c1e21;
+  --card-canvas-bg-hover: #25282c;
+  --card-canvas-border: #363b40;
+  --card-canvas-border-hover: #3f444b;
+  --card-canvas-icon-bg: #363b40;
+  --card-canvas-icon-bg-hover: #474e57;
+  --card-canvas-frame-header: #1f2124;
+  --card-canvas-name-fg: #e4e7e9;
+  --card-canvas-sub-fg: #7c8994;
+  --card-canvas-halo: var(--sky-500);
+
   --tl-close: var(--red-400);
   --tl-min: var(--amber-300);
   --tl-max: var(--emerald-400);
