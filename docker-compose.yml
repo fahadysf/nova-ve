@@ -43,7 +43,9 @@ services:
       - pgdata:/var/lib/postgresql/data
       - labdata:/run/secrets:ro
     ports:
-      - "5432:5432"
+      # Host ports are overridable so the sandbox can coexist with other
+      # local listeners (e.g. an SSH tunnel to a deployed instance).
+      - "${NOVA_VE_SANDBOX_DB_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-nova} -d ${DB_NAME:-novadb}"]
       interval: 5s
@@ -77,7 +79,7 @@ services:
       # from the repo so UI edits never dirty the working tree.
       - labdata:/data
     ports:
-      - "8000:8000"
+      - "${NOVA_VE_SANDBOX_BACKEND_PORT:-8000}:8000"
     depends_on:
       db-init:
         condition: service_completed_successfully
@@ -98,7 +100,7 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "5173:5173"
+      - "${NOVA_VE_SANDBOX_FRONTEND_PORT:-5173}:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
