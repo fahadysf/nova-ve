@@ -175,3 +175,53 @@ describe('CustomNode', () => {
     window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
   });
 });
+
+describe('CustomNode netbird-style card visuals (#254)', () => {
+  it('renders the flat neutral card with status dot and quiet secondary line', () => {
+    render(CustomNode, {
+      props: {
+        data: {
+          label: 'edge-router-core-01',
+          status: 2,
+          type: 'qemu',
+          console: 'telnet',
+          nodeId: 1,
+          interfaces: [
+            { index: 0, name: 'eth0', network_id: 0 },
+            { index: 1, name: 'eth1', network_id: 0 },
+          ],
+        },
+      },
+    });
+
+    // Neutral card surface (not the old status-colored borders).
+    const card = screen.getByTestId('custom-node-card');
+    expect(card).toHaveClass('bg-[var(--card-canvas-bg)]');
+    expect(card).not.toHaveClass('border-emerald-500/80');
+
+    // Status is a dot, never text, and never the legacy indicator testid.
+    const dot = screen.getByTestId('node-status-dot');
+    expect(dot).toHaveClass('bg-emerald-400');
+    expect(screen.queryByTestId('node-status-indicator')).toBeNull();
+
+    // Secondary line: NIC count + console, no template/type metadata.
+    expect(screen.getByText('2 NICs · telnet')).toBeInTheDocument();
+    expect(screen.queryByText('vyos')).toBeNull();
+    expect(screen.queryByText('qemu')).toBeNull();
+  });
+
+  it('renders an amber pulsing dot while transitioning and gray when stopped', () => {
+    const stopped = render(CustomNode, {
+      props: { data: { label: 'n1', status: 0, nodeId: 1, interfaces: [] } },
+    });
+    expect(screen.getByTestId('node-status-dot')).toHaveClass('bg-gray-500');
+    stopped.unmount();
+
+    render(CustomNode, {
+      props: {
+        data: { label: 'n1', status: 0, transientStatus: 'starting', nodeId: 1, interfaces: [] },
+      },
+    });
+    expect(screen.getByTestId('node-status-dot')).toHaveClass('bg-amber-300', 'animate-pulse');
+  });
+});
