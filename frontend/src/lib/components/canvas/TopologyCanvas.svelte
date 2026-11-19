@@ -371,17 +371,22 @@
   }
 
   /**
-   * True when the endpoint targets a NIC that does not exist at boot time
-   * (the dotted node slot, or an index beyond the declared interfaces).
+   * True when the endpoint targets a NIC that does not exist at boot time.
    * Attaching those needs QMP hot-plug; links to boot interfaces are
    * host-only (issue #174) and work on any machine type while running.
+   *
+   * A node-slot endpoint is NOT a new NIC: the confirm modal's interface
+   * picker only offers existing unconnected interfaces, so a slot drag
+   * always resolves to a boot NIC. Gating it here would block the only UI
+   * path to unused interfaces (ports render only for linked interfaces).
    */
   function endpointNeedsNewNic(endpoint: DragEndpoint | null): boolean {
     if (!endpoint) return false;
-    if (endpoint.kind === 'node-slot') return true;
+    if (endpoint.kind === 'node-slot') return false;
     if (endpoint.kind === 'interface') {
       const node = $labState.nodes[String(endpoint.nodeId)];
-      return endpoint.interfaceIndex >= (node?.interfaces?.length ?? 0);
+      const bootCount = node?.interfaces?.length ?? node?.ethernet ?? 0;
+      return endpoint.interfaceIndex >= bootCount;
     }
     return false;
   }
