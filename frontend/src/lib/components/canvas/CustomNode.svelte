@@ -70,11 +70,11 @@
     id="default"
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
-  <div class="flex items-center gap-2.5 pb-3 pl-3 pr-1">
+  <div class="flex items-center gap-2.5 pb-3 pl-3 pr-4">
     <div
-      class="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
+      class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
     >
-      <svelte:component this={typeIcon} class="h-4 w-4" />
+      <svelte:component this={typeIcon} class="h-5 w-5" />
     </div>
     <div class="flex min-w-0 flex-col justify-center leading-tight">
       <div class="flex items-center gap-1.5" title={data.label}>
@@ -116,14 +116,14 @@
 
   <button
     type="button"
-    class="nodrag absolute bottom-1 left-1 inline-flex h-4 w-4 items-center justify-center rounded-full border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg-hover)] text-[var(--card-canvas-sub-fg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:text-[var(--card-canvas-name-fg)]"
+    class="nodrag absolute bottom-1 right-1 inline-flex h-3 w-3 items-center justify-center rounded-full border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg-hover)] text-[var(--card-canvas-sub-fg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:text-[var(--card-canvas-name-fg)]"
     aria-label="Open node info panel"
     title="Open info panel"
     data-testid="node-info-button"
     on:click={openInfo}
     on:pointerdown|stopPropagation
   >
-    <Info class="h-3 w-3" />
+    <Info class="h-2 w-2" />
   </button>
 </div>
 
