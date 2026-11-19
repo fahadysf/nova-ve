@@ -80,7 +80,7 @@
   <!-- Frame-header look (#254): quiet band, name in the primary role and the
        connection count as a secondary line — network pills stay neutral
        grays, color is reserved for link state. -->
-  <div class="flex items-center justify-between gap-2 py-2 pb-3 pl-3.5 pr-4">
+  <div class="flex items-center justify-between gap-2 py-2.5 pl-3.5 pr-4">
     <div class="flex min-w-0 items-center gap-2">
       <div
         class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
