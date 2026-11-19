@@ -25,6 +25,13 @@ export default defineConfig({
 				target: process.env.NOVA_VE_BACKEND_ORIGIN || 'http://127.0.0.1:8000',
 				changeOrigin: true,
 			},
+			// wsClient connects same-origin (window.location) to /ws/labs/{id};
+			// without this entry the dev server never upgrades the connection.
+			'/ws': {
+				target: process.env.NOVA_VE_BACKEND_ORIGIN || 'http://127.0.0.1:8000',
+				changeOrigin: true,
+				ws: true,
+			},
 			'/VERSION': {
 				target: process.env.NOVA_VE_BACKEND_ORIGIN || 'http://127.0.0.1:8000',
 				changeOrigin: true,
