@@ -220,7 +220,7 @@ afterEach(() => {
 });
 
 describe('TopologyCanvas hotplug gate', () => {
-  it('gates link confirm for running non-hotplug nodes and shows the canvas banner', async () => {
+  it('allows link confirm between boot interfaces of running non-hotplug nodes', async () => {
     renderCanvas({
       '1': makeNode(1, 'edge-a', 2, { hotplug: false, max_nics: 8, machine: 'pc' }),
       '2': makeNode(2, 'edge-b', 2, { hotplug: false, max_nics: 8, machine: 'pc' }),
@@ -228,10 +228,48 @@ describe('TopologyCanvas hotplug gate', () => {
 
     driveConfirm(interfaceEndpoint(1, 'eth0'), interfaceEndpoint(2, 'eth0'));
 
+    await waitFor(() => {
+      expect(screen.getByTestId('link-confirm-modal')).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId('topology-hotplug-banner')).toBeNull();
+    expect(get(dragLinkStore).state).toBe('confirming');
+  });
+
+  it('gates link confirm for running non-hotplug nodes when dragging from the new-connection slot', async () => {
+    renderCanvas(
+      {
+        '1': makeNode(1, 'edge-a', 2, { hotplug: false, max_nics: 8, machine: 'pc' }),
+      },
+      {
+        '9': makeNetwork(9, 'bridge-a'),
+      }
+    );
+
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), networkEndpoint(9, 'bridge-a'));
+
     const banner = await screen.findByTestId('topology-hotplug-banner');
     expect(banner).toHaveTextContent('Restart required to change topology');
     expect(banner).toHaveTextContent('edge-a');
-    expect(banner).toHaveTextContent('edge-b');
+    expect(screen.queryByTestId('link-confirm-modal')).toBeNull();
+    expect(get(dragLinkStore).state).toBe('idle');
+  });
+
+  it('gates link confirm for running IOL nodes even on boot interfaces', async () => {
+    const iolNode = {
+      ...makeNode(4, 'iol-a', 2, { hotplug: false, max_nics: 8, machine: null }),
+      type: 'iol' as const,
+      template: 'iol',
+    };
+    renderCanvas(
+      { '4': iolNode },
+      { '9': makeNetwork(9, 'bridge-a') }
+    );
+
+    driveConfirm(interfaceEndpoint(4, 'eth0'), networkEndpoint(9, 'bridge-a'));
+
+    const banner = await screen.findByTestId('topology-hotplug-banner');
+    expect(banner).toHaveTextContent('Restart required to change topology');
+    expect(banner).toHaveTextContent('iol-a');
     expect(screen.queryByTestId('link-confirm-modal')).toBeNull();
     expect(get(dragLinkStore).state).toBe('idle');
   });

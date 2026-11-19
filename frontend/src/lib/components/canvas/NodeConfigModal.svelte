@@ -1183,7 +1183,7 @@
                     </span>
                   {:else}
                     <span class="rounded-full border border-amber-700/50 bg-amber-900/30 px-2 py-1 text-amber-300">
-                      Restart required to change topology
+                      Live link changes: boot NICs only
                     </span>
                   {/if}
                   <span class="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-slate-300">

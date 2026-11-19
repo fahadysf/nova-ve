@@ -3075,13 +3075,6 @@ class NodeRuntimeService:
                 f"is {runtime.get('kind')!r}, expected 'qemu'."
             )
 
-        if not runtime.get("hotplug_capable", False):
-            raise NodeRuntimeError(
-                f"Cannot hot-attach interface on node {node_id}: template "
-                f"capabilities.hotplug is false or machine is not q35. "
-                "Restart the node with a hot-plug-capable template."
-            )
-
         socket_path = runtime.get("qmp_socket") or ""
         if not socket_path:
             work_dir = runtime.get("work_dir")
@@ -3146,6 +3139,19 @@ class NodeRuntimeService:
         # bring the guest carrier UP. No netdev_del/add; no device_add.
         boot_ethernet = int(runtime.get("boot_ethernet") or 0)
         is_boot_nic = int(interface_index) < boot_ethernet
+
+        if not is_boot_nic and not runtime.get("hotplug_capable", False):
+            # Hot-ADD requires q35 pcie slots; boot-NIC attaches are
+            # host-only (issue #174) and work on any machine type — gate
+            # only interfaces beyond the boot-time set here.
+            raise NodeRuntimeError(
+                f"Cannot hot-attach interface on node {node_id}: interface "
+                f"index {interface_index} is beyond the boot-time interface "
+                f"set (boot_ethernet={boot_ethernet}) and template "
+                "capabilities.hotplug is false or machine is not q35. "
+                "Restart the node with the new interface count or use a "
+                "hot-plug-capable template."
+            )
 
         if is_boot_nic:
             # ----- Boot-time NIC: host-only attach ----------------------

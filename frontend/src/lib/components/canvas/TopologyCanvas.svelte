@@ -370,18 +370,38 @@
     return $labState.nodes[String(endpoint.nodeId)] ?? null;
   }
 
+  /**
+   * True when the endpoint targets a NIC that does not exist at boot time
+   * (the dotted node slot, or an index beyond the declared interfaces).
+   * Attaching those needs QMP hot-plug; links to boot interfaces are
+   * host-only (issue #174) and work on any machine type while running.
+   */
+  function endpointNeedsNewNic(endpoint: DragEndpoint | null): boolean {
+    if (!endpoint) return false;
+    if (endpoint.kind === 'node-slot') return true;
+    if (endpoint.kind === 'interface') {
+      const node = $labState.nodes[String(endpoint.nodeId)];
+      return endpoint.interfaceIndex >= (node?.interfaces?.length ?? 0);
+    }
+    return false;
+  }
+
   function blockedTopologyChangeNodes(snapshot: DragLinkSnapshot): NodeData[] {
     const seenNodeIds = new Set<number>();
-    const candidateNodes = [resolveEndpointNode(snapshot.source), resolveEndpointNode(snapshot.target)];
-
-    return candidateNodes.filter((node): node is NodeData => {
-      if (!node || seenNodeIds.has(node.id)) {
-        return false;
+    const blocked: NodeData[] = [];
+    for (const endpoint of [snapshot.source, snapshot.target]) {
+      const node = resolveEndpointNode(endpoint);
+      if (!node || node.status !== 2) continue;
+      const blockedHere =
+        node.type === 'iol' ||
+        (endpointNeedsNewNic(endpoint) && resolveNodeCapabilities(node).hotplug === false);
+      if (!blockedHere) continue;
+      if (!seenNodeIds.has(node.id)) {
+        seenNodeIds.add(node.id);
+        blocked.push(node);
       }
-      seenNodeIds.add(node.id);
-      const capabilities = resolveNodeCapabilities(node);
-      return node.status === 2 && capabilities.hotplug === false;
-    });
+    }
+    return blocked;
   }
 
   function gateLinkConfirmIfNeeded(snapshot: DragLinkSnapshot): boolean {
