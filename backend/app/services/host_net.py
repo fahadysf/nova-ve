@@ -39,6 +39,25 @@ from typing import Any, Literal, Sequence
 logger = logging.getLogger("nova-ve")
 
 # ---------------------------------------------------------------------------
+# Sandbox mode (#253)
+# ---------------------------------------------------------------------------
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def sandbox_mode() -> bool:
+    """Return True when backend sandbox mode (``NOVA_VE_SANDBOX_MODE``) is on.
+
+    In sandbox mode every host-level network operation becomes a logged
+    no-op and queries report "absent", so the UI sandbox (#252) can create
+    networks / nodes / links purely as persisted data. Read from the
+    environment on every call (like the other host_net knobs) so a live
+    toggle lands without process restarts.
+    """
+    return os.environ.get("NOVA_VE_SANDBOX_MODE", "").strip().lower() in _TRUE_VALUES
+
+
+# ---------------------------------------------------------------------------
 # Typed exceptions
 # ---------------------------------------------------------------------------
 
@@ -275,8 +294,18 @@ _classify_helper_failure = _classify_helper_error
 
 
 def _invoke_helper(verb: str, *args: str) -> "subprocess.CompletedProcess[str]":
-    """Run ``sudo <helper> <verb> [args...]`` and raise typed errors on failure."""
+    """Run ``sudo <helper> <verb> [args...]`` and raise typed errors on failure.
+
+    In sandbox mode (#253) the helper is never invoked — every verb is a
+    logged no-op returning synthetic success. Callers that parse stdout
+    (pids, egress iface, MACs) have their own sandbox branches below.
+    """
     argv = [_sudo_bin(), "-n", _helper_bin(), verb, *args]
+    if sandbox_mode():
+        logger.info(
+            "sandbox: skip host op '%s %s' (no-op)", verb, " ".join(args)
+        )
+        return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
     proc = _run(argv)
     if proc.returncode != 0:
         raise _classify_helper_error(proc.stderr or "", proc.returncode)
@@ -289,7 +318,12 @@ def bridge_exists(name: str) -> bool:
     Used for idempotency in ``create_network``: we re-use a pre-existing
     bridge with the right name rather than failing on EEXIST. The query
     runs without sudo (``ip link show`` is unprivileged read access).
+
+    Sandbox mode (#253): the kernel never holds sandbox objects, so the
+    answer is always False (create then no-ops through _invoke_helper).
     """
+    if sandbox_mode():
+        return False
     try:
         proc = _run([_ip_bin(), "link", "show", name])
     except FileNotFoundError:
@@ -506,7 +540,12 @@ def console_proxy_start(node_pid: int, listen_port: int, target_port: int) -> in
     Required because ``docker run --network=none -p`` does not bring up the
     Docker userland proxy — there's no container IP to forward to — so the
     advertised host port is unreachable until we splice in via setns.
+
+    Sandbox mode (#253): unreachable in practice (nodes never start), but
+    guarded anyway so a stray call gets a benign pid instead of an error.
     """
+    if sandbox_mode():
+        return 0
     proc = _invoke_helper(
         "console-proxy-start",
         str(int(node_pid)),
@@ -556,7 +595,13 @@ def bridge_addr_add(name: str, cidr: str) -> None:
 
 
 def default_egress_iface() -> str:
-    """Return the interface used by the host's current default route."""
+    """Return the interface used by the host's current default route.
+
+    Sandbox mode (#253): synthetic ``eth0`` — the value is persisted as
+    ``runtime.egress_interface`` data only; nothing consumes it kernel-side.
+    """
+    if sandbox_mode():
+        return "eth0"
     proc = _invoke_helper("default-egress")
     return (proc.stdout or "").strip()
 
@@ -636,7 +681,10 @@ def tap_exists(name: str) -> bool:
     """Return True if a Linux interface named ``name`` currently exists.
 
     Uses the same unprivileged ``ip link show`` check as ``bridge_exists``.
+    Sandbox mode (#253): always False (see bridge_exists).
     """
+    if sandbox_mode():
+        return False
     try:
         proc = _run([_ip_bin(), "link", "show", name])
     except FileNotFoundError:

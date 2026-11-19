@@ -57,6 +57,23 @@ services:
       db-init:
         condition: service_completed_successfully
 
+  # One-shot: create dummy node images (qemu/iol/dynamips) in the volume so
+  # the add-node modal and node creation work without real images (#253).
+  # Idempotent — never touches pre-existing files, so real images deployed
+  # into the volume later are safe.
+  sandbox-images:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: "no"
+    environment:
+      BASE_DATA_DIR: /data
+      IMAGES_DIR: /data/images
+      TEMPLATES_DIR: /app/templates
+    volumes:
+      - labdata:/data
+    command: python -m scripts.sandbox_images
+
   backend:
     build:
       context: ./backend
@@ -76,6 +93,9 @@ services:
       # Provisioned by db-init into the shared volume; without this the
       # backend exits at startup (host_net.get_instance_id).
       NOVA_VE_INSTANCE_ID_FILE: /data/instance_id
+      # UI sandbox (#253): host network ops become logged no-ops, node
+      # start returns a typed sandbox error, docker catalog is synthetic.
+      NOVA_VE_SANDBOX_MODE: "1"
     volumes:
       # Labs/images/tmp persist in the volume — deliberately NOT bind-mounted
       # from the repo so UI edits never dirty the working tree.
@@ -87,6 +107,8 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
+      sandbox-images:
+        condition: service_completed_successfully
     # UI-sandbox bootstrap: schema + bootstrap admin (idempotent; generated
     # password is printed to logs unless NOVA_VE_ADMIN_PASSWORD is set), then
     # the API. Node start/stop and consoles are expected to fail here — no

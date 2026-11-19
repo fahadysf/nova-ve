@@ -133,6 +133,15 @@ class ImageConsoleHints:
 class DockerImageService:
     """Read/mutate the Docker image registry for lab availability."""
 
+    # Sandbox mode (#253): synthetic marked-image catalog so the docker tab
+    # of the add-node modal works with no daemon. Names are data only — they
+    # pass creation-time validation and never launch in the sandbox.
+    _SANDBOX_MARKED_IMAGES: tuple[str, ...] = (
+        "alpine:latest",
+        "nginx:alpine",
+        "busybox:latest",
+    )
+
     def list_all_images(self) -> list[ImageRecord]:
         """Return every local image, grouped by image ID.
 
@@ -188,7 +197,13 @@ class DockerImageService:
         marker name. An image marked but missing any upstream tag still shows
         up by its marker tag so the operator notices the orphan and can
         retag it.
+
+        Sandbox mode (#253): no daemon — return the synthetic catalog instead.
         """
+        from app.services.host_net import sandbox_mode
+
+        if sandbox_mode():
+            return list(self._SANDBOX_MARKED_IMAGES)
         out: list[str] = []
         for record in self.list_all_images():
             if not record.marked:
