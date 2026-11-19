@@ -70,7 +70,7 @@
     id="default"
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
-  <div class="flex items-center gap-2.5 pb-3 pl-3 pr-4">
+  <div class="flex items-center gap-2.5 py-1.5 pr-2">
     <div
       class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
     >
