@@ -339,6 +339,16 @@ class NodeRuntimeService:
         if runtime:
             return runtime
 
+        # Sandbox mode (#253): nodes are createable/editable data but never
+        # launch — fail with a clear, typed message instead of leaking the
+        # first missing host dependency (sudo/qemu/docker CLI).
+        if host_net.sandbox_mode():
+            raise NodeRuntimeError(
+                "Sandbox mode: node processes are not started in the UI sandbox "
+                "(no hypervisor/docker runtime available). The node remains on "
+                "the canvas as stopped."
+            )
+
         if node.get("type") == "qemu":
             runtime = self._start_qemu_node(lab_data, node)
         elif node.get("type") == "docker":
@@ -1232,7 +1242,12 @@ class NodeRuntimeService:
         """Schedule ``_discovery_loop`` as a background asyncio task.
 
         Mirrors :meth:`start_heartbeat` — safe to call from app startup.
+        Sandbox mode (#253): skipped entirely — the loop cross-references
+        kernel-side bridge state, which is meaningless (and noisy) in the
+        UI sandbox where no host network objects exist.
         """
+        if host_net.sandbox_mode():
+            return
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
