@@ -558,7 +558,7 @@ class LabService:
         return data
 
     @staticmethod
-    def read_meta_revision_static(filename: str) -> Optional[int]:
+    def read_meta_revision_static(filename: str) -> int | None:
         """Post-write `meta.revision` for endpoints that must report it (#248).
 
         Reads the value from disk rather than predicting it, so multi-write
