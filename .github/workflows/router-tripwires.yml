@@ -35,7 +35,14 @@ jobs:
         with:
           node-version: '20'
       - name: Install
-        run: cd frontend && npm ci
+        # frontend/package-lock.json is deliberately gitignored (see
+        # frontend/.gitignore), so npm ci has no lockfile to install from —
+        # match the main ci.yml installer instead. There is no `prepare`
+        # script, so sync explicitly: the benches run vitest before anything
+        # else would generate .svelte-kit/tsconfig.json.
+        run: |
+          cd frontend && npm install
+          npx svelte-kit sync
       - name: Router perf bench
         run: cd frontend && npm run test -- tests/e2e/bench/router_perf.spec.ts
       - name: Router quality bench

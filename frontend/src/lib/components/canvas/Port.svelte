@@ -4,7 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher, getContext, onDestroy } from 'svelte';
   import type { Readable } from 'svelte/store';
-  import { Handle, Position, useNodesData, useStore } from '@xyflow/svelte';
+  import { Handle, Position, useNodesData, useStore, useUpdateNodeInternals } from '@xyflow/svelte';
   import { formatInterfaceName } from '$lib/services/interfaceNaming';
   import type { LiveMacState, NodeInterface, PortPosition } from '$lib/types';
   import { dragLinkStore, getDragLinkSnapshot } from '$lib/stores/dragLink';
@@ -28,9 +28,6 @@
   export let nodeName: string | undefined = undefined;
   export let connectionPointRef:
     | { linkId: string; endpointKey: 'from' | 'to' }
-    | undefined = undefined;
-  export let manualRepositionStart:
-    | ((detail: { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition }) => void)
     | undefined = undefined;
   // When true, an inline label with the interface name is rendered next to the
   // port handle without requiring hover. Used to surface link attachments at a
@@ -104,17 +101,21 @@
     }
   })();
 
+  $: labelVertical = position.side === 'top' || position.side === 'bottom';
   $: pinnedLabelStyle = (() => {
+    // North/south ports get a vertical pill (text reads top→bottom), east/
+    // west ports a horizontal one (#254) — the pill hugs the link tangent.
+    const writingMode = labelVertical ? 'writing-mode: vertical-rl;' : '';
     switch (position.side) {
       case 'top':
-        return 'bottom: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);';
+        return `${writingMode} bottom: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);`;
       case 'right':
-        return 'left: calc(100% + 6px); top: 50%; transform: translate(0, -50%);';
+        return `${writingMode} left: calc(100% + 6px); top: 50%; transform: translate(0, -50%);`;
       case 'bottom':
-        return 'top: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);';
+        return `${writingMode} top: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);`;
       case 'left':
       default:
-        return 'right: calc(100% + 6px); top: 50%; transform: translate(0, -50%);';
+        return `${writingMode} right: calc(100% + 6px); top: 50%; transform: translate(0, -50%);`;
     }
   })();
 
@@ -126,9 +127,11 @@
   let insideFlow = false;
   const flowNodeId = getContext<string | undefined>('svelteflow__node_id');
   let currentNodeStore: Readable<{ data: { interface_naming_scheme?: string | null } } | null> | null = null;
+  let updateNodeInternals: ((id: string | string[]) => void) | null = null;
   try {
     useStore();
     insideFlow = true;
+    updateNodeInternals = useUpdateNodeInternals();
     if (flowNodeId) {
       currentNodeStore = useNodesData(flowNodeId) as Readable<{
         data: { interface_naming_scheme?: string | null };
@@ -136,6 +139,14 @@
     }
   } catch {
     insideFlow = false;
+  }
+
+  // Edge endpoints anchor at Svelte Flow's MEASURED handle center; re-measure
+  // whenever the port moves so paths track relocations exactly (#258).
+  $: if (insideFlow && updateNodeInternals && flowNodeId) {
+    void position.side;
+    void position.offset;
+    updateNodeInternals(flowNodeId);
   }
   if (currentNodeStore) {
     unsubscribeCurrentNode = currentNodeStore.subscribe((value) => {
@@ -229,33 +240,26 @@
     clearHoverTimer();
     showTooltip = false;
 
-    if (event.ctrlKey) {
-      manualRepositionStart?.({ event, nodeId, interfaceIndex, port: position });
-      return;
-    }
-
-    if (!event.ctrlKey) {
-      clickStartTs = Date.now();
-      clickStartCoords = { x: event.clientX, y: event.clientY };
-      dragLinkStore.start({
-        source: newConnectionSlot
-          ? {
-              kind: 'node-slot',
-              nodeId,
-              port: position,
-              nodeName,
-            }
-          : {
-              kind: 'interface',
-              nodeId,
-              interfaceIndex,
-              port: position,
-              interfaceName: renderedInterfaceName,
-              plannedMac: interfaceData.planned_mac ?? null,
-            },
-        pointer: { x: event.clientX, y: event.clientY },
-      });
-    }
+    clickStartTs = Date.now();
+    clickStartCoords = { x: event.clientX, y: event.clientY };
+    dragLinkStore.start({
+      source: newConnectionSlot
+        ? {
+            kind: 'node-slot',
+            nodeId,
+            port: position,
+            nodeName,
+          }
+        : {
+            kind: 'interface',
+            nodeId,
+            interfaceIndex,
+            port: position,
+            interfaceName: renderedInterfaceName,
+            plannedMac: interfaceData.planned_mac ?? null,
+          },
+      pointer: { x: event.clientX, y: event.clientY },
+    });
 
     dispatch('port:mousedown', { event, nodeId, interfaceIndex, port: position });
   }
@@ -377,18 +381,23 @@
   {#if insideFlow}
     <!--
       Pair source + target handles at the same id/position so peer-to-peer
-      links (where this iface is the target end) also resolve.
+      links (where this iface is the target end) also resolve. The inline
+      style centers both handles exactly on the perimeter point — Svelte
+      Flow anchors edge endpoints at the measured handle center, and its
+      default per-side offsets sit ~6px outside the port circle.
     -->
     <Handle
       type="source"
       position={xyPosition}
       id={`iface-${interfaceIndex}`}
+      style="left: 50%; top: 50%; transform: translate(-50%, -50%);"
       class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
     />
     <Handle
       type="target"
       position={xyPosition}
       id={`iface-${interfaceIndex}`}
+      style="left: 50%; top: 50%; transform: translate(-50%, -50%);"
       class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
     />
   {/if}
@@ -417,8 +426,14 @@
     ></span>
   {/if}
   {#if connected && !newConnectionSlot && !showTooltip}
+    <!-- Vertical pills swap the padding utilities: writing-mode vertical-rl
+         turns the physical px/py axes around, so keeping them would pad the
+         caps wide and the text sides thin — an ovular blob instead of the
+         same pill shape as the horizontal labels, just rotated (#254). -->
     <span
-      class="pointer-events-none absolute whitespace-nowrap rounded-full border border-gray-700/70 bg-gray-950/85 px-1.5 py-px font-mono text-[7.5px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm"
+      class={`pointer-events-none absolute whitespace-nowrap rounded-full border border-gray-700/70 bg-gray-950/85 ${
+        labelVertical ? 'py-1.5 px-px' : 'px-1.5 py-px'
+      } font-mono text-[7.5px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm`}
       style={pinnedLabelStyle}
       data-testid="port-pinned-label"
       aria-hidden="true"

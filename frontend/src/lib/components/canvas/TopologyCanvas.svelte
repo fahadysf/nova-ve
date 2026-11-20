@@ -47,14 +47,17 @@
     type LayoutDebouncer,
   } from '$lib/services/labApi';
   import {
-    closestPortPositionToBox,
+    bestRouteAwarePortPosition,
+    nudgeAwayFromPorts,
+    placeInterfaces,
     separatePortPositions,
     type NodeBox,
   } from '$lib/services/portLayout';
+  import type { Obstacle } from '$lib/services/router';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { labState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
-  import { deriveEdges, parseIfaceInterfaceIndex, type DiscoveredLink } from '$lib/services/canvasEdges';
+  import { deriveEdges, attachRouteObstacles, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -536,21 +539,6 @@
     return null;
   }
 
-  function isPortPosition(value: unknown): value is PortPosition {
-    if (!value || typeof value !== 'object') return false;
-    const candidate = value as PortPosition;
-    return (
-      (candidate.side === 'top' ||
-        candidate.side === 'right' ||
-        candidate.side === 'bottom' ||
-        candidate.side === 'left') &&
-      typeof candidate.offset === 'number' &&
-      Number.isFinite(candidate.offset) &&
-      candidate.offset >= 0 &&
-      candidate.offset <= 1
-    );
-  }
-
   function implicitLinkPairsByNetwork(): Map<number, Link[]> {
     const pairs = new Map<number, Link[]>();
     for (const link of $labState.links) {
@@ -592,17 +580,32 @@
   function endpointPortPosition(
     link: Link,
     key: LinkEndpointKey,
-    implicitPairs: Map<number, Link[]>
+    implicitPairs: Map<number, Link[]>,
+    routeBoxes: ReadonlyMap<string, NodeBox>
   ): PortPosition | null {
-    const saved = link.endpoint_positions?.[key];
-    if (saved?.mode === 'manual' && isPortPosition(saved.position)) {
-      return saved.position;
-    }
-
-    const ownBox = endpointBox(link[key]);
-    const peerBox = endpointBox(autoPeerEndpointFor(link, key, implicitPairs));
+    // Fully automatic (#258): the side faces the peer and the offset projects
+    // toward the peer center — relocated to an unconstricted side when an
+    // unrelated card blocks the gap-facing exit (bestRouteAwarePortPosition).
+    // Persisted manual placements (endpoint_positions.mode 'manual') are no
+    // longer honored — NetBird-style auto-positioning is the only truth.
+    const ownEndpoint = link[key];
+    const peerEndpoint = autoPeerEndpointFor(link, key, implicitPairs);
+    const ownBox = endpointBox(ownEndpoint);
+    const peerBox = endpointBox(peerEndpoint);
     if (!ownBox || !peerBox) return null;
-    return closestPortPositionToBox(ownBox, peerBox);
+
+    const flowId = (endpoint: Link['from'] | Link['to'] | null | undefined): string | null => {
+      if (typeof endpoint?.node_id === 'number') return `node${endpoint.node_id}`;
+      if (typeof endpoint?.network_id === 'number') return `network${endpoint.network_id}`;
+      return null;
+    };
+    const ownId = flowId(ownEndpoint);
+    const peerId = flowId(peerEndpoint);
+    const obstacles = [...routeBoxes.entries()]
+      .filter(([flowKey]) => flowKey !== ownId && flowKey !== peerId)
+      .map(([, box]) => box);
+
+    return bestRouteAwarePortPosition(ownBox, peerBox, obstacles);
   }
 
   function buildConnectionPointPositions(): {
@@ -610,17 +613,39 @@
     nodeRefs: Map<number, Record<string, ConnectionPointRef>>;
     network: Map<number, Record<string, PortPosition>>;
     networkRefs: Map<number, Record<string, ConnectionPointRef>>;
+    nodeOpenSlot: Map<number, PortPosition>;
+    networkOpenSlot: Map<number, PortPosition>;
   } {
     const node = new Map<number, Record<string, PortPosition>>();
     const nodeRefs = new Map<number, Record<string, ConnectionPointRef>>();
     const network = new Map<number, Record<string, PortPosition>>();
     const networkRefs = new Map<number, Record<string, ConnectionPointRef>>();
+    const nodeOpenSlot = new Map<number, PortPosition>();
+    const networkOpenSlot = new Map<number, PortPosition>();
     const implicitPairs = implicitLinkPairsByNetwork();
+
+    // Card boxes (visible ones only) so port placement can tell when the
+    // gap-facing side's exit is boxed in by an unrelated card (#258).
+    const routeBoxes = new Map<string, NodeBox>();
+    for (const nodeRecord of Object.values($labState.nodes)) {
+      const box = nodeBox(nodeRecord.id);
+      if (box) routeBoxes.set(`node${nodeRecord.id}`, box);
+    }
+    for (const networkRecord of Object.values($labState.networks)) {
+      const box = networkBox(networkRecord.id);
+      if (!box) continue;
+      const networkLinkCount = $labState.links.filter(
+        (link) => link?.id && link.to?.network_id === networkRecord.id
+      ).length;
+      const forceVisible = networkRecord.implicit === true && networkLinkCount !== 2;
+      if (!networkRecord.visibility && !forceVisible) continue;
+      routeBoxes.set(`network${networkRecord.id}`, box);
+    }
 
     for (const link of $labState.links) {
       for (const key of ['from', 'to'] as const) {
         const endpoint = link[key];
-        const port = endpointPortPosition(link, key, implicitPairs);
+        const port = endpointPortPosition(link, key, implicitPairs, routeBoxes);
         if (!endpoint || !port) continue;
 
         if (typeof endpoint.node_id === 'number' && typeof endpoint.interface_index === 'number') {
@@ -653,7 +678,55 @@
       if (box) network.set(networkId, separatePositionRecord(positions, box));
     }
 
-    return { node, nodeRefs, network, networkRefs };
+    // Dotted "new connection" handles (#258): the open slot obeys the same
+    // aversion rules as placed ports — it keeps its canonical spot unless a
+    // placed port on the same side sits within the min gap, in which case it
+    // shifts to the nearest free stretch of that side (placed ports never
+    // move, so no edge geometry changes).
+    for (const nodeRecord of Object.values($labState.nodes)) {
+      const slot = firstFreeInterfaceDefaultPosition(nodeRecord);
+      const box = nodeBox(nodeRecord.id);
+      if (!slot || !box) continue;
+      nodeOpenSlot.set(
+        nodeRecord.id,
+        nudgeAwayFromPorts(slot, Object.values(node.get(nodeRecord.id) ?? {}), box)
+      );
+    }
+
+    for (const networkRecord of Object.values($labState.networks)) {
+      const box = networkBox(networkRecord.id);
+      if (!box) continue;
+      const linkCount = $labState.links.filter(
+        (link) => link?.id && link.to?.network_id === networkRecord.id
+      ).length;
+      const openSlot = slotPosition(linkCount, linkCount + 1);
+      networkOpenSlot.set(
+        networkRecord.id,
+        nudgeAwayFromPorts(
+          openSlot,
+          Object.values(network.get(networkRecord.id) ?? {}),
+          box
+        )
+      );
+    }
+
+    return { node, nodeRefs, network, networkRefs, nodeOpenSlot, networkOpenSlot };
+  }
+
+  /**
+   * Canonical perimeter position of a node's dotted "new connection" slot —
+   * the first interface that is neither link-connected nor attached to a
+   * network, mirroring PortLayer's firstAvailableEntry selection exactly.
+   */
+  function firstFreeInterfaceDefaultPosition(node: NodeData): PortPosition | null {
+    const interfaces = node.interfaces ?? [];
+    if (interfaces.length === 0) return null;
+    const connected = new Set(connectedInterfaceIndexesForNode(node));
+    const index = interfaces.findIndex(
+      (iface, i) => !connected.has(iface.index ?? i) && (iface.network_id ?? 0) <= 0
+    );
+    if (index < 0) return null;
+    return placeInterfaces(interfaces.length)[index] ?? null;
   }
 
   function separatePositionRecord(
@@ -690,6 +763,7 @@
           connectedInterfaceIndexes: connectedInterfaceIndexesForNode(node),
           portPositionsByInterfaceIndex: connectionPointPositions.node.get(node.id) ?? {},
           portRefsByInterfaceIndex: connectionPointPositions.nodeRefs.get(node.id) ?? {},
+          newConnectionPortPosition: connectionPointPositions.nodeOpenSlot.get(node.id) ?? null,
           highlightedInterfaceIndex: highlightedTargetForNode(node.id),
           highlightedNewConnection: highlightedNewConnectionForNode(node.id),
           interface_naming_scheme: node.interface_naming_scheme ?? null
@@ -731,6 +805,7 @@
           linkIds: networkLinkIds,
           portPositionsByLinkId: connectionPointPositions.network.get(network.id) ?? {},
           portRefsByLinkId: connectionPointPositions.networkRefs.get(network.id) ?? {},
+          openSlotPosition: connectionPointPositions.networkOpenSlot.get(network.id) ?? null,
           brokenImplicit: isBrokenImplicit
         },
         style: `width: ${networkCardWidth(network)}px;`
@@ -771,7 +846,27 @@
       }
     }
 
-    return deriveEdges($labState.links, $labState.defaults, discoveredList, divergentByLinkId, $labState.networks);
+    // Obstacle-avoiding orthogonal routes (#254/#258): hand every edge the
+    // other cards' boxes so the router adds joints and detours around them
+    // instead of passing underneath. Hidden implicit bridges stay
+    // non-obstacles — nothing is drawn there to avoid.
+    const routeObstacles = new Map<string, Obstacle>();
+    for (const node of Object.values($labState.nodes)) {
+      routeObstacles.set(`node${node.id}`, nodeBox(node.id)!);
+    }
+    for (const network of Object.values($labState.networks)) {
+      const networkLinkCount = $labState.links.filter(
+        (link) => link?.id && link.to?.network_id === network.id
+      ).length;
+      const forceVisible = network.implicit === true && networkLinkCount !== 2;
+      if (!network.visibility && !forceVisible) continue;
+      routeObstacles.set(`network${network.id}`, networkBox(network.id)!);
+    }
+
+    return attachRouteObstacles(
+      deriveEdges($labState.links, $labState.defaults, discoveredList, divergentByLinkId, $labState.networks),
+      routeObstacles
+    );
   }
 
   $: {
@@ -1222,13 +1317,6 @@
     }
   }
 
-  function autoPositionConnectionPoint() {
-    const target = portMenuTarget;
-    if (!target) return;
-    void persistConnectionPointPosition(target, 'auto', null);
-    closeMenu();
-  }
-
   async function handleNodeAction(action: 'start' | 'stop' | 'wipe' | 'delete' | 'console', targetId: string) {
     closeMenu();
     const decoded = decodeId(targetId);
@@ -1440,21 +1528,6 @@
     pendingNetworkPosition = null;
   }
 
-  setContext('nova-ve:port-position-persist', (
-    nodeId: number,
-    interfaceIndex: number,
-    port: PortPosition
-  ) => {
-    void persistPortPosition(nodeId, interfaceIndex, port);
-  });
-
-  setContext('nova-ve:connection-point-position-persist', (
-    target: ConnectionPointTarget,
-    port: PortPosition
-  ) => {
-    void persistConnectionPointPosition(target, 'manual', port);
-  });
-
   setContext('nova-ve:connection-point-context-menu', (
     target: ConnectionPointTarget,
     event: MouseEvent
@@ -1473,160 +1546,11 @@
     };
   });
 
-  function findLinkEndpointForConnectionPoint(
-    target: ConnectionPointTarget
-  ): { linkIndex: number; key: LinkEndpointKey } | null {
-    if (target.kind === 'network') {
-      if (target.endpointKey) {
-        const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
-        if (linkIndex < 0) return null;
-        const link = $labState.links[linkIndex];
-        const endpoint = link[target.endpointKey];
-        if (endpoint?.network_id === target.networkId) {
-          return { linkIndex, key: target.endpointKey };
-        }
-        return null;
-      }
+  // #258: findLinkEndpointForConnectionPoint removed with the manual
+  // placement persistence it served.
 
-      const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
-      if (linkIndex < 0) return null;
-      const link = $labState.links[linkIndex];
-      if (link.from?.network_id === target.networkId) return { linkIndex, key: 'from' };
-      if (link.to?.network_id === target.networkId) return { linkIndex, key: 'to' };
-      return null;
-    }
-
-    if (target.linkId && target.endpointKey) {
-      const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
-      if (linkIndex < 0) return null;
-      const link = $labState.links[linkIndex];
-      const endpoint = link[target.endpointKey];
-      if (
-        endpoint?.node_id === target.nodeId &&
-        endpoint?.interface_index === target.interfaceIndex
-      ) {
-        return { linkIndex, key: target.endpointKey };
-      }
-      return null;
-    }
-
-    for (const [linkIndex, link] of $labState.links.entries()) {
-      if (
-        link.from?.node_id === target.nodeId &&
-        link.from?.interface_index === target.interfaceIndex
-      ) {
-        return { linkIndex, key: 'from' };
-      }
-      if (
-        link.to?.node_id === target.nodeId &&
-        link.to?.interface_index === target.interfaceIndex
-      ) {
-        return { linkIndex, key: 'to' };
-      }
-    }
-    return null;
-  }
-
-  function withEndpointPosition(
-    positions: LinkEndpointPositions | undefined,
-    key: LinkEndpointKey,
-    mode: 'auto' | 'manual',
-    port: PortPosition | null
-  ): LinkEndpointPositions {
-    return {
-      ...(positions ?? {}),
-      [key]: mode === 'manual' ? { mode, position: port } : { mode: 'auto' },
-    };
-  }
-
-  async function persistConnectionPointPosition(
-    target: ConnectionPointTarget,
-    mode: 'auto' | 'manual',
-    port: PortPosition | null
-  ) {
-    const ref = findLinkEndpointForConnectionPoint(target);
-    if (!ref) {
-      toastStore.push('No connected link found for this connection point.', 'error');
-      return;
-    }
-
-    const link = $labState.links[ref.linkIndex];
-    if (!link || String(link.id).startsWith('tmp_')) return;
-
-    const previousLinks = $labState.links;
-    const endpoint_positions = withEndpointPosition(
-      link.endpoint_positions,
-      ref.key,
-      mode,
-      port
-    );
-    labState.setLinks($labState.links.map((entry, index) =>
-      index === ref.linkIndex ? { ...entry, endpoint_positions } : entry
-    ));
-    publishFlowState();
-
-    try {
-      const response = await apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
-        method: 'PATCH',
-        body: { endpoint_positions },
-        suppressToast: true,
-      });
-      adoptRevision(response);
-    } catch (error) {
-      labState.setLinks(previousLinks);
-      publishFlowState();
-      const message =
-        error instanceof Error ? error.message : 'Failed to persist connection point position';
-      toastStore.push(message, 'error');
-    }
-  }
-
-  async function persistPortPosition(
-    nodeId: number,
-    interfaceIndex: number,
-    port: PortPosition,
-    ref?: ConnectionPointRef
-  ) {
-    const connectedTarget: ConnectionPointTarget = {
-      kind: 'node',
-      nodeId,
-      interfaceIndex,
-      linkId: ref?.linkId,
-      endpointKey: ref?.endpointKey,
-    };
-    if (findLinkEndpointForConnectionPoint(connectedTarget)) {
-      await persistConnectionPointPosition(connectedTarget, 'manual', port);
-      return;
-    }
-
-    const node = $labState.nodes[String(nodeId)];
-    if (!node) return;
-    const iface = node.interfaces[interfaceIndex];
-    if (!iface) return;
-
-    const previous = iface.port_position ?? null;
-    iface.port_position = port;
-    labState.setNodes({ ...$labState.nodes });
-    publishFlowState();
-
-    try {
-      const response = await apiRequest(
-        `/labs/${labId}/nodes/${nodeId}/interfaces/${interfaceIndex}`,
-        {
-          method: 'PATCH',
-          body: { port_position: port },
-          suppressToast: true
-        }
-      );
-      adoptRevision(response);
-    } catch (error) {
-      iface.port_position = previous;
-      labState.setNodes({ ...$labState.nodes });
-      publishFlowState();
-      const message = error instanceof Error ? error.message : 'Failed to persist port position';
-      toastStore.push(message, 'error');
-    }
-  }
+  // #258: persistConnectionPointPosition / withEndpointPosition removed —
+  // manual endpoint placements are no longer written or honored.
 
   function highlightedTargetForNode(candidateNodeId: number): number | null {
     const snap = getDragLinkSnapshot();
@@ -2343,13 +2267,12 @@
           <span>Delete Network</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
       {:else if menu?.targetType === 'port'}
-        <button
-          type="button"
-          class="menu-item"
-          on:click|preventDefault|stopPropagation={autoPositionConnectionPoint}
-        >
-          <span>Auto-position</span><LocateFixed class="h-3.5 w-3.5 text-gray-400" />
-        </button>
+        <!-- #258: connection points are auto-positioned; no port menu actions.
+             This branch stays so right-clicking a port shows an empty menu
+             instead of falling through to the edge line-style menu. -->
+        <div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-widest text-gray-500">
+          Auto-positioned
+        </div>
       {:else}
         {#if menu && isDiscoveredEdgeId(menu.targetId)}
           <button

@@ -31,6 +31,15 @@ export const LANE_WIDTH = 12; // half of "2 * laneWidth = 24px" band width
 
 const ABORT_CHECK_EVERY = 256;
 
+/**
+ * Cells a path must travel straight out of a port (along the side normal,
+ * no turning, no reversal) before its first bend — and straight into the
+ * target port before its last bend (#258). Lines always leave/arrive
+ * perpendicular to the card side for a visible stub instead of kinking at
+ * the handle.
+ */
+export const MIN_EXIT_CELLS = 2;
+
 // ---------- public types ----------------------------------------------------
 
 /** Axis-parallel segment used by the crossings-reduction pass. */
@@ -55,6 +64,15 @@ export async function routeOrthogonal(
 
   const { from, to, obstacles } = req;
 
+  // Facing ports with a clear corridor skip the grid entirely: the canonical
+  // Z-route with ONE jog at the corridor midpoint — maximum distance from
+  // both endpoints, never hugging the boxes (#254). Corners are rounded by
+  // serialize(); aligned ports collapse to a straight line.
+  const axis = facingAxis(from, to);
+  if (axis && corridorClear(from, to, axis, obstacles)) {
+    return serialize(centeredFacingSegments(from, to, axis).filter(isNonDegenerate));
+  }
+
   // Compute bounds based only on the from/to box (with padding). Filter
   // obstacles to those that intersect this window — A*'s grid scales with
   // the bbox area, so clipping irrelevant obstacles is critical for perf
@@ -69,12 +87,16 @@ export async function routeOrthogonal(
   grid.unblock(startCell.cx, startCell.cy);
   grid.unblock(endCell.cx, endCell.cy);
 
-  // Carve a one-cell exit lane in the port-tangent direction so the path
-  // does not fight the inflated obstacle of its own host node.
+  // Carve a straight exit lane in the port-tangent direction so the forced
+  // perpendicular stub has somewhere to run.
   carveExit(grid, from, startCell);
   carveExit(grid, to, endCell);
 
-  const cells = await runAStar(grid, startCell, endCell, signal);
+  const cells = await runAStar(grid, startCell, endCell, signal, {
+    from: exitZoneFor(from, startCell),
+    to: exitZoneFor(to, endCell),
+    fallbackAxis: from.side === 'top' || from.side === 'bottom' ? 'y' : 'x',
+  });
 
   // Convert the cell path to world segments anchored at the actual port world
   // coords (so the rendered path lands exactly on the handle).
@@ -88,6 +110,74 @@ export async function routeOrthogonal(
   const { d, bends, lengthPx } = serialize(reduced);
   return { d, bends, lengthPx };
 }
+
+// ---------- facing-port fast path -------------------------------------------
+
+type FacingAxis = 'horizontal' | 'vertical';
+
+/** Ports that directly face each other (right↔left or bottom↔top). */
+function facingAxis(from: PortRef, to: PortRef): FacingAxis | null {
+  if (
+    (from.side === 'right' && to.side === 'left') ||
+    (from.side === 'left' && to.side === 'right')
+  ) {
+    return 'horizontal';
+  }
+  if (
+    (from.side === 'bottom' && to.side === 'top') ||
+    (from.side === 'top' && to.side === 'bottom')
+  ) {
+    return 'vertical';
+  }
+  return null;
+}
+
+function rectsIntersect(
+  o: Obstacle,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): boolean {
+  return o.x + o.w > minX && o.x < maxX && o.y + o.h > minY && o.y < maxY;
+}
+
+/** The port-to-port corridor rect is free of obstacles (2px touch tolerance). */
+function corridorClear(
+  from: PortRef,
+  to: PortRef,
+  axis: FacingAxis,
+  obstacles: Obstacle[],
+): boolean {
+  void axis;
+  const minX = Math.min(from.x, to.x);
+  const maxX = Math.max(from.x, to.x);
+  const minY = Math.min(from.y, to.y);
+  const maxY = Math.max(from.y, to.y);
+  return !obstacles.some((o) => rectsIntersect(o, minX + 2, minY + 2, maxX - 2, maxY - 2));
+}
+
+/** The canonical three-segment Z with the jog at the corridor midpoint. */
+function centeredFacingSegments(from: PortRef, to: PortRef, axis: FacingAxis): Segment[] {
+  const s = (x1: number, y1: number, x2: number, y2: number): Segment => ({ x1, y1, x2, y2 });
+  if (axis === 'horizontal') {
+    const midX = (from.x + to.x) / 2;
+    return [
+      s(from.x, from.y, midX, from.y),
+      s(midX, from.y, midX, to.y),
+      s(midX, to.y, to.x, to.y),
+    ];
+  }
+  const midY = (from.y + to.y) / 2;
+  return [
+    s(from.x, from.y, from.x, midY),
+    s(from.x, midY, to.x, midY),
+    s(to.x, midY, to.x, to.y),
+  ];
+}
+
+const isNonDegenerate = (s: Segment): boolean =>
+  Math.abs(s.x2 - s.x1) > 0.01 || Math.abs(s.y2 - s.y1) > 0.01;
 
 // ---------- bounds + grid ---------------------------------------------------
 
@@ -268,7 +358,8 @@ function buildGrid(
   return grid;
 }
 
-/** Free a one-cell exit in the tangent direction of the port. */
+/** Free a straight exit lane in the tangent direction of the port — deep
+ * enough for the forced perpendicular stub (MIN_EXIT_CELLS). */
 function carveExit(grid: Grid, port: PortRef, cell: GridCell): void {
   let dx = 0;
   let dy = 0;
@@ -286,10 +377,12 @@ function carveExit(grid: Grid, port: PortRef, cell: GridCell): void {
       dx = 1;
       break;
   }
-  const exitCx = cell.cx + dx;
-  const exitCy = cell.cy + dy;
-  if (grid.inBounds(exitCx, exitCy)) {
-    grid.unblock(exitCx, exitCy);
+  for (let k = 1; k <= MIN_EXIT_CELLS; k++) {
+    const exitCx = cell.cx + dx * k;
+    const exitCy = cell.cy + dy * k;
+    if (grid.inBounds(exitCx, exitCy)) {
+      grid.unblock(exitCx, exitCy);
+    }
   }
 }
 
@@ -363,11 +456,51 @@ const DIRS: ReadonlyArray<[number, number]> = [
   [0, -1],
 ];
 
+/** Straight-zone bookkeeping for one port's perpendicular stub. */
+interface ExitZone {
+  cx: number;
+  cy: number;
+  /** Outward unit step along the port side. */
+  dx: number;
+  dy: number;
+}
+
+function exitZoneFor(port: PortRef, cell: GridCell): ExitZone {
+  switch (port.side) {
+    case 'top':
+      return { cx: cell.cx, cy: cell.cy, dx: 0, dy: -1 };
+    case 'bottom':
+      return { cx: cell.cx, cy: cell.cy, dx: 0, dy: 1 };
+    case 'left':
+      return { cx: cell.cx, cy: cell.cy, dx: -1, dy: 0 };
+    case 'right':
+      return { cx: cell.cx, cy: cell.cy, dx: 1, dy: 0 };
+  }
+}
+
+/** True when (x, y) sits on the zone's outward lane inside the stub length. */
+function inExitLane(z: ExitZone, x: number, y: number): boolean {
+  if (z.dx !== 0) {
+    const rel = (x - z.cx) * z.dx;
+    return y === z.cy && rel > 0 && rel < MIN_EXIT_CELLS;
+  }
+  const rel = (y - z.cy) * z.dy;
+  return x === z.cx && rel > 0 && rel < MIN_EXIT_CELLS;
+}
+
+interface ExitConstraints {
+  from: ExitZone;
+  to: ExitZone;
+  /** Axis the no-path fallback L should lead with (the source port's normal). */
+  fallbackAxis: 'x' | 'y';
+}
+
 async function runAStar(
   grid: Grid,
   start: GridCell,
   goal: GridCell,
   signal?: AbortSignal,
+  zones?: ExitConstraints,
 ): Promise<GridCell[]> {
   const cols = grid.cols;
   const rows = grid.rows;
@@ -428,6 +561,21 @@ async function runAStar(
       if (closed[nIdx]) continue;
       if (grid.isBlocked(nx, ny)) continue;
 
+      // Perpendicular-exit enforcement (#258): leave the source outward and
+      // straight, arrive at the target inward and straight.
+      if (zones) {
+        if (idx === startIdx) {
+          if (dx !== zones.from.dx || dy !== zones.from.dy) continue;
+        } else if (inExitLane(zones.from, cx, cy)) {
+          if (dx !== zones.from.dx || dy !== zones.from.dy) continue;
+        }
+        if (nIdx === goalIdx) {
+          if (dx !== -zones.to.dx || dy !== -zones.to.dy) continue;
+        } else if (inExitLane(zones.to, cx, cy)) {
+          if (dx !== -zones.to.dx || dy !== -zones.to.dy) continue;
+        }
+      }
+
       const stepDir = dx !== 0 ? 1 : 2; // 1=horiz, 2=vert
       const isBend = incoming !== 0 && incoming !== stepDir;
       const stepCost = 1 + (isBend ? BEND_PENALTY : 0);
@@ -444,8 +592,9 @@ async function runAStar(
     }
   }
 
-  // No path found — fall back to a direct L-route between start and goal.
-  return fallbackL(start, goal);
+  // No path found under the constraints — fall back to a direct L-route
+  // that still leaves the source port along its outward axis.
+  return fallbackL(start, goal, zones?.fallbackAxis ?? 'x');
 }
 
 function heuristic(a: GridCell, b: GridCell): number {
@@ -465,9 +614,27 @@ function reconstruct(cameFrom: Int32Array, endIdx: number, cols: number): GridCe
   return path;
 }
 
-function fallbackL(start: GridCell, goal: GridCell): GridCell[] {
-  // Pure deterministic L-bend (right then up/down).
+function fallbackL(
+  start: GridCell,
+  goal: GridCell,
+  axisFirst: 'x' | 'y',
+): GridCell[] {
+  // Pure deterministic L-bend along the requested axis first, so the stub
+  // out of the source port stays perpendicular to its side.
   const out: GridCell[] = [{ cx: start.cx, cy: start.cy }];
+  if (axisFirst === 'y') {
+    const stepY = goal.cy > start.cy ? 1 : -1;
+    for (let cy = start.cy + stepY; cy !== goal.cy + stepY; cy += stepY) {
+      out.push({ cx: start.cx, cy });
+      if (cy === goal.cy) break;
+    }
+    const stepX = goal.cx > start.cx ? 1 : -1;
+    for (let cx = start.cx + stepX; cx !== goal.cx + stepX; cx += stepX) {
+      out.push({ cx, cy: goal.cy });
+      if (cx === goal.cx) break;
+    }
+    return out;
+  }
   const stepX = goal.cx > start.cx ? 1 : -1;
   for (let cx = start.cx + stepX; cx !== goal.cx + stepX; cx += stepX) {
     out.push({ cx, cy: start.cy });
@@ -705,6 +872,95 @@ export function countCrossings(segments: Segment[]): number {
 
 // ---------- serialize -------------------------------------------------------
 
+/** Corner rounding radius for orthogonal connections (#254, NetBird-style). */
+export const ORTHOGONAL_CORNER_RADIUS = 8;
+
+interface PathPoint {
+  x: number;
+  y: number;
+}
+
+function pointToward(from: PathPoint, toward: PathPoint, dist: number): PathPoint {
+  const len = Math.hypot(toward.x - from.x, toward.y - from.y);
+  if (len === 0) return { ...from };
+  const t = dist / len;
+  return { x: from.x + (toward.x - from.x) * t, y: from.y + (toward.y - from.y) * t };
+}
+
+/**
+ * Emit an SVG path for a polyline with rounded right-angle corners.
+ *
+ * Each interior corner is cut back by `radius` on both adjacent segments and
+ * replaced with a quadratic bezier (control point at the corner). The radius
+ * clamps to half of each adjacent segment so short runs never overshoot; a
+ * corner on a zero-length run stays sharp. Pure geometry — CSS cannot round
+ * path geometry (stroke-linejoin only rounds the stroke outline at
+ * strokeWidth/2), so the corners are baked into the `d` string like React
+ * Flow's getSmoothStepPath does.
+ */
+export function roundedOrthogonalPath(
+  points: PathPoint[],
+  radius: number = ORTHOGONAL_CORNER_RADIUS,
+): string {
+  if (points.length < 2) return '';
+  let d = `M ${points[0].x},${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const prev = points[i - 1];
+    const corner = points[i];
+    const next = points[i + 1];
+    const inLen = Math.hypot(corner.x - prev.x, corner.y - prev.y);
+    const outLen = Math.hypot(next.x - corner.x, next.y - corner.y);
+    const r = Math.min(radius, inLen / 2, outLen / 2);
+    if (r < 0.5) {
+      // Degenerate run(s) — keep the sharp corner.
+      d += ` L ${corner.x},${corner.y}`;
+      continue;
+    }
+    const cutIn = pointToward(corner, prev, r);
+    const cutOut = pointToward(corner, next, r);
+    d += ` L ${cutIn.x},${cutIn.y} Q ${corner.x},${corner.y} ${cutOut.x},${cutOut.y}`;
+  }
+  const last = points[points.length - 1];
+  d += ` L ${last.x},${last.y}`;
+  return d;
+}
+
+/** Polyline points from contiguous axis-aligned segments (deduping seams). */
+function segmentsToPoints(segments: Segment[]): PathPoint[] {
+  const pts: PathPoint[] = [{ x: segments[0].x1, y: segments[0].y1 }];
+  for (const s of segments) {
+    const last = pts[pts.length - 1];
+    if (Math.abs(s.x2 - last.x) > 0.01 || Math.abs(s.y2 - last.y) > 0.01) {
+      pts.push({ x: s.x2, y: s.y2 });
+    }
+  }
+  return pts;
+}
+
+/**
+ * Merge consecutive points closer than 0.5px (grid-lane vs port-axis
+ * rounding can leave a sub-pixel jog right at a box edge, which rendered as
+ * a glitch kink). The final point is an anchor: if IT is sub-pixel close to
+ * its predecessor, the predecessor is dropped instead so the path still
+ * lands exactly on the port handle.
+ */
+function mergeSubPixelPoints(points: PathPoint[], epsilon = 0.5): PathPoint[] {
+  if (points.length < 2) return points;
+  const out: PathPoint[] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const candidate = points[i];
+    const last = out[out.length - 1];
+    const near =
+      Math.abs(candidate.x - last.x) < epsilon && Math.abs(candidate.y - last.y) < epsilon;
+    if (!near) {
+      out.push(candidate);
+    } else if (i === points.length - 1) {
+      out[out.length - 1] = candidate;
+    }
+  }
+  return out;
+}
+
 function serialize(segments: Segment[]): {
   d: string;
   bends: number;
@@ -713,17 +969,17 @@ function serialize(segments: Segment[]): {
   if (segments.length === 0) {
     return { d: '', bends: 0, lengthPx: 0 };
   }
-  let d = `M ${segments[0].x1},${segments[0].y1}`;
-  d += ` L ${segments[0].x2},${segments[0].y2}`;
   let lengthPx = Math.abs(segments[0].x2 - segments[0].x1) +
     Math.abs(segments[0].y2 - segments[0].y1);
   let bends = 0;
   for (let i = 1; i < segments.length; i++) {
     const s = segments[i];
-    d += ` L ${s.x2},${s.y2}`;
     lengthPx += Math.abs(s.x2 - s.x1) + Math.abs(s.y2 - s.y1);
     bends++;
   }
+  // bends counts corners (unchanged by rounding); metrics stay on the sharp
+  // geometry so consumers see stable values.
+  const d = roundedOrthogonalPath(mergeSubPixelPoints(segmentsToPoints(segments)));
   return { d, bends, lengthPx };
 }
 
@@ -738,4 +994,6 @@ export const __test = {
   reduceCrossings,
   countCrossings,
   segmentsCross,
+  centeredFacingSegments,
+  mergeSubPixelPoints,
 };
