@@ -1,9 +1,9 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import { cleanup, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
 import { writable } from 'svelte/store';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { get } from 'svelte/store';
 import type { DragEndpoint, InterfaceEndpoint, NetworkEndpoint, NodeSlotEndpoint } from '$lib/stores/dragLink';
 import { dragLinkStore } from '$lib/stores/dragLink';
@@ -401,5 +401,51 @@ describe('TopologyCanvas node-slot link confirmation', () => {
         })
       );
     });
+  });
+});
+
+describe('TopologyCanvas minimap collapse (#273)', () => {
+  beforeEach(() => {
+    window.localStorage.removeItem('nova-ve.canvas-prefs');
+  });
+
+  it('renders collapsed by default with the floating toggle box', async () => {
+    renderCanvas({
+      '1': makeNode(1, 'edge-a', 0, { hotplug: false, max_nics: 8, machine: 'pc' }),
+    });
+
+    const toggle = screen.getByTestId('minimap-toggle');
+    expect(toggle.getAttribute('aria-label')).toBe('Show minimap');
+    expect(screen.queryByTestId('minimap-frame')).toBeNull();
+  });
+
+  it('expands the minimap on click and collapses again', async () => {
+    renderCanvas({
+      '1': makeNode(1, 'edge-a', 0, { hotplug: false, max_nics: 8, machine: 'pc' }),
+    });
+
+    await fireEvent.click(screen.getByTestId('minimap-toggle'));
+    await tick();
+    expect(screen.getByTestId('minimap-frame')).toBeInTheDocument();
+    expect(screen.getByTestId('minimap-toggle').getAttribute('aria-label')).toBe('Hide minimap');
+    expect(JSON.parse(window.localStorage.getItem('nova-ve.canvas-prefs') ?? '{}')).toEqual({
+      minimapExpanded: true
+    });
+
+    await fireEvent.click(screen.getByTestId('minimap-toggle'));
+    await tick();
+    expect(screen.queryByTestId('minimap-frame')).toBeNull();
+    expect(screen.getByTestId('minimap-toggle').getAttribute('aria-label')).toBe('Show minimap');
+  });
+
+  it('restores the persisted expanded choice on load', async () => {
+    window.localStorage.setItem(
+      'nova-ve.canvas-prefs',
+      JSON.stringify({ minimapExpanded: true })
+    );
+    // Simulate a fresh module load: the store reads storage at creation.
+    vi.resetModules();
+    const { canvasPrefs: freshStore } = await import('$lib/stores/canvasPrefs');
+    expect(get(freshStore).minimapExpanded).toBe(true);
   });
 });
