@@ -52,6 +52,16 @@ def _write_lab(settings, filename, *, running=0, total=1, cpu=1, ram=1024, autho
     (settings.LABS_DIR / filename).write_text(json.dumps(lab))
 
 
+class _FakeListRuntime:
+    """Registry stand-in for the listing: running node ids per lab id."""
+
+    def __init__(self, running_by_lab=None):
+        self.running_by_lab = running_by_lab or {}
+
+    def is_node_running(self, lab_id, node_id):
+        return node_id in self.running_by_lab.get(lab_id, set())
+
+
 @pytest_asyncio.fixture()
 async def client(manage_settings):
     transport = ASGITransport(app=app)
@@ -67,10 +77,21 @@ def _as(role: str, username: str = "admin", folder: str = "/") -> None:
 
 
 @pytest.mark.asyncio
-async def test_listing_reports_state_and_allocations(client, manage_settings):
+async def test_listing_reports_state_and_allocations(client, manage_settings, monkeypatch):
     _write_lab(manage_settings, "arc-lab.json", running=2, total=3, cpu=2, ram=2048)
     _write_lab(manage_settings, "idle-lab.json", running=0, total=1)
     _as("admin")
+
+    import app.routers.manage as manage_module
+
+    # Registry-authoritative: nodes 1 and 2 of arc-lab hold runtimes; the
+    # persisted status fields are deliberately stale (all status=2 on
+    # arc-lab, one status=2 on idle-lab) and must be ignored.
+    monkeypatch.setattr(
+        manage_module,
+        "NodeRuntimeService",
+        lambda: _FakeListRuntime({"arc-lab": {1, 2}}),
+    )
 
     response = await client.get("/api/manage/labs")
 
@@ -83,12 +104,13 @@ async def test_listing_reports_state_and_allocations(client, manage_settings):
     assert labs["arc-lab.json"]["cpu_allocated"] == 6
     assert labs["arc-lab.json"]["ram_allocated_mb"] == 6144
     assert labs["idle-lab.json"]["state"] == "stopped"
+    assert labs["idle-lab.json"]["nodes_running"] == 0
     assert data["totals"]["running"] == 1
     assert data["totals"]["nodes_running"] == 2
 
 
 @pytest.mark.asyncio
-async def test_non_admin_listing_scoped_to_folder_root(client, manage_settings):
+async def test_non_admin_listing_scoped_to_folder_root(client, manage_settings, monkeypatch):
     nested = manage_settings.LABS_DIR / "trainee"
     nested.mkdir()
     lab = {
@@ -100,6 +122,12 @@ async def test_non_admin_listing_scoped_to_folder_root(client, manage_settings):
     (nested / "scoped.json").write_text(json.dumps(lab))
     _write_lab(manage_settings, "admin-lab.json")
     _as("user", username="trainee", folder="/trainee")
+
+    import app.routers.manage as manage_module
+
+    monkeypatch.setattr(
+        manage_module, "NodeRuntimeService", lambda: _FakeListRuntime()
+    )
 
     response = await client.get("/api/manage/labs")
 
