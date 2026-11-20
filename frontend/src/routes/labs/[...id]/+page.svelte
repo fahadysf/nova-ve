@@ -53,6 +53,9 @@
     id: number;
     nodeId: number;
     nodeName: string;
+    // #268 — which declared console session this tab shows; a node with a
+    // secondary console can have one tab per mode.
+    mode: 'primary' | 'second';
     src: string;
     requestId: number;
     floating: FloatingWindowState;
@@ -684,13 +687,15 @@
     consoleWorkspace = { ...consoleWorkspace, tabs, zStack, activeTabId };
   }
 
-  async function openConsole(node: NodeData) {
+  async function openConsole(node: NodeData, mode: 'primary' | 'second' = 'primary') {
     if (node.status !== 2 || node.transientStatus) {
       toastStore.push('Start the node before opening the HTML5 console.');
       return;
     }
 
-    const existingTab = consoleWorkspace?.tabs.find((tab) => tab.nodeId === node.id);
+    const existingTab = consoleWorkspace?.tabs.find(
+      (tab) => tab.nodeId === node.id && (tab.mode ?? 'primary') === mode
+    );
     if (existingTab) {
       if (consoleWorkspace?.mode === 'floating') {
         updateFloatingWindow(existingTab.id, { minimized: false });
@@ -709,8 +714,9 @@
     const nextTab: ConsoleTab = {
       id: nextConsoleTabId(),
       nodeId: node.id,
-      nodeName: node.name,
-      src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}`,
+      nodeName: mode === 'second' ? `${node.name} (second)` : node.name,
+      mode,
+      src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}${mode === 'second' ? '&console=second' : ''}`,
       requestId: Date.now(),
       floating: defaultFloatingWindowBounds(offsetIndex)
     };
@@ -1096,7 +1102,7 @@
             labId={labId}
             {consoleSelectorWindows}
             {consoleMinimizedWindows}
-            on:console={(event) => openConsole(event.detail.node)}
+            on:console={(event) => openConsole(event.detail.node, event.detail.mode ?? 'primary')}
             on:console-select={(event) => {
               const tabId = event.detail.tabId;
               updateFloatingWindow(tabId, { minimized: false });
