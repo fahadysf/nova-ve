@@ -58,6 +58,26 @@ describe('NetworkNode', () => {
     expect(screen.getByTestId('network-info-button')).toHaveClass('absolute', 'bottom-1', 'right-1');
   });
 
+  it('renders the dotted open slot at the canvas-nudged position when provided (#258)', () => {
+    const { container } = render(NetworkNode, {
+      props: {
+        id: 'network7',
+        data: {
+          label: 'edge-transport-bridge-01',
+          count: 1,
+          networkId: 7,
+          linkIds: ['link-a'],
+          openSlotPosition: { side: 'right', offset: 0.75 },
+        },
+      },
+    });
+
+    const openPort = container.querySelector('[data-network-port-open="true"]');
+    expect(openPort).not.toBeNull();
+    expect(openPort!.getAttribute('data-network-port-side')).toBe('right');
+    expect(openPort!.getAttribute('data-network-port-offset')).toBe('0.7500');
+  });
+
   it('binds connected network handles to their persisted link endpoint', () => {
     render(NetworkNode, {
       props: {

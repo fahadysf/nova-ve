@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   clampToPerimeter,
   closestPortPositionToBox,
+  nudgeAwayFromPorts,
   PORT_HANDLE_MIN_CENTER_GAP_PX,
   placeInterfaces,
   portPositionToPoint,
@@ -262,5 +263,80 @@ describe('portLayout.separatePortPositions — center bias (#258)', () => {
     // The 0.9-ideal port stays the lower of the two on the side.
     expect(separated[0].offset).toBeGreaterThan(separated[1].offset);
     expect((separated[0].offset + separated[1].offset) / 2).toBeCloseTo(0.5, 6);
+  });
+});
+
+describe('portLayout.nudgeAwayFromPorts — dotted open-slot aversion (#258)', () => {
+  const box = { x: 0, y: 0, w: 100, h: 100 };
+
+  it('keeps the canonical position when no occupant is within the min gap', () => {
+    const nudged = nudgeAwayFromPorts(
+      { side: 'right', offset: 0.5 },
+      [{ side: 'right', offset: 0.95 }],
+      box
+    );
+    expect(nudged).toEqual({ side: 'right', offset: 0.5 });
+  });
+
+  it('shifts to the nearest free stretch when a same-side port sits too close', () => {
+    // Occupant at 0.48 leaves [0.59, 1] as the nearest feasible stretch;
+    // 0.59 is closer to the canonical 0.5 than the 0.37 cap of [0, 0.37].
+    const nudged = nudgeAwayFromPorts(
+      { side: 'right', offset: 0.5 },
+      [{ side: 'right', offset: 0.48 }],
+      box
+    );
+    expect(nudged.side).toBe('right');
+    expect(nudged.offset).toBeGreaterThanOrEqual(0.48 + PORT_HANDLE_MIN_CENTER_GAP_PX / box.h - 1e-6);
+    expect(nudged.offset).toBeCloseTo(0.59, 6);
+  });
+
+  it('picks the other direction when the occupant sits below the canonical spot', () => {
+    const nudged = nudgeAwayFromPorts(
+      { side: 'right', offset: 0.5 },
+      [{ side: 'right', offset: 0.55 }],
+      box
+    );
+    expect(nudged.offset).toBeCloseTo(0.55 - PORT_HANDLE_MIN_CENTER_GAP_PX / box.h, 6);
+  });
+
+  it('never moves the placed ports themselves', () => {
+    const occupant = { side: 'right', offset: 0.48 } as const;
+    nudgeAwayFromPorts({ side: 'right', offset: 0.5 }, [occupant], box);
+    expect(occupant.offset).toBe(0.48);
+  });
+
+  it('pushes clear of a perpendicular occupant near a shared corner', () => {
+    const nudged = nudgeAwayFromPorts(
+      { side: 'right', offset: 0 },
+      [{ side: 'top', offset: 0.95 }],
+      box
+    );
+    const slotPoint = portPositionToPoint(nudged, box);
+    const occupantPoint = portPositionToPoint({ side: 'top', offset: 0.95 }, box);
+    const distance = Math.hypot(slotPoint.x - occupantPoint.x, slotPoint.y - occupantPoint.y);
+    expect(distance).toBeGreaterThanOrEqual(PORT_HANDLE_MIN_CENTER_GAP_PX);
+    expect(nudged.side).toBe('right');
+    expect(nudged.offset).toBeGreaterThan(0);
+  });
+
+  it('hugs the less-crowded edge when the side is saturated with ports', () => {
+    const nudged = nudgeAwayFromPorts(
+      { side: 'right', offset: 0.5 },
+      [
+        { side: 'right', offset: 0.1 },
+        { side: 'right', offset: 0.3 },
+        { side: 'right', offset: 0.5 },
+        { side: 'right', offset: 0.7 },
+        { side: 'right', offset: 0.9 },
+      ],
+      box
+    );
+    expect(nudged.offset).toBe(0);
+  });
+
+  it('returns the slot untouched when there are no occupants at all', () => {
+    const nudged = nudgeAwayFromPorts({ side: 'bottom', offset: 0 }, [], box);
+    expect(nudged).toEqual({ side: 'bottom', offset: 0 });
   });
 });

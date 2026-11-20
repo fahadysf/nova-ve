@@ -24,6 +24,8 @@
     connectedInterfaceIndexes?: number[];
     portPositionsByInterfaceIndex?: Record<string, PortPosition>;
     portRefsByInterfaceIndex?: Record<string, NodeConnectionPointRef>;
+    /** Canvas-computed position for the dotted new-connection slot (#258). */
+    newConnectionPortPosition?: PortPosition | null;
     highlightedInterfaceIndex?: number | null;
     highlightedNewConnection?: boolean;
   };
@@ -104,6 +106,7 @@
     connectedInterfaceIndexes={data.connectedInterfaceIndexes ?? []}
     portPositionsByInterfaceIndex={data.portPositionsByInterfaceIndex ?? {}}
     portRefsByInterfaceIndex={data.portRefsByInterfaceIndex ?? {}}
+    newConnectionPortPosition={data.newConnectionPortPosition ?? null}
     highlightedInterfaceIndex={data.highlightedInterfaceIndex ?? null}
     highlightedNewConnection={data.highlightedNewConnection ?? false}
     on:port:mousedown={(e) => dispatch('port:mousedown', e.detail)}
