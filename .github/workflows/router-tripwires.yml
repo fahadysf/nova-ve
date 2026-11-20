@@ -35,7 +35,10 @@ jobs:
         with:
           node-version: '20'
       - name: Install
-        run: cd frontend && npm ci
+        # frontend/package-lock.json is deliberately gitignored (see
+        # frontend/.gitignore), so npm ci has no lockfile to install from —
+        # match the main ci.yml installer instead.
+        run: cd frontend && npm install
       - name: Router perf bench
         run: cd frontend && npm run test -- tests/e2e/bench/router_perf.spec.ts
       - name: Router quality bench
