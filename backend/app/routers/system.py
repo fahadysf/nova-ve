@@ -322,6 +322,20 @@ async def poll(
 # ----------------------------------------------------------------------
 # Log viewer (#265): per-node runtime logs, pattern-filtered tail.
 # ----------------------------------------------------------------------
+def _docker_log_entry(record_file, record, lab_id: str, node_id) -> dict:
+    """Synthetic listing entry for a docker node's daemon-side logs."""
+    return {
+        "name": record_file.name.replace(".json", ""),
+        "label": str(record.get("name") or record_file.stem),
+        "kind": "docker",
+        "lab_id": lab_id,
+        "node_id": node_id,
+        "path": f"docker://{lab_id}/{node_id}",
+        "size": 0,
+        "mtime": int(time.time()),
+    }
+
+
 def _collect_log_files() -> list[dict]:
     """Every node runtime log on disk or in the docker daemon.
 
@@ -347,23 +361,17 @@ def _collect_log_files() -> list[dict]:
         log_path_raw = record.get("stdout_log")
         if not log_path_raw:
             if kind == "docker" and lab_id and node_id is not None:
-                entries.append(
-                    {
-                        "name": record_file.name.replace(".json", ""),
-                        "label": str(record.get("name") or record_file.stem),
-                        "kind": kind,
-                        "lab_id": lab_id,
-                        "node_id": node_id,
-                        "path": f"docker://{lab_id}/{node_id}",
-                        "size": 0,
-                        "mtime": int(time.time()),
-                    }
-                )
+                entries.append(_docker_log_entry(record_file, record, lab_id, node_id))
             continue
         log_path = Path(str(log_path_raw))
         try:
             stat = log_path.stat()
         except OSError:
+            # Docker records reference a stdout file that never materializes
+            # (container logs live in the docker daemon) — fall through to
+            # the synthetic docker:// path so they stay visible.
+            if kind == "docker" and lab_id and node_id is not None:
+                entries.append(_docker_log_entry(record_file, record, lab_id, node_id))
             continue
         # Path safety: only surface files under TMP_DIR.
         try:
