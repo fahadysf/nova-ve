@@ -55,6 +55,15 @@ export async function routeOrthogonal(
 
   const { from, to, obstacles } = req;
 
+  // Facing ports with a clear corridor skip the grid entirely: NetBird-style,
+  // the middle of the corridor is ONE smooth S-joint at the midpoint — maximum
+  // distance from both endpoints, nothing near the boxes (#254). Aligned
+  // ports collapse to a straight line.
+  const axis = facingAxis(from, to);
+  if (axis && corridorClear(from, to, axis, obstacles)) {
+    return centeredFacingRoute(from, to);
+  }
+
   // Compute bounds based only on the from/to box (with padding). Filter
   // obstacles to those that intersect this window — A*'s grid scales with
   // the bbox area, so clipping irrelevant obstacles is critical for perf
@@ -88,6 +97,77 @@ export async function routeOrthogonal(
   const { d, bends, lengthPx } = serialize(reduced);
   return { d, bends, lengthPx };
 }
+
+// ---------- facing-port fast path -------------------------------------------
+
+type FacingAxis = 'horizontal' | 'vertical';
+
+/** Ports that directly face each other (right↔left or bottom↔top). */
+function facingAxis(from: PortRef, to: PortRef): FacingAxis | null {
+  if (
+    (from.side === 'right' && to.side === 'left') ||
+    (from.side === 'left' && to.side === 'right')
+  ) {
+    return 'horizontal';
+  }
+  if (
+    (from.side === 'bottom' && to.side === 'top') ||
+    (from.side === 'top' && to.side === 'bottom')
+  ) {
+    return 'vertical';
+  }
+  return null;
+}
+
+function rectsIntersect(
+  o: Obstacle,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+): boolean {
+  return o.x + o.w > minX && o.x < maxX && o.y + o.h > minY && o.y < maxY;
+}
+
+/** The port-to-port corridor rect is free of obstacles (2px touch tolerance). */
+function corridorClear(
+  from: PortRef,
+  to: PortRef,
+  axis: FacingAxis,
+  obstacles: Obstacle[],
+): boolean {
+  void axis;
+  const minX = Math.min(from.x, to.x);
+  const maxX = Math.max(from.x, to.x);
+  const minY = Math.min(from.y, to.y);
+  const maxY = Math.max(from.y, to.y);
+  return !obstacles.some((o) => rectsIntersect(o, minX + 2, minY + 2, maxX - 2, maxY - 2));
+}
+
+/**
+ * The NetBird-style facing route: one cubic S-joint spanning the middle half
+ * of the corridor (control points on the corridor axis at the midpoint), so
+ * the joint sits at the maximum distance from both ports and the line meets
+ * each handle in a straight stub. Aligned ports collapse to a straight line.
+ */
+function centeredFacingRoute(from: PortRef, to: PortRef): RouteResult {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  if (Math.abs(dx) < 0.01 || Math.abs(dy) < 0.01) {
+    const d = `M ${from.x},${from.y} L ${to.x},${to.y}`;
+    return { d, bends: 0, lengthPx: Math.abs(dx) + Math.abs(dy) };
+  }
+  const horizontal = facingAxis(from, to) === 'horizontal';
+  const mid = horizontal ? (from.x + to.x) / 2 : (from.y + to.y) / 2;
+  const d = horizontal
+    ? `M ${from.x},${from.y} C ${mid},${from.y} ${mid},${to.y} ${to.x},${to.y}`
+    : `M ${from.x},${from.y} C ${from.x},${mid} ${to.x},${mid} ${to.x},${to.y}`;
+  return { d, bends: 1, lengthPx: Math.abs(dx) + Math.abs(dy) };
+}
+
+const isNonDegenerate = (s: Segment): boolean =>
+  Math.abs(s.x2 - s.x1) > 0.01 || Math.abs(s.y2 - s.y1) > 0.01;
+void isNonDegenerate;
 
 // ---------- bounds + grid ---------------------------------------------------
 
