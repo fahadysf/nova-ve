@@ -39,6 +39,21 @@ def test_guide_documents_delete_source_opt_in(guide_text: str) -> None:
     )
 
 
+def test_guide_documents_move_symlink_default(guide_text: str) -> None:
+    """The guide must lead with the #271 move+symlink default."""
+    assert "move + symlink back" in guide_text, (
+        "migration guide must describe the move + symlink back default (#271)"
+    )
+    assert "--copy-only" in guide_text, (
+        "migration guide must mention --copy-only as the conservative opt-out"
+    )
+
+
+def test_guide_documents_log_file(guide_text: str) -> None:
+    """The guide must reference the #271 log file path."""
+    assert "/var/log/eve-ng-importer.log" in guide_text
+
+
 def test_guide_documents_dry_run(guide_text: str) -> None:
     """The guide must mention --dry-run so operators know how to plan first."""
     assert "--dry-run" in guide_text

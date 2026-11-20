@@ -2949,3 +2949,460 @@ def test_merge_qemu_args_malformed_extra_raises_value_error():
     base = ["qemu-system-x86_64", "-display", "none"]
     with pytest.raises(ValueError):
         _merge_qemu_args(base, "-name 'unclosed")
+
+
+# ---------------------------------------------------------------------------
+# External console launch (#269): bind-address behavior on freshly started
+# nodes. With EXTERNAL_CONSOLE_HOST configured, console listeners must be
+# reachable from operator workstations, so QEMU telnet/VNC binds go explicit
+# wildcard and the port probe checks the same address.
+# ---------------------------------------------------------------------------
+def test_console_bind_address_follows_external_host_setting(monkeypatch, patched_settings):
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
+    assert NodeRuntimeService()._console_bind_address() == "0.0.0.0"
+
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "   ", raising=False)
+    assert NodeRuntimeService()._console_bind_address() == "127.0.0.1"
+
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
+    assert NodeRuntimeService()._console_bind_address() == "127.0.0.1"
+
+
+def test_allocate_console_port_probes_external_bind_address(monkeypatch, patched_settings):
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
+    probed = []
+
+    def fake_port_available(port, bind_host="127.0.0.1"):
+        probed.append((port, bind_host))
+        return True
+
+    monkeypatch.setattr(NodeRuntimeService, "_port_available", staticmethod(fake_port_available))
+    service = NodeRuntimeService()
+    assert service._allocate_console_port("vnc") == 5900
+    assert probed and probed[0][1] == "0.0.0.0"
+
+
+def test_allocate_console_port_binds_ephemeral_probe_on_external_address(
+    monkeypatch, patched_settings
+):
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
+    bound = []
+
+    class _RecordingSocket:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def setsockopt(self, *args):
+            pass
+
+        def bind(self, addr):
+            bound.append(addr)
+
+        def getsockname(self):
+            host, _port = bound[-1]
+            return (host, 47511)
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.socket.socket", _RecordingSocket
+    )
+    assert NodeRuntimeService()._allocate_console_port("telnet") == 47511
+    assert bound == [("0.0.0.0", 0)]
+
+
+def test_allocate_console_port_defaults_to_loopback(monkeypatch, patched_settings):
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
+    bound = []
+
+    class _RecordingSocket:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def setsockopt(self, *args):
+            pass
+
+        def bind(self, addr):
+            bound.append(addr)
+
+        def getsockname(self):
+            host, _port = bound[-1]
+            return (host, 47512)
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.socket.socket", _RecordingSocket
+    )
+    assert NodeRuntimeService()._allocate_console_port("telnet") == 47512
+    assert bound == [("127.0.0.1", 0)]
+
+
+@pytest.mark.asyncio
+async def test_qemu_start_binds_telnet_wildcard_when_external_host_set(
+    monkeypatch, patched_settings, sample_lab
+):
+    recorded_popen = []
+    _mock_runtime_binaries(monkeypatch)
+    _stub_host_net_for_qemu_start(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _fake_subprocess_run_factory([]),
+    )
+
+    def fake_popen(cmd, cwd=None, stdin=None, stdout=None, stderr=None, start_new_session=None):
+        recorded_popen.append({"cmd": cmd})
+        if stdout is not None:
+            stdout.write(b"boot ok\n")
+        return _FakeProcess(4321)
+
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("app.services.node_runtime_service.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.services.node_runtime_service.psutil.Process", lambda pid: SimpleNamespace(
+        create_time=lambda: 111.0,
+        cpu_percent=lambda interval=0.0: 7.2,
+        memory_info=lambda: SimpleNamespace(rss=2048),
+        wait=lambda timeout=5: None,
+        is_running=lambda: True,
+        status=lambda: "sleeping",
+    ))
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
+
+    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    assert response["code"] == 200
+
+    serial_args = [
+        value
+        for flag, value in zip(recorded_popen[0]["cmd"], recorded_popen[0]["cmd"][1:])
+        if flag == "-serial"
+        for value in [value]
+    ]
+    assert serial_args, "expected a -serial console argument"
+    assert any(
+        arg.startswith("telnet:0.0.0.0:") and arg.endswith(",server,nowait")
+        for arg in serial_args
+    )
+    assert not any(arg.startswith("telnet::") for arg in serial_args)
+
+    # The runtime record keeps reporting the same port the endpoint will
+    # advertise externally.
+    console = NodeRuntimeService().console_info(sample_lab, 1)
+    port = console["port"]
+    assert f"telnet:0.0.0.0:{port},server,nowait" in serial_args
+
+
+@pytest.mark.asyncio
+async def test_qemu_start_keeps_legacy_bind_without_external_host(
+    monkeypatch, patched_settings, sample_lab
+):
+    recorded_popen = []
+    _mock_runtime_binaries(monkeypatch)
+    _stub_host_net_for_qemu_start(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _fake_subprocess_run_factory([]),
+    )
+
+    def fake_popen(cmd, cwd=None, stdin=None, stdout=None, stderr=None, start_new_session=None):
+        recorded_popen.append({"cmd": cmd})
+        if stdout is not None:
+            stdout.write(b"boot ok\n")
+        return _FakeProcess(4321)
+
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("app.services.node_runtime_service.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.services.node_runtime_service.psutil.Process", lambda pid: SimpleNamespace(
+        create_time=lambda: 111.0,
+        cpu_percent=lambda interval=0.0: 7.2,
+        memory_info=lambda: SimpleNamespace(rss=2048),
+        wait=lambda timeout=5: None,
+        is_running=lambda: True,
+        status=lambda: "sleeping",
+    ))
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
+
+    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    assert response["code"] == 200
+
+    cmd = recorded_popen[0]["cmd"]
+    serial_values = [cmd[i + 1] for i, flag in enumerate(cmd) if flag == "-serial"]
+    assert any(arg.startswith("telnet::") for arg in serial_values)
+    assert not any("0.0.0.0" in arg for arg in serial_values)
+
+
+@pytest.mark.asyncio
+async def test_qemu_start_binds_vnc_wildcard_when_external_host_set(
+    monkeypatch, patched_settings, sample_lab
+):
+    recorded_popen = []
+    _mock_runtime_binaries(monkeypatch)
+    _stub_host_net_for_qemu_start(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _fake_subprocess_run_factory([]),
+    )
+
+    def fake_popen(cmd, cwd=None, stdin=None, stdout=None, stderr=None, start_new_session=None):
+        recorded_popen.append({"cmd": cmd})
+        if stdout is not None:
+            stdout.write(b"boot ok\n")
+        return _FakeProcess(4321)
+
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("app.services.node_runtime_service.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("app.services.node_runtime_service.psutil.Process", lambda pid: SimpleNamespace(
+        create_time=lambda: 111.0,
+        cpu_percent=lambda interval=0.0: 7.2,
+        memory_info=lambda: SimpleNamespace(rss=2048),
+        wait=lambda timeout=5: None,
+        is_running=lambda: True,
+        status=lambda: "sleeping",
+    ))
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
+
+    vnc_lab = dict(sample_lab)
+    vnc_lab["nodes"] = {
+        "1": {
+            **sample_lab["nodes"]["1"],
+            "console": "vnc",
+        }
+    }
+    (patched_settings.LABS_DIR / "sample.json").write_text(json.dumps(vnc_lab))
+
+    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    assert response["code"] == 200
+
+    cmd = recorded_popen[0]["cmd"]
+    vnc_values = [cmd[i + 1] for i, flag in enumerate(cmd) if flag == "-vnc"]
+    assert any(arg == "0.0.0.0:0" for arg in vnc_values), vnc_values
+
+
+# ---------------------------------------------------------------------------
+# External console endpoint (#269): GET /api/labs/{lab}/nodes/{id}/external-console
+# ---------------------------------------------------------------------------
+def _seed_runtime(settings, lab_id: str, node_id: int, **extra) -> None:
+    """Inject a live runtime record for the external-console endpoint tests."""
+    runtime_dir = Path(settings.TMP_DIR) / "node-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime = {
+        "lab_id": lab_id,
+        "node_id": node_id,
+        "pid": 999999,
+        "pid_create_time": 111.0,
+        **extra,
+    }
+    with NodeRuntimeService._lock:
+        NodeRuntimeService._registry[f"{lab_id}:{node_id}"] = runtime
+        NodeRuntimeService._loaded = True
+    (runtime_dir / f"{lab_id}-{node_id}.json").write_text(json.dumps(runtime))
+
+
+def _enable_external_console(monkeypatch, settings, host: str = "192.168.7.9") -> None:
+    monkeypatch.setattr(settings, "EXTERNAL_CONSOLE_HOST", host, raising=False)
+    monkeypatch.setattr("app.routers.labs.get_settings", lambda: settings)
+
+
+def _live_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        NodeRuntimeService, "_is_runtime_alive", lambda self, runtime: True
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_emits_telnet_link(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        mode="primary",
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    data = response["data"]
+    assert data == {
+        "mode": "primary",
+        "scheme": "telnet",
+        "host": "192.168.7.9",
+        "port": 47501,
+        "console": "telnet",
+    }
+    # host:port only — the URL surface must never embed credentials.
+    assert "password" not in json.dumps(response).lower()
+    assert "@" not in json.dumps(data)
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_emits_vnc_link(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="vnc", console_port=5902)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    assert response["data"]["scheme"] == "vnc"
+    assert response["data"]["port"] == 5902
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_emits_rdp_link_for_proxy_backed_docker_node(
+    monkeypatch, patched_settings, sample_lab
+):
+    """Running rdp-mode nodes are docker-backed and proxy-fronted: the
+    endpoint advertises the proxy's externally reachable host:port."""
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_alive", lambda pid: True
+    )
+    _seed_runtime(
+        patched_settings,
+        "lab-123",
+        1,
+        kind="docker",
+        console="rdp",
+        console_port=47530,
+        console_proxy_pid=12345,
+        container_name="nova-ve-lab-123-1",
+    )
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    assert response["data"]["scheme"] == "rdp"
+    assert response["data"]["host"] == "192.168.7.9"
+    assert response["data"]["port"] == 47530
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_disabled_without_external_host(
+    monkeypatch, patched_settings, sample_lab
+):
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
+    monkeypatch.setattr("app.routers.labs.get_settings", lambda: patched_settings)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 400
+    assert "disabled" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_requires_registry_liveness(
+    monkeypatch, patched_settings, sample_lab
+):
+    """A stale persisted status=2 must not yield a link — the runtime
+    registry is the authority."""
+    _enable_external_console(monkeypatch, patched_settings)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 400
+    assert "not running" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_rejects_secondary_and_unknown_modes(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+    user = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
+
+    response = await labs.node_external_console("sample.json", 1, mode="second", current_user=user)
+    assert response["code"] == 400
+    assert "secondary console" in response["message"].lower()
+
+    response = await labs.node_external_console("sample.json", 1, mode="tertiary", current_user=user)
+    assert response["code"] == 422
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_advertises_secondary_console(
+    monkeypatch, patched_settings, sample_lab
+):
+    """#268 + #269 union: a node with a declared secondary console gets a
+    native-launch link for it — scheme and port come from the secondary
+    session, not the primary."""
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    lab_path = patched_settings.LABS_DIR / "sample.json"
+    lab_data = json.loads(lab_path.read_text())
+    lab_data["nodes"]["1"]["second_console"] = "vnc"
+    lab_path.write_text(json.dumps(lab_data))
+    _seed_runtime(
+        patched_settings,
+        "lab-123",
+        1,
+        kind="qemu",
+        console="telnet",
+        console_port=47501,
+        second_console="vnc",
+        second_console_port=5910,
+    )
+    user = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
+
+    response = await labs.node_external_console("sample.json", 1, mode="second", current_user=user)
+
+    assert response["code"] == 200
+    assert response["data"]["mode"] == "second"
+    assert response["data"]["scheme"] == "vnc"
+    assert response["data"]["host"] == "192.168.7.9"
+    assert response["data"]["port"] == 5910
+    assert response["data"]["console"] == "vnc"
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_scopes_access_and_missing_lab(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+
+    outsider = SimpleNamespace(username="trainee", role="user", html5=True, folder="/trainee")
+    response = await labs.node_external_console(
+        "sample.json", 1, current_user=outsider
+    )
+    assert response["code"] == 403
+
+    response = await labs.node_external_console(
+        "missing.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+    assert response["code"] == 404

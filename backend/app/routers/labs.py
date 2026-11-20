@@ -1927,6 +1927,129 @@ async def node_rdp(
     return response
 
 
+# External console launch (#269): the OS protocol handlers behind
+# telnet://, vnc:// and rdp:// URLs. The endpoint advertises the
+# admin-configured externally reachable host plus the node's console port so
+# the operator's desktop client can dial the console directly. Credentials
+# are never embedded — the URL surface is host:port only, and access is
+# guarded exactly like the sibling console routes.
+_EXTERNAL_CONSOLE_SCHEMES = {
+    "telnet": "telnet",
+    "vnc": "vnc",
+    "rdp": "rdp",
+}
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/external-console")
+async def node_external_console(
+    lab_path: str,
+    node_id: int,
+    mode: str = "primary",
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Advertise an externally reachable console endpoint for a running node.
+
+    Returns ``{mode, scheme, host, port, console}`` where ``scheme`` is one of
+    ``telnet|vnc|rdp`` and ``host`` is the EXTERNAL_CONSOLE_HOST setting used
+    verbatim. The client builds the OS scheme URL (``telnet://host:port`` and
+    friends) itself. Docker-backed consoles are advertised through the console
+    proxy listener that already republishes the container console port on the
+    wildcard bind.
+    """
+    mode_normalized = (mode or "primary").strip().lower()
+    if mode_normalized not in {"primary", "second"}:
+        return {"code": 422, "status": "fail", "message": "mode must be 'primary' or 'second'."}
+
+    external_host = str(getattr(get_settings(), "EXTERNAL_CONSOLE_HOST", "") or "").strip()
+    if not external_host:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": (
+                "External console launching is disabled: no externally reachable "
+                "console host is configured."
+            ),
+        }
+
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
+        runtime_service = NodeRuntimeService()
+        lab_id = str(data.get("id", "")).strip()
+        # Registry-authoritative liveness (#262): a persisted status=2 on a
+        # stopped node must not yield a dialable-looking endpoint.
+        if not runtime_service.is_node_running(lab_id, node_id):
+            return {
+                "code": 400,
+                "status": "fail",
+                "message": f"Node is not running: {node_id}.",
+            }
+
+        node = data.get("nodes", {}).get(str(node_id), {})
+        if mode_normalized == "second" and not node.get("second_console"):
+            return {
+                "code": 400,
+                "status": "fail",
+                "message": f"Node has no secondary console: {node_id}.",
+            }
+
+        # console_info re-spawns a dead docker console proxy before reporting
+        # the port, so the advertised host:port actually accepts connections.
+        # mode="second" (#268) resolves the secondary console session — its
+        # port is wildcard-bound too while external consoles are enabled.
+        console = runtime_service.console_info(data, node_id, mode=mode_normalized)
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as exc:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(exc),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    console_mode = str(console.get("console", "telnet"))
+    scheme = _EXTERNAL_CONSOLE_SCHEMES.get(console_mode)
+    if scheme is None:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": f"Console mode '{console_mode}' has no native client launch support.",
+        }
+
+    port = int(console.get("port", 0))
+    if port <= 0:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": "Node console port is not available.",
+        }
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "External console endpoint fetched.",
+        "data": {
+            "mode": mode_normalized,
+            "scheme": scheme,
+            "host": external_host,
+            "port": port,
+            "console": console_mode,
+        },
+    }
+
+
 @router.get("/{lab_path:path}/nodes/{node_id}/html5")
 async def node_html5(
     lab_path: str,

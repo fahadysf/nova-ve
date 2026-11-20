@@ -209,3 +209,50 @@ def test_e2e_iol_copies_iourc_alongside_bin(synthetic_eveng_tree, tmp_path):
     iol_dir = dest / "iol" / "i86bi-linux-l3-15.5"
     assert (iol_dir / "i86bi-linux-l3-15.5.bin").is_file()
     assert (iol_dir / "iourc").is_file()
+
+
+# ---- move + symlink default (#271) ---------------------------------------
+
+
+def test_e2e_move_symlink_moves_bytes_and_keeps_eveng_paths(synthetic_eveng_tree, tmp_path):
+    """Default #271 mode: one copy of the bytes, EVE-NG paths symlink to it, re-run is a no-op."""
+    dest = tmp_path / "nova-ve-images"
+
+    # First run: everything moves; originals become symlinks to the dest files.
+    items1 = walk_all(synthetic_eveng_tree.source_root, dest)
+    m1 = ImportManifest()
+    run_migration(
+        items1,
+        options=MigrateOptions(mode=CopyMode.MOVE_SYMLINK),
+        manifest=m1,
+        docker_build=lambda c, t: None,
+    )
+    assert len(m1.imported) > 0
+    for entry in m1.imported:
+        src_path = Path(entry.src)
+        if entry.dst.endswith("/iourc"):
+            # Shared license file stays copy-based.
+            assert entry.symlinked is False
+            assert src_path.is_file() and not src_path.is_symlink()
+            continue
+        assert entry.symlinked is True, f"{entry.dst} expected to be move+symlinked"
+        assert src_path.is_symlink(), f"{src_path} must remain as a symlink for EVE-NG"
+        assert os.path.realpath(src_path) == entry.dst
+        assert Path(entry.dst).is_file() and not Path(entry.dst).is_symlink()
+        # The bytes are readable through the original EVE-NG path.
+        assert src_path.read_bytes() == Path(entry.dst).read_bytes()
+
+    # Second run: re-walk sees the symlinks and skips everything untouched.
+    items2 = walk_all(synthetic_eveng_tree.source_root, dest)
+    m2 = ImportManifest()
+    run_migration(
+        items2,
+        options=MigrateOptions(mode=CopyMode.MOVE_SYMLINK),
+        manifest=m2,
+        docker_build=lambda c, t: None,
+    )
+    assert len(m2.imported) == 0
+    assert len(m2.skipped) == len(m1.imported)
+    assert all(entry.reason for entry in m2.skipped)
+    for entry in m1.imported:
+        assert Path(entry.src).is_symlink() or entry.dst.endswith("/iourc")

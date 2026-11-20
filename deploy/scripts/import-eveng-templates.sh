@@ -6,7 +6,12 @@
 # imports, then exec's the venv'd Python module with the same argv. The Python
 # module (backend/scripts/import_eveng) does the actual work.
 #
-# Tracking: #183 (umbrella #182).
+# Default mode (#271): image files are moved into /var/lib/nova-ve/images and
+# the original /opt/unetlab path is symlinked back at the moved file; the run
+# narrates each step on stdout and appends to /var/log/eve-ng-importer.log.
+# Pass --copy-only for the conservative copy + sha256-verify behaviour.
+#
+# Tracking: #183 (umbrella #182), #271.
 #
 set -euo pipefail
 

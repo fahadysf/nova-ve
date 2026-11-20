@@ -555,6 +555,29 @@ class TestParseBackSecondaryPorts:
         assert record["second_console"] is None
         assert record["second_console_port"] is None
 
+    def test_wildcard_binds_parse_primary_and_secondary(self):
+        """#269 union: the explicit wildcard forms emitted while
+        EXTERNAL_CONSOLE_HOST is set must parse back on restart, for both
+        the primary and the secondary listener."""
+        record = self._parse(
+            _qemu_node("telnet", "vnc"),
+            ["qemu-system-x86_64", "-serial", "telnet:0.0.0.0:23020,server,nowait",
+             "-vnc", "0.0.0.0:6", "-qmp", "unix:/tmp/qmp.sock,server,nowait"],
+        )
+        assert record["console_port"] == 23020
+        assert record["second_console"] == "vnc"
+        assert record["second_console_port"] == 5906
+
+    def test_wildcard_telnet_secondary_parses(self):
+        record = self._parse(
+            _qemu_node("vnc", "telnet"),
+            ["qemu-system-x86_64", "-vnc", "0.0.0.0:2",
+             "-serial", "telnet:0.0.0.0:23021,server,nowait"],
+        )
+        assert record["console_port"] == 5902
+        assert record["second_console"] == "telnet"
+        assert record["second_console_port"] == 23021
+
 
 # ---------------------------------------------------------------------------
 # Runtime: console_info mode selection + start-path dual allocation

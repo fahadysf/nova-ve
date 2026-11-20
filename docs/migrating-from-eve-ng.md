@@ -1,8 +1,8 @@
 # Migrating from EVE-NG
 
-nova-ve includes an importer for EVE-NG, UNetLab, and PNETLab addon trees. It copies supported image assets into the nova-ve image layout, generates templates for supported vendors, and records a manifest for audit and follow-up.
+nova-ve includes an importer for EVE-NG, UNetLab, and PNETLab addon trees. It migrates supported image assets into the nova-ve image layout, generates templates for supported vendors, and records a manifest for audit and follow-up.
 
-The default import mode is **non-destructive**. Source files are preserved unless you explicitly choose a destructive mode.
+The default import mode is **move + symlink back**: each image file is renamed into the nova-ve image store and a symlink is left at its original EVE-NG path. This is **non-destructive to your data** — no file bytes are deleted, duplicated, or rewritten, the disk image exists exactly once, and EVE-NG keeps booting its nodes from the same paths. Use `--copy-only` if you want the source files left fully untouched instead.
 
 ## One-Shot Import Script
 
@@ -23,6 +23,7 @@ The first command is a dry-run plan; the second performs the import. The wrapper
 | nova-ve image destination | `/var/lib/nova-ve/images` |
 | Generated template destination | `/var/lib/nova-ve/templates` |
 | Run manifest | `/var/lib/nova-ve/import-manifest.json` |
+| Run log | `/var/log/eve-ng-importer.log` |
 
 If the EVE-NG source is on another machine, copy it to the nova-ve host first:
 
@@ -56,7 +57,26 @@ cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
 sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
-By default, the importer copies files, verifies sha256 at the destination, and keeps the source tree intact. Re-running the same command is idempotent: files that already match are skipped and recorded in the manifest.
+The run prints one human-readable step per file so you can see exactly what is happening, for example:
+
+```
+[1/12] qemu/vyos-1.4 — moving hda.qcow2 (2.1 GiB) ... done (0.3s, symlinked back to /opt/unetlab/addons/qemu/vyos-1.4/hda.qcow2)
+[2/12] qemu/vyos-1.4 — generating template YAML ... done (adapter=vyos)
+[3/12] qemu/csr1000v — hda.qcow2 already in place (sha256 match), skipped
+```
+
+Every run also appends its steps and the final summary to `/var/log/eve-ng-importer.log` (override with `--log-file`; rotation is size-capped). Scripts that want the old machine-readable event stream can pass `--json`.
+
+By default, image files are moved and symlinked back as described above; if the source and destination are on different filesystems, those files fall back to copy + sha256 verify + symlink. Re-running the same command is idempotent: a source path that is already a symlink to its destination is skipped and recorded in the manifest, and so is any file whose destination already matches by sha256.
+
+## Conservative Opt-Out
+
+Use `--copy-only` for the pre-#271 behaviour — copy + sha256 verify with the source files fully preserved:
+
+```bash
+cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
+sudo ./deploy/scripts/import-eveng-templates.sh --copy-only
+```
 
 ## Destructive Opt-In
 
