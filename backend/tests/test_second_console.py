@@ -14,6 +14,7 @@ Covers the three backend layers the feature touches:
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -759,6 +760,313 @@ async def test_qemu_start_rejects_rdp_secondary(monkeypatch, tmp_path):
 
 # ---------------------------------------------------------------------------
 # HTML5 endpoint console-mode selector
+# ---------------------------------------------------------------------------
+# Docker dual console ports
+# ---------------------------------------------------------------------------
+
+
+def _docker_second_console_lab() -> dict:
+    return {
+        "schema": 2,
+        "id": "lab-268-docker",
+        "nodes": {
+            "1": {
+                "id": 1,
+                "name": "alpine-1",
+                "type": "docker",
+                "image": "nova-ve/alpine-telnet:latest",
+                "console": "telnet",
+                "second_console": "vnc",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 1,
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None},
+                ],
+            }
+        },
+        "networks": {},
+        "links": [],
+    }
+
+
+def _patch_docker_psutil(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.psutil.Process",
+        lambda pid: SimpleNamespace(create_time=lambda: 222.0),
+    )
+
+
+@pytest.fixture()
+def _docker_instance_id(monkeypatch, tmp_path):
+    """Seed the instance_id + runtime pid registry under tmp_path (same
+    setup the docker tests in test_node_runtime rely on)."""
+    instance_dir = tmp_path / "nova-ve-instance"
+    instance_dir.mkdir(parents=True, exist_ok=True)
+    (instance_dir / "instance_id").write_text("test-instance-203")
+    monkeypatch.setenv("NOVA_VE_INSTANCE_DIR", str(instance_dir))
+    pids_path = tmp_path / "runtime" / "pids.json"
+    pids_path.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("NOVA_VE_PIDS_JSON", str(pids_path))
+
+
+def test_docker_start_maps_and_proxies_second_console(monkeypatch, tmp_path, _docker_instance_id):
+    """A docker node with a secondary console publishes and proxies a second
+    host port into the container's secondary console service (#268)."""
+    from tests.test_node_runtime import _us203_helper_mock, _us204_docker_run_factory
+
+    settings = SimpleNamespace(
+        LABS_DIR=tmp_path / "labs",
+        IMAGES_DIR=tmp_path / "images",
+        TMP_DIR=tmp_path / "tmp",
+        TEMPLATES_DIR=tmp_path / "templates",
+        QEMU_BINARY="qemu-system-x86_64",
+        QEMU_IMG_BINARY="qemu-img",
+        DOCKER_HOST="unix:///var/run/docker.sock",
+    )
+    for path in (settings.LABS_DIR, settings.IMAGES_DIR, settings.TMP_DIR,
+                 settings.TEMPLATES_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
+
+    lab_data = _docker_second_console_lab()
+    containers: dict[str, dict[str, object]] = {}
+    _mock_runtime_binaries(monkeypatch)
+    _us203_helper_mock(monkeypatch)
+    _patch_docker_psutil(monkeypatch)
+    proxy_calls: list[dict[str, int]] = []
+
+    def fake_proxy_start(**kwargs):
+        proxy_calls.append(dict(kwargs))
+        return 9000 + len(proxy_calls)
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start", fake_proxy_start
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _us204_docker_run_factory(containers),
+    )
+
+    service = NodeRuntimeService()
+    runtime = service._start_docker_node(lab_data, lab_data["nodes"]["1"])
+
+    run_cmd = runtime["command"]
+    publish = [
+        run_cmd[i + 1]
+        for i, tok in enumerate(run_cmd)
+        if tok == "-p"
+    ]
+    assert publish == [
+        f"{runtime['console_port']}:23",
+        f"{runtime['second_console_port']}:5900",
+    ]
+    assert runtime["console"] == "telnet"
+    assert runtime["second_console"] == "vnc"
+    assert runtime["second_console_port"] != runtime["console_port"]
+    assert runtime["second_console_proxy_pid"] == 9002
+    assert len(proxy_calls) == 2
+    assert proxy_calls[0]["listen_port"] == runtime["console_port"]
+    assert proxy_calls[0]["target_port"] == 23
+    assert proxy_calls[1]["listen_port"] == runtime["second_console_port"]
+    assert proxy_calls[1]["target_port"] == 5900
+
+    # The record round-trips through the persisted state file.
+    service._persist_runtime(runtime)
+    reloaded = json.loads(service._state_path("lab-268-docker", 1).read_text())
+    assert reloaded["second_console"] == "vnc"
+    assert reloaded["second_console_port"] == runtime["second_console_port"]
+
+
+def test_docker_console_info_second_mode_resolves_secondary_session(
+    monkeypatch, tmp_path, _docker_instance_id
+):
+    settings = SimpleNamespace(
+        LABS_DIR=tmp_path / "labs",
+        IMAGES_DIR=tmp_path / "images",
+        TMP_DIR=tmp_path / "tmp",
+        TEMPLATES_DIR=tmp_path / "templates",
+        QEMU_BINARY="qemu-system-x86_64",
+        QEMU_IMG_BINARY="qemu-img",
+        DOCKER_HOST="unix:///var/run/docker.sock",
+    )
+    for path in (settings.LABS_DIR, settings.IMAGES_DIR, settings.TMP_DIR,
+                 settings.TEMPLATES_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
+
+    lab_data = _docker_second_console_lab()
+    _mock_runtime_binaries(monkeypatch)
+    respawns: list[dict[str, int]] = []
+
+    def fake_proxy_start(**kwargs):
+        respawns.append(dict(kwargs))
+        return 9100 + len(respawns)
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start", fake_proxy_start
+    )
+    # The primary proxy is alive; the secondary one is dead and must respawn.
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_alive",
+        lambda pid: pid == 8000,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_stop",
+        lambda pid: None,
+    )
+    # The container-liveness probe inspects /proc/<pid>, which does not exist
+    # on macOS — treat it as present.
+    real_Path = Path
+
+    def fake_Path(arg):
+        if str(arg).startswith("/proc/"):
+            return SimpleNamespace(is_dir=lambda: True)
+        return real_Path(arg)
+
+    monkeypatch.setattr("app.services.node_runtime_service.Path", fake_Path)
+
+    service = NodeRuntimeService()
+    # Keep the seeded record alive without a real docker daemon.
+    monkeypatch.setattr(
+        NodeRuntimeService, "_is_docker_running", staticmethod(lambda _runtime: True)
+    )
+    with service._lock:
+        service._registry[service._key("lab-268-docker", 1)] = {
+            "lab_id": "lab-268-docker",
+            "node_id": 1,
+            "kind": "docker",
+            "console": "telnet",
+            "console_port": 23001,
+            "second_console": "vnc",
+            "second_console_port": 5905,
+            "console_proxy_pid": 8000,
+            "second_console_proxy_pid": None,
+            "pid": 4242,
+            "started_at": 1.0,
+        }
+
+    primary = service.console_info(lab_data, 1)
+    assert primary["port"] == 23001
+    assert primary["console"] == "telnet"
+
+    second = service.console_info(lab_data, 1, mode="second")
+    assert second["mode"] == "second"
+    assert second["console"] == "vnc"
+    assert second["port"] == 5905
+    assert second["name"] == "alpine-1-second"
+    # The dead secondary proxy was re-spawned into the container netns.
+    assert respawns == [{"node_pid": 4242, "listen_port": 5905, "target_port": 5900}]
+    with service._lock:
+        assert (
+            service._registry[service._key("lab-268-docker", 1)]["second_console_proxy_pid"]
+            == 9101
+        )
+
+
+def test_docker_stop_stops_both_console_proxies(monkeypatch, tmp_path, _docker_instance_id):
+    from tests.test_node_runtime import _us203_helper_mock, _us204_docker_run_factory
+
+    settings = SimpleNamespace(
+        LABS_DIR=tmp_path / "labs",
+        IMAGES_DIR=tmp_path / "images",
+        TMP_DIR=tmp_path / "tmp",
+        TEMPLATES_DIR=tmp_path / "templates",
+        QEMU_BINARY="qemu-system-x86_64",
+        QEMU_IMG_BINARY="qemu-img",
+        DOCKER_HOST="unix:///var/run/docker.sock",
+    )
+    for path in (settings.LABS_DIR, settings.IMAGES_DIR, settings.TMP_DIR,
+                 settings.TEMPLATES_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
+
+    lab_data = _docker_second_console_lab()
+    containers: dict[str, dict[str, object]] = {}
+    _mock_runtime_binaries(monkeypatch)
+    _us203_helper_mock(monkeypatch)
+    _patch_docker_psutil(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start",
+        lambda **_kwargs: 8123,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _us204_docker_run_factory(containers),
+    )
+    stopped_pids: list[int] = []
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_stop",
+        lambda pid: stopped_pids.append(pid),
+    )
+
+    service = NodeRuntimeService()
+    runtime = service._start_docker_node(lab_data, lab_data["nodes"]["1"])
+    # ``_start_docker_node`` is the raw builder; ``stop_node`` reads the
+    # registry, so seed it with the freshly built record.
+    with service._lock:
+        service._registry[service._key("lab-268-docker", 1)] = runtime
+    service.stop_node(lab_data, 1)
+
+    assert sorted(stopped_pids) == sorted(
+        [runtime["console_proxy_pid"], runtime["second_console_proxy_pid"]]
+    )
+
+
+def test_docker_reconcile_restores_secondary_proxy(monkeypatch, tmp_path, _docker_instance_id):
+    """Backend restart adoption rebuilds the secondary console session from
+    the node declaration (#268)."""
+    from tests.test_node_runtime import _us203_helper_mock, _us204_docker_run_factory
+
+    settings = SimpleNamespace(
+        LABS_DIR=tmp_path / "labs",
+        IMAGES_DIR=tmp_path / "images",
+        TMP_DIR=tmp_path / "tmp",
+        TEMPLATES_DIR=tmp_path / "templates",
+        QEMU_BINARY="qemu-system-x86_64",
+        QEMU_IMG_BINARY="qemu-img",
+        DOCKER_HOST="unix:///var/run/docker.sock",
+    )
+    for path in (settings.LABS_DIR, settings.IMAGES_DIR, settings.TMP_DIR,
+                 settings.TEMPLATES_DIR):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
+
+    lab_data = _docker_second_console_lab()
+    container_name = "nova-ve-lab268docker-1"
+    containers: dict[str, dict[str, object]] = {
+        container_name: {"running": True, "pid": 7100}
+    }
+    _mock_runtime_binaries(monkeypatch)
+    _us203_helper_mock(monkeypatch)
+    _patch_docker_psutil(monkeypatch)
+    proxy_calls: list[dict[str, int]] = []
+
+    def fake_proxy_start(**kwargs):
+        proxy_calls.append(dict(kwargs))
+        return 9200 + len(proxy_calls)
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start", fake_proxy_start
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _us204_docker_run_factory(containers),
+    )
+
+    service = NodeRuntimeService()
+    runtime = service._reconcile_docker_node_runtime(lab_data, lab_data["nodes"]["1"])
+
+    assert runtime is not None
+    assert runtime["second_console"] == "vnc"
+    assert runtime["second_console_port"] != runtime["console_port"]
+    assert runtime["second_console_proxy_pid"] == 9202
+    assert len(proxy_calls) == 2
+    assert proxy_calls[0]["listen_port"] == runtime["console_port"]
+    assert proxy_calls[1]["listen_port"] == runtime["second_console_port"]
+    assert proxy_calls[1]["target_port"] == 5900
+
+
 # ---------------------------------------------------------------------------
 
 
