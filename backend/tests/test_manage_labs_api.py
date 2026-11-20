@@ -178,3 +178,112 @@ async def test_stop_path_traversal_is_rejected(client, manage_settings):
 
     assert response.status_code == 200
     assert response.json()["code"] == 404
+
+
+# ----------------------------------------------------------------------
+# Node management (#263)
+# ----------------------------------------------------------------------
+def _write_running_lab(settings, filename, *, lab_id, running_ids, stopped_ids=(), template="veos", node_type="qemu", cpu=2, ram=2048):
+    nodes = {}
+    for i in sorted(running_ids + tuple(stopped_ids)):
+        nodes[str(i)] = {
+            "id": i,
+            "name": f"node-{i}",
+            "type": node_type,
+            "template": template,
+            "image": "some-image",
+            "status": 2 if i in running_ids else 0,
+            "cpu": cpu,
+            "ram": ram,
+            "console": "telnet",
+        }
+    lab = {
+        "schema": 2,
+        "id": lab_id,
+        "meta": {"name": filename.replace(".json", "")},
+        "nodes": nodes,
+    }
+    (settings.LABS_DIR / filename).write_text(json.dumps(lab))
+
+
+@pytest.mark.asyncio
+async def test_node_inventory_lists_running_nodes_with_usage(client, manage_settings, monkeypatch):
+    _write_running_lab(
+        manage_settings, "arc-lab.json", lab_id="arc-id", running_ids=(1,), stopped_ids=(2,)
+    )
+    _write_running_lab(
+        manage_settings, "other-lab.json", lab_id="other-id", running_ids=(5,), template="alpine", node_type="docker"
+    )
+    _as("admin")
+
+    import app.routers.manage as manage_module
+
+    calls: list[tuple[str, int]] = []
+
+    class _FakeRuntime:
+        def enrich_node(self, lab_id, node_id, node):
+            running = node.get("status") == 2
+            enriched = dict(node)
+            enriched["status"] = 2 if running else 0
+            enriched["url"] = "telnet://host:port" if running else None
+            enriched["cpu_usage"] = 12.5 if running else 0
+            enriched["ram_usage"] = 256 if running else 0
+            enriched["disk_usage"] = 1024
+            calls.append((lab_id, node_id))
+            return enriched
+
+    monkeypatch.setattr(manage_module, "NodeRuntimeService", lambda: _FakeRuntime())
+
+    response = await client.get("/api/manage/nodes")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    # Default filter: running only.
+    assert [row["node_id"] for row in data["nodes"]] == [1, 5]
+    assert data["totals"]["running"] == 2
+    assert data["totals"]["nodes"] == 2
+    assert data["nodes"][0]["lab_name"] == "arc-lab"
+    assert data["nodes"][0]["cpu_usage"] == 12.5
+    assert data["nodes"][0]["url"] == "telnet://host:port"
+    assert calls  # every node was probed through the runtime service
+
+
+@pytest.mark.asyncio
+async def test_node_inventory_filters(client, manage_settings, monkeypatch):
+    _write_running_lab(
+        manage_settings, "arc-lab.json", lab_id="arc-id", running_ids=(1,), stopped_ids=(2,)
+    )
+    _as("admin")
+
+    class _FakeRuntime:
+        def enrich_node(self, lab_id, node_id, node):
+            enriched = dict(node)
+            enriched["status"] = 2 if node.get("status") == 2 else 0
+            enriched["url"] = None
+            return enriched
+
+    import app.routers.manage as manage_module
+
+    monkeypatch.setattr(manage_module, "NodeRuntimeService", lambda: _FakeRuntime())
+
+    all_response = await client.get("/api/manage/nodes", params={"state": "all"})
+    assert sorted(row["node_id"] for row in all_response.json()["data"]["nodes"]) == [1, 2]
+
+    stopped_response = await client.get("/api/manage/nodes", params={"state": "stopped"})
+    assert [row["node_id"] for row in stopped_response.json()["data"]["nodes"]] == [2]
+
+    template_response = await client.get("/api/manage/nodes", params={"state": "all", "template": "veos"})
+    assert len(template_response.json()["data"]["nodes"]) == 2
+
+    lab_response = await client.get("/api/manage/nodes", params={"state": "all", "lab": "arc"})
+    assert len(lab_response.json()["data"]["nodes"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_node_inventory_requires_admin(client, manage_settings):
+    _as("user", username="trainee", folder="/trainee")
+
+    response = await client.get("/api/manage/nodes")
+
+    assert response.status_code == 200
+    assert response.json()["code"] == 403
