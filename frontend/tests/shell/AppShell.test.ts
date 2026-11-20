@@ -58,14 +58,15 @@ describe('AppShell (#260)', () => {
     expect(screen.queryByTestId('nav-status')).toBeNull();
   });
 
-  it('marks the current route active and planned entries with badges', () => {
+  it('marks the current route active with no stale preview badges', () => {
     setUser('admin');
     render(AppShell, { props: { pathname: '/manage/users' } });
 
     const active = screen.getByTestId('nav-users');
     expect(active).toHaveAttribute('aria-current', 'page');
     expect(screen.getByTestId('nav-labs')).not.toHaveAttribute('aria-current');
-    expect(screen.getAllByText('planned').length).toBeGreaterThan(0);
+    // Every nav entry is a live view now — the preview-badge era is over.
+    expect(screen.queryAllByText('planned')).toHaveLength(0);
   });
 });
 
