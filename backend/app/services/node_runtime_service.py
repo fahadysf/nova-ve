@@ -815,8 +815,8 @@ class NodeRuntimeService:
             console_port = int(runtime.get("console_port", 0))
             connection_name = node_name
 
-        if runtime.get("kind") == "docker" and mode != "second":
-            runtime = self._ensure_console_proxy(lab_id, node_id, runtime)
+        if runtime.get("kind") == "docker":
+            runtime = self._ensure_console_proxy(lab_id, node_id, runtime, mode=mode)
 
         return {
             "lab_id": lab_id,
@@ -830,16 +830,33 @@ class NodeRuntimeService:
         }
 
     def _ensure_console_proxy(
-        self, lab_id: str, node_id: int, runtime: dict[str, Any]
+        self,
+        lab_id: str,
+        node_id: int,
+        runtime: dict[str, Any],
+        mode: str = "primary",
     ) -> dict[str, Any]:
         """Re-spawn a dead console proxy for a running Docker node.
 
         Checks liveness via /proc. If the container is still up but the proxy
         died, stops the stale entry, re-spawns, and persists the new PID.
-        Returns the (possibly updated) runtime dict.
+        ``mode="second"`` targets the secondary console proxy (#268) instead
+        of the primary one. Returns the (possibly updated) runtime dict.
         """
-        proxy_pid = runtime.get("console_proxy_pid")
+        pid_key = "second_console_proxy_pid" if mode == "second" else "console_proxy_pid"
+        proxy_pid = runtime.get(pid_key)
         if proxy_pid and host_net.console_proxy_alive(int(proxy_pid)):
+            return runtime
+
+        if mode == "second":
+            console_mode = runtime.get("second_console") or None
+            listen_port = int(runtime.get("second_console_port") or 0)
+            if not console_mode or not listen_port:
+                return runtime
+        else:
+            console_mode = runtime.get("console", "telnet")
+            listen_port = int(runtime.get("console_port", 0))
+        if not listen_port:
             return runtime
 
         container_pid = runtime.get("pid")
@@ -852,7 +869,8 @@ class NodeRuntimeService:
             return runtime
 
         _logger.info(
-            "console proxy dead or missing for lab=%s node=%s (old_pid=%s); respawning",
+            "%s console proxy dead or missing for lab=%s node=%s (old_pid=%s); respawning",
+            mode,
             lab_id,
             node_id,
             proxy_pid,
@@ -864,11 +882,6 @@ class NodeRuntimeService:
             except Exception:
                 pass
 
-        console_mode = runtime.get("console", "telnet")
-        listen_port = int(runtime.get("console_port", 0))
-        if not listen_port:
-            return runtime
-
         try:
             new_pid = host_net.console_proxy_start(
                 node_pid=int(container_pid),
@@ -877,7 +890,8 @@ class NodeRuntimeService:
             )
         except Exception as exc:
             _logger.warning(
-                "console proxy respawn failed for lab=%s node=%s: %s",
+                "%s console proxy respawn failed for lab=%s node=%s: %s",
+                mode,
                 lab_id,
                 node_id,
                 exc,
@@ -885,13 +899,14 @@ class NodeRuntimeService:
             return runtime
 
         runtime = dict(runtime)
-        runtime["console_proxy_pid"] = new_pid
+        runtime[pid_key] = new_pid
         key = self._key(lab_id, node_id)
         with self._lock:
             self._registry[key] = runtime
         self._persist_runtime(runtime)
         _logger.info(
-            "console proxy respawned for lab=%s node=%s new_pid=%s",
+            "%s console proxy respawned for lab=%s node=%s new_pid=%s",
+            mode,
             lab_id,
             node_id,
             new_pid,
@@ -2490,6 +2505,17 @@ class NodeRuntimeService:
         network_specs = self._docker_network_specs(lab_data, node)
         extras = _node_extras(node)
         container_console_port = self._docker_container_console_port(console_mode, extras)
+        # Optional second console (#268): publish and proxy a second host port
+        # into the container's secondary console service, mirroring the
+        # primary mapping.
+        second_console_mode = node.get("second_console") or None
+        second_console_port: int | None = None
+        second_container_console_port: int | None = None
+        if second_console_mode:
+            second_console_port = self._allocate_console_port(second_console_mode)
+            second_container_console_port = self._docker_container_console_port(
+                second_console_mode, extras
+            )
         node_id = int(node["id"])
 
         # ----- Step 1: pre-flight bridge presence check ---------------------
@@ -2533,6 +2559,8 @@ class NodeRuntimeService:
             "-p",
             f"{console_port}:{container_console_port}",
         ]
+        if second_console_port and second_container_console_port:
+            cmd += ["-p", f"{second_console_port}:{second_container_console_port}"]
 
         restart_policy = _extra_str(extras, "restart_policy")
         if restart_policy and restart_policy != "no":
@@ -2653,6 +2681,22 @@ class NodeRuntimeService:
                 exc,
             )
 
+        second_console_proxy_pid: int | None = None
+        if second_console_mode and second_console_port:
+            try:
+                second_console_proxy_pid = host_net.console_proxy_start(
+                    node_pid=pid,
+                    listen_port=int(second_console_port),
+                    target_port=int(second_container_console_port),
+                )
+            except Exception as exc:
+                _logger.warning(
+                    "secondary console proxy failed to start for lab=%s node=%s: %s",
+                    lab_id,
+                    node_id,
+                    exc,
+                )
+
         work_dir = self._work_dir(lab_id, node_id)
         work_dir.mkdir(parents=True, exist_ok=True)
         return {
@@ -2662,6 +2706,9 @@ class NodeRuntimeService:
             "name": node.get("name"),
             "console": console_mode,
             "console_port": console_port,
+            "second_console": second_console_mode,
+            "second_console_port": second_console_port,
+            "second_console_proxy_pid": second_console_proxy_pid,
             "container_name": container_name,
             "container_id": result.stdout.strip(),
             "pid": pid,
@@ -4820,6 +4867,33 @@ class NodeRuntimeService:
                 exc,
             )
 
+        # Secondary console proxy (#268): re-spawned on adoption since the
+        # netns-spliced forwarder from the original start is gone after a
+        # backend restart.
+        second_console_mode = node.get("second_console") or None
+        second_console_port: int | None = None
+        second_console_proxy_pid: int | None = None
+        if second_console_mode:
+            second_console_port = self._allocate_console_port(second_console_mode)
+            try:
+                second_console_proxy_pid = host_net.console_proxy_start(
+                    node_pid=pid,
+                    listen_port=int(second_console_port),
+                    target_port=int(
+                        self._docker_container_console_port(
+                            second_console_mode, _node_extras(node)
+                        )
+                    ),
+                )
+            except Exception as exc:
+                _logger.warning(
+                    "secondary console proxy failed to start while reconciling "
+                    "lab=%s node=%s: %s",
+                    lab_id,
+                    node_id,
+                    exc,
+                )
+
         attachments = self._docker_attachments(lab_data, node)
         network_specs = self._docker_network_specs(lab_data, node)
         work_dir = self._work_dir(lab_id, node_id)
@@ -4831,6 +4905,9 @@ class NodeRuntimeService:
             "name": node.get("name"),
             "console": console_mode,
             "console_port": console_port,
+            "second_console": second_console_mode,
+            "second_console_port": second_console_port,
+            "second_console_proxy_pid": second_console_proxy_pid,
             "container_name": container_name,
             "container_id": self._docker_container_id(docker_binary, container_name)
             or container_name,
@@ -5075,7 +5152,15 @@ class NodeRuntimeService:
 
         # Stop the console TCP forwarder before tearing down the container so
         # in-flight client connections see a clean refused-after-stop instead
-        # of hanging until the proxy notices the netns is gone.
+        # of hanging until the proxy notices the netns is gone. The secondary
+        # console forwarder (#268), when present, goes first.
+        second_proxy_pid = runtime.get("second_console_proxy_pid")
+        if second_proxy_pid:
+            try:
+                host_net.console_proxy_stop(int(second_proxy_pid))
+            except Exception:
+                pass
+
         proxy_pid = runtime.get("console_proxy_pid")
         if proxy_pid:
             try:
