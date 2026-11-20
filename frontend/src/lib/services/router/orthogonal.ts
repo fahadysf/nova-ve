@@ -55,13 +55,13 @@ export async function routeOrthogonal(
 
   const { from, to, obstacles } = req;
 
-  // Facing ports with a clear corridor skip the grid entirely: NetBird-style,
-  // the middle of the corridor is ONE smooth S-joint at the midpoint — maximum
-  // distance from both endpoints, nothing near the boxes (#254). Aligned
-  // ports collapse to a straight line.
+  // Facing ports with a clear corridor skip the grid entirely: the canonical
+  // Z-route with ONE jog at the corridor midpoint — maximum distance from
+  // both endpoints, never hugging the boxes (#254). Corners are rounded by
+  // serialize(); aligned ports collapse to a straight line.
   const axis = facingAxis(from, to);
   if (axis && corridorClear(from, to, axis, obstacles)) {
-    return centeredFacingRoute(from, to);
+    return serialize(centeredFacingSegments(from, to, axis).filter(isNonDegenerate));
   }
 
   // Compute bounds based only on the from/to box (with padding). Filter
@@ -144,30 +144,27 @@ function corridorClear(
   return !obstacles.some((o) => rectsIntersect(o, minX + 2, minY + 2, maxX - 2, maxY - 2));
 }
 
-/**
- * The NetBird-style facing route: one cubic S-joint spanning the middle half
- * of the corridor (control points on the corridor axis at the midpoint), so
- * the joint sits at the maximum distance from both ports and the line meets
- * each handle in a straight stub. Aligned ports collapse to a straight line.
- */
-function centeredFacingRoute(from: PortRef, to: PortRef): RouteResult {
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  if (Math.abs(dx) < 0.01 || Math.abs(dy) < 0.01) {
-    const d = `M ${from.x},${from.y} L ${to.x},${to.y}`;
-    return { d, bends: 0, lengthPx: Math.abs(dx) + Math.abs(dy) };
+/** The canonical three-segment Z with the jog at the corridor midpoint. */
+function centeredFacingSegments(from: PortRef, to: PortRef, axis: FacingAxis): Segment[] {
+  const s = (x1: number, y1: number, x2: number, y2: number): Segment => ({ x1, y1, x2, y2 });
+  if (axis === 'horizontal') {
+    const midX = (from.x + to.x) / 2;
+    return [
+      s(from.x, from.y, midX, from.y),
+      s(midX, from.y, midX, to.y),
+      s(midX, to.y, to.x, to.y),
+    ];
   }
-  const horizontal = facingAxis(from, to) === 'horizontal';
-  const mid = horizontal ? (from.x + to.x) / 2 : (from.y + to.y) / 2;
-  const d = horizontal
-    ? `M ${from.x},${from.y} C ${mid},${from.y} ${mid},${to.y} ${to.x},${to.y}`
-    : `M ${from.x},${from.y} C ${from.x},${mid} ${to.x},${mid} ${to.x},${to.y}`;
-  return { d, bends: 1, lengthPx: Math.abs(dx) + Math.abs(dy) };
+  const midY = (from.y + to.y) / 2;
+  return [
+    s(from.x, from.y, from.x, midY),
+    s(from.x, midY, to.x, midY),
+    s(to.x, midY, to.x, to.y),
+  ];
 }
 
 const isNonDegenerate = (s: Segment): boolean =>
   Math.abs(s.x2 - s.x1) > 0.01 || Math.abs(s.y2 - s.y1) > 0.01;
-void isNonDegenerate;
 
 // ---------- bounds + grid ---------------------------------------------------
 
@@ -850,6 +847,30 @@ function segmentsToPoints(segments: Segment[]): PathPoint[] {
   return pts;
 }
 
+/**
+ * Merge consecutive points closer than 0.5px (grid-lane vs port-axis
+ * rounding can leave a sub-pixel jog right at a box edge, which rendered as
+ * a glitch kink). The final point is an anchor: if IT is sub-pixel close to
+ * its predecessor, the predecessor is dropped instead so the path still
+ * lands exactly on the port handle.
+ */
+function mergeSubPixelPoints(points: PathPoint[], epsilon = 0.5): PathPoint[] {
+  if (points.length < 2) return points;
+  const out: PathPoint[] = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const candidate = points[i];
+    const last = out[out.length - 1];
+    const near =
+      Math.abs(candidate.x - last.x) < epsilon && Math.abs(candidate.y - last.y) < epsilon;
+    if (!near) {
+      out.push(candidate);
+    } else if (i === points.length - 1) {
+      out[out.length - 1] = candidate;
+    }
+  }
+  return out;
+}
+
 function serialize(segments: Segment[]): {
   d: string;
   bends: number;
@@ -868,7 +889,7 @@ function serialize(segments: Segment[]): {
   }
   // bends counts corners (unchanged by rounding); metrics stay on the sharp
   // geometry so consumers see stable values.
-  const d = roundedOrthogonalPath(segmentsToPoints(segments));
+  const d = roundedOrthogonalPath(mergeSubPixelPoints(segmentsToPoints(segments)));
   return { d, bends, lengthPx };
 }
 
@@ -883,4 +904,6 @@ export const __test = {
   reduceCrossings,
   countCrossings,
   segmentsCross,
+  centeredFacingSegments,
+  mergeSubPixelPoints,
 };
