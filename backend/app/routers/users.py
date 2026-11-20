@@ -10,6 +10,11 @@ from app.models.user import User
 
 router = APIRouter(prefix="/api/users", tags=["users"], responses=COMMON_RESPONSES)
 
+# #261 — fields a non-admin may change on their own account. Everything else
+# in UserUpdate (role, quotas, tenancy) is admin-only; a self-service PATCH
+# carrying any of those is rejected instead of silently applied.
+SELF_SERVICE_FIELDS = {"email", "name", "password", "html5"}
+
 
 @router.get("/")
 async def list_users(
@@ -20,18 +25,7 @@ async def list_users(
     users = result.scalars().all()
     data = {}
     for u in users:
-        data[u.username] = {
-            "username": u.username,
-            "email": u.email,
-            "name": u.name,
-            "role": u.role,
-            "online": 1 if u.online else 0,
-            "ip": u.ip,
-            "folder": u.folder,
-            "lab": u.lab,
-            "pod": u.pod,
-            "diskusage": u.diskusage,
-        }
+        data[u.username] = UserRead.model_validate(u).model_dump()
     return {
         "code": 200,
         "status": "success",
@@ -102,12 +96,23 @@ async def update_user(
     if current_user.username != username and current_user.role != "admin":
         raise HTTPException(status_code=403, detail="Access denied.")
 
+    update_data = request.model_dump(exclude_unset=True)
+
+    # #261 — privilege split: self-service accounts may only touch profile
+    # fields; role/quotas/tenancy require the admin guard.
+    if current_user.role != "admin":
+        escalation = sorted(set(update_data) - SELF_SERVICE_FIELDS)
+        if escalation:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Admin role required to change: {', '.join(escalation)}.",
+            )
+
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    update_data = request.model_dump(exclude_unset=True)
     if "password" in update_data and update_data["password"]:
         from app.core.security import hash_password
         user.password_hash = hash_password(update_data.pop("password"))
@@ -132,6 +137,9 @@ async def delete_user(
     current_user: UserRead = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
+    if current_user.username == username:
+        raise HTTPException(status_code=400, detail="You cannot delete your own account.")
+
     result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
     if not user:

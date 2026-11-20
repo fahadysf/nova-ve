@@ -37,11 +37,17 @@ class UserCreate(UserBase):
 class UserUpdate(BaseModel):
     email: Optional[str] = None
     name: Optional[str] = None
-    role: Optional[str] = None
+    role: Optional[str] = Field(default=None, pattern=r"^(admin|editor|user)$")
     ram: Optional[int] = None
     cpu: Optional[int] = None
     html5: Optional[bool] = None
     password: Optional[str] = None
+    # Admin-only account-management fields (#261): quotas + tenancy.
+    sat: Optional[int] = None
+    expiration: Optional[int] = None
+    datestart: Optional[int] = None
+    folder: Optional[str] = None
+    pod: Optional[int] = None
 
 
 class UserInDB(UserBase):
