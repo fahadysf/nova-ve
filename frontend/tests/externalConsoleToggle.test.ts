@@ -1,0 +1,208 @@
+// Copyright (c) 2026 Fahad Yousuf <fahadysuf@gmail.com>
+// SPDX-License-Identifier: Apache-2.0
+
+// Lab editor page tests (#269): the top-bar external-console toggle and the
+// external launch / in-browser fallback behavior of console actions.
+
+import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import LabEditorPage from '../src/routes/labs/[...id]/+page.svelte';
+import { ApiError } from '$lib/api';
+import { authStore } from '$lib/stores/session';
+import { toastStore } from '$lib/stores/toasts';
+import { externalConsoleStore } from '$lib/stores/externalConsole';
+import { setPagePathname, setPageParams } from './mocks/appStores';
+
+const apiRequest = vi.fn();
+
+vi.mock('$lib/api', () => {
+  class ApiError extends Error {
+    statusCode: number;
+    constructor(message: string, options?: { statusCode?: number }) {
+      super(message);
+      this.name = 'ApiError';
+      this.statusCode = options?.statusCode ?? 0;
+    }
+  }
+  return {
+    ApiError,
+    apiRequest: (...args: unknown[]) => apiRequest(...args),
+    apiGetData: async (...args: unknown[]) => {
+      const response = await (apiRequest as (...a: unknown[]) => unknown)(...args);
+      return (response as { data: unknown }).data;
+    },
+  };
+});
+
+vi.mock('@xyflow/svelte', async () => {
+  const SlotStub = (await import('./mocks/SlotStub.svelte')).default;
+  return { SvelteFlowProvider: SlotStub };
+});
+
+vi.mock('../src/lib/components/canvas/TopologyCanvas.svelte', async () => {
+  const Stub = (await import('./mocks/TopologyCanvasStub.svelte')).default;
+  return { default: Stub };
+});
+
+const META = { id: 'sample.json', name: 'Sample Lab', path: 'sample.json' };
+const NODES = {
+  '1': {
+    id: 1,
+    name: 'router-1',
+    type: 'qemu',
+    status: 2,
+    cpu: 1,
+    ram: 512,
+    console: 'telnet',
+    interfaces: [],
+  },
+};
+
+type Payload = { code: number; status: string; message?: string; data?: unknown };
+
+// Per-test path handler; defaults to the happy lab-load payloads.
+let servePath: (path: string) => Payload = () => ({ code: 200, status: 'success', data: {} });
+
+function labLoadPayloads(): Record<string, Payload> {
+  return {
+    '/labs/sample.json': { code: 200, status: 'success', data: META },
+    '/labs/sample.json/nodes': { code: 200, status: 'success', data: NODES },
+    '/labs/sample.json/networks?include_hidden=true': { code: 200, status: 'success', data: {} },
+    '/labs/sample.json/topology': { code: 200, status: 'success', data: [] },
+    '/labs/sample.json/links': { code: 200, status: 'success', data: [] },
+  };
+}
+
+function plantNode(node: Record<string, unknown> | undefined) {
+  (globalThis as unknown as { __externalConsoleTestNode?: unknown }).__externalConsoleTestNode = node;
+}
+
+function captureToasts() {
+  const messages: string[] = [];
+  const unsubscribe = toastStore.subscribe((items) => {
+    messages.splice(0, messages.length, ...items.map((item) => item.message));
+  });
+  return { messages, unsubscribe };
+}
+
+describe('lab editor external console toggle (#269)', () => {
+  let clickedHrefs: string[];
+  let clickSpy: ReturnType<typeof vi.spyOn> | null = null;
+
+  beforeEach(() => {
+    window.localStorage.clear();
+    window.document.cookie = 'novaVeConsoleMode=tabbed; path=/';
+    authStore.setUser({ username: 'admin', role: 'admin', email: '', name: '' } as never);
+    setPagePathname('/labs/sample.json');
+    setPageParams({ id: 'sample.json' });
+    clickedHrefs = [];
+    servePath = (path) =>
+      labLoadPayloads()[path] ?? { code: 200, status: 'success', data: {} };
+    // Mirror the real apiRequest semantics: fail payloads reject with ApiError.
+    apiRequest.mockReset();
+    apiRequest.mockImplementation(async (path: string) => {
+      const payload = servePath(path);
+      if (payload.code >= 400 || payload.status === 'fail') {
+        throw new ApiError(payload.message || 'Request failed.', { statusCode: payload.code });
+      }
+      return payload;
+    });
+    clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (
+      this: HTMLAnchorElement
+    ) {
+      clickedHrefs.push(this.href);
+    });
+  });
+
+  afterEach(() => {
+    clickSpy?.mockRestore();
+    clickSpy = null;
+    plantNode(undefined);
+    externalConsoleStore.setMode('off');
+  });
+
+  it('toggle lives in the top bar, presses, and persists the choice', async () => {
+    render(LabEditorPage);
+
+    const toggle = await waitFor(() => screen.getByTestId('external-console-toggle'));
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(toggle.getAttribute('title')).toMatch(/client registered/i);
+
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'));
+    expect(window.localStorage.getItem('nova-ve.external-console')).toBe('on');
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'));
+    expect(window.localStorage.getItem('nova-ve.external-console')).toBe('off');
+  });
+
+  it('external mode: console action emits telnet:// without opening the workspace', async () => {
+    externalConsoleStore.setMode('on');
+    const { container } = render(LabEditorPage);
+    await waitFor(() => screen.getByTestId('canvas-console-button'));
+
+    plantNode({ id: 1, name: 'router-1', type: 'qemu', status: 2, console: 'telnet' });
+    servePath = (path) => {
+      if (path === '/api/labs/sample.json/nodes/1/external-console') {
+        return {
+          code: 200,
+          status: 'success',
+          data: { mode: 'primary', scheme: 'telnet', host: '192.168.7.9', port: 47501, console: 'telnet' },
+        };
+      }
+      return labLoadPayloads()[path] ?? { code: 200, status: 'success', data: {} };
+    };
+
+    fireEvent.click(screen.getByTestId('canvas-console-button'));
+
+    await waitFor(() => expect(clickedHrefs).toContain('telnet://192.168.7.9:47501'));
+    expect(apiRequest).toHaveBeenCalledWith(
+      '/api/labs/sample.json/nodes/1/external-console',
+      expect.objectContaining({ suppressToast: true })
+    );
+    // The embedded workspace must not open in external mode.
+    expect(container.querySelector('iframe')).toBeNull();
+  });
+
+  it('external mode: failure toasts and falls back to the in-browser console', async () => {
+    externalConsoleStore.setMode('on');
+    const { messages, unsubscribe } = captureToasts();
+    const { container } = render(LabEditorPage);
+    await waitFor(() => screen.getByTestId('canvas-console-button'));
+
+    plantNode({ id: 1, name: 'router-1', type: 'qemu', status: 2, console: 'telnet' });
+    servePath = (path) => {
+      if (path === '/api/labs/sample.json/nodes/1/external-console') {
+        return { code: 400, status: 'fail', message: 'Node is not running: 1.' };
+      }
+      return labLoadPayloads()[path] ?? { code: 200, status: 'success', data: {} };
+    };
+
+    fireEvent.click(screen.getByTestId('canvas-console-button'));
+
+    await waitFor(() =>
+      expect(messages.some((message) => message.includes('Node is not running'))).toBe(true)
+    );
+    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull());
+    expect((container.querySelector('iframe') as HTMLIFrameElement).getAttribute('src')).toContain(
+      '/nodes/1/html5'
+    );
+    unsubscribe();
+  });
+
+  it('toggle off: console action opens the embedded workspace and never calls the endpoint', async () => {
+    const { container } = render(LabEditorPage);
+    await waitFor(() => screen.getByTestId('canvas-console-button'));
+
+    plantNode({ id: 1, name: 'router-1', type: 'qemu', status: 2, console: 'telnet' });
+
+    fireEvent.click(screen.getByTestId('canvas-console-button'));
+
+    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull());
+    const calledPaths = apiRequest.mock.calls.map((call) => String(call[0]));
+    expect(calledPaths.some((path) => path.includes('external-console'))).toBe(false);
+  });
+});
