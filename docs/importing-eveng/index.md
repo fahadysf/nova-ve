@@ -16,10 +16,10 @@ The wrapper sources the installed nova-ve environment, finds the backend virtual
 
 ## Pages in this section
 
-- [Overview](overview.md) — one-shot wrapper usage, prerequisites, and run order (`--dry-run` → real → optional `--delete-source`).
+- [Overview](overview.md) — one-shot wrapper usage, prerequisites, and run order (`--dry-run` → real → optional `--copy-only` / `--delete-source`).
 - [Importing images](images.md) — per-kind source → destination mapping for qemu / dynamips / iol / docker, plus boot-disk precedence and verification recipes.
 - [Vendor coverage](vendor-coverage.md) — which vendor adapters can emit a nova-ve template natively.
 - [Reading the manifest](manifest.md) — the manifest JSON shape, handling `needs-manual-review`, and rollback.
 
-!!! tip "Non-destructive by default"
-    Running `import-eveng-templates.sh` with no flags is non-destructive. Sources under `/opt/unetlab/addons/...` are copied + sha256-verified at the destination; the source files are left untouched unless you pass `--delete-source` (or the unsafe `--move`).
+!!! tip "Fast and data-safe by default"
+    Running `import-eveng-templates.sh` with no flags moves each image file under `/opt/unetlab/addons/...` into `/var/lib/nova-ve/images` and symlinks the original path back at the moved file. No bytes are deleted or duplicated and EVE-NG keeps working; pass `--copy-only` for the conservative copy + sha256-verify behaviour, or `--delete-source` / the unsafe `--move` when you really want the source files gone.

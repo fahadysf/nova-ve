@@ -1,21 +1,26 @@
 # Overview & run order
 
-## TL;DR — non-destructive default
+## TL;DR — move + symlink back by default
 
-!!! warning "Sources are preserved by default"
-    Running `import-eveng-templates.sh` with no flags is non-destructive. Sources under `/opt/unetlab/addons/...` are copied + sha256-verified at the destination; the source files are **left untouched** unless you pass an explicit opt-in flag.
+!!! note "Default mode since #271"
+    Running `import-eveng-templates.sh` with no flags moves each image file under `/opt/unetlab/addons/...` into the nova-ve image store and leaves a **symlink at the original path** pointing at the moved file. No bytes are deleted, duplicated, or rewritten — the disk image exists exactly once, EVE-NG keeps resolving its original paths, and the import is near-instant even for multi-GiB qcow2 files.
 
 | Flag | Behaviour |
 |---|---|
-| *(default — no flags)* | copy + sha256 verify; sources preserved |
-| `--copy-only` | alias for the default (accepted for symmetry with `--move`) |
+| *(default — no flags)* | move + symlink back (same as `--move-symlink`); cross-filesystem sources fall back to copy + sha256 verify + symlink |
+| `--move-symlink` | explicit spelling of the default |
+| `--copy-only` | conservative opt-out: copy + sha256 verify, sources preserved (the pre-#271 default) |
 | `--delete-source` | copy + sha256 verify + delete source after match (destructive opt-in) |
 | `--move` | copy + delete source; **skips sha256 verify**; unsafe — only use when the source tree is already verified elsewhere |
 | `--force` | overwrite an existing destination on sha256 mismatch (combinable) |
 | `--dry-run` | plan the run without touching the destination filesystem |
-| `--verbose` | DEBUG-level structured logging on stderr |
+| `--json` | one JSON log event per line on stderr instead of the human step-by-step stdout |
+| `--log-file` | appending run log (default `/var/log/eve-ng-importer.log`, size-capped rotation) |
+| `--verbose` | DEBUG-level logging in the log file (and stderr under `--json`) |
 
-This non-destructive default is the inversion of the original spec, made during the safety review for [#184](https://github.com/fahadysf/nova-ve/issues/184). It optimises for operator-recoverability over fast-by-default.
+The four copy-strategy flags (`--move-symlink`, `--copy-only`, `--delete-source`, `--move`) are mutually exclusive — they are competing answers to "what happens to the source file".
+
+Every run prints numbered, human-readable step lines (`[3/12] qemu/vyos-1.4 — moving hda.qcow2 (2.1 GiB) ... done (0.3s, symlinked back to /opt/unetlab/addons/qemu/vyos-1.4/hda.qcow2)`) on stdout and appends the same narration plus the final summary to `/var/log/eve-ng-importer.log`.
 
 ## Prerequisites
 
@@ -67,7 +72,7 @@ The dry run walks the source tree, evaluates each file's idempotency check (sha2
 
 `--dry-run` does **not** require root.
 
-### Step 2 — real run (non-destructive)
+### Step 2 — real run (move + symlink back)
 
 Once the dry-run looks correct, drop the `--dry-run` flag:
 
@@ -76,7 +81,11 @@ cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
 sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
-This copies every file, verifies sha256 at the destination, and writes the manifest to `--manifest` (default `/var/lib/nova-ve/import-manifest.json`). **Sources are preserved.** Re-running the same command is idempotent: anything whose destination already matches the source sha256 lands in `manifest.skipped[]` with `reason: "exists, sha256 match"`.
+This moves every image file into the destination (a rename on the same filesystem — no byte copy), symlinks the original EVE-NG path back at the moved file, and writes the manifest to `--manifest` (default `/var/lib/nova-ve/import-manifest.json`). If the source and destination live on different filesystems, the importer falls back to copy + sha256 verify + symlink for those files and says so in the step output and manifest `note`. Re-running the same command is idempotent: a source path that is already a symlink to its destination lands in `manifest.skipped[]` with `reason: "already migrated: source is a symlink to the destination"`.
+
+Prefer the old behaviour? Pass `--copy-only` for the conservative copy + sha256 verify with sources fully preserved.
+
+The shared IOL license file (`iourc`) is always copy-based even in the default mode, because every IOL image references the one file — moving it for one image would break the others.
 
 ### Step 3 — opt-in to delete sources (optional)
 

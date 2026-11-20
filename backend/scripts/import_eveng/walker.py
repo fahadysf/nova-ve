@@ -30,7 +30,9 @@ class MigrationItem:
 
     ``files`` is the concrete list of (src, dst) pairs to copy. ``meta``
     carries kind-specific data the copier may need (e.g. the chosen boot disk
-    for qemu, the license-file path for iol).
+    for qemu, the license-file path for iol, or ``copy_only_names`` — file
+    names exempt from the #271 move+symlink default, such as the shared IOL
+    ``iourc`` license).
     """
 
     kind: str
@@ -136,7 +138,13 @@ def walk_iol(source_root: Path, dest_root: Path) -> list[MigrationItem]:
         image_key = entry.stem
         dst_dir = dest_root / "iol" / image_key
         files: list[tuple[Path, Path]] = [(entry, dst_dir / entry.name)]
-        meta: dict[str, object] = {"iourc_present": iourc.is_file()}
+        # iourc is one shared license referenced by every IOL image — moving
+        # it for the first item would leave the siblings pointing at another
+        # item's destination. Keep it copy-based (#271).
+        meta: dict[str, object] = {
+            "iourc_present": iourc.is_file(),
+            "copy_only_names": ("iourc",),
+        }
         if iourc.is_file():
             files.append((iourc, dst_dir / "iourc"))
         items.append(

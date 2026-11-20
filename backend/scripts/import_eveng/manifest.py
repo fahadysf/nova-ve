@@ -34,15 +34,24 @@ class ImportedEntry:
     sha256: str
     bytes: int
     mode: str = "default"
+    note: str | None = None
+    symlinked: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "src": self.src,
             "dst": self.dst,
             "sha256": self.sha256,
             "bytes": self.bytes,
             "mode": self.mode,
         }
+        # Optional #271 fields stay absent for plain copies so older
+        # manifests and this one remain byte-comparable for the same run.
+        if self.note is not None:
+            out["note"] = self.note
+        if self.symlinked:
+            out["symlinked"] = True
+        return out
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ImportedEntry":
@@ -52,6 +61,8 @@ class ImportedEntry:
             sha256=str(data["sha256"]),
             bytes=int(data["bytes"]),
             mode=str(data.get("mode", "default")),
+            note=(str(data["note"]) if data.get("note") is not None else None),
+            symlinked=bool(data.get("symlinked", False)),
         )
 
 
