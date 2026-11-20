@@ -112,7 +112,7 @@ describe('CustomNode', () => {
     expect(screen.queryByTestId('port-new-connection-handle')).toBeNull();
   });
 
-  it('shows ctrl-drag preview for connected interfaces whose real index differs from array order', async () => {
+  it('ignores the legacy persisted port_position — auto-positioning only (#258)', async () => {
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
       x: 0,
       y: 0,
@@ -131,20 +131,26 @@ describe('CustomNode', () => {
           label: 'pa-vm-01',
           status: 2,
           nodeId: 1,
-          connectedInterfaceIndexes: [5],
           interfaces: [
-            { index: 5, name: 'ethernet1/5', network_id: 9, port_position: { side: 'right', offset: 0.5 } },
+            // Stale manual placement from the removed ctrl+drag feature must
+            // not be honored; unconnected ports use the canonical default.
+            { index: 0, name: 'eth0', network_id: 0, port_position: { side: 'bottom', offset: 0.9 } },
           ],
         },
       },
     });
 
     const portWrapper = document.querySelector(
-      '[data-port-node-id="1"][data-port-interface-index="5"]'
+      '[data-port-node-id="1"][data-port-interface-index="0"]'
     ) as HTMLElement | null;
     expect(portWrapper).not.toBeNull();
-    expect(portWrapper).toHaveAttribute('data-port-side', 'right');
+    // placeInterfaces(1) → t=0.5, the start of the "bottom" quadrant.
+    expect(portWrapper).toHaveAttribute('data-port-side', 'bottom');
+    expect(portWrapper?.getAttribute('data-port-offset')).toBe('0.0000');
 
+    // A full ctrl+drag gesture must not persist any placement: the port may
+    // follow the cursor as a link-drag preview, but settles back to the
+    // canonical auto position once the gesture ends.
     portWrapper?.dispatchEvent(
       new MouseEvent('mousedown', {
         button: 0,
@@ -165,14 +171,14 @@ describe('CustomNode', () => {
       })
     );
     await tick();
-
-    const movedPortWrapper = document.querySelector(
-      '[data-port-node-id="1"][data-port-interface-index="5"]'
-    ) as HTMLElement | null;
-    expect(movedPortWrapper).toHaveAttribute('data-port-side', 'top');
-    expect(movedPortWrapper?.getAttribute('data-port-offset')).toBe('0.5000');
-
     window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+    await tick();
+
+    const settled = document.querySelector(
+      '[data-port-node-id="1"][data-port-interface-index="0"]'
+    ) as HTMLElement | null;
+    expect(settled).toHaveAttribute('data-port-side', 'bottom');
+    expect(settled?.getAttribute('data-port-offset')).toBe('0.0000');
   });
 });
 

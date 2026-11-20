@@ -2,8 +2,8 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { createEventDispatcher, getContext, onDestroy } from 'svelte';
-  import { clampToPerimeter, placeInterfaces } from '$lib/services/portLayout';
+  import { createEventDispatcher } from 'svelte';
+  import { placeInterfaces } from '$lib/services/portLayout';
   import type { NodeInterface, PortPosition } from '$lib/types';
   import Port from './Port.svelte';
 
@@ -18,38 +18,26 @@
   export let highlightedInterfaceIndex: number | null = null;
   export let highlightedNewConnection = false;
 
-  type PortPositionPersist = (
-    nodeId: number,
-    interfaceIndex: number,
-    port: PortPosition,
-    ref?: NodeConnectionPointRef
-  ) => void;
-  const persistFromContext = getContext<PortPositionPersist | undefined>(
-    'nova-ve:port-position-persist'
-  );
-
   const dispatch = createEventDispatcher<{
     'port:mousedown': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:mouseup': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:mouseenter': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:mouseleave': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
-    'port:dragend': { nodeId: number; interfaceIndex: number; port: PortPosition };
   }>();
 
   let layerEl: HTMLDivElement | null = null;
-  let dragging: { interfaceIndex: number; previewPort: PortPosition } | null = null;
-  let pendingPushTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
 
-  const PUSH_DEBOUNCE_MS = 250;
-
+  // Connection points are fully automatic (#258): the canvas computes each
+  // link's port (facing side toward the peer, spread with a minimum gap) and
+  // unconnected interfaces fall back to the canonical perimeter distribution.
+  // The legacy per-interface persisted position is no longer honored.
   $: defaults = placeInterfaces(interfaces.length);
   $: connectedSet = new Set(connectedInterfaceIndexes);
   $: resolvedPorts = interfaces.map((iface, index) => {
     const interfaceIndex = iface.index ?? index;
     const linkPosition = portPositionsByInterfaceIndex[String(interfaceIndex)];
     if (linkPosition) return linkPosition;
-    const persisted = iface.port_position ?? null;
-    return persisted ?? defaults[index] ?? ({ side: 'top', offset: 0 } as PortPosition);
+    return defaults[index] ?? ({ side: 'top', offset: 0 } as PortPosition);
   });
   $: visibleInterfaceEntries = interfaces
     .map((iface, index) => ({
@@ -69,30 +57,6 @@
       }))
       .find((entry) => !entry.connected) ?? null;
 
-  function nodeBox(): { x: number; y: number; w: number; h: number } | null {
-    if (!layerEl) return null;
-    const rect = layerEl.getBoundingClientRect();
-    return { x: rect.left, y: rect.top, w: rect.width, h: rect.height };
-  }
-
-  function schedulePersistence(interfaceIndex: number, port: PortPosition) {
-    const existing = pendingPushTimers.get(interfaceIndex);
-    if (existing) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      pendingPushTimers.delete(interfaceIndex);
-      if (persistFromContext) {
-        persistFromContext(
-          nodeId,
-          interfaceIndex,
-          port,
-          portRefsByInterfaceIndex[String(interfaceIndex)]
-        );
-      }
-      dispatch('port:dragend', { nodeId, interfaceIndex, port });
-    }, PUSH_DEBOUNCE_MS);
-    pendingPushTimers.set(interfaceIndex, timer);
-  }
-
   function handlePortMouseDown(detail: {
     event: MouseEvent;
     nodeId: number;
@@ -100,46 +64,12 @@
     port: PortPosition;
   }) {
     dispatch('port:mousedown', detail);
-
-    if (!detail.event.ctrlKey) {
-      return;
-    }
-
-    dragging = { interfaceIndex: detail.interfaceIndex, previewPort: detail.port };
-
-    const onMove = (event: MouseEvent) => {
-      const box = nodeBox();
-      if (!box || !dragging) return;
-      const port = clampToPerimeter({ x: event.clientX, y: event.clientY }, box);
-      dragging = { interfaceIndex: dragging.interfaceIndex, previewPort: port };
-    };
-
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      if (dragging) {
-        const { interfaceIndex, previewPort } = dragging;
-        schedulePersistence(interfaceIndex, previewPort);
-      }
-      dragging = null;
-    };
-
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
   }
-
-  onDestroy(() => {
-    for (const timer of pendingPushTimers.values()) clearTimeout(timer);
-    pendingPushTimers.clear();
-  });
 </script>
 
 <div bind:this={layerEl} class="pointer-events-none absolute inset-0">
   {#each visibleInterfaceEntries as entry (entry.interfaceIndex)}
-    {@const port =
-      dragging && dragging.interfaceIndex === entry.interfaceIndex
-        ? dragging.previewPort
-        : resolvedPorts[entry.index]}
+    {@const port = resolvedPorts[entry.index]}
     <div class="pointer-events-auto absolute inset-0">
       <Port
         interfaceData={entry.iface}
@@ -150,7 +80,6 @@
         connectionPointRef={portRefsByInterfaceIndex[String(entry.interfaceIndex)]}
         connected={true}
         highlighted={highlightedInterfaceIndex === entry.interfaceIndex}
-        manualRepositionStart={handlePortMouseDown}
         on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
         on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
         on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}
@@ -159,10 +88,7 @@
     </div>
   {/each}
   {#if firstAvailableEntry}
-    {@const port =
-      dragging && dragging.interfaceIndex === firstAvailableEntry.interfaceIndex
-        ? dragging.previewPort
-        : resolvedPorts[firstAvailableEntry.index]}
+    {@const port = resolvedPorts[firstAvailableEntry.index]}
     <div class="pointer-events-auto absolute inset-0">
       <Port
         interfaceData={firstAvailableEntry.iface}
@@ -173,7 +99,6 @@
         connected={false}
         newConnectionSlot={true}
         highlighted={highlightedNewConnection}
-        manualRepositionStart={handlePortMouseDown}
         on:port:mousedown={(e) => handlePortMouseDown(e.detail)}
         on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
         on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}

@@ -536,21 +536,6 @@
     return null;
   }
 
-  function isPortPosition(value: unknown): value is PortPosition {
-    if (!value || typeof value !== 'object') return false;
-    const candidate = value as PortPosition;
-    return (
-      (candidate.side === 'top' ||
-        candidate.side === 'right' ||
-        candidate.side === 'bottom' ||
-        candidate.side === 'left') &&
-      typeof candidate.offset === 'number' &&
-      Number.isFinite(candidate.offset) &&
-      candidate.offset >= 0 &&
-      candidate.offset <= 1
-    );
-  }
-
   function implicitLinkPairsByNetwork(): Map<number, Link[]> {
     const pairs = new Map<number, Link[]>();
     for (const link of $labState.links) {
@@ -594,11 +579,10 @@
     key: LinkEndpointKey,
     implicitPairs: Map<number, Link[]>
   ): PortPosition | null {
-    const saved = link.endpoint_positions?.[key];
-    if (saved?.mode === 'manual' && isPortPosition(saved.position)) {
-      return saved.position;
-    }
-
+    // Fully automatic (#258): the side faces the peer and the offset projects
+    // toward the peer center. Persisted manual placements
+    // (endpoint_positions.mode 'manual') are no longer honored —
+    // NetBird-style auto-positioning is the only source of truth.
     const ownBox = endpointBox(link[key]);
     const peerBox = endpointBox(autoPeerEndpointFor(link, key, implicitPairs));
     if (!ownBox || !peerBox) return null;
@@ -1222,13 +1206,6 @@
     }
   }
 
-  function autoPositionConnectionPoint() {
-    const target = portMenuTarget;
-    if (!target) return;
-    void persistConnectionPointPosition(target, 'auto', null);
-    closeMenu();
-  }
-
   async function handleNodeAction(action: 'start' | 'stop' | 'wipe' | 'delete' | 'console', targetId: string) {
     closeMenu();
     const decoded = decodeId(targetId);
@@ -1440,21 +1417,6 @@
     pendingNetworkPosition = null;
   }
 
-  setContext('nova-ve:port-position-persist', (
-    nodeId: number,
-    interfaceIndex: number,
-    port: PortPosition
-  ) => {
-    void persistPortPosition(nodeId, interfaceIndex, port);
-  });
-
-  setContext('nova-ve:connection-point-position-persist', (
-    target: ConnectionPointTarget,
-    port: PortPosition
-  ) => {
-    void persistConnectionPointPosition(target, 'manual', port);
-  });
-
   setContext('nova-ve:connection-point-context-menu', (
     target: ConnectionPointTarget,
     event: MouseEvent
@@ -1473,160 +1435,11 @@
     };
   });
 
-  function findLinkEndpointForConnectionPoint(
-    target: ConnectionPointTarget
-  ): { linkIndex: number; key: LinkEndpointKey } | null {
-    if (target.kind === 'network') {
-      if (target.endpointKey) {
-        const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
-        if (linkIndex < 0) return null;
-        const link = $labState.links[linkIndex];
-        const endpoint = link[target.endpointKey];
-        if (endpoint?.network_id === target.networkId) {
-          return { linkIndex, key: target.endpointKey };
-        }
-        return null;
-      }
+  // #258: findLinkEndpointForConnectionPoint removed with the manual
+  // placement persistence it served.
 
-      const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
-      if (linkIndex < 0) return null;
-      const link = $labState.links[linkIndex];
-      if (link.from?.network_id === target.networkId) return { linkIndex, key: 'from' };
-      if (link.to?.network_id === target.networkId) return { linkIndex, key: 'to' };
-      return null;
-    }
-
-    if (target.linkId && target.endpointKey) {
-      const linkIndex = $labState.links.findIndex((link) => link.id === target.linkId);
-      if (linkIndex < 0) return null;
-      const link = $labState.links[linkIndex];
-      const endpoint = link[target.endpointKey];
-      if (
-        endpoint?.node_id === target.nodeId &&
-        endpoint?.interface_index === target.interfaceIndex
-      ) {
-        return { linkIndex, key: target.endpointKey };
-      }
-      return null;
-    }
-
-    for (const [linkIndex, link] of $labState.links.entries()) {
-      if (
-        link.from?.node_id === target.nodeId &&
-        link.from?.interface_index === target.interfaceIndex
-      ) {
-        return { linkIndex, key: 'from' };
-      }
-      if (
-        link.to?.node_id === target.nodeId &&
-        link.to?.interface_index === target.interfaceIndex
-      ) {
-        return { linkIndex, key: 'to' };
-      }
-    }
-    return null;
-  }
-
-  function withEndpointPosition(
-    positions: LinkEndpointPositions | undefined,
-    key: LinkEndpointKey,
-    mode: 'auto' | 'manual',
-    port: PortPosition | null
-  ): LinkEndpointPositions {
-    return {
-      ...(positions ?? {}),
-      [key]: mode === 'manual' ? { mode, position: port } : { mode: 'auto' },
-    };
-  }
-
-  async function persistConnectionPointPosition(
-    target: ConnectionPointTarget,
-    mode: 'auto' | 'manual',
-    port: PortPosition | null
-  ) {
-    const ref = findLinkEndpointForConnectionPoint(target);
-    if (!ref) {
-      toastStore.push('No connected link found for this connection point.', 'error');
-      return;
-    }
-
-    const link = $labState.links[ref.linkIndex];
-    if (!link || String(link.id).startsWith('tmp_')) return;
-
-    const previousLinks = $labState.links;
-    const endpoint_positions = withEndpointPosition(
-      link.endpoint_positions,
-      ref.key,
-      mode,
-      port
-    );
-    labState.setLinks($labState.links.map((entry, index) =>
-      index === ref.linkIndex ? { ...entry, endpoint_positions } : entry
-    ));
-    publishFlowState();
-
-    try {
-      const response = await apiRequest(`/labs/${labId}/links/${encodeURIComponent(link.id)}`, {
-        method: 'PATCH',
-        body: { endpoint_positions },
-        suppressToast: true,
-      });
-      adoptRevision(response);
-    } catch (error) {
-      labState.setLinks(previousLinks);
-      publishFlowState();
-      const message =
-        error instanceof Error ? error.message : 'Failed to persist connection point position';
-      toastStore.push(message, 'error');
-    }
-  }
-
-  async function persistPortPosition(
-    nodeId: number,
-    interfaceIndex: number,
-    port: PortPosition,
-    ref?: ConnectionPointRef
-  ) {
-    const connectedTarget: ConnectionPointTarget = {
-      kind: 'node',
-      nodeId,
-      interfaceIndex,
-      linkId: ref?.linkId,
-      endpointKey: ref?.endpointKey,
-    };
-    if (findLinkEndpointForConnectionPoint(connectedTarget)) {
-      await persistConnectionPointPosition(connectedTarget, 'manual', port);
-      return;
-    }
-
-    const node = $labState.nodes[String(nodeId)];
-    if (!node) return;
-    const iface = node.interfaces[interfaceIndex];
-    if (!iface) return;
-
-    const previous = iface.port_position ?? null;
-    iface.port_position = port;
-    labState.setNodes({ ...$labState.nodes });
-    publishFlowState();
-
-    try {
-      const response = await apiRequest(
-        `/labs/${labId}/nodes/${nodeId}/interfaces/${interfaceIndex}`,
-        {
-          method: 'PATCH',
-          body: { port_position: port },
-          suppressToast: true
-        }
-      );
-      adoptRevision(response);
-    } catch (error) {
-      iface.port_position = previous;
-      labState.setNodes({ ...$labState.nodes });
-      publishFlowState();
-      const message = error instanceof Error ? error.message : 'Failed to persist port position';
-      toastStore.push(message, 'error');
-    }
-  }
+  // #258: persistConnectionPointPosition / withEndpointPosition removed —
+  // manual endpoint placements are no longer written or honored.
 
   function highlightedTargetForNode(candidateNodeId: number): number | null {
     const snap = getDragLinkSnapshot();
@@ -2343,13 +2156,12 @@
           <span>Delete Network</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
       {:else if menu?.targetType === 'port'}
-        <button
-          type="button"
-          class="menu-item"
-          on:click|preventDefault|stopPropagation={autoPositionConnectionPoint}
-        >
-          <span>Auto-position</span><LocateFixed class="h-3.5 w-3.5 text-gray-400" />
-        </button>
+        <!-- #258: connection points are auto-positioned; no port menu actions.
+             This branch stays so right-clicking a port shows an empty menu
+             instead of falling through to the edge line-style menu. -->
+        <div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-widest text-gray-500">
+          Auto-positioned
+        </div>
       {:else}
         {#if menu && isDiscoveredEdgeId(menu.targetId)}
           <button
