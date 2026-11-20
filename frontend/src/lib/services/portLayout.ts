@@ -500,8 +500,11 @@ function projectedPortPosition(
  * node (observed live: net-bridge → vm-linux doubled back off its right
  * edge because iol-rtr blocked the corridor). When the gap-facing side's
  * exit strip is obstructed, move the connection point to the unconstricted
- * side that heads most directly toward the target (ties on the wider gap);
- * with a clear exit the position is exactly ``closestPortPositionToBox``.
+ * FORWARD side that heads most directly toward the target (ties on the
+ * wider gap). Sides pointing away from the peer never win — a top-side port
+ * for a bottom-right target is worse than keeping the facing side and
+ * letting the router detour. With a clear exit the position is exactly
+ * ``closestPortPositionToBox``.
  */
 export function bestRouteAwarePortPosition(
   sourceBox: NodeBox,
@@ -539,6 +542,9 @@ export function bestRouteAwarePortPosition(
           : side === 'right'
             ? toPeerX
             : -toPeerX;
+    // Never relocate to a side that points away from the peer — the link
+    // would leave backwards and hug the origin box.
+    if (towardPeer <= 0) continue;
     const score = (towardPeer / toPeerLen) * 1000 + sideGapPx(sourceBox, targetBox, side);
     if (score > bestScore) {
       best = candidate;

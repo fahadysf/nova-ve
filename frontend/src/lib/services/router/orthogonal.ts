@@ -31,6 +31,15 @@ export const LANE_WIDTH = 12; // half of "2 * laneWidth = 24px" band width
 
 const ABORT_CHECK_EVERY = 256;
 
+/**
+ * Cells a path must travel straight out of a port (along the side normal,
+ * no turning, no reversal) before its first bend — and straight into the
+ * target port before its last bend (#258). Lines always leave/arrive
+ * perpendicular to the card side for a visible stub instead of kinking at
+ * the handle.
+ */
+export const MIN_EXIT_CELLS = 2;
+
 // ---------- public types ----------------------------------------------------
 
 /** Axis-parallel segment used by the crossings-reduction pass. */
@@ -78,12 +87,16 @@ export async function routeOrthogonal(
   grid.unblock(startCell.cx, startCell.cy);
   grid.unblock(endCell.cx, endCell.cy);
 
-  // Carve a one-cell exit lane in the port-tangent direction so the path
-  // does not fight the inflated obstacle of its own host node.
+  // Carve a straight exit lane in the port-tangent direction so the forced
+  // perpendicular stub has somewhere to run.
   carveExit(grid, from, startCell);
   carveExit(grid, to, endCell);
 
-  const cells = await runAStar(grid, startCell, endCell, signal);
+  const cells = await runAStar(grid, startCell, endCell, signal, {
+    from: exitZoneFor(from, startCell),
+    to: exitZoneFor(to, endCell),
+    fallbackAxis: from.side === 'top' || from.side === 'bottom' ? 'y' : 'x',
+  });
 
   // Convert the cell path to world segments anchored at the actual port world
   // coords (so the rendered path lands exactly on the handle).
@@ -345,7 +358,8 @@ function buildGrid(
   return grid;
 }
 
-/** Free a one-cell exit in the tangent direction of the port. */
+/** Free a straight exit lane in the tangent direction of the port — deep
+ * enough for the forced perpendicular stub (MIN_EXIT_CELLS). */
 function carveExit(grid: Grid, port: PortRef, cell: GridCell): void {
   let dx = 0;
   let dy = 0;
@@ -363,10 +377,12 @@ function carveExit(grid: Grid, port: PortRef, cell: GridCell): void {
       dx = 1;
       break;
   }
-  const exitCx = cell.cx + dx;
-  const exitCy = cell.cy + dy;
-  if (grid.inBounds(exitCx, exitCy)) {
-    grid.unblock(exitCx, exitCy);
+  for (let k = 1; k <= MIN_EXIT_CELLS; k++) {
+    const exitCx = cell.cx + dx * k;
+    const exitCy = cell.cy + dy * k;
+    if (grid.inBounds(exitCx, exitCy)) {
+      grid.unblock(exitCx, exitCy);
+    }
   }
 }
 
@@ -440,11 +456,51 @@ const DIRS: ReadonlyArray<[number, number]> = [
   [0, -1],
 ];
 
+/** Straight-zone bookkeeping for one port's perpendicular stub. */
+interface ExitZone {
+  cx: number;
+  cy: number;
+  /** Outward unit step along the port side. */
+  dx: number;
+  dy: number;
+}
+
+function exitZoneFor(port: PortRef, cell: GridCell): ExitZone {
+  switch (port.side) {
+    case 'top':
+      return { cx: cell.cx, cy: cell.cy, dx: 0, dy: -1 };
+    case 'bottom':
+      return { cx: cell.cx, cy: cell.cy, dx: 0, dy: 1 };
+    case 'left':
+      return { cx: cell.cx, cy: cell.cy, dx: -1, dy: 0 };
+    case 'right':
+      return { cx: cell.cx, cy: cell.cy, dx: 1, dy: 0 };
+  }
+}
+
+/** True when (x, y) sits on the zone's outward lane inside the stub length. */
+function inExitLane(z: ExitZone, x: number, y: number): boolean {
+  if (z.dx !== 0) {
+    const rel = (x - z.cx) * z.dx;
+    return y === z.cy && rel > 0 && rel < MIN_EXIT_CELLS;
+  }
+  const rel = (y - z.cy) * z.dy;
+  return x === z.cx && rel > 0 && rel < MIN_EXIT_CELLS;
+}
+
+interface ExitConstraints {
+  from: ExitZone;
+  to: ExitZone;
+  /** Axis the no-path fallback L should lead with (the source port's normal). */
+  fallbackAxis: 'x' | 'y';
+}
+
 async function runAStar(
   grid: Grid,
   start: GridCell,
   goal: GridCell,
   signal?: AbortSignal,
+  zones?: ExitConstraints,
 ): Promise<GridCell[]> {
   const cols = grid.cols;
   const rows = grid.rows;
@@ -505,6 +561,21 @@ async function runAStar(
       if (closed[nIdx]) continue;
       if (grid.isBlocked(nx, ny)) continue;
 
+      // Perpendicular-exit enforcement (#258): leave the source outward and
+      // straight, arrive at the target inward and straight.
+      if (zones) {
+        if (idx === startIdx) {
+          if (dx !== zones.from.dx || dy !== zones.from.dy) continue;
+        } else if (inExitLane(zones.from, cx, cy)) {
+          if (dx !== zones.from.dx || dy !== zones.from.dy) continue;
+        }
+        if (nIdx === goalIdx) {
+          if (dx !== -zones.to.dx || dy !== -zones.to.dy) continue;
+        } else if (inExitLane(zones.to, cx, cy)) {
+          if (dx !== -zones.to.dx || dy !== -zones.to.dy) continue;
+        }
+      }
+
       const stepDir = dx !== 0 ? 1 : 2; // 1=horiz, 2=vert
       const isBend = incoming !== 0 && incoming !== stepDir;
       const stepCost = 1 + (isBend ? BEND_PENALTY : 0);
@@ -521,8 +592,9 @@ async function runAStar(
     }
   }
 
-  // No path found — fall back to a direct L-route between start and goal.
-  return fallbackL(start, goal);
+  // No path found under the constraints — fall back to a direct L-route
+  // that still leaves the source port along its outward axis.
+  return fallbackL(start, goal, zones?.fallbackAxis ?? 'x');
 }
 
 function heuristic(a: GridCell, b: GridCell): number {
@@ -542,9 +614,27 @@ function reconstruct(cameFrom: Int32Array, endIdx: number, cols: number): GridCe
   return path;
 }
 
-function fallbackL(start: GridCell, goal: GridCell): GridCell[] {
-  // Pure deterministic L-bend (right then up/down).
+function fallbackL(
+  start: GridCell,
+  goal: GridCell,
+  axisFirst: 'x' | 'y',
+): GridCell[] {
+  // Pure deterministic L-bend along the requested axis first, so the stub
+  // out of the source port stays perpendicular to its side.
   const out: GridCell[] = [{ cx: start.cx, cy: start.cy }];
+  if (axisFirst === 'y') {
+    const stepY = goal.cy > start.cy ? 1 : -1;
+    for (let cy = start.cy + stepY; cy !== goal.cy + stepY; cy += stepY) {
+      out.push({ cx: start.cx, cy });
+      if (cy === goal.cy) break;
+    }
+    const stepX = goal.cx > start.cx ? 1 : -1;
+    for (let cx = start.cx + stepX; cx !== goal.cx + stepX; cx += stepX) {
+      out.push({ cx, cy: goal.cy });
+      if (cx === goal.cx) break;
+    }
+    return out;
+  }
   const stepX = goal.cx > start.cx ? 1 : -1;
   for (let cx = start.cx + stepX; cx !== goal.cx + stepX; cx += stepX) {
     out.push({ cx, cy: start.cy });

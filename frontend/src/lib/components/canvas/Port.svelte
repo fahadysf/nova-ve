@@ -371,18 +371,23 @@
   {#if insideFlow}
     <!--
       Pair source + target handles at the same id/position so peer-to-peer
-      links (where this iface is the target end) also resolve.
+      links (where this iface is the target end) also resolve. The inline
+      style centers both handles exactly on the perimeter point — Svelte
+      Flow anchors edge endpoints at the measured handle center, and its
+      default per-side offsets sit ~6px outside the port circle.
     -->
     <Handle
       type="source"
       position={xyPosition}
       id={`iface-${interfaceIndex}`}
+      style="left: 50%; top: 50%; transform: translate(-50%, -50%);"
       class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
     />
     <Handle
       type="target"
       position={xyPosition}
       id={`iface-${interfaceIndex}`}
+      style="left: 50%; top: 50%; transform: translate(-50%, -50%);"
       class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
     />
   {/if}
