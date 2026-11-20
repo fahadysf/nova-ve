@@ -781,23 +781,51 @@ class NodeRuntimeService:
 
         return self._read_qemu_logs(runtime, tail=tail)
 
-    def console_info(self, lab_data: dict[str, Any], node_id: int, host: str = "127.0.0.1") -> dict[str, Any]:
+    def console_info(
+        self,
+        lab_data: dict[str, Any],
+        node_id: int,
+        host: str = "127.0.0.1",
+        mode: str = "primary",
+    ) -> dict[str, Any]:
+        """Console connection details for *node_id*.
+
+        ``mode="primary"`` (default) keeps the single-console behavior;
+        ``mode="second"`` resolves the secondary console session declared on
+        the template/node (#268) from the runtime record.
+        """
         lab_id = self._lab_id(lab_data)
         node = self._node_data(lab_data, node_id)
         runtime = self._runtime_record(lab_id, node_id)
         if not runtime:
             raise NodeRuntimeError(f"Node is not running: {node_id}")
 
-        if runtime.get("kind") == "docker":
+        node_name = node.get("name", f"node-{node_id}")
+
+        if mode == "second":
+            second_mode = runtime.get("second_console")
+            second_port = int(runtime.get("second_console_port") or 0)
+            if not second_mode or not second_port:
+                raise NodeRuntimeError(f"Node has no secondary console session: {node_id}")
+            console_mode = str(second_mode)
+            console_port = second_port
+            connection_name = f"{node_name}-second"
+        else:
+            console_mode = str(runtime.get("console", node.get("console", "telnet")))
+            console_port = int(runtime.get("console_port", 0))
+            connection_name = node_name
+
+        if runtime.get("kind") == "docker" and mode != "second":
             runtime = self._ensure_console_proxy(lab_id, node_id, runtime)
 
         return {
             "lab_id": lab_id,
             "node_id": node_id,
-            "name": node.get("name", f"node-{node_id}"),
-            "console": runtime.get("console", node.get("console", "telnet")),
+            "mode": mode,
+            "name": connection_name,
+            "console": console_mode,
             "host": host,
-            "port": int(runtime.get("console_port", 0)),
+            "port": console_port,
             "url": self._console_url(runtime),
         }
 
@@ -1190,20 +1218,73 @@ class NodeRuntimeService:
                 return None
             return cmdline[idx + 1]
 
-        console_mode = str(node.get("console", "telnet"))
-        console_port = 0
-        serial_arg = _arg_after("-serial")
-        if serial_arg and serial_arg.startswith("telnet::"):
+        def _args_after(flag: str) -> list[str]:
+            """Every value that follows an occurrence of *flag* (#268 dual-console).
+
+            QEMU maps repeated ``-serial`` flags to serial0, serial1, ... in
+            order, and there can be one ``-serial`` plus one ``-vnc`` when the
+            node declares both a CLI and a graphical console.
+            """
+            values: list[str] = []
+            for index, token in enumerate(cmdline):
+                if token == flag and index + 1 < len(cmdline):
+                    values.append(cmdline[index + 1])
+            return values
+
+        def _telnet_port(serial_arg: str) -> int:
             try:
-                console_port = int(serial_arg.split("::", 1)[1].split(",", 1)[0])
+                return int(serial_arg.split("::", 1)[1].split(",", 1)[0])
             except (IndexError, ValueError):
-                console_port = 0
-        vnc_arg = _arg_after("-vnc")
-        if vnc_arg and vnc_arg.startswith(":"):
+                return 0
+
+        def _vnc_port(vnc_arg: str) -> int:
             try:
-                console_port = 5900 + int(vnc_arg[1:].split(",", 1)[0])
+                return 5900 + int(vnc_arg[1:].split(",", 1)[0])
             except ValueError:
-                pass
+                return 0
+
+        console_mode = str(node.get("console", "telnet"))
+        second_console_mode = node.get("second_console") or None
+        serial_args = _args_after("-serial")
+        vnc_args = _args_after("-vnc")
+
+        console_port = 0
+        second_console_port: int | None = None
+
+        def _serial_port(serial_arg: str | None) -> int:
+            if serial_arg and serial_arg.startswith("telnet::"):
+                return _telnet_port(serial_arg)
+            return 0
+
+        if len(serial_args) >= 2:
+            # Two serial backends: a serial/telnet-family primary plus a
+            # telnet secondary (QEMU maps repeated -serial flags to
+            # serial0, serial1, ... in order).
+            console_port = _serial_port(serial_args[0])
+            if second_console_mode == "telnet":
+                second_console_port = _serial_port(serial_args[1])
+        elif len(vnc_args) >= 2:
+            console_port = _vnc_port(vnc_args[0])
+            if second_console_mode == "vnc":
+                second_console_port = _vnc_port(vnc_args[1])
+        elif serial_args and vnc_args:
+            # Dual backend (one -serial + one -vnc): the declared primary
+            # mode picks its port, the other backend belongs to the
+            # secondary console.
+            if console_mode == "vnc":
+                console_port = _vnc_port(vnc_args[0])
+                if second_console_mode == "telnet":
+                    second_console_port = _serial_port(serial_args[0])
+            else:
+                console_port = _serial_port(serial_args[0])
+                if second_console_mode == "vnc":
+                    second_console_port = _vnc_port(vnc_args[0])
+        elif vnc_args:
+            # Single backend — adopt it as the primary regardless of the
+            # declared mode (historical adoption behavior).
+            console_port = _vnc_port(vnc_args[0])
+        elif serial_args:
+            console_port = _serial_port(serial_args[0])
 
         qmp_socket = ""
         qmp_arg = _arg_after("-qmp")
@@ -1233,6 +1314,8 @@ class NodeRuntimeService:
             "name": node.get("name"),
             "console": console_mode,
             "console_port": console_port,
+            "second_console": second_console_mode,
+            "second_console_port": second_console_port,
             "pid": pid,
             "pid_create_time": create_time,
             "overlay_path": overlay_path,
@@ -1751,6 +1834,8 @@ class NodeRuntimeService:
         qmp_path: str,
         tap_names: dict[int, str],
         attachment_by_index: dict[int, dict[str, Any]],
+        second_console_mode: str | None = None,
+        second_console_port: int | None = None,
     ) -> list[str]:
         """Assemble the base QEMU argv (before user extra-args merge).
 
@@ -1789,10 +1874,20 @@ class NodeRuntimeService:
             cmd += ["-cpu", cpu_model]
         else:
             cmd += ["-cpu", "max"]
+        # Primary console backend (#268): a vnc primary binds the QEMU VNC
+        # display, everything else (telnet and the paired-template serial)
+        # exposes a telnet server on the serial line.
         if console_mode == "vnc":
             cmd += ["-vnc", f":{console_port - 5900}"]
         else:
             cmd += ["-serial", f"telnet::{console_port},server,nowait"]
+        # Secondary console backend: QEMU keeps the primary backend and adds
+        # a second one — the VNC display coexists with the serial server, and
+        # a telnet secondary becomes serial1 (second ``-serial`` argument).
+        if second_console_mode == "vnc" and second_console_port:
+            cmd += ["-vnc", f":{second_console_port - 5900}"]
+        elif second_console_mode == "telnet" and second_console_port:
+            cmd += ["-serial", f"telnet::{second_console_port},server,nowait"]
         cmd += ["-qmp", f"unix:{qmp_path},server,nowait"]
 
         if machine == "q35" and max_nics > 0:
@@ -1898,6 +1993,18 @@ class NodeRuntimeService:
                 "RDP is only supported for Docker nodes that publish an RDP service."
             )
         console_port = self._allocate_console_port(console_mode)
+        # #268 — optional second console. When the node declares one, QEMU
+        # exposes BOTH backends, so a second port is allocated with the same
+        # helper keyed on the secondary mode.
+        second_console_mode = node.get("second_console") or None
+        second_console_port: int | None = None
+        if second_console_mode:
+            if second_console_mode == "rdp":
+                raise NodeRuntimeError(
+                    "QEMU RDP consoles are not supported. Use VNC or telnet for QEMU nodes; "
+                    "RDP is only supported for Docker nodes that publish an RDP service."
+                )
+            second_console_port = self._allocate_console_port(second_console_mode)
         accel = _qemu_accel()
 
         qmp_socket_path = work_dir / "qmp.sock"
@@ -1959,6 +2066,8 @@ class NodeRuntimeService:
             qmp_path=str(qmp_socket_path),
             tap_names=tap_names,
             attachment_by_index=attachment_by_index,
+            second_console_mode=second_console_mode,
+            second_console_port=second_console_port,
         )
         # Compute unconnected indices for post-spawn QMP set_link calls.
         # Issue #174: every non-uplink iface now has a TAP, so distinguish by
@@ -2048,6 +2157,8 @@ class NodeRuntimeService:
             "name": node.get("name"),
             "console": console_mode,
             "console_port": console_port,
+            "second_console": second_console_mode,
+            "second_console_port": second_console_port,
             "pid": process.pid,
             "pid_create_time": process_info.create_time(),
             "overlay_path": str(overlay_path),
@@ -2136,6 +2247,8 @@ class NodeRuntimeService:
             qmp_path="<work-dir>/qmp.sock",
             tap_names=tap_names,
             attachment_by_index=attachment_by_index,
+            second_console_mode=node.get("second_console") or None,
+            second_console_port=5901 if node.get("second_console") else None,
         )
 
         extra_args = _extra_str(extras, "qemu_options")
