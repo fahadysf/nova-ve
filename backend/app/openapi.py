@@ -84,6 +84,13 @@ OPENAPI_TAGS: list[Dict[str, Any]] = [
         "description": "Template catalogue and per-template artefacts (images).",
     },
     {
+        "name": "manage",
+        "description": (
+            "Lab management (#262): instance listing with state and "
+            "allocated resources, plus lab-wide stop/wipe lifecycle actions."
+        ),
+    },
+    {
         "name": "library",
         "description": (
             "Image & template library inventory (#264): on-box images with "
