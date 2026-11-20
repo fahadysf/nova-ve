@@ -1931,8 +1931,18 @@ async def node_rdp(
 async def node_html5(
     lab_path: str,
     node_id: int,
+    console: str = "primary",
     current_user: UserRead = Depends(get_current_user),
 ):
+    # #268 — ``console`` selects which declared console session to open:
+    # ``primary`` (default) or ``second`` when the node exposes one.
+    if console not in ("primary", "second"):
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": f"Unknown console mode {console!r}; expected 'primary' or 'second'.",
+        }
+
     if not getattr(current_user, "html5", True):
         return {
             "code": 403,
@@ -1942,7 +1952,7 @@ async def node_html5(
 
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
-        console = NodeRuntimeService().console_info(data, node_id)
+        console_info = NodeRuntimeService().console_info(data, node_id, mode=console)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
     except FileNotFoundError:
@@ -1967,21 +1977,26 @@ async def node_html5(
     try:
         settings = get_settings()
         if settings.GUACAMOLE_DATABASE_URL.strip():
+            # The secondary session gets its own stable connection key so the
+            # two consoles of one node never share a Guacamole connection.
+            connection_key = f"{data.get('id', lab_path)}:{node_id}:{console_info['console']}"
+            if console == "second":
+                connection_key = f"{data.get('id', lab_path)}:{node_id}:second:{console_info['console']}"
             html5_url = await GuacamoleDatabaseService().create_console_url(
                 current_user,
-                host=console["host"],
-                port=console["port"],
-                protocol=console["console"],
-                connection_name=console["name"],
-                connection_key=f"{data.get('id', lab_path)}:{node_id}:{console['console']}",
+                host=console_info["host"],
+                port=console_info["port"],
+                protocol=console_info["console"],
+                connection_name=console_info["name"],
+                connection_key=connection_key,
             )
         else:
             html5_url = await Html5SessionService().create_console_url(
                 current_user,
-                host=console["host"],
-                port=console["port"],
-                protocol=console["console"],
-                connection_name=console["name"],
+                host=console_info["host"],
+                port=console_info["port"],
+                protocol=console_info["console"],
+                connection_name=console_info["name"],
             )
     except (Html5SessionError, GuacamoleDatabaseError) as exc:
         return {

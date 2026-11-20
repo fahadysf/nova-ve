@@ -431,7 +431,7 @@ async def test_html5_respects_user_flag(monkeypatch, patched_settings, sample_la
     monkeypatch.setattr(
         "app.routers.labs.NodeRuntimeService",
         lambda: SimpleNamespace(
-            console_info=lambda _lab_data, _node_id: {
+            console_info=lambda _lab_data, _node_id, mode="primary": {
                 "console": "telnet",
                 "host": "127.0.0.1",
                 "port": 2323,
@@ -504,7 +504,7 @@ async def test_html5_route_prefers_db_backed_service_when_configured(monkeypatch
     monkeypatch.setattr(
         "app.routers.labs.NodeRuntimeService",
         lambda: SimpleNamespace(
-            console_info=lambda _lab_data, _node_id: {
+            console_info=lambda _lab_data, _node_id, mode="primary": {
                 "name": "alpine-a",
                 "console": "telnet",
                 "host": "127.0.0.1",
