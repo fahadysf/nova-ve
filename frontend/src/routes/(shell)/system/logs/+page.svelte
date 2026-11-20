@@ -154,10 +154,14 @@
     <section class="overflow-hidden rounded-2xl border border-gray-800 bg-gray-950" data-testid="logs-panel">
       {#if content}
         <pre class="max-h-[60vh] overflow-auto p-4 font-mono text-[11px] leading-relaxed text-gray-300">{content}</pre>
-      {:else}
-        <div class="px-5 py-10 text-center text-sm text-gray-600">
-          {loading ? 'Loading…' : 'Select a log file to view its tail.'}
+      {:else if loading}
+        <div class="px-5 py-10 text-center text-sm text-gray-600">Loading…</div>
+      {:else if selectedPath}
+        <div class="px-5 py-10 text-center text-sm text-gray-600" data-testid="logs-empty">
+          No log output for this file yet.
         </div>
+      {:else}
+        <div class="px-5 py-10 text-center text-sm text-gray-600">Select a log file to view its tail.</div>
       {/if}
     </section>
     {#if content}
