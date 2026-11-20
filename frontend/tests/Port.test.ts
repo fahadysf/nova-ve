@@ -457,12 +457,42 @@ describe('Port pinned label orientation (#254)', () => {
     return pill.getAttribute('style') ?? '';
   }
 
+  function pillClassFor(side: 'top' | 'right' | 'bottom' | 'left'): string {
+    const { container } = render(Port, {
+      props: {
+        interfaceData: connectedInterface,
+        position: { side, offset: 0.5 },
+        nodeId: 7,
+        interfaceIndex: 0,
+        connected: true,
+      },
+    });
+    const pill = container.querySelector('[data-testid="port-pinned-label"]');
+    if (!pill) throw new Error(`pinned label not rendered for side ${side}`);
+    return pill.getAttribute('class') ?? '';
+  }
+
   it('renders the pill vertical on north ports', () => {
     expect(pillStyleFor('top')).toContain('writing-mode: vertical-rl');
   });
 
   it('renders the pill vertical on south ports', () => {
     expect(pillStyleFor('bottom')).toContain('writing-mode: vertical-rl');
+  });
+
+  it('swaps the pill padding when vertical so the capsule matches the horizontal one', () => {
+    // writing-mode vertical-rl turns the physical padding axes around; the
+    // swapped utilities restore the wide sides / thin caps pill shape.
+    expect(pillClassFor('top')).toContain('py-1.5 px-px');
+    expect(pillClassFor('bottom')).toContain('py-1.5 px-px');
+    expect(pillClassFor('top')).not.toContain('px-1.5');
+    expect(pillClassFor('bottom')).not.toContain('px-1.5');
+  });
+
+  it('keeps the standard horizontal pill padding on east/west ports', () => {
+    expect(pillClassFor('right')).toContain('px-1.5 py-px');
+    expect(pillClassFor('left')).toContain('px-1.5 py-px');
+    expect(pillClassFor('right')).not.toContain('py-1.5');
   });
 
   it('renders the pill horizontal on east ports', () => {

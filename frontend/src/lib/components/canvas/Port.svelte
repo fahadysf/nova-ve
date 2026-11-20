@@ -101,11 +101,11 @@
     }
   })();
 
+  $: labelVertical = position.side === 'top' || position.side === 'bottom';
   $: pinnedLabelStyle = (() => {
     // North/south ports get a vertical pill (text reads top→bottom), east/
     // west ports a horizontal one (#254) — the pill hugs the link tangent.
-    const vertical = position.side === 'top' || position.side === 'bottom';
-    const writingMode = vertical ? 'writing-mode: vertical-rl;' : '';
+    const writingMode = labelVertical ? 'writing-mode: vertical-rl;' : '';
     switch (position.side) {
       case 'top':
         return `${writingMode} bottom: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);`;
@@ -426,8 +426,14 @@
     ></span>
   {/if}
   {#if connected && !newConnectionSlot && !showTooltip}
+    <!-- Vertical pills swap the padding utilities: writing-mode vertical-rl
+         turns the physical px/py axes around, so keeping them would pad the
+         caps wide and the text sides thin — an ovular blob instead of the
+         same pill shape as the horizontal labels, just rotated (#254). -->
     <span
-      class="pointer-events-none absolute whitespace-nowrap rounded-full border border-gray-700/70 bg-gray-950/85 px-1.5 py-px font-mono text-[7.5px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm"
+      class={`pointer-events-none absolute whitespace-nowrap rounded-full border border-gray-700/70 bg-gray-950/85 ${
+        labelVertical ? 'py-1.5 px-px' : 'px-1.5 py-px'
+      } font-mono text-[7.5px] leading-none text-gray-200 shadow-sm shadow-black/30 backdrop-blur-sm`}
       style={pinnedLabelStyle}
       data-testid="port-pinned-label"
       aria-hidden="true"
