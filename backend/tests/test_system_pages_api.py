@@ -26,6 +26,7 @@ def sys_settings(tmp_path, monkeypatch):
         DISCOVERY_CADENCE_SECONDS=30,
         NAT_CLOUD_POOL="10.255.0.0/16",
         SESSION_MAX_AGE=14400,
+        EXTERNAL_CONSOLE_HOST="192.168.7.9",
         SESSION_COOKIE_NAME="nova_session",
         COOKIE_SECURE=False,
         ACCESS_TOKEN_EXPIRE_MINUTES=60,
@@ -203,6 +204,79 @@ async def test_settings_put_requires_admin(client, sys_settings):
     )
 
     assert response.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# External console host setting (#269)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_settings_get_reports_external_console_host(client, sys_settings):
+    _as("admin")
+
+    response = await client.get("/api/system/settings")
+
+    assert response.status_code == 200
+    networking = response.json()["data"]["networking"]
+    assert networking["external_console_host"] == "192.168.7.9"
+    assert networking["external_console_host_effective"] == "192.168.7.9"
+
+
+@pytest.mark.asyncio
+async def test_settings_put_persists_external_console_host_override(client, sys_settings):
+    _as("admin")
+
+    response = await client.put(
+        "/api/system/settings",
+        json={"EXTERNAL_CONSOLE_HOST": "console.example.net"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["restart_required"] is True
+
+    persisted = json.loads((sys_settings.BASE_DATA_DIR / "system-settings.json").read_text())
+    assert persisted["EXTERNAL_CONSOLE_HOST"] == "console.example.net"
+
+    get_response = await client.get("/api/system/settings")
+    networking = get_response.json()["data"]["networking"]
+    assert networking["external_console_host"] == "console.example.net"
+    assert networking["external_console_host_effective"] == "192.168.7.9"
+
+
+@pytest.mark.asyncio
+async def test_settings_put_persists_empty_external_console_host_as_disable(
+    client, sys_settings
+):
+    _as("admin")
+
+    response = await client.put(
+        "/api/system/settings",
+        json={"EXTERNAL_CONSOLE_HOST": "   "},
+    )
+
+    assert response.status_code == 200
+    persisted = json.loads((sys_settings.BASE_DATA_DIR / "system-settings.json").read_text())
+    assert persisted["EXTERNAL_CONSOLE_HOST"] == ""
+
+    get_response = await client.get("/api/system/settings")
+    networking = get_response.json()["data"]["networking"]
+    assert networking["external_console_host"] == ""
+
+
+@pytest.mark.asyncio
+async def test_settings_put_rejects_external_console_host_with_scheme_or_port(
+    client, sys_settings
+):
+    _as("admin")
+
+    for bad_value in ("http://192.168.7.9", "192.168.7.9:8080", "user@host", "a/b"):
+        response = await client.put(
+            "/api/system/settings",
+            json={"EXTERNAL_CONSOLE_HOST": bad_value},
+        )
+        assert response.status_code == 422, bad_value
+
+    # Every rejected value: nothing persisted at all.
+    assert not (sys_settings.BASE_DATA_DIR / "system-settings.json").exists()
 
 
 @pytest.mark.asyncio
