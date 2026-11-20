@@ -1,18 +1,21 @@
-"""Tests for the EVE-NG importer CLI scaffold (#183)."""
+"""Tests for the EVE-NG importer CLI scaffold (#183) + #271 mode/output flags."""
 
 from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 
 import pytest
 
 from scripts.import_eveng import main as package_main
+from scripts.import_eveng._app_owner import AppOwner
 from scripts.import_eveng._hash import sha256_file, sha256_stream
 from scripts.import_eveng.cli import (
     DEFAULT_DEST,
+    DEFAULT_LOG_PATH,
     DEFAULT_MANIFEST,
     DEFAULT_SOURCE,
     build_parser,
@@ -32,8 +35,8 @@ from scripts.import_eveng.manifest import (
 # --- argparse defaults ---------------------------------------------------
 
 
-def test_argparse_defaults_match_gh_body_verbatim() -> None:
-    """Default flag values must match GH #183 verbatim."""
+def test_argparse_defaults_match_issue_contract() -> None:
+    """Paths per GH #183; mode + log defaults per #271 (move-symlink default)."""
     parser = build_parser()
     args = parser.parse_args([])
     assert args.source == DEFAULT_SOURCE == Path("/opt/unetlab")
@@ -41,17 +44,23 @@ def test_argparse_defaults_match_gh_body_verbatim() -> None:
     assert args.manifest == DEFAULT_MANIFEST == Path("/var/lib/nova-ve/import-manifest.json")
     assert args.dry_run is False
     assert args.force is False
-    assert args.copy_only is False
-    assert args.move is False
-    assert args.delete_source is False
+    assert args.mode == "move-symlink"
+    assert args.json is False
+    assert args.log_file == DEFAULT_LOG_PATH == Path("/var/log/eve-ng-importer.log")
     assert args.verbose is False
 
 
-def test_copy_only_and_move_are_mutually_exclusive() -> None:
-    """argparse must reject --copy-only and --move passed together."""
+def test_mode_flags_are_mutually_exclusive() -> None:
+    """The copy strategies compete for the source file; argparse must reject combos."""
     parser = build_parser()
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--copy-only", "--move"])
+    for combo in (
+        ["--copy-only", "--move"],
+        ["--move-symlink", "--delete-source"],
+        ["--move-symlink", "--copy-only"],
+        ["--copy-only", "--delete-source"],
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args(combo)
 
 
 def test_dry_run_flag_parses() -> None:
@@ -308,3 +317,159 @@ def test_main_dry_run_skips_root_check(
 
     rc = main(["--source", str(src), "--dry-run"])
     assert rc == 0
+
+
+# --- #271: move+symlink default, step output, log file --------------------
+
+
+def _fake_owner() -> AppOwner:
+    """Owner pointing at the current process uid/gid (macOS test runners safe)."""
+    return AppOwner(
+        name="ubuntu",
+        uid=os.getuid(),
+        group="ubuntu",
+        gid=os.getgid(),
+        home="/home/ubuntu",
+        source="default",
+    )
+
+
+def _seed_qemu_vendor(src_root: Path, image_key: str = "vyos-1.4") -> Path:
+    vendor = src_root / "addons" / "qemu" / image_key
+    vendor.mkdir(parents=True)
+    (vendor / "hda.qcow2").write_bytes(b"vyos image bytes")
+    return vendor / "hda.qcow2"
+
+
+def test_main_default_mode_moves_and_symlinks_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Default run (#271): the image is moved, the EVE-NG path becomes a symlink,
+    stdout shows numbered step lines, and the run appends to the log file."""
+    src_root = tmp_path / "opt-unetlab"
+    disk = _seed_qemu_vendor(src_root)
+    dst = tmp_path / "images"
+    mf = tmp_path / "import-manifest.json"
+    templates = tmp_path / "templates"
+    log = tmp_path / "eve-ng-importer.log"
+
+    monkeypatch.setattr("scripts.import_eveng.cli._is_root", lambda: True)
+    monkeypatch.setattr("scripts.import_eveng.cli.resolve_app_owner", _fake_owner)
+
+    rc = main(
+        [
+            "--source", str(src_root),
+            "--dest", str(dst),
+            "--manifest", str(mf),
+            "--templates-dir", str(templates),
+            "--log-file", str(log),
+        ]
+    )
+    assert rc == 0
+
+    moved = dst / "qemu" / "vyos-1.4" / "hda.qcow2"
+    assert moved.is_file() and not moved.is_symlink()
+    assert moved.read_bytes() == b"vyos image bytes"
+    assert disk.is_symlink()
+    assert os.path.realpath(disk) == str(moved)
+
+    out = capsys.readouterr().out
+    assert "[1/" in out, "numbered step lines expected on stdout"
+    assert "moving hda.qcow2" in out
+    assert "symlinked back to" in out
+    assert "generating template YAML" in out
+    assert f"log                : {log}" in out
+
+    log_text = log.read_text()
+    assert "importer.step" in log_text
+    assert "run summary" in out
+
+    raw = json.loads(mf.read_text())
+    entry = next(e for e in raw["imported"] if e["dst"].endswith("hda.qcow2"))
+    assert entry["mode"] == "move-symlink"
+    assert entry["symlinked"] is True
+    assert "symlinked back to" in entry["note"]
+
+
+def test_main_copy_only_preserves_sources_as_real_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--copy-only opts out of the #271 default: plain copy, source untouched."""
+    src_root = tmp_path / "opt-unetlab"
+    disk = _seed_qemu_vendor(src_root)
+    dst = tmp_path / "images"
+    mf = tmp_path / "import-manifest.json"
+
+    monkeypatch.setattr("scripts.import_eveng.cli._is_root", lambda: True)
+    monkeypatch.setattr("scripts.import_eveng.cli.resolve_app_owner", _fake_owner)
+
+    rc = main(
+        [
+            "--source", str(src_root),
+            "--dest", str(dst),
+            "--manifest", str(mf),
+            "--templates-dir", "-",
+            "--copy-only",
+            "--log-file", str(tmp_path / "importer.log"),
+        ]
+    )
+    assert rc == 0
+    assert disk.is_file() and not disk.is_symlink()
+    assert (dst / "qemu" / "vyos-1.4" / "hda.qcow2").read_bytes() == b"vyos image bytes"
+
+
+def test_main_json_mode_suppresses_step_lines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--json restores the machine-readable stream and hides the step lines."""
+    src_root = tmp_path / "opt-unetlab"
+    _seed_qemu_vendor(src_root)
+
+    monkeypatch.setattr("scripts.import_eveng.cli._is_root", lambda: False)
+    rc = main(
+        [
+            "--source", str(src_root),
+            "--dest", str(tmp_path / "dst"),
+            "--manifest", str(tmp_path / "m.json"),
+            "--dry-run",
+            "--json",
+            "--log-file", str(tmp_path / "importer.log"),
+        ]
+    )
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "[1/" not in captured.out, "human step lines must be suppressed under --json"
+    assert "run summary" in captured.out
+    assert '"message"' in captured.err, "JSON events expected on stderr under --json"
+
+
+def test_main_dry_run_prints_human_plan_without_touching_dest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """--dry-run narrates the planned move+symlink but mutates nothing."""
+    src_root = tmp_path / "opt-unetlab"
+    disk = _seed_qemu_vendor(src_root)
+    dst = tmp_path / "images"
+
+    monkeypatch.setattr("scripts.import_eveng.cli._is_root", lambda: False)
+    rc = main(
+        [
+            "--source", str(src_root),
+            "--dest", str(dst),
+            "--manifest", str(tmp_path / "m.json"),
+            "--dry-run",
+            "--log-file", str(tmp_path / "importer.log"),
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "would be moving hda.qcow2" in out
+    assert "dry-run — no changes made" in out
+    assert disk.is_file() and not disk.is_symlink()
+    assert not dst.exists()

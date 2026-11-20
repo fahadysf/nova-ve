@@ -12,6 +12,7 @@
     ChevronsLeft,
     ChevronsRight,
     Cpu,
+    ExternalLink,
     Monitor,
     Network as NetworkIcon,
     RefreshCw,
@@ -20,6 +21,7 @@
   import { authStore } from '$lib/stores/auth';
   import { apiGetData, apiRequest, ApiError } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
+  import { buildExternalConsoleUrl, externalConsoleStore } from '$lib/stores/externalConsole';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
   import InfoPanelStack from '$lib/components/canvas/InfoPanelStack.svelte';
@@ -61,6 +63,15 @@
     floating: FloatingWindowState;
   };
   type ConsoleMode = 'tabbed' | 'floating';
+  // #269: advertised external console endpoint (host:port only — the browser
+  // hands the scheme URL to the OS protocol handler, credentials never ride along).
+  type ExternalConsoleInfo = {
+    mode: string;
+    scheme: string;
+    host: string;
+    port: number;
+    console: string;
+  };
   // #245: 'changed' events are action notifications only — lab state lives
   // in the labState store, so no state payloads ride along anymore.
   type CanvasChangeDetail = {
@@ -687,10 +698,51 @@
     consoleWorkspace = { ...consoleWorkspace, tabs, zStack, activeTabId };
   }
 
+  // #269: with external mode on, console actions hand the node's console to
+  // the OS protocol handler (telnet://, vnc://, rdp://) instead of the
+  // embedded workspace. The backend advertises the reachable host:port for
+  // running nodes; any failure falls back to the in-browser console.
+  async function launchExternalConsole(
+    node: NodeData,
+    mode: 'primary' | 'second' = 'primary'
+  ): Promise<boolean> {
+    try {
+      const response = await apiRequest<ExternalConsoleInfo>(
+        `/api/labs/${labId}/nodes/${node.id}/external-console${mode === 'second' ? '?mode=second' : ''}`,
+        { suppressToast: true }
+      );
+      triggerExternalUrl(buildExternalConsoleUrl(response.data));
+      return true;
+    } catch (error) {
+      const reason = error instanceof ApiError ? error.message : 'External console is unavailable.';
+      toastStore.push(`${reason} Opening the in-browser console instead.`, 'info');
+      return false;
+    }
+  }
+
+  function triggerExternalUrl(url: string) {
+    // Navigating the page itself would be heavier than a synthetic anchor
+    // click; the browser shows its own first-click "Open app?" prompt.
+    if (typeof document === 'undefined') return;
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.style.display = 'none';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  }
+
   async function openConsole(node: NodeData, mode: 'primary' | 'second' = 'primary') {
     if (node.status !== 2 || node.transientStatus) {
       toastStore.push('Start the node before opening the HTML5 console.');
       return;
+    }
+
+    if ($externalConsoleStore === 'on') {
+      if (await launchExternalConsole(node, mode)) {
+        return;
+      }
+      // External launch failed — fall through to the embedded console.
     }
 
     const existingTab = consoleWorkspace?.tabs.find(
@@ -734,12 +786,14 @@
     const selectedId = Number((event.currentTarget as HTMLSelectElement).value);
     const node = nodeList.find((candidate) => candidate.id === selectedId);
     if (node) {
-      const existingTab = consoleWorkspace?.tabs.find((tab) => tab.nodeId === node.id);
-      if (existingTab) {
-        replaceConsoleWindow((workspace) => ({ ...workspace, minimized: false, activeTabId: existingTab.id }));
-        await tick();
-        focusGuacamoleWindow(existingTab.id);
-        return;
+      if ($externalConsoleStore !== 'on') {
+        const existingTab = consoleWorkspace?.tabs.find((tab) => tab.nodeId === node.id);
+        if (existingTab) {
+          replaceConsoleWindow((workspace) => ({ ...workspace, minimized: false, activeTabId: existingTab.id }));
+          await tick();
+          focusGuacamoleWindow(existingTab.id);
+          return;
+        }
       }
 
       await openConsole(node);
@@ -1022,6 +1076,24 @@
         </div>
 
         <div class="hidden shrink-0 items-center gap-2 md:flex">
+          <div class="flex flex-col gap-1 rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">External console</div>
+            <button
+              type="button"
+              data-testid="external-console-toggle"
+              aria-pressed={$externalConsoleStore === 'on'}
+              title="Launch consoles in desktop apps via telnet://, vnc:// or rdp:// links. The OS needs a client registered for the scheme; the first click shows the browser's allow prompt."
+              class={`inline-flex items-center justify-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] transition ${
+                $externalConsoleStore === 'on'
+                  ? 'border-blue-500/60 bg-blue-500/20 text-white'
+                  : 'border-gray-800 bg-gray-900/80 text-gray-400 hover:text-white'
+              }`}
+              on:click={() => externalConsoleStore.toggle()}
+            >
+              <ExternalLink class="h-3 w-3" aria-hidden="true" />
+              External
+            </button>
+          </div>
           <div class="flex flex-col gap-1 rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Console layout</div>
             <div class="inline-flex items-center rounded-md border border-gray-800 bg-gray-900/80 p-0.5">

@@ -194,3 +194,46 @@ def test_docker_build_failure_records_error_without_aborting(tmp_path: Path) -> 
     assert "docker build failed" in manifest.errors[0].error
     # No marker written because build failed.
     assert not (dst / "docker" / "broken" / "image.txt").exists()
+
+
+# ---- move + symlink default (#271) ---------------------------------------
+
+
+def test_move_symlink_run_moves_images_and_keeps_shared_iourc_as_copy(tmp_path: Path) -> None:
+    """MOVE_SYMLINK run: images moved + symlinked back; shared iourc stays a copy."""
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    vendor = src / "addons" / "qemu" / "vy"
+    _seed(vendor / "hda.qcow2", b"vyos")
+    _seed(src / "addons" / "dynamips" / "c7200.image", b"c7200")
+    _seed(src / "addons" / "iol" / "bin" / "iol.bin", b"iol")
+    _seed(src / "addons" / "iol" / "bin" / "iourc", b"license")
+
+    items = walk_all(src, dst)
+    manifest = ImportManifest()
+    run_migration(
+        items, options=MigrateOptions(mode=CopyMode.MOVE_SYMLINK), manifest=manifest
+    )
+
+    moved_pairs = [
+        (vendor / "hda.qcow2", dst / "qemu" / "vy" / "hda.qcow2"),
+        (src / "addons" / "dynamips" / "c7200.image", dst / "dynamips" / "c7200" / "c7200.image"),
+        (src / "addons" / "iol" / "bin" / "iol.bin", dst / "iol" / "iol" / "iol.bin"),
+    ]
+    for original, moved in moved_pairs:
+        assert moved.is_file() and not moved.is_symlink()
+        assert original.is_symlink(), f"{original} must be symlinked back at the EVE-NG path"
+        assert os.path.realpath(original) == str(moved)
+
+    # iourc is shared metadata: plain copy, the source file stays real so
+    # sibling IOL items can still read it.
+    iourc_src = src / "addons" / "iol" / "bin" / "iourc"
+    assert iourc_src.is_file() and not iourc_src.is_symlink()
+    assert (dst / "iol" / "iol" / "iourc").read_bytes() == b"license"
+
+    iourc_entry = next(e for e in manifest.imported if e.dst.endswith("iourc"))
+    assert iourc_entry.mode == "default"
+    assert iourc_entry.symlinked is False
+    moved_entry = next(e for e in manifest.imported if e.dst.endswith("hda.qcow2"))
+    assert moved_entry.mode == "move-symlink"
+    assert moved_entry.symlinked is True

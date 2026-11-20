@@ -35,6 +35,7 @@ EDITABLE_SETTING_KEYS = (
     "DISCOVERY_CADENCE_SECONDS",
     "NAT_CLOUD_POOL",
     "SESSION_MAX_AGE",
+    "EXTERNAL_CONSOLE_HOST",
 )
 
 
@@ -68,6 +69,21 @@ def _validate_override(key: str, value) -> object:
         if ivalue < 300:
             raise ValueError("SESSION_MAX_AGE must be at least 300 seconds.")
         return ivalue
+    if key == "EXTERNAL_CONSOLE_HOST":
+        # External console launch (#269): the host advertised verbatim in
+        # telnet://, vnc:// and rdp:// URLs. Must be a bare hostname or IPv4
+        # address — no scheme, port, path, or userinfo — so the emitted
+        # host:port URLs stay unambiguous. An empty value persists as an
+        # explicit "feature disabled" override.
+        text_value = str(value).strip()
+        if not text_value:
+            return ""
+        if any(char in text_value for char in ("/", ":", "@", " ")) or not text_value.replace(".", "").replace("-", "").isalnum():
+            raise ValueError(
+                "EXTERNAL_CONSOLE_HOST must be a bare hostname or IPv4 address "
+                "(no scheme, port, path, or credentials)."
+            )
+        return text_value
     raise ValueError(f"Unsupported setting: {key}")
 
 
@@ -158,6 +174,16 @@ async def get_settings_route(
                 "nat_cloud_pool": overrides.get("NAT_CLOUD_POOL", settings.NAT_CLOUD_POOL),
                 "nat_cloud_pool_effective": settings.NAT_CLOUD_POOL,
                 "docker_host": settings.DOCKER_HOST,
+                # External console launch (#269): empty disables the feature;
+                # when set it is advertised verbatim in telnet://, vnc:// and
+                # rdp:// URLs and newly started console listeners bind the
+                # wildcard address (see config.py for the exposure notes).
+                "external_console_host": overrides.get(
+                    "EXTERNAL_CONSOLE_HOST", getattr(settings, "EXTERNAL_CONSOLE_HOST", "")
+                ),
+                "external_console_host_effective": getattr(
+                    settings, "EXTERNAL_CONSOLE_HOST", ""
+                ),
             },
             "reconciliation": {
                 "discovery_cadence_seconds": overrides.get(
@@ -186,6 +212,7 @@ class SettingsUpdateBody(BaseModel):
     DISCOVERY_CADENCE_SECONDS: int | None = None
     NAT_CLOUD_POOL: str | None = None
     SESSION_MAX_AGE: int | None = None
+    EXTERNAL_CONSOLE_HOST: str | None = None
 
 
 @router.put("/system/settings")
