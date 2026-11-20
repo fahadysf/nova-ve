@@ -9,6 +9,7 @@ from typing import Any, Iterator
 import yaml
 
 from app.config import get_settings
+from app.schemas.node import validate_second_console_mode_for_type
 
 
 _logger = logging.getLogger("nova-ve.template_service")
@@ -755,6 +756,32 @@ class TemplateError(Exception):
     pass
 
 
+SECOND_CONSOLE_MODES = ("telnet", "vnc", "rdp")
+
+
+def _validate_second_console(payload: Any, template_type: str, console_type: str, source: str) -> str | None:
+    """Normalize + validate a template's ``second_console`` declaration (#268).
+
+    ``None``/empty clears it. The mode must be one of the standard modes and
+    must compose with the primary (mirror of the node-level rule so invalid
+    combinations are rejected at template load and template save, not only
+    at node create).
+    """
+    if payload is None or (isinstance(payload, str) and not payload.strip()):
+        return None
+    if not isinstance(payload, str) or payload.strip() not in SECOND_CONSOLE_MODES:
+        modes = ", ".join(SECOND_CONSOLE_MODES)
+        raise TemplateError(
+            f"second_console on {source} must be one of: {modes} (or empty for no secondary console)."
+        )
+    second_console = payload.strip()
+    try:
+        validate_second_console_mode_for_type(template_type, console_type, second_console)
+    except ValueError as exc:
+        raise TemplateError(f"second_console on {source}: {exc}")
+    return second_console
+
+
 def _validate_image_aliases(payload: Any, source: str) -> list[str]:
     if payload is None:
         return []
@@ -909,6 +936,9 @@ class TemplateDefinition:
     ethernet: int
     console_type: str
     cpulimit: int
+    # Optional second console mode declared on the template (#268); nodes
+    # created from it inherit the value and get a second console session.
+    second_console: str | None = None
     extras: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
     interface_naming: dict[str, Any] | None = None
@@ -934,6 +964,7 @@ class TemplateDefinition:
             "ram": self.ram,
             "ethernet": self.ethernet,
             "console_type": self.console_type,
+            "second_console": self.second_console,
             "cpulimit": self.cpulimit,
             "extras": dict(self.extras),
             "capabilities": dict(self.capabilities),
@@ -1095,6 +1126,7 @@ class TemplateService:
                         "ram": template.ram,
                         "ethernet": template.ethernet,
                         "console_type": template.console_type,
+                        "second_console": template.second_console,
                         "delay": 0,
                         "cpulimit": template.cpulimit,
                         "extras": defaults_extras,
@@ -1312,6 +1344,15 @@ class TemplateService:
             image_aliases = _validate_image_aliases(
                 payload.get("image_aliases"), source=str(template_path)
             )
+            resolved_console_type = str(
+                payload.get("console_type") or self._default_console_type(template_type)
+            )
+            second_console = _validate_second_console(
+                payload.get("second_console"),
+                template_type,
+                resolved_console_type,
+                source=str(template_path),
+            )
             templates.append(
                 TemplateDefinition(
                     key=key,
@@ -1322,7 +1363,8 @@ class TemplateService:
                     cpu=int(payload.get("cpu", 1)),
                     ram=int(payload.get("ram", 1024)),
                     ethernet=int(payload.get("ethernet", 1)),
-                    console_type=str(payload.get("console_type") or self._default_console_type(template_type)),
+                    console_type=resolved_console_type,
+                    second_console=second_console,
                     cpulimit=int(payload.get("cpulimit", 1)),
                     extras=yaml_extras,
                     raw=payload,
@@ -1376,6 +1418,15 @@ class TemplateService:
                     child_caps = _validate_capabilities(
                         child.get("capabilities"), child_kind, source=source
                     )
+                    child_console_type = str(
+                        child.get("console") or self._default_console_type(child_kind)
+                    )
+                    child_second_console = _validate_second_console(
+                        child.get("second_console"),
+                        child_kind,
+                        child_console_type,
+                        source=source,
+                    )
                     yaml_extras = (
                         dict(child.get("extras") or {})
                         if isinstance(child.get("extras"), dict)
@@ -1393,9 +1444,8 @@ class TemplateService:
                             cpu=_safe_paired_child_int(child, "cpu", 1),
                             ram=_safe_paired_child_int(child, "ram", 1024),
                             ethernet=_safe_paired_child_int(child, "ethernet", 1),
-                            console_type=str(
-                                child.get("console") or self._default_console_type(child_kind)
-                            ),
+                            console_type=child_console_type,
+                            second_console=child_second_console,
                             cpulimit=_safe_paired_child_int(child, "cpulimit", 1),
                             extras=yaml_extras,
                             raw=dict(child),

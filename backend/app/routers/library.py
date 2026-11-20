@@ -20,6 +20,7 @@ import time
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
+from typing import Literal
 
 from app.dependencies import get_current_admin
 from app.openapi import COMMON_RESPONSES
@@ -55,6 +56,9 @@ class TemplateEditBody(BaseModel):
     ram: int | None = Field(default=None, ge=1)
     ethernet: int | None = Field(default=None, ge=1)
     console_type: str | None = None
+    # Explicit null clears the secondary console; the edit service re-runs
+    # the primary/secondary combination check on save.
+    second_console: Literal["telnet", "vnc", "rdp"] | None = None
     cpulimit: int | None = Field(default=None, ge=1)
     image_aliases: list[str] | None = None
 
@@ -78,6 +82,7 @@ async def list_library_templates(
                 "ram": template["ram"],
                 "ethernet": template["ethernet"],
                 "console_type": template["console_type"],
+                "second_console": template.get("second_console"),
                 "cpulimit": template["cpulimit"],
                 "image_aliases": template["image_aliases"],
                 "capabilities": template["capabilities"],

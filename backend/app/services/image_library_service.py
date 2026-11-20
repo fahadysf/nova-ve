@@ -27,7 +27,12 @@ from typing import Any
 import yaml
 
 from app.config import get_settings
-from app.services.template_service import TemplateError, TemplateService, _matches_template_image_name
+from app.services.template_service import (
+    SECOND_CONSOLE_MODES,
+    TemplateError,
+    TemplateService,
+    _matches_template_image_name,
+)
 
 FILESYSTEM_IMAGE_TYPES = ("qemu", "iol", "dynamips")
 CHECKSUM_CACHE_FILENAME = "image-checksums.json"
@@ -40,6 +45,7 @@ TEMPLATE_EDITABLE_FIELDS = {
     "ram",
     "ethernet",
     "console_type",
+    "second_console",
     "cpulimit",
     "image_aliases",
 }
@@ -344,6 +350,19 @@ class ImageLibraryService:
                 ):
                     raise TemplateUpdateInvalid("image_aliases must be a list of strings.")
                 clean[field] = [item.strip() for item in value if item.strip()]
+            elif field == "second_console":
+                # ``None`` clears the secondary console; otherwise it must be a
+                # supported mode. Combination validity is re-checked by the
+                # reload below, which runs the same rule the loader applies.
+                if value is None:
+                    clean[field] = None
+                elif isinstance(value, str) and value.strip() in SECOND_CONSOLE_MODES:
+                    clean[field] = value.strip()
+                else:
+                    modes = ", ".join(SECOND_CONSOLE_MODES)
+                    raise TemplateUpdateInvalid(
+                        f"second_console must be one of: {modes} (or null to clear)."
+                    )
             else:
                 if not isinstance(value, str) or not value.strip():
                     raise TemplateUpdateInvalid(f"{field} must be a non-empty string.")
