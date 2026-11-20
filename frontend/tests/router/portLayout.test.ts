@@ -400,3 +400,26 @@ describe('portLayout.bestRouteAwarePortPosition — no backward-hugging ports (#
     expect(result.side).toBe('bottom');
   });
 });
+
+describe('portLayout.bestRouteAwarePortPosition — never flees backwards (#258)', () => {
+  // Live user arrangement: net-bridge moved so iol-rtr overlaps its right
+  // exit AND the projected bottom corner. Right and bottom are both
+  // constricted; top/left are clear but point AWAY from the bottom-right
+  // target — the port must keep the gap-facing right side instead of
+  // relocating to top.
+  const NET = (x: number, y: number) => ({ x, y, w: 130, h: 50 });
+  const NODE = (x: number, y: number) => ({ x, y, w: 152, h: 58 });
+
+  const netBridge = NET(236, 88);
+  const vmLinux = NODE(518, 242);
+  const overlappingIolRtr = NODE(356, 105);
+  const ctrAlpine = NODE(114, 225);
+
+  it('keeps the facing side when every forward side is constricted', () => {
+    const result = bestRouteAwarePortPosition(netBridge, vmLinux, [
+      overlappingIolRtr,
+      ctrAlpine,
+    ]);
+    expect(result.side).toBe('right');
+  });
+});

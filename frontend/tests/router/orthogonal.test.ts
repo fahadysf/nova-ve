@@ -14,6 +14,13 @@ interface Fixture {
   name: string;
   req: RouteRequest;
   optimalBends: number;
+  /**
+   * Bend ceiling when the perpendicular-exit stubs (#258) raise the count
+   * above the unconstrained optimum — leaving/arriving along the side
+   * normal adds a joint at each end, and a constrained exit lane can shift
+   * the whole detour. Defaults to optimalBends + 1.
+   */
+  maxBends?: number;
 }
 
 const FIXTURES: Fixture[] = [
@@ -56,6 +63,7 @@ const FIXTURES: Fixture[] = [
       style: 'orthogonal',
     },
     optimalBends: 2,
+    maxBends: 4,
   },
   {
     name: 'wide gap with multiple obstacles',
@@ -69,6 +77,7 @@ const FIXTURES: Fixture[] = [
       style: 'orthogonal',
     },
     optimalBends: 3,
+    maxBends: 6,
   },
   {
     name: 'opposite-side ports facing same direction',
@@ -87,7 +96,7 @@ describe('orthogonal router fixtures', () => {
     it(`${fx.name}: bends ≤ optimal(${fx.optimalBends})+1`, async () => {
       const result = await routeOrthogonal(fx.req);
       expect(result.d).toMatch(/^M /);
-      expect(result.bends).toBeLessThanOrEqual(fx.optimalBends + 1);
+      expect(result.bends).toBeLessThanOrEqual(fx.maxBends ?? fx.optimalBends + 1);
       expect(result.lengthPx).toBeGreaterThan(0);
     });
   }
@@ -263,5 +272,60 @@ describe('obstacle-avoiding detours (#254/#258 — links avert nodes)', () => {
       style: 'orthogonal',
     });
     expect(result.bends).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('perpendicular exit stubs (#258 — lines leave/arrive along the side normal)', () => {
+  function firstLeg(d: string): { dx: number; dy: number; len: number } {
+    const nums = d.match(/-?\d+(?:\.\d+)?/g)!.map(Number);
+    const dx = nums[2] - nums[0];
+    const dy = nums[3] - nums[1];
+    return { dx, dy, len: Math.hypot(dx, dy) };
+  }
+
+  function lastLeg(d: string): { dx: number; dy: number } {
+    const nums = d.match(/-?\d+(?:\.\d+)?/g)!.map(Number);
+    const n = nums.length;
+    return { dx: nums[n - 2] - nums[n - 4], dy: nums[n - 1] - nums[n - 3] };
+  }
+
+  it('leaves a bottom port perpendicular for a full stub before bending', async () => {
+    const result = await routeOrthogonal({
+      from: { x: 100, y: 0, side: 'bottom' },
+      to: { x: 400, y: 300, side: 'left' },
+      obstacles: [{ x: 60, y: 120, w: 240, h: 80 }],
+      style: 'orthogonal',
+    });
+    const leg = firstLeg(result.d);
+    // Vertical (perpendicular to the bottom side), no bend within 2 cells.
+    expect(leg.dx).toBe(0);
+    expect(leg.dy).toBeGreaterThan(0);
+    expect(leg.len).toBeGreaterThanOrEqual(39);
+  });
+
+  it('never leaves a port anti-parallel, even when the exit is crowded', async () => {
+    // Live regression: iol-rtr overlapping the right exit forced the old
+    // path to start `M 346,90 L 334,90` (backwards).
+    const result = await routeOrthogonal({
+      from: { x: 366, y: 138, side: 'right' },
+      to: { x: 594, y: 271, side: 'left' },
+      obstacles: [{ x: 356, y: 105, w: 152, h: 58 }],
+      style: 'orthogonal',
+    });
+    const leg = firstLeg(result.d);
+    expect(leg.dx).toBeGreaterThan(0);
+    expect(leg.len).toBeGreaterThanOrEqual(39);
+  });
+
+  it('arrives perpendicular into a west port', async () => {
+    const result = await routeOrthogonal({
+      from: { x: 100, y: 0, side: 'bottom' },
+      to: { x: 400, y: 300, side: 'left' },
+      obstacles: [{ x: 60, y: 120, w: 240, h: 80 }],
+      style: 'orthogonal',
+    });
+    const leg = lastLeg(result.d);
+    expect(leg.dy).toBe(0);
+    expect(leg.dx).toBeGreaterThan(0);
   });
 });

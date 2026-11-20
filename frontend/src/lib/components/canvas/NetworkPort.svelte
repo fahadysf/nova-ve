@@ -219,16 +219,21 @@
   on:mouseenter={handleMouseEnter}
   on:mouseleave={handleMouseLeave}
 >
+  <!-- Handles centered exactly on the perimeter point: Svelte Flow anchors
+       edge endpoints at the measured handle center, and its default
+       per-side offsets sit ~6px outside the port circle. -->
   <Handle
     type="source"
     position={xyPosition}
     id={handleId}
+    style="left: 50%; top: 50%; transform: translate(-50%, -50%);"
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
   <Handle
     type="target"
     position={xyPosition}
     id={handleId}
+    style="left: 50%; top: 50%; transform: translate(-50%, -50%);"
     class="!h-1 !w-1 !border-0 !bg-transparent !opacity-0 !pointer-events-none"
   />
   <span
