@@ -28,6 +28,7 @@ describe('AppShell (#260)', () => {
     render(AppShell, { props: { pathname: '/labs' } });
 
     expect(screen.getByTestId('app-topbar')).toBeInTheDocument();
+    expect(screen.getByTestId('app-brand')).toBeInTheDocument();
     expect(screen.getByTestId('app-logout')).toBeInTheDocument();
     expect(screen.getByText('admin')).toBeInTheDocument();
     expect(screen.getByTestId('nav-labs')).toBeInTheDocument();
@@ -38,7 +39,7 @@ describe('AppShell (#260)', () => {
     render(AppShell, { props: { pathname: '/labs' } });
 
     expect(screen.getByTestId('nav-users')).toBeInTheDocument();
-    expect(screen.getByTestId('nav-running-labs')).toBeInTheDocument();
+    expect(screen.getByTestId('nav-lab-management')).toBeInTheDocument();
     expect(screen.getByTestId('nav-running-nodes')).toBeInTheDocument();
     expect(screen.getByTestId('nav-images-templates')).toBeInTheDocument();
     expect(screen.getByTestId('nav-status')).toBeInTheDocument();
@@ -51,6 +52,7 @@ describe('AppShell (#260)', () => {
     render(AppShell, { props: { pathname: '/labs' } });
 
     expect(screen.getByTestId('nav-labs')).toBeInTheDocument();
+    expect(screen.getByTestId('nav-lab-management')).toBeInTheDocument();
     expect(screen.queryByTestId('nav-users')).toBeNull();
     expect(screen.queryByTestId('nav-images-templates')).toBeNull();
     expect(screen.queryByTestId('nav-status')).toBeNull();
