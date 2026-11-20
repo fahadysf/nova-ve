@@ -11,17 +11,48 @@ export interface ApiResponse<T> {
   eve_expire?: string;
 }
 
+export type UserRole = 'admin' | 'editor' | 'user';
+
 export interface UserRead {
   username: string;
   email?: string | null;
   name?: string | null;
-  role: 'admin' | 'user';
+  role: UserRole;
   html5?: boolean;
   extauth?: string | null;
   online?: number | boolean;
   ip?: string | null;
   lab?: string | null;
+  /** Quotas (#261): -1 = unlimited. RAM in MB. */
+  cpu?: number;
+  ram?: number;
+  sat?: number;
+  /** Account lifecycle epoch seconds; -1 = unset. */
+  expiration?: number;
+  datestart?: number;
+  diskusage?: number;
+  /** Tenant folder root (#261): non-admins are scoped to this lab root. */
+  folder?: string | null;
+  /** Tenant (pod) id. */
+  pod?: number;
 }
+
+// A type alias (not an interface) so it satisfies Record<string, unknown>
+// for apiRequest bodies without call-site spreads.
+export type UserWritePayload = {
+  email?: string;
+  name?: string;
+  role?: UserRole;
+  html5?: boolean;
+  password?: string;
+  cpu?: number;
+  ram?: number;
+  sat?: number;
+  expiration?: number;
+  datestart?: number;
+  folder?: string;
+  pod?: number;
+};
 
 export type AuthLoginResponse = UserRead;
 

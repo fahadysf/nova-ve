@@ -93,7 +93,12 @@
           {$authStore.user.role}
         </span>
       {/if}
-      <span class="text-[13px] text-gray-400">{userLabel}</span>
+      <a
+        href="/profile"
+        class="text-[13px] text-gray-400 transition hover:text-gray-100"
+        title="Open profile"
+        data-testid="app-profile-link"
+      >{userLabel}</a>
       <button
         class="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12px] text-gray-400 transition hover:bg-gray-800/70 hover:text-red-300"
         on:click={handleLogout}
