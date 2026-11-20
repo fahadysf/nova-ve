@@ -206,3 +206,62 @@ describe('facing-port centered Z + sub-pixel seam merge (#254)', () => {
     expect(mergeSubPixelPoints(pts)).toEqual(pts);
   });
 });
+
+describe('obstacle-avoiding detours (#254/#258 — links avert nodes)', () => {
+  // net-bridge→vm-linux regression: a blocked facing corridor must fall
+  // through to A* and add joints around the box instead of cutting the
+  // centered Z straight through it.
+  const OBSTACLE = { x: 150, y: 60, w: 100, h: 80 };
+
+  function pathPoints(d: string): Array<{ x: number; y: number }> {
+    const nums = d.match(/-?\d+(?:\.\d+)?/g)!.map(Number);
+    const pts: Array<{ x: number; y: number }> = [];
+    for (let i = 0; i < nums.length; i += 2) pts.push({ x: nums[i], y: nums[i + 1] });
+    return pts;
+  }
+
+  function segmentClearOfBox(
+    a: { x: number; y: number },
+    b: { x: number; y: number },
+    clearance: number
+  ): boolean {
+    const minX = Math.min(a.x, b.x);
+    const maxX = Math.max(a.x, b.x);
+    const minY = Math.min(a.y, b.y);
+    const maxY = Math.max(a.y, b.y);
+    return (
+      maxX <= OBSTACLE.x - clearance ||
+      minX >= OBSTACLE.x + OBSTACLE.w + clearance ||
+      maxY <= OBSTACLE.y - clearance ||
+      minY >= OBSTACLE.y + OBSTACLE.h + clearance
+    );
+  }
+
+  it('detours around an obstacle blocking the facing corridor', async () => {
+    const result = await routeOrthogonal({
+      from: { x: 0, y: 100, side: 'right' },
+      to: { x: 400, y: 100, side: 'left' },
+      obstacles: [OBSTACLE],
+      style: 'orthogonal',
+    });
+
+    // The centered-Z fast path would be a 2-bend route through the box.
+    expect(result.bends).toBeGreaterThan(2);
+    const pts = pathPoints(result.d);
+    expect(pts.length).toBeGreaterThan(2);
+    for (let i = 1; i < pts.length; i += 1) {
+      // A* keeps PORT_CLEARANCE=12px inflation; assert a conservative 6px.
+      expect(segmentClearOfBox(pts[i - 1], pts[i], 6)).toBe(true);
+    }
+  });
+
+  it('still takes the centered-Z fast path when the corridor is clear', async () => {
+    const result = await routeOrthogonal({
+      from: { x: 0, y: 100, side: 'right' },
+      to: { x: 400, y: 60, side: 'left' },
+      obstacles: [{ x: 100, y: 200, w: 200, h: 80 }],
+      style: 'orthogonal',
+    });
+    expect(result.bends).toBeLessThanOrEqual(2);
+  });
+});

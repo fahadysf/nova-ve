@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   assignNetworkSlots,
+  attachRouteObstacles,
   buildNetworkSlotMap,
   deriveEdges,
   parseIfaceInterfaceIndex,
@@ -549,5 +550,67 @@ describe('canvasEdges.parseIfaceInterfaceIndex', () => {
   it('returns null when the iface form is malformed', () => {
     expect(parseIfaceInterfaceIndex('nve12abXX')).toBeNull();
     expect(parseIfaceInterfaceIndex('nveXi3')).toBeNull();
+  });
+});
+
+describe('canvasEdges.attachRouteObstacles (#254/#258)', () => {
+  const boxes = new Map([
+    ['node1', { x: 0, y: 0, w: 100, h: 40 }],
+    ['node2', { x: 300, y: 0, w: 100, h: 40 }],
+    ['network3', { x: 150, y: 200, w: 140, h: 44 }],
+  ]);
+
+  it('attaches every box except the edge endpoints', () => {
+    const out = attachRouteObstacles(
+      [
+        {
+          id: 'link:1',
+          source: 'node1',
+          target: 'network3',
+          data: { label: '' },
+        },
+      ] as unknown as Parameters<typeof attachRouteObstacles>[0],
+      boxes
+    );
+    expect(out[0].data?.obstacles).toEqual([boxes.get('node2')]);
+  });
+
+  it('excludes both endpoints of node-to-node pair edges', () => {
+    const out = attachRouteObstacles(
+      [
+        {
+          id: 'pair:net9',
+          source: 'node1',
+          target: 'node2',
+          data: {},
+        },
+      ] as unknown as Parameters<typeof attachRouteObstacles>[0],
+      boxes
+    );
+    expect(out[0].data?.obstacles).toEqual([boxes.get('network3')]);
+  });
+
+  it('creates the data bag when the edge has none', () => {
+    const out = attachRouteObstacles(
+      [
+        { id: 'x', source: 'node1', target: 'node2' },
+      ] as unknown as Parameters<typeof attachRouteObstacles>[0],
+      boxes
+    );
+    expect(out[0].data?.obstacles).toHaveLength(1);
+  });
+
+  it('returns an empty obstacle list for a two-box world reduced to nothing', () => {
+    const two = new Map([
+      ['node1', { x: 0, y: 0, w: 100, h: 40 }],
+      ['node2', { x: 300, y: 0, w: 100, h: 40 }],
+    ]);
+    const out = attachRouteObstacles(
+      [
+        { id: 'pair:net9', source: 'node1', target: 'node2', data: {} },
+      ] as unknown as Parameters<typeof attachRouteObstacles>[0],
+      two
+    );
+    expect(out[0].data?.obstacles).toEqual([]);
   });
 });

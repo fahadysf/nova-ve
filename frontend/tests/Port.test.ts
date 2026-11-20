@@ -433,3 +433,43 @@ describe('Port (US-079)', () => {
     }
   });
 });
+
+describe('Port pinned label orientation (#254)', () => {
+  const connectedInterface: NodeInterface = {
+    index: 0,
+    name: 'eth0',
+    planned_mac: null,
+    network_id: 9,
+  };
+
+  function pillStyleFor(side: 'top' | 'right' | 'bottom' | 'left'): string {
+    const { container } = render(Port, {
+      props: {
+        interfaceData: connectedInterface,
+        position: { side, offset: 0.5 },
+        nodeId: 7,
+        interfaceIndex: 0,
+        connected: true,
+      },
+    });
+    const pill = container.querySelector('[data-testid="port-pinned-label"]');
+    if (!pill) throw new Error(`pinned label not rendered for side ${side}`);
+    return pill.getAttribute('style') ?? '';
+  }
+
+  it('renders the pill vertical on north ports', () => {
+    expect(pillStyleFor('top')).toContain('writing-mode: vertical-rl');
+  });
+
+  it('renders the pill vertical on south ports', () => {
+    expect(pillStyleFor('bottom')).toContain('writing-mode: vertical-rl');
+  });
+
+  it('renders the pill horizontal on east ports', () => {
+    expect(pillStyleFor('right')).not.toContain('writing-mode');
+  });
+
+  it('renders the pill horizontal on west ports', () => {
+    expect(pillStyleFor('left')).not.toContain('writing-mode');
+  });
+});

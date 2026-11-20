@@ -53,10 +53,11 @@
     separatePortPositions,
     type NodeBox,
   } from '$lib/services/portLayout';
+  import type { Obstacle } from '$lib/services/router';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { labState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
-  import { deriveEdges, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
+  import { deriveEdges, attachRouteObstacles, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -811,7 +812,27 @@
       }
     }
 
-    return deriveEdges($labState.links, $labState.defaults, discoveredList, divergentByLinkId, $labState.networks);
+    // Obstacle-avoiding orthogonal routes (#254/#258): hand every edge the
+    // other cards' boxes so the router adds joints and detours around them
+    // instead of passing underneath. Hidden implicit bridges stay
+    // non-obstacles — nothing is drawn there to avoid.
+    const routeObstacles = new Map<string, Obstacle>();
+    for (const node of Object.values($labState.nodes)) {
+      routeObstacles.set(`node${node.id}`, nodeBox(node.id)!);
+    }
+    for (const network of Object.values($labState.networks)) {
+      const networkLinkCount = $labState.links.filter(
+        (link) => link?.id && link.to?.network_id === network.id
+      ).length;
+      const forceVisible = network.implicit === true && networkLinkCount !== 2;
+      if (!network.visibility && !forceVisible) continue;
+      routeObstacles.set(`network${network.id}`, networkBox(network.id)!);
+    }
+
+    return attachRouteObstacles(
+      deriveEdges($labState.links, $labState.defaults, discoveredList, divergentByLinkId, $labState.networks),
+      routeObstacles
+    );
   }
 
   $: {

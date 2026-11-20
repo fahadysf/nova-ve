@@ -102,16 +102,20 @@
   })();
 
   $: pinnedLabelStyle = (() => {
+    // North/south ports get a vertical pill (text reads top→bottom), east/
+    // west ports a horizontal one (#254) — the pill hugs the link tangent.
+    const vertical = position.side === 'top' || position.side === 'bottom';
+    const writingMode = vertical ? 'writing-mode: vertical-rl;' : '';
     switch (position.side) {
       case 'top':
-        return 'bottom: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);';
+        return `${writingMode} bottom: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);`;
       case 'right':
-        return 'left: calc(100% + 6px); top: 50%; transform: translate(0, -50%);';
+        return `${writingMode} left: calc(100% + 6px); top: 50%; transform: translate(0, -50%);`;
       case 'bottom':
-        return 'top: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);';
+        return `${writingMode} top: calc(100% + 6px); left: 50%; transform: translate(-50%, 0);`;
       case 'left':
       default:
-        return 'right: calc(100% + 6px); top: 50%; transform: translate(0, -50%);';
+        return `${writingMode} right: calc(100% + 6px); top: 50%; transform: translate(0, -50%);`;
     }
   })();
 
