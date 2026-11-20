@@ -3185,3 +3185,189 @@ async def test_qemu_start_binds_vnc_wildcard_when_external_host_set(
     assert any(arg == "0.0.0.0:0" for arg in vnc_values), vnc_values
 
 
+# ---------------------------------------------------------------------------
+# External console endpoint (#269): GET /api/labs/{lab}/nodes/{id}/external-console
+# ---------------------------------------------------------------------------
+def _seed_runtime(settings, lab_id: str, node_id: int, **extra) -> None:
+    """Inject a live runtime record for the external-console endpoint tests."""
+    runtime_dir = Path(settings.TMP_DIR) / "node-runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    runtime = {
+        "lab_id": lab_id,
+        "node_id": node_id,
+        "pid": 999999,
+        "pid_create_time": 111.0,
+        **extra,
+    }
+    with NodeRuntimeService._lock:
+        NodeRuntimeService._registry[f"{lab_id}:{node_id}"] = runtime
+        NodeRuntimeService._loaded = True
+    (runtime_dir / f"{lab_id}-{node_id}.json").write_text(json.dumps(runtime))
+
+
+def _enable_external_console(monkeypatch, settings, host: str = "192.168.7.9") -> None:
+    monkeypatch.setattr(settings, "EXTERNAL_CONSOLE_HOST", host, raising=False)
+    monkeypatch.setattr("app.routers.labs.get_settings", lambda: settings)
+
+
+def _live_runtime(monkeypatch) -> None:
+    monkeypatch.setattr(
+        NodeRuntimeService, "_is_runtime_alive", lambda self, runtime: True
+    )
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_emits_telnet_link(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        mode="primary",
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    data = response["data"]
+    assert data == {
+        "mode": "primary",
+        "scheme": "telnet",
+        "host": "192.168.7.9",
+        "port": 47501,
+        "console": "telnet",
+    }
+    # host:port only — the URL surface must never embed credentials.
+    assert "password" not in json.dumps(response).lower()
+    assert "@" not in json.dumps(data)
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_emits_vnc_link(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="vnc", console_port=5902)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    assert response["data"]["scheme"] == "vnc"
+    assert response["data"]["port"] == 5902
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_emits_rdp_link_for_proxy_backed_docker_node(
+    monkeypatch, patched_settings, sample_lab
+):
+    """Running rdp-mode nodes are docker-backed and proxy-fronted: the
+    endpoint advertises the proxy's externally reachable host:port."""
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_alive", lambda pid: True
+    )
+    _seed_runtime(
+        patched_settings,
+        "lab-123",
+        1,
+        kind="docker",
+        console="rdp",
+        console_port=47530,
+        console_proxy_pid=12345,
+        container_name="nova-ve-lab-123-1",
+    )
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 200
+    assert response["data"]["scheme"] == "rdp"
+    assert response["data"]["host"] == "192.168.7.9"
+    assert response["data"]["port"] == 47530
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_disabled_without_external_host(
+    monkeypatch, patched_settings, sample_lab
+):
+    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
+    monkeypatch.setattr("app.routers.labs.get_settings", lambda: patched_settings)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 400
+    assert "disabled" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_requires_registry_liveness(
+    monkeypatch, patched_settings, sample_lab
+):
+    """A stale persisted status=2 must not yield a link — the runtime
+    registry is the authority."""
+    _enable_external_console(monkeypatch, patched_settings)
+
+    response = await labs.node_external_console(
+        "sample.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+
+    assert response["code"] == 400
+    assert "not running" in response["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_rejects_secondary_and_unknown_modes(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+    user = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
+
+    response = await labs.node_external_console("sample.json", 1, mode="second", current_user=user)
+    assert response["code"] == 400
+    assert "secondary console" in response["message"].lower()
+
+    response = await labs.node_external_console("sample.json", 1, mode="tertiary", current_user=user)
+    assert response["code"] == 422
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_scopes_access_and_missing_lab(
+    monkeypatch, patched_settings, sample_lab
+):
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    _seed_runtime(patched_settings, "lab-123", 1, kind="qemu", console="telnet", console_port=47501)
+
+    outsider = SimpleNamespace(username="trainee", role="user", html5=True, folder="/trainee")
+    response = await labs.node_external_console(
+        "sample.json", 1, current_user=outsider
+    )
+    assert response["code"] == 403
+
+    response = await labs.node_external_console(
+        "missing.json",
+        1,
+        current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
+    )
+    assert response["code"] == 404
