@@ -11,6 +11,7 @@
     LocateFixed,
     Lock,
     LockOpen,
+    Map as MapIcon,
     Monitor,
     Pencil,
     Play,
@@ -40,6 +41,7 @@
   import NetworkConfigModal from '$lib/components/canvas/NetworkConfigModal.svelte';
   import PortInfoPopover from '$lib/components/canvas/PortInfoPopover.svelte';
   import { selectedPortInfoStore, type SelectedPortInfo } from '$lib/stores/portInfo';
+  import { canvasPrefs } from '$lib/stores/canvasPrefs';
   import { toastStore } from '$lib/stores/toasts';
   import {
     createLayoutDebouncer,
@@ -2014,7 +2016,32 @@
     }}
   >
     <Background patternColor="#374151" gap={20} />
-    <MiniMap nodeColor={nodeColor} maskColor="rgba(17, 24, 39, 0.7)" class="canvas-minimap" />
+    <!-- #273: the minimap starts collapsed to a small floating box (same
+         style as the top-right legend) and only renders when expanded from
+         that box; the choice persists per user. -->
+    {#if $canvasPrefs.minimapExpanded}
+      <div class="contents" data-testid="minimap-frame">
+        <MiniMap
+          nodeColor={nodeColor}
+          maskColor="rgba(17, 24, 39, 0.7)"
+          class="canvas-minimap canvas-minimap-lifted"
+        />
+      </div>
+    {/if}
+    <Panel position="bottom-right">
+      <button
+        type="button"
+        class="inline-flex items-center gap-1.5 rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs font-normal text-gray-300 shadow-lg shadow-black/20 backdrop-blur transition-colors hover:border-blue-500 hover:text-white"
+        data-testid="minimap-toggle"
+        aria-label={$canvasPrefs.minimapExpanded ? 'Hide minimap' : 'Show minimap'}
+        title={$canvasPrefs.minimapExpanded ? 'Hide minimap' : 'Show minimap'}
+        on:click={() => canvasPrefs.toggleMinimap()}
+      >
+        <MapIcon class="h-3.5 w-3.5 text-gray-400" />
+        <span>Minimap</span>
+        <span class="text-[9px] text-gray-500">{$canvasPrefs.minimapExpanded ? '▾' : '▴'}</span>
+      </button>
+    </Panel>
 
     <Panel position="top-left">
       <div class="rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-500 shadow-lg shadow-black/20">
@@ -2460,6 +2487,11 @@
     border: 1px solid rgb(55 65 81 / 1);
     background: rgb(17 24 39 / 0.92);
     box-shadow: 0 20px 40px -20px rgb(0 0 0 / 0.65);
+  }
+
+  /* #273: the expanded minimap sits above its always-present toggle box. */
+  :global(.canvas-minimap.canvas-minimap-lifted) {
+    bottom: 3.1rem;
   }
 
   :global(.canvas-minimap svg) {
