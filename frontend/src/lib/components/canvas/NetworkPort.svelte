@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher, getContext } from 'svelte';
-  import { Handle, Position } from '@xyflow/svelte';
+  import { Handle, Position, useUpdateNodeInternals } from '@xyflow/svelte';
   import { dragLinkStore, getDragLinkSnapshot, type Side } from '$lib/stores/dragLink';
   import { togglePortInfo } from '$lib/stores/portInfo';
   import { slotHandleId } from '$lib/services/canvasEdges';
@@ -46,6 +46,22 @@
   );
 
   $: handleId = slotHandleId(networkId, slotIndex);
+
+  // Edge endpoints anchor at Svelte Flow's MEASURED handle center; re-measure
+  // whenever the slot moves so paths track relocations exactly (#258). The
+  // hook throws outside a SvelteFlow tree (unit tests) — guard it.
+  const flowNodeId = getContext<string | undefined>('svelteflow__node_id');
+  let updateNodeInternals: ((id: string | string[]) => void) | null = null;
+  try {
+    updateNodeInternals = useUpdateNodeInternals();
+  } catch {
+    updateNodeInternals = null;
+  }
+  $: if (updateNodeInternals && flowNodeId) {
+    void effectiveSide;
+    void effectiveOffset;
+    updateNodeInternals(flowNodeId);
+  }
 
   // Slots are fully automatic (#258): the canvas assigns each link a slot
   // (facing side + min-gap spread); no manual repositioning overrides.
