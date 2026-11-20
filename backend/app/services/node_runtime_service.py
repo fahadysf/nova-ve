@@ -1789,8 +1789,18 @@ class NodeRuntimeService:
             cmd += ["-cpu", cpu_model]
         else:
             cmd += ["-cpu", "max"]
+        # #269: with EXTERNAL_CONSOLE_HOST set, console listeners must be
+        # reachable from operator workstations, so pin an explicit wildcard
+        # bind on freshly started nodes (the bare-host forms leave the bind
+        # address to QEMU defaults). Nodes started while the setting is off
+        # keep their previous binding until restarted.
         if console_mode == "vnc":
-            cmd += ["-vnc", f":{console_port - 5900}"]
+            if self._external_console_enabled():
+                cmd += ["-vnc", f"0.0.0.0:{console_port - 5900}"]
+            else:
+                cmd += ["-vnc", f":{console_port - 5900}"]
+        elif self._external_console_enabled():
+            cmd += ["-serial", f"telnet:0.0.0.0:{console_port},server,nowait"]
         else:
             cmd += ["-serial", f"telnet::{console_port},server,nowait"]
         cmd += ["-qmp", f"unix:{qmp_path},server,nowait"]
@@ -5514,23 +5524,43 @@ class NodeRuntimeService:
         ).hexdigest().upper()
         return f"/html5/#/client/{connection}?token={token}"
 
+    def _console_bind_address(self) -> str:
+        """Address console listeners bind on freshly started nodes.
+
+        Loopback by default. With EXTERNAL_CONSOLE_HOST set (#269), consoles
+        must be reachable from the operator's workstation, so listeners bind
+        the wildcard and the port probe checks the same address — probing
+        loopback would happily hand out a port the wildcard listener cannot
+        use. The external-console endpoint advertises the configured host
+        verbatim; see config.py for the exposure trade-offs.
+        """
+        external_host = str(getattr(get_settings(), "EXTERNAL_CONSOLE_HOST", "") or "")
+        if external_host.strip():
+            return "0.0.0.0"
+        return "127.0.0.1"
+
+    def _external_console_enabled(self) -> bool:
+        """True when EXTERNAL_CONSOLE_HOST is configured (#269)."""
+        return self._console_bind_address() == "0.0.0.0"
+
     def _allocate_console_port(self, console_mode: str) -> int:
+        bind_host = self._console_bind_address()
         if console_mode == "vnc":
             for port in range(5900, 6000):
-                if self._port_available(port):
+                if self._port_available(port, bind_host):
                     return port
             raise NodeRuntimeError("No VNC console ports available")
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind(("127.0.0.1", 0))
+            sock.bind((bind_host, 0))
             return int(sock.getsockname()[1])
 
     @staticmethod
-    def _port_available(port: int) -> bool:
+    def _port_available(port: int, bind_host: str = "127.0.0.1") -> bool:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                sock.bind(("127.0.0.1", port))
+                sock.bind((bind_host, port))
             except OSError:
                 return False
         return True
