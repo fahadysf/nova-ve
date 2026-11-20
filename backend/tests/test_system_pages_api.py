@@ -242,3 +242,26 @@ async def test_docker_runtime_logs_are_listed_and_tailed(client, sys_settings, m
     # 10 tail lines fetched, pattern "log 7" narrows to one.
     assert data["lines"] == 1
     assert "docker log 7" in data["content"]
+
+
+@pytest.mark.asyncio
+async def test_docker_record_with_missing_stdout_file_still_lists(client, sys_settings):
+    records = sys_settings.TMP_DIR / "node-runtime"
+    records.mkdir(exist_ok=True)
+    (records / "arc-docker-4.json").write_text(
+        json.dumps(
+            {
+                "lab_id": "arc-id",
+                "node_id": 4,
+                "name": "alpine-n2",
+                "kind": "docker",
+                "stdout_log": str(sys_settings.TMP_DIR / "never-created.log"),
+            }
+        )
+    )
+    _as("admin")
+
+    listing = await client.get("/api/system/logs")
+    logs = listing.json()["data"]["logs"]
+    assert len(logs) == 1
+    assert logs[0]["path"] == "docker://arc-id/4"
