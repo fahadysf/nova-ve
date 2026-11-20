@@ -762,6 +762,15 @@ class NodeRuntimeService:
                 counts[kind] += 1
         return counts
 
+    def is_node_running(self, lab_id: str, node_id: int) -> bool:
+        """Registry-authoritative liveness check (#262).
+
+        ``lab.json`` node status can go stale (heartbeat reconciles only
+        nodes the registry knows about), so management views must ask the
+        runtime registry, not the persisted status field.
+        """
+        return self._runtime_record(lab_id, node_id) is not None
+
     def read_logs(self, lab_id: str, node_id: int, tail: int = 200) -> str:
         runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
         if not runtime:

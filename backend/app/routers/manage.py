@@ -75,7 +75,7 @@ def _user_folder_root(current_user: UserRead) -> str:
     return str(getattr(current_user, "folder", "/") or "/").replace("\\", "/").strip("/")
 
 
-def _summarize_lab(lab_file: Path, labs_dir: Path) -> dict[str, Any] | None:
+def _summarize_lab(lab_file: Path, labs_dir: Path, runtime: NodeRuntimeService | None = None) -> dict[str, Any] | None:
     try:
         data = json.loads(lab_file.read_text())
     except (OSError, json.JSONDecodeError):
@@ -88,17 +88,21 @@ def _summarize_lab(lab_file: Path, labs_dir: Path) -> dict[str, Any] | None:
     nodes = data.get("nodes")
     if not isinstance(nodes, dict):
         nodes = {}
+    lab_id = str(data.get("id", "")).strip()
     running = 0
     cpu_alloc = 0
     ram_alloc = 0
-    for node in nodes.values():
+    for node_id_raw, node in nodes.items():
         if not isinstance(node, dict):
             continue
         try:
-            if int(node.get("status", 0)) == 2:
-                running += 1
+            node_id = int(node_id_raw)
         except (TypeError, ValueError):
-            pass
+            continue
+        # Registry-authoritative liveness (#262): the persisted status field
+        # can be stale after an unclean stop.
+        if runtime is not None and lab_id and runtime.is_node_running(lab_id, node_id):
+            running += 1
         try:
             cpu_alloc += int(node.get("cpu", 1))
         except (TypeError, ValueError):
@@ -135,11 +139,12 @@ async def list_managed_labs(
     """
     labs_dir = _labs_dir_from_config()
     root = _user_folder_root(current_user)
+    runtime = NodeRuntimeService()
 
     labs: list[dict[str, Any]] = []
     if labs_dir.exists():
         for lab_file in sorted(labs_dir.rglob("*.json")):
-            summary = _summarize_lab(lab_file, labs_dir)
+            summary = _summarize_lab(lab_file, labs_dir, runtime)
             if summary is None:
                 continue
             if root and not summary["path"].lstrip("/").startswith(f"{root}/"):
