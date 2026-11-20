@@ -26,6 +26,36 @@ def validate_console_mode_for_type(node_type: str, console: str) -> None:
         )
 
 
+def validate_second_console_mode_for_type(
+    node_type: str, console: str, second_console: Optional[str]
+) -> None:
+    """Secondary console validation (#268).
+
+    ``None`` clears the secondary console and always passes. The secondary
+    mode must differ from the primary and must be one the node type
+    supports — which automatically rules out a secondary on types that only
+    allow telnet. A node whose primary is ``serial`` (paired-template
+    children) may declare any standard mode as its secondary: the serial
+    link is not one of the supported modes, and the child exposes its real
+    CLI/display alongside it.
+    """
+    if second_console is None:
+        return
+    if second_console == console:
+        raise ValueError(
+            "Secondary console mode must differ from the primary console mode."
+        )
+    if console == "serial":
+        return
+    allowed = SUPPORTED_CONSOLE_MODES_BY_TYPE.get(node_type, {"telnet"})
+    if second_console not in allowed:
+        allowed_list = ", ".join(sorted(allowed))
+        raise ValueError(
+            f"Secondary console mode {second_console!r} is not supported for {node_type} nodes; "
+            f"supported modes: {allowed_list}."
+        )
+
+
 class NodeInterfaceRuntime(BaseModel):
     """US-204b: per-interface runtime state used as the freshness oracle
     for stale-rollback detection.
@@ -66,6 +96,10 @@ class NodeBase(BaseModel):
     # Single-node create flows still default to ``telnet``; the value only
     # appears on lab.json entries that came from /from-paired-template.
     console: Literal["telnet", "vnc", "rdp", "serial"] = "telnet"
+    # Optional second way in (#268) — e.g. a graphical display alongside the
+    # serial/telnet CLI. ``None`` keeps the single-console behavior; old
+    # lab.json files load unchanged.
+    second_console: Optional[ConsoleMode] = None
     status: Literal[0, 2] = 0
     delay: int = 0
     cpu: int = 1
@@ -114,6 +148,7 @@ class NodeCreate(BaseModel):
     template: str
     image: str
     console: ConsoleMode = "telnet"
+    second_console: Optional[ConsoleMode] = None
     cpu: int = 1
     ram: int = 1024
     ethernet: int = 1
@@ -129,6 +164,7 @@ class NodeCreate(BaseModel):
         if self.type == 'docker' and self.interface_naming_scheme not in (None, 'eth{n}'):
             raise ValueError("Docker nodes use eth{n} naming; field is system-fixed")
         validate_console_mode_for_type(self.type, self.console)
+        validate_second_console_mode_for_type(self.type, self.console, self.second_console)
         return self
 
 
@@ -147,6 +183,7 @@ class NodeFromTemplate(BaseModel):
     name: str
     image: str
     console: Optional[ConsoleMode] = None
+    second_console: Optional[ConsoleMode] = None
     cpu: Optional[int] = None
     ram: Optional[int] = None
     ethernet: Optional[int] = None
@@ -158,6 +195,11 @@ class NodeFromTemplate(BaseModel):
     def _check_console_mode(self):
         if self.console is not None:
             validate_console_mode_for_type(self.template_type, self.console)
+        # When the request does not pin the primary, the template's
+        # console_type acts as it; the router re-checks the resolved pair
+        # against the template definition after the lookup.
+        primary = self.console or "telnet"
+        validate_second_console_mode_for_type(self.template_type, primary, self.second_console)
         return self
 
 
@@ -190,6 +232,7 @@ class NodeBatchCreate(BaseModel):
     template: str
     image: str
     console: ConsoleMode = "telnet"
+    second_console: Optional[ConsoleMode] = None
     cpu: int = 1
     ram: int = 1024
     ethernet: int = 1
@@ -205,6 +248,7 @@ class NodeBatchCreate(BaseModel):
         if self.type == 'docker' and self.interface_naming_scheme not in (None, 'eth{n}'):
             raise ValueError("Docker nodes use eth{n} naming; field is system-fixed")
         validate_console_mode_for_type(self.type, self.console)
+        validate_second_console_mode_for_type(self.type, self.console, self.second_console)
         return self
 
 
@@ -220,6 +264,9 @@ class NodeUpdate(BaseModel):
     # declared. Without ``serial`` here, saving an unchanged paired child
     # would 422 on schema validation (#206 codex-iter3).
     console: Optional[Literal["telnet", "vnc", "rdp", "serial"]] = None
+    # ``None`` is meaningful here — it clears the secondary console. The
+    # update route writes explicit Nones for this field only.
+    second_console: Optional[ConsoleMode] = None
     delay: Optional[int] = None
     left: Optional[int] = None
     top: Optional[int] = None
