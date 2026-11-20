@@ -4,7 +4,7 @@
 <script lang="ts">
   import { createEventDispatcher, getContext, onDestroy } from 'svelte';
   import type { Readable } from 'svelte/store';
-  import { Handle, Position, useNodesData, useStore } from '@xyflow/svelte';
+  import { Handle, Position, useNodesData, useStore, useUpdateNodeInternals } from '@xyflow/svelte';
   import { formatInterfaceName } from '$lib/services/interfaceNaming';
   import type { LiveMacState, NodeInterface, PortPosition } from '$lib/types';
   import { dragLinkStore, getDragLinkSnapshot } from '$lib/stores/dragLink';
@@ -127,9 +127,11 @@
   let insideFlow = false;
   const flowNodeId = getContext<string | undefined>('svelteflow__node_id');
   let currentNodeStore: Readable<{ data: { interface_naming_scheme?: string | null } } | null> | null = null;
+  let updateNodeInternals: ((id: string | string[]) => void) | null = null;
   try {
     useStore();
     insideFlow = true;
+    updateNodeInternals = useUpdateNodeInternals();
     if (flowNodeId) {
       currentNodeStore = useNodesData(flowNodeId) as Readable<{
         data: { interface_naming_scheme?: string | null };
@@ -137,6 +139,14 @@
     }
   } catch {
     insideFlow = false;
+  }
+
+  // Edge endpoints anchor at Svelte Flow's MEASURED handle center; re-measure
+  // whenever the port moves so paths track relocations exactly (#258).
+  $: if (insideFlow && updateNodeInternals && flowNodeId) {
+    void position.side;
+    void position.offset;
+    updateNodeInternals(flowNodeId);
   }
   if (currentNodeStore) {
     unsubscribeCurrentNode = currentNodeStore.subscribe((value) => {
