@@ -56,6 +56,63 @@ export type UserWritePayload = {
 
 export type AuthLoginResponse = UserRead;
 
+// --- Image & template library (#264) --------------------------------------
+
+export interface LibraryImageRef {
+  lab: string;
+  lab_path: string;
+  lab_name: string;
+  node: string;
+  template: string;
+}
+
+export interface LibraryImage {
+  name: string;
+  filename: string;
+  type: string;
+  path: string;
+  files: string[];
+  size: number | null;
+  mtime: number | null;
+  mtime_iso: string | null;
+  sha256: string | null;
+  state: string;
+  referenced_by: LibraryImageRef[];
+  templates: { type: string; key: string; name: string }[];
+}
+
+export interface LibraryTemplateImage {
+  name: string;
+  filename: string;
+  state: string;
+  size: number | null;
+}
+
+export interface LibraryTemplate {
+  type: string;
+  key: string;
+  name: string;
+  description: string;
+  icon_type: string;
+  cpu: number;
+  ram: number;
+  ethernet: number;
+  console_type: string;
+  cpulimit: number;
+  image_aliases: string[];
+  paired_parent?: string | null;
+  images: LibraryTemplateImage[];
+}
+
+export type LibraryTemplateEdit = {
+  name?: string;
+  cpu?: number;
+  ram?: number;
+  ethernet?: number;
+  console_type?: string;
+  image_aliases?: string[];
+};
+
 export interface FolderEntry {
   name: string;
   path: string;
