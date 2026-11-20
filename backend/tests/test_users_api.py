@@ -89,6 +89,9 @@ class FakeSession:
             [self.users[username]] if username in self.users else []
         )
 
+    def add(self, user):
+        self.users[user.username] = user
+
     async def delete(self, user):
         self.deleted.append(user.username)
         self.users.pop(user.username, None)
@@ -288,3 +291,36 @@ async def test_create_duplicate_user_returns_error_code(client):
     payload = response.json()
     assert payload["code"] == 400
     assert "already exists" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_create_user_persists_quotas_and_tenancy(client):
+    admin = _user(username="admin", role="admin")
+    fake = FakeSession([admin])
+    _install(admin, fake)
+
+    response = await client.post(
+        "/api/users/",
+        json={
+            "username": "quota-user",
+            "password": "secret123",
+            "email": "q@x.com",
+            "name": "Quota User",
+            "role": "user",
+            "cpu": 4,
+            "ram": 8192,
+            "pod": 7,
+            "folder": "/probe",
+            "expiration": 1798761600,
+            "datestart": 1735689600,
+        },
+    )
+
+    assert response.status_code == 200
+    created = fake.users["quota-user"]
+    assert created.cpu == 4
+    assert created.ram == 8192
+    assert created.pod == 7
+    assert created.folder == "/probe"
+    assert created.expiration == 1798761600
+    assert created.datestart == 1735689600

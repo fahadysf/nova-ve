@@ -49,12 +49,22 @@ async def create_user(
             "message": f"User {request.username} already exists.",
         }
 
+    # #261 — create accepts the full account form: forward quota + tenancy
+    # fields explicitly instead of letting create_user drop them.
     user = await auth_service.create_user(
         username=request.username,
         password=request.password,
         email=request.email,
         name=request.name,
         role=request.role,
+        ram=request.ram,
+        cpu=request.cpu,
+        sat=request.sat,
+        expiration=request.expiration,
+        datestart=request.datestart,
+        html5=request.html5,
+        folder=request.folder,
+        pod=request.pod,
     )
     return {
         "code": 200,
