@@ -18,6 +18,8 @@
     linkIds?: string[];
     portPositionsByLinkId?: Record<string, { side: 'top' | 'right' | 'bottom' | 'left'; offset: number }>;
     portRefsByLinkId?: Record<string, NetworkConnectionPointRef>;
+    /** Canvas-computed position for the dotted open slot (#258). */
+    openSlotPosition?: { side: 'top' | 'right' | 'bottom' | 'left'; offset: number } | null;
   };
 
   function openInfo(event: MouseEvent) {
@@ -48,9 +50,11 @@
     idx,
     linkId: linkIdBySlot.get(idx) ?? null,
     placement:
-      linkIdBySlot.get(idx) && data.portPositionsByLinkId?.[linkIdBySlot.get(idx)!]
-        ? data.portPositionsByLinkId[linkIdBySlot.get(idx)!]
-        : slotPosition(idx, slotCount),
+      idx === openSlotIdx && data.openSlotPosition
+        ? data.openSlotPosition
+        : linkIdBySlot.get(idx) && data.portPositionsByLinkId?.[linkIdBySlot.get(idx)!]
+          ? data.portPositionsByLinkId[linkIdBySlot.get(idx)!]
+          : slotPosition(idx, slotCount),
     isOpen: idx === openSlotIdx,
   }));
   // slotAssignments is consumed by canvasEdges.deriveEdges — referenced here

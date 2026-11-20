@@ -111,6 +111,9 @@
   $: canConfirm = sourceSelectionValid && targetSelectionValid;
 
   $: if (open) {
+    // Every new-link dialog starts from the orthogonal default (#258) —
+    // the previous dialog's style choice does not carry over.
+    style = 'orthogonal';
     const nextSignature = JSON.stringify({
       source: snapshot.source,
       target: snapshot.target,

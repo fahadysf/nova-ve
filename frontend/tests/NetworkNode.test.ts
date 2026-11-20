@@ -58,6 +58,26 @@ describe('NetworkNode', () => {
     expect(screen.getByTestId('network-info-button')).toHaveClass('absolute', 'bottom-1', 'right-1');
   });
 
+  it('renders the dotted open slot at the canvas-nudged position when provided (#258)', () => {
+    const { container } = render(NetworkNode, {
+      props: {
+        id: 'network7',
+        data: {
+          label: 'edge-transport-bridge-01',
+          count: 1,
+          networkId: 7,
+          linkIds: ['link-a'],
+          openSlotPosition: { side: 'right', offset: 0.75 },
+        },
+      },
+    });
+
+    const openPort = container.querySelector('[data-network-port-open="true"]');
+    expect(openPort).not.toBeNull();
+    expect(openPort!.getAttribute('data-network-port-side')).toBe('right');
+    expect(openPort!.getAttribute('data-network-port-offset')).toBe('0.7500');
+  });
+
   it('binds connected network handles to their persisted link endpoint', () => {
     render(NetworkNode, {
       props: {
@@ -82,19 +102,7 @@ describe('NetworkNode', () => {
     expect(connectedPort).toHaveAttribute('data-network-port-endpoint-key', 'to');
   });
 
-  it('shows and keeps ctrl-drag repositioning for the dotted open connection handle', async () => {
-    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
-      x: 0,
-      y: 0,
-      left: 0,
-      top: 0,
-      right: 100,
-      bottom: 100,
-      width: 100,
-      height: 100,
-      toJSON: () => ({}),
-    } as DOMRect);
-
+  it('keeps the dotted open connection handle at its canonical slot (#258 — no repositioning)', async () => {
     render(NetworkNode, {
       props: {
         id: 'network7',
@@ -112,7 +120,11 @@ describe('NetworkNode', () => {
     ) as HTMLElement | null;
     expect(openPort).not.toBeNull();
     expect(openPort).toHaveAttribute('data-network-port-side', 'right');
+    expect(openPort?.getAttribute('data-network-port-offset')).toBe('0.5000');
 
+    // Ctrl+drag repositioning was removed (#258): the port may follow the
+    // cursor as a link-drag preview, but must settle back to its canonical
+    // slot once the gesture ends.
     openPort?.dispatchEvent(
       new MouseEvent('mousedown', {
         button: 0,
@@ -133,20 +145,13 @@ describe('NetworkNode', () => {
       })
     );
     await tick();
-
-    const movedOpenPort = document.querySelector(
-      '[data-network-port-id="7"][data-network-port-open="true"]'
-    ) as HTMLElement | null;
-    expect(movedOpenPort).toHaveAttribute('data-network-port-side', 'top');
-    expect(movedOpenPort?.getAttribute('data-network-port-offset')).toBe('0.5000');
-
     window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
     await tick();
 
-    const releasedOpenPort = document.querySelector(
+    const settledPort = document.querySelector(
       '[data-network-port-id="7"][data-network-port-open="true"]'
     ) as HTMLElement | null;
-    expect(releasedOpenPort).toHaveAttribute('data-network-port-side', 'top');
-    expect(releasedOpenPort?.getAttribute('data-network-port-offset')).toBe('0.5000');
+    expect(settledPort).toHaveAttribute('data-network-port-side', 'right');
+    expect(settledPort?.getAttribute('data-network-port-offset')).toBe('0.5000');
   });
 });

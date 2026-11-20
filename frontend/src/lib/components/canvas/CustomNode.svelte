@@ -24,6 +24,8 @@
     connectedInterfaceIndexes?: number[];
     portPositionsByInterfaceIndex?: Record<string, PortPosition>;
     portRefsByInterfaceIndex?: Record<string, NodeConnectionPointRef>;
+    /** Canvas-computed position for the dotted new-connection slot (#258). */
+    newConnectionPortPosition?: PortPosition | null;
     highlightedInterfaceIndex?: number | null;
     highlightedNewConnection?: boolean;
   };
@@ -33,7 +35,6 @@
     'port:mouseup': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:mouseenter': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:mouseleave': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
-    'port:dragend': { nodeId: number; interfaceIndex: number; port: PortPosition };
   }>();
 
   function openInfo(event: MouseEvent) {
@@ -105,13 +106,13 @@
     connectedInterfaceIndexes={data.connectedInterfaceIndexes ?? []}
     portPositionsByInterfaceIndex={data.portPositionsByInterfaceIndex ?? {}}
     portRefsByInterfaceIndex={data.portRefsByInterfaceIndex ?? {}}
+    newConnectionPortPosition={data.newConnectionPortPosition ?? null}
     highlightedInterfaceIndex={data.highlightedInterfaceIndex ?? null}
     highlightedNewConnection={data.highlightedNewConnection ?? false}
     on:port:mousedown={(e) => dispatch('port:mousedown', e.detail)}
     on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
     on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}
     on:port:mouseleave={(e) => dispatch('port:mouseleave', e.detail)}
-    on:port:dragend={(e) => dispatch('port:dragend', e.detail)}
   />
 
   <button

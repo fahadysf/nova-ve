@@ -10,8 +10,9 @@
  *   2. Drive ``dragLinkStore.start(...)`` directly with the source endpoint —
  *      the legacy ``createEventDispatcher`` chain never bubbled through
  *      SvelteFlow's component-prop renderer.
- *   3. Skip drag-link start for ctrl-modified mousedown (port repositioning)
- *      and right-button (or other non-zero) mousedown.
+ *   3. Skip drag-link start for right-button (or other non-zero) mousedown.
+ *      Ctrl-modified mousedown starts a link drag like plain mousedown since
+ *      port repositioning was removed (#258).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -150,7 +151,7 @@ describe('Port (US-080)', () => {
     expect(call.pointer).toEqual({ x: 100, y: 200 });
   });
 
-  it('ctrl+mousedown does NOT call dragLinkStore.start and does suppress node drag', () => {
+  it('ctrl+mousedown starts a link drag like plain mousedown (#258 — no repositioning)', () => {
     render(Port, {
       props: {
         interfaceData: baseInterface,
@@ -164,7 +165,7 @@ describe('Port (US-080)', () => {
     const { event, stopSpy, preventSpy } = makeMouseDown({ ctrlKey: true });
     root.dispatchEvent(event);
 
-    expect(startSpy).not.toHaveBeenCalled();
+    expect(startSpy).toHaveBeenCalledTimes(1);
     expect(stopSpy).toHaveBeenCalled();
     expect(preventSpy).toHaveBeenCalled();
   });
@@ -430,5 +431,75 @@ describe('Port (US-079)', () => {
     if (stored?.kind === 'interface') {
       expect(stored.interfaceName).toBe('eth0');
     }
+  });
+});
+
+describe('Port pinned label orientation (#254)', () => {
+  const connectedInterface: NodeInterface = {
+    index: 0,
+    name: 'eth0',
+    planned_mac: null,
+    network_id: 9,
+  };
+
+  function pillStyleFor(side: 'top' | 'right' | 'bottom' | 'left'): string {
+    const { container } = render(Port, {
+      props: {
+        interfaceData: connectedInterface,
+        position: { side, offset: 0.5 },
+        nodeId: 7,
+        interfaceIndex: 0,
+        connected: true,
+      },
+    });
+    const pill = container.querySelector('[data-testid="port-pinned-label"]');
+    if (!pill) throw new Error(`pinned label not rendered for side ${side}`);
+    return pill.getAttribute('style') ?? '';
+  }
+
+  function pillClassFor(side: 'top' | 'right' | 'bottom' | 'left'): string {
+    const { container } = render(Port, {
+      props: {
+        interfaceData: connectedInterface,
+        position: { side, offset: 0.5 },
+        nodeId: 7,
+        interfaceIndex: 0,
+        connected: true,
+      },
+    });
+    const pill = container.querySelector('[data-testid="port-pinned-label"]');
+    if (!pill) throw new Error(`pinned label not rendered for side ${side}`);
+    return pill.getAttribute('class') ?? '';
+  }
+
+  it('renders the pill vertical on north ports', () => {
+    expect(pillStyleFor('top')).toContain('writing-mode: vertical-rl');
+  });
+
+  it('renders the pill vertical on south ports', () => {
+    expect(pillStyleFor('bottom')).toContain('writing-mode: vertical-rl');
+  });
+
+  it('swaps the pill padding when vertical so the capsule matches the horizontal one', () => {
+    // writing-mode vertical-rl turns the physical padding axes around; the
+    // swapped utilities restore the wide sides / thin caps pill shape.
+    expect(pillClassFor('top')).toContain('py-1.5 px-px');
+    expect(pillClassFor('bottom')).toContain('py-1.5 px-px');
+    expect(pillClassFor('top')).not.toContain('px-1.5');
+    expect(pillClassFor('bottom')).not.toContain('px-1.5');
+  });
+
+  it('keeps the standard horizontal pill padding on east/west ports', () => {
+    expect(pillClassFor('right')).toContain('px-1.5 py-px');
+    expect(pillClassFor('left')).toContain('px-1.5 py-px');
+    expect(pillClassFor('right')).not.toContain('py-1.5');
+  });
+
+  it('renders the pill horizontal on east ports', () => {
+    expect(pillStyleFor('right')).not.toContain('writing-mode');
+  });
+
+  it('renders the pill horizontal on west ports', () => {
+    expect(pillStyleFor('left')).not.toContain('writing-mode');
   });
 });
