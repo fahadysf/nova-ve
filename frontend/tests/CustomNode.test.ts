@@ -69,6 +69,29 @@ describe('CustomNode', () => {
     expect(screen.queryByText('eth2')).toBeNull();
   });
 
+  it('places the dotted new-connection handle at the canvas-nudged position (#258)', () => {
+    const { container } = render(CustomNode, {
+      props: {
+        data: {
+          label: 'edge-router-core-01',
+          status: 2,
+          nodeId: 1,
+          connectedInterfaceIndexes: [1],
+          newConnectionPortPosition: { side: 'left', offset: 0.25 },
+          interfaces: [
+            { index: 0, name: 'eth0', network_id: 0 },
+            { index: 1, name: 'eth1', network_id: 9 },
+          ],
+        },
+      },
+    });
+
+    const slot = container.querySelector('[data-port-new-connection="true"]');
+    expect(slot).not.toBeNull();
+    expect(slot!.getAttribute('data-port-side')).toBe('left');
+    expect(slot!.getAttribute('data-port-offset')).toBe('0.2500');
+  });
+
   it('binds connected node handles to their persisted link endpoint', () => {
     render(CustomNode, {
       props: {

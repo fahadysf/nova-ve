@@ -48,13 +48,15 @@
   } from '$lib/services/labApi';
   import {
     closestPortPositionToBox,
+    nudgeAwayFromPorts,
+    placeInterfaces,
     separatePortPositions,
     type NodeBox,
   } from '$lib/services/portLayout';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { labState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
-  import { deriveEdges, parseIfaceInterfaceIndex, type DiscoveredLink } from '$lib/services/canvasEdges';
+  import { deriveEdges, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -594,11 +596,15 @@
     nodeRefs: Map<number, Record<string, ConnectionPointRef>>;
     network: Map<number, Record<string, PortPosition>>;
     networkRefs: Map<number, Record<string, ConnectionPointRef>>;
+    nodeOpenSlot: Map<number, PortPosition>;
+    networkOpenSlot: Map<number, PortPosition>;
   } {
     const node = new Map<number, Record<string, PortPosition>>();
     const nodeRefs = new Map<number, Record<string, ConnectionPointRef>>();
     const network = new Map<number, Record<string, PortPosition>>();
     const networkRefs = new Map<number, Record<string, ConnectionPointRef>>();
+    const nodeOpenSlot = new Map<number, PortPosition>();
+    const networkOpenSlot = new Map<number, PortPosition>();
     const implicitPairs = implicitLinkPairsByNetwork();
 
     for (const link of $labState.links) {
@@ -637,7 +643,55 @@
       if (box) network.set(networkId, separatePositionRecord(positions, box));
     }
 
-    return { node, nodeRefs, network, networkRefs };
+    // Dotted "new connection" handles (#258): the open slot obeys the same
+    // aversion rules as placed ports — it keeps its canonical spot unless a
+    // placed port on the same side sits within the min gap, in which case it
+    // shifts to the nearest free stretch of that side (placed ports never
+    // move, so no edge geometry changes).
+    for (const nodeRecord of Object.values($labState.nodes)) {
+      const slot = firstFreeInterfaceDefaultPosition(nodeRecord);
+      const box = nodeBox(nodeRecord.id);
+      if (!slot || !box) continue;
+      nodeOpenSlot.set(
+        nodeRecord.id,
+        nudgeAwayFromPorts(slot, Object.values(node.get(nodeRecord.id) ?? {}), box)
+      );
+    }
+
+    for (const networkRecord of Object.values($labState.networks)) {
+      const box = networkBox(networkRecord.id);
+      if (!box) continue;
+      const linkCount = $labState.links.filter(
+        (link) => link?.id && link.to?.network_id === networkRecord.id
+      ).length;
+      const openSlot = slotPosition(linkCount, linkCount + 1);
+      networkOpenSlot.set(
+        networkRecord.id,
+        nudgeAwayFromPorts(
+          openSlot,
+          Object.values(network.get(networkRecord.id) ?? {}),
+          box
+        )
+      );
+    }
+
+    return { node, nodeRefs, network, networkRefs, nodeOpenSlot, networkOpenSlot };
+  }
+
+  /**
+   * Canonical perimeter position of a node's dotted "new connection" slot —
+   * the first interface that is neither link-connected nor attached to a
+   * network, mirroring PortLayer's firstAvailableEntry selection exactly.
+   */
+  function firstFreeInterfaceDefaultPosition(node: NodeData): PortPosition | null {
+    const interfaces = node.interfaces ?? [];
+    if (interfaces.length === 0) return null;
+    const connected = new Set(connectedInterfaceIndexesForNode(node));
+    const index = interfaces.findIndex(
+      (iface, i) => !connected.has(iface.index ?? i) && (iface.network_id ?? 0) <= 0
+    );
+    if (index < 0) return null;
+    return placeInterfaces(interfaces.length)[index] ?? null;
   }
 
   function separatePositionRecord(
@@ -674,6 +728,7 @@
           connectedInterfaceIndexes: connectedInterfaceIndexesForNode(node),
           portPositionsByInterfaceIndex: connectionPointPositions.node.get(node.id) ?? {},
           portRefsByInterfaceIndex: connectionPointPositions.nodeRefs.get(node.id) ?? {},
+          newConnectionPortPosition: connectionPointPositions.nodeOpenSlot.get(node.id) ?? null,
           highlightedInterfaceIndex: highlightedTargetForNode(node.id),
           highlightedNewConnection: highlightedNewConnectionForNode(node.id),
           interface_naming_scheme: node.interface_naming_scheme ?? null
@@ -715,6 +770,7 @@
           linkIds: networkLinkIds,
           portPositionsByLinkId: connectionPointPositions.network.get(network.id) ?? {},
           portRefsByLinkId: connectionPointPositions.networkRefs.get(network.id) ?? {},
+          openSlotPosition: connectionPointPositions.networkOpenSlot.get(network.id) ?? null,
           brokenImplicit: isBrokenImplicit
         },
         style: `width: ${networkCardWidth(network)}px;`

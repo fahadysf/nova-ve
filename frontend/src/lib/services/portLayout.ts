@@ -310,3 +310,87 @@ export function separatePortPositions(
 
   return separateCornerCollisions(result, nodeBox, minCenterGapPx);
 }
+
+/**
+ * Nudge a standalone slot (the dotted "new connection" handle) away from
+ * already-placed ports with the same aversion rules the placed ports obey
+ * among themselves (#258). The slot keeps its canonical position unless a
+ * port on the same side sits within ``minCenterGapPx``, in which case it
+ * shifts to the nearest free stretch of that side — placed ports never move.
+ * A corner backstop then pushes it clear of perpendicular occupants near a
+ * shared corner, mirroring ``separateCornerCollisions``.
+ */
+export function nudgeAwayFromPorts(
+  slot: PortPosition,
+  occupied: readonly PortPosition[],
+  nodeBox: NodeBox,
+  minCenterGapPx = PORT_HANDLE_MIN_CENTER_GAP_PX
+): PortPosition {
+  const result: PortPosition = { side: slot.side, offset: clamp01(slot.offset) };
+
+  const sameSideOffsets = occupied
+    .filter((position) => position.side === result.side)
+    .map((position) => clamp01(position.offset))
+    .sort((a, b) => a - b);
+  const minDelta = (minCenterGapPx + 1e-6) / sideLengthPx(result.side, nodeBox);
+  const clearOf = (offset: number): boolean =>
+    sameSideOffsets.every((o) => Math.abs(offset - o) + 1e-9 >= minDelta);
+
+  if (sameSideOffsets.length > 0 && !clearOf(result.offset)) {
+    // Feasible stretches between/around the placed ports; pick the one whose
+    // clamped point is closest to the slot's canonical offset.
+    const intervals: Array<[number, number]> = [];
+    let cursor = 0;
+    for (const o of sameSideOffsets) {
+      const hi = o - minDelta;
+      if (hi >= cursor) intervals.push([cursor, hi]);
+      cursor = o + minDelta;
+    }
+    if (cursor <= 1) intervals.push([cursor, 1]);
+
+    let best: number | null = null;
+    let bestDist = Infinity;
+    for (const [lo, hi] of intervals) {
+      const candidate = Math.min(Math.max(result.offset, lo), hi);
+      const dist = Math.abs(candidate - result.offset);
+      if (dist < bestDist) {
+        best = candidate;
+        bestDist = dist;
+      }
+    }
+    if (best === null) {
+      // Side saturated with ports: hug the less-crowded edge.
+      const mid = (sameSideOffsets[0] + sameSideOffsets[sameSideOffsets.length - 1]) / 2;
+      best = result.offset <= mid ? 0 : 1;
+    }
+    result.offset = clamp01(best);
+  }
+
+  // Corner backstop: perpendicular occupants near a shared corner. Push along
+  // our own side in whichever direction increases the Euclidean gap.
+  for (let pass = 0; pass < 6; pass += 1) {
+    let changed = false;
+    for (const position of occupied) {
+      if (position.side === result.side) continue;
+      const point = portPositionToPoint(result, nodeBox);
+      const other = portPositionToPoint(position, nodeBox);
+      const distance = Math.hypot(point.x - other.x, point.y - other.y);
+      if (distance + 1e-6 >= minCenterGapPx) continue;
+
+      const probe = portPositionToPoint(
+        { side: result.side, offset: clamp01(result.offset + 0.001) },
+        nodeBox
+      );
+      const sign = Math.hypot(probe.x - other.x, probe.y - other.y) >= distance ? 1 : -1;
+      // 1.2× overshoot: only the slot moves, so a plain step converges
+      // asymptotically from below and never crosses the threshold.
+      const delta =
+        (1.2 * (minCenterGapPx - distance) + 1e-3) / sideLengthPx(result.side, nodeBox);
+      result.offset = clamp01(result.offset + sign * delta);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+
+  return result;
+}

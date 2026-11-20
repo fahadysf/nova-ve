@@ -15,6 +15,8 @@
   export let connectedInterfaceIndexes: number[] = [];
   export let portPositionsByInterfaceIndex: Record<string, PortPosition> = {};
   export let portRefsByInterfaceIndex: Record<string, NodeConnectionPointRef> = {};
+  /** Canvas-computed position for the dotted new-connection slot (#258). */
+  export let newConnectionPortPosition: PortPosition | null = null;
   export let highlightedInterfaceIndex: number | null = null;
   export let highlightedNewConnection = false;
 
@@ -88,7 +90,8 @@
     </div>
   {/each}
   {#if firstAvailableEntry}
-    {@const port = resolvedPorts[firstAvailableEntry.index]}
+    {@const port =
+      newConnectionPortPosition ?? resolvedPorts[firstAvailableEntry.index]}
     <div class="pointer-events-auto absolute inset-0">
       <Port
         interfaceData={firstAvailableEntry.iface}
