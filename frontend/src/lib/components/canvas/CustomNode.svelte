@@ -53,6 +53,16 @@
   $: transitioning = data.transientStatus === 'starting' || data.transientStatus === 'stopping';
   $: interfaces = data.interfaces ?? [];
   $: nodeId = data.nodeId ?? 0;
+
+  // #274: run-state outline on the icon container, in addition to the
+  // status dot. Ring colors track the dot palette (amber-300 transient,
+  // emerald-400 running, gray-500 stopped); box-shadow keeps the card's
+  // layout and hit area untouched.
+  $: iconStateRing = transitioning
+    ? 'shadow-[0_0_0_2px_#fcd34d]'
+    : running
+      ? 'shadow-[0_0_0_2px_#34d399]'
+      : 'shadow-[0_0_0_2px_#6b7280]';
 </script>
 
 <div
@@ -73,7 +83,8 @@
   />
   <div class="flex items-center gap-2.5 py-1.5 pr-2">
     <div
-      class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
+      data-testid="node-icon-container"
+      class={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)] ${iconStateRing}`}
     >
       <svelte:component this={typeIcon} class="h-5 w-5" />
     </div>

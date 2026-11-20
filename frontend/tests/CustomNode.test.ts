@@ -254,3 +254,40 @@ describe('CustomNode netbird-style card visuals (#254)', () => {
     expect(screen.getByTestId('node-status-dot')).toHaveClass('bg-amber-300', 'animate-pulse');
   });
 });
+
+describe('CustomNode icon-container run-state outline (#274)', () => {
+  it('rings the icon container green while running', () => {
+    render(CustomNode, {
+      props: { data: { label: 'n1', status: 2, nodeId: 1, interfaces: [] } },
+    });
+
+    const icon = screen.getByTestId('node-icon-container');
+    expect(icon).toHaveClass('shadow-[0_0_0_2px_#34d399]');
+    expect(icon).not.toHaveClass('shadow-[0_0_0_2px_#6b7280]');
+  });
+
+  it('rings grey when stopped and amber while transitioning', () => {
+    const stopped = render(CustomNode, {
+      props: { data: { label: 'n1', status: 0, nodeId: 1, interfaces: [] } },
+    });
+    expect(screen.getByTestId('node-icon-container')).toHaveClass('shadow-[0_0_0_2px_#6b7280]');
+    stopped.unmount();
+
+    render(CustomNode, {
+      props: {
+        data: { label: 'n1', status: 0, transientStatus: 'stopping', nodeId: 1, interfaces: [] },
+      },
+    });
+    expect(screen.getByTestId('node-icon-container')).toHaveClass('shadow-[0_0_0_2px_#fcd34d]');
+  });
+
+  it('keeps the outline off the card border — no layout-bearing status classes on the card', () => {
+    render(CustomNode, {
+      props: { data: { label: 'n1', status: 2, nodeId: 1, interfaces: [] } },
+    });
+
+    const card = screen.getByTestId('custom-node-card');
+    expect(card.className).not.toContain('shadow-');
+    expect(card.className).toContain('border-[var(--card-canvas-border)]');
+  });
+});
