@@ -24,6 +24,7 @@
 
   type NodeTypeKey = NodeData['type'];
   type ConsoleModeValue = NodeData['console'];
+  type SecondaryConsoleValue = NonNullable<NodeData['secondConsole']>;
   type ConsoleOption = { value: ConsoleModeValue; label: string };
   type ExtrasMap = Record<string, unknown>;
   type IourcStatus = {
@@ -50,6 +51,7 @@
     ram: number;
     ethernet: number;
     console: NodeData['console'];
+    second_console: SecondaryConsoleValue | null;
     delay: number;
     extras: ExtrasMap;
     interface_naming_scheme: string | null;
@@ -68,6 +70,7 @@
     ram: number;
     ethernet: number;
     console: NodeData['console'];
+    second_console: SecondaryConsoleValue | null;
     delay: number;
     extras: ExtrasMap;
     interface_naming_scheme: string | null;
@@ -136,6 +139,8 @@
   let ram = 1024;
   let ethernet = 1;
   let consoleMode: NodeData['console'] = 'telnet';
+  // '' = no secondary console (#268).
+  let secondConsoleChoice = '';
   let delay = 0;
   let extras: ExtrasMap = {};
   let interfaceNamingScheme = DEFAULT_INTERFACE_NAMING;
@@ -184,6 +189,26 @@
     return CONSOLE_OPTIONS_BY_TYPE[type].some((option) => option.value === requested)
       ? requested
       : CONSOLE_OPTIONS_BY_TYPE[type][0].value;
+  }
+
+  // #268 — secondary console options: every mode the node type supports
+  // except the chosen primary, plus an explicit "none". A paired-template
+  // serial primary allows any standard mode as its secondary.
+  const SECONDARY_NONE_VALUE = '';
+  const ALL_SECONDARY_MODES: ReadonlyArray<ConsoleOption> = [
+    { value: 'telnet', label: 'telnet' },
+    { value: 'vnc', label: 'vnc' },
+    { value: 'rdp', label: 'rdp' },
+  ] as ReadonlyArray<ConsoleOption>;
+
+  function secondConsoleOptionsFor(type: NodeTypeKey, primary: ConsoleModeValue): Array<{ value: string; label: string }> {
+    const supported = primary === 'serial'
+      ? [...ALL_SECONDARY_MODES]
+      : ALL_SECONDARY_MODES.filter((mode) =>
+          CONSOLE_OPTIONS_BY_TYPE[type].some((candidate) => candidate.value === mode.value)
+        );
+    const options = supported.filter((mode) => mode.value !== primary);
+    return [{ value: SECONDARY_NONE_VALUE, label: 'none' }, ...options];
   }
 
   function displayedCapabilitiesFor(template: NodeCatalogTemplate | undefined) {
@@ -299,6 +324,7 @@
       ram = node.ram;
       ethernet = node.ethernet;
       consoleMode = fallbackConsoleModeForType(node.type, node.console);
+      secondConsoleChoice = node.secondConsole ?? '';
       delay = node.delay ?? 0;
       interfaceNamingScheme = node.interface_naming_scheme ?? DEFAULT_INTERFACE_NAMING;
       const baseExtras = defaultExtrasFromTemplate(matchingTemplate);
@@ -343,6 +369,7 @@
       ram = setIfClean('ram', ram, 1024);
       ethernet = setIfClean('ethernet', ethernet, 1);
       consoleMode = setIfClean('consoleMode', consoleMode, fallbackConsoleModeForType(selectedType, 'telnet'));
+      secondConsoleChoice = setIfClean('secondConsoleChoice', secondConsoleChoice, '');
       delay = setIfClean('delay', delay, 0);
       namePrefix = setIfClean('namePrefix', namePrefix, 'Node');
       extras = force ? {} : extras;
@@ -358,6 +385,11 @@
       'consoleMode',
       consoleMode,
       fallbackConsoleModeForType(template.type, template.defaults.console_type),
+    );
+    secondConsoleChoice = setIfClean(
+      'secondConsoleChoice',
+      secondConsoleChoice,
+      template.defaults.second_console ?? '',
     );
     delay = setIfClean('delay', delay, template.defaults.delay);
     namePrefix = setIfClean('namePrefix', namePrefix, template.name);
@@ -453,6 +485,12 @@
     resetDirty();
   }
 
+  function secondaryConsoleValue(): SecondaryConsoleValue | null {
+    return secondConsoleChoice === SECONDARY_NONE_VALUE
+      ? null
+      : (secondConsoleChoice as SecondaryConsoleValue);
+  }
+
   function submitForm() {
     // #208c — interfaceNamingError gates only the single-node form. The
     // paired-template path doesn't surface the freeform interface-naming
@@ -470,6 +508,7 @@
           ram,
           ethernet,
           console: fallbackConsoleModeForType(node.type, consoleMode),
+          second_console: secondaryConsoleValue(),
           delay,
           extras,
           interface_naming_scheme: normalizedInterfaceNamingScheme(),
@@ -515,6 +554,7 @@
         ram,
         ethernet,
         console: fallbackConsoleModeForType(template.type, consoleMode),
+        second_console: secondaryConsoleValue(),
         delay,
         extras,
         interface_naming_scheme: normalizedInterfaceNamingScheme(),
@@ -537,6 +577,12 @@
   $: selectedImageOption = imageOptionFor(selectedTemplate, image);
   $: currentConsoleType = mode === 'edit' && node ? node.type : selectedTemplate?.type ?? selectedType;
   $: consoleOptions = consoleOptionsForType(currentConsoleType, consoleMode);
+  $: secondConsoleOptions = secondConsoleOptionsFor(currentConsoleType, consoleMode);
+  // A secondary equal to the (possibly changed) primary is meaningless —
+  // reset the choice instead of submitting an invalid pair.
+  $: if (secondConsoleChoice !== SECONDARY_NONE_VALUE && secondConsoleChoice === consoleMode) {
+    secondConsoleChoice = SECONDARY_NONE_VALUE;
+  }
   $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
   $: visiblePairedTemplates = catalog ? pairedTemplates() : [];
   $: selectedPairedTemplate = pairedTemplateKey ? pairedTemplateForKey(pairedTemplateKey) : undefined;
@@ -844,7 +890,7 @@
               {/if}
             </div>
 
-            <div class="grid gap-4 md:grid-cols-3">
+            <div class="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
               <label class="block">
                 <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Image</div>
                 <select
@@ -881,6 +927,21 @@
                   class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                 >
                   {#each consoleOptions as option}
+                    <option value={option.value}>{option.label}</option>
+                  {/each}
+                </select>
+              </label>
+
+              <label class="block">
+                <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Second console</div>
+                <select
+                  bind:value={secondConsoleChoice}
+                  on:change={() => markDirty('secondConsoleChoice')}
+                  disabled={isStoppedOnly('second_console')}
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
+                  data-testid="node-second-console"
+                >
+                  {#each secondConsoleOptions as option}
                     <option value={option.value}>{option.label}</option>
                   {/each}
                 </select>

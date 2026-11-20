@@ -23,6 +23,7 @@ from app.schemas.node import (
     NodeFromTemplate,
     NodeUpdate,
     validate_console_mode_for_type,
+    validate_second_console_mode_for_type,
 )
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
@@ -71,7 +72,7 @@ def _json_error(status_code: int, content: dict) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=content)
 
 NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top", "interface_naming_scheme"}
-NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "delay", "extras"}
+NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "second_console", "delay", "extras"}
 NODE_FIELDS_MUTABLE = NODE_FIELDS_EDITABLE_WHILE_RUNNING | NODE_FIELDS_EDITABLE_WHILE_STOPPED | {"config"}
 NODE_CREATE_FIELDS = [
     "template",
@@ -261,6 +262,22 @@ def _validate_node_update_request(node: dict, request: NodeUpdate, node_running:
         except ValueError as exc:
             return str(exc)
 
+    # The secondary must stay valid against the primary the node will end up
+    # with: the incoming value when both change together, the stored one when
+    # only the secondary changes.
+    if "second_console" in requested_fields and _changed("second_console"):
+        effective_primary = str(
+            payload.get("console") if "console" in requested_fields else node.get("console", "telnet")
+        )
+        try:
+            validate_second_console_mode_for_type(
+                str(node.get("type", "qemu")),
+                effective_primary,
+                payload.get("second_console"),
+            )
+        except ValueError as exc:
+            return str(exc)
+
     if "image" in requested_fields and _changed("image"):
         try:
             TemplateService().validate_node_request(
@@ -310,6 +327,7 @@ def _build_node_payload(
         "template": request.template,
         "image": request.image,
         "console": request.console if "console" in provided_fields else template.console_type,
+        "second_console": _second_console_mode_from_create_request(request, template),
         "status": 0,
         "delay": request.delay if "delay" in provided_fields else 0,
         "cpu": request.cpu if "cpu" in provided_fields else template.cpu,
@@ -342,11 +360,22 @@ def _console_mode_from_create_request(request: NodeCreate | NodeBatchCreate, tem
     return str(template.console_type or "telnet")
 
 
+def _second_console_mode_from_create_request(request: NodeCreate | NodeBatchCreate, template) -> str | None:
+    if "second_console" in request.model_fields_set:
+        return request.second_console
+    return getattr(template, "second_console", None) or None
+
+
 def _validate_create_console_request(request: NodeCreate | NodeBatchCreate, template) -> str | None:
     try:
         validate_console_mode_for_type(
             str(request.type),
             _console_mode_from_create_request(request, template),
+        )
+        validate_second_console_mode_for_type(
+            str(request.type),
+            _console_mode_from_create_request(request, template),
+            _second_console_mode_from_create_request(request, template),
         )
     except ValueError as exc:
         return str(exc)
@@ -829,8 +858,14 @@ async def create_node_from_template(
 
     # Build a NodeCreate from the template defaults, allowing per-request overrides.
     console_mode = request.console or template_def.console_type or "telnet"
+    second_console_mode = (
+        request.second_console
+        if "second_console" in request.model_fields_set
+        else (template_def.second_console or None)
+    )
     try:
         validate_console_mode_for_type(request.template_type, console_mode)
+        validate_second_console_mode_for_type(request.template_type, console_mode, second_console_mode)
     except ValueError as exc:
         return {
             "code": 400,
@@ -844,6 +879,7 @@ async def create_node_from_template(
         template=request.template_key,
         image=request.image,
         console=console_mode,
+        second_console=second_console_mode,
         cpu=request.cpu if request.cpu is not None else template_def.cpu,
         ram=request.ram if request.ram is not None else template_def.ram,
         ethernet=request.ethernet if request.ethernet is not None else template_def.ethernet,
@@ -944,6 +980,7 @@ def _build_paired_child_payload(
         "template": synthetic_paired_child_key(template_key, child_id),
         "image": str(child.get("image") or ""),
         "console": str(child.get("console") or "telnet"),
+        "second_console": child.get("second_console") or None,
         "status": 0,
         "delay": 0,
         "cpu": int(child.get("cpu", 1)),
@@ -1480,7 +1517,9 @@ async def update_node(
         }
 
     for field, value in request.model_dump(exclude_unset=True).items():
-        if value is not None:
+        # ``second_console: null`` is meaningful — it clears the secondary
+        # console (#268). Every other field keeps the skip-None behavior.
+        if value is not None or field == "second_console":
             node[field] = value
 
     node["interfaces"] = _resize_interfaces(
@@ -1947,25 +1986,18 @@ async def node_external_console(
             }
 
         node = data.get("nodes", {}).get(str(node_id), {})
-        if mode_normalized == "second":
-            if not node.get("second_console"):
-                return {
-                    "code": 400,
-                    "status": "fail",
-                    "message": f"Node has no secondary console: {node_id}.",
-                }
-            # Forward-compat with the secondary-console lane (#268): until
-            # secondary consoles expose a runtime port, refuse instead of
-            # advertising the primary console under the second mode.
+        if mode_normalized == "second" and not node.get("second_console"):
             return {
                 "code": 400,
                 "status": "fail",
-                "message": "Secondary console external launch is not supported yet.",
+                "message": f"Node has no secondary console: {node_id}.",
             }
 
         # console_info re-spawns a dead docker console proxy before reporting
         # the port, so the advertised host:port actually accepts connections.
-        console = runtime_service.console_info(data, node_id)
+        # mode="second" (#268) resolves the secondary console session — its
+        # port is wildcard-bound too while external consoles are enabled.
+        console = runtime_service.console_info(data, node_id, mode=mode_normalized)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
     except FileNotFoundError:
@@ -2022,8 +2054,18 @@ async def node_external_console(
 async def node_html5(
     lab_path: str,
     node_id: int,
+    console: str = "primary",
     current_user: UserRead = Depends(get_current_user),
 ):
+    # #268 — ``console`` selects which declared console session to open:
+    # ``primary`` (default) or ``second`` when the node exposes one.
+    if console not in ("primary", "second"):
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": f"Unknown console mode {console!r}; expected 'primary' or 'second'.",
+        }
+
     if not getattr(current_user, "html5", True):
         return {
             "code": 403,
@@ -2033,7 +2075,7 @@ async def node_html5(
 
     try:
         data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
-        console = NodeRuntimeService().console_info(data, node_id)
+        console_info = NodeRuntimeService().console_info(data, node_id, mode=console)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
     except FileNotFoundError:
@@ -2058,21 +2100,26 @@ async def node_html5(
     try:
         settings = get_settings()
         if settings.GUACAMOLE_DATABASE_URL.strip():
+            # The secondary session gets its own stable connection key so the
+            # two consoles of one node never share a Guacamole connection.
+            connection_key = f"{data.get('id', lab_path)}:{node_id}:{console_info['console']}"
+            if console == "second":
+                connection_key = f"{data.get('id', lab_path)}:{node_id}:second:{console_info['console']}"
             html5_url = await GuacamoleDatabaseService().create_console_url(
                 current_user,
-                host=console["host"],
-                port=console["port"],
-                protocol=console["console"],
-                connection_name=console["name"],
-                connection_key=f"{data.get('id', lab_path)}:{node_id}:{console['console']}",
+                host=console_info["host"],
+                port=console_info["port"],
+                protocol=console_info["console"],
+                connection_name=console_info["name"],
+                connection_key=connection_key,
             )
         else:
             html5_url = await Html5SessionService().create_console_url(
                 current_user,
-                host=console["host"],
-                port=console["port"],
-                protocol=console["console"],
-                connection_name=console["name"],
+                host=console_info["host"],
+                port=console_info["port"],
+                protocol=console_info["console"],
+                connection_name=console_info["name"],
             )
     except (Html5SessionError, GuacamoleDatabaseError) as exc:
         return {
