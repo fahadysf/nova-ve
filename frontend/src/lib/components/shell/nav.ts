@@ -37,16 +37,20 @@ export interface NavSection {
 
 export const NAV_SECTIONS: readonly NavSection[] = [
   {
-    title: null,
+    // Labs grouping (#260): the browser plus lab-instance management sit
+    // under their own superheading instead of an un-sectioned first entry.
+    title: 'Labs',
     adminOnly: false,
-    items: [{ label: 'Labs', href: '/labs', icon: FlaskConical }],
+    items: [
+      { label: 'Labs', href: '/labs', icon: FlaskConical },
+      { label: 'Lab Management', href: '/manage/labs', icon: Activity, plannedIssue: 262 },
+    ],
   },
   {
     title: 'Management',
     adminOnly: true,
     items: [
       { label: 'Users', href: '/manage/users', icon: Users, plannedIssue: 261 },
-      { label: 'Running Labs', href: '/manage/labs', icon: Activity, plannedIssue: 262 },
       { label: 'Running Nodes', href: '/manage/nodes', icon: Boxes, plannedIssue: 263 },
     ],
   },
