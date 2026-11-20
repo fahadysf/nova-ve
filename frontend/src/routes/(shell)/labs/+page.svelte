@@ -5,7 +5,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { apiGetData, apiRequest, ApiError } from '$lib/api';
-  import { logout, authStore } from '$lib/stores/auth';
+  import { authStore } from '$lib/stores/auth';
   import { toastStore } from '$lib/stores/toasts';
   import type { FolderEntry, FolderListing, LabListItem } from '$lib/types';
 
@@ -21,7 +21,6 @@
   $: folderSegments = currentFolder.split('/').filter(Boolean);
   $: currentFolderLabel = currentFolder || '/';
   $: inVirtualRootFolder = folderSegments.length === 1 && STATIC_ROOT_FOLDERS.has(folderSegments[0]);
-  $: currentUserLabel = $authStore.user?.name || $authStore.user?.username || '';
 
   onMount(async () => {
     if (!$authStore.authenticated) {
@@ -79,11 +78,6 @@
 
   function openFolder(folder: FolderEntry) {
     void fetchContents(folder.path);
-  }
-
-  async function handleLogout() {
-    await logout();
-    goto('/login');
   }
 
   async function createFolder() {
@@ -212,24 +206,8 @@
   }
 </script>
 
-<div class="flex flex-1 flex-col bg-gray-900">
-  <header class="flex h-14 items-center justify-between border-b border-gray-700 bg-gray-800 px-4">
-    <div class="text-lg font-bold tracking-tight text-gray-100">nova-ve</div>
-    <div class="flex items-center gap-4">
-      {#if $authStore.user?.role === 'admin'}
-        <button
-          on:click={() => goto('/admin/docker-images')}
-          class="text-sm text-gray-300 transition hover:text-white"
-          title="Curate the docker images available in lab Add Node"
-        >Docker images</button>
-      {/if}
-      <span class="text-sm text-gray-400">{currentUserLabel}</span>
-      <button on:click={handleLogout} class="text-sm text-red-400 transition hover:text-red-300">Logout</button>
-    </div>
-  </header>
-
-  <main class="flex-1 overflow-auto p-6">
-    <div class="space-y-6">
+<div class="p-6">
+  <div class="space-y-6">
       <section class="flex flex-wrap items-start justify-between gap-4 rounded-2xl border border-gray-800 bg-gray-900/95 px-5 py-4">
         <div>
           <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Labs Browser</div>
@@ -399,6 +377,5 @@
           {/if}
         </section>
       {/if}
-    </div>
-  </main>
+  </div>
 </div>

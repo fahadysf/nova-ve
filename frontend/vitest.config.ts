@@ -7,6 +7,11 @@ export default defineConfig({
 	resolve: {
 		alias: {
 			$lib: path.resolve('./src/lib'),
+			// SvelteKit virtual modules are not resolvable under the plain
+			// svelte plugin vitest uses — point them at test doubles.
+			'$app/navigation': path.resolve('./tests/mocks/appNavigation.ts'),
+			'$app/stores': path.resolve('./tests/mocks/appStores.ts'),
+			'$app/environment': path.resolve('./tests/mocks/appEnvironment.ts'),
 		},
 		// Resolve the browser entry of Svelte/SvelteKit so component mount() is available
 		// inside the JSDOM environment (Svelte 5 + @testing-library/svelte component tests).
