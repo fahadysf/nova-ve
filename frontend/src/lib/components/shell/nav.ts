@@ -3,9 +3,6 @@
 
 /**
  * Left-navigation model for the app shell (#260).
- *
- * Static preview pages carry a `plannedIssue` reference — the row renders a
- * "planned" badge and links to the tracking issue until the real view lands.
  */
 import {
   Activity,
@@ -25,8 +22,6 @@ export interface NavItem {
   label: string;
   href: string;
   icon: NavIcon;
-  /** Tracking issue for views that are static previews so far. */
-  plannedIssue?: number;
 }
 
 export interface NavSection {
@@ -43,36 +38,29 @@ export const NAV_SECTIONS: readonly NavSection[] = [
     adminOnly: false,
     items: [
       { label: 'Labs', href: '/labs', icon: FlaskConical },
-      { label: 'Lab Management', href: '/manage/labs', icon: Activity, plannedIssue: 262 },
+      { label: 'Lab Management', href: '/manage/labs', icon: Activity },
     ],
   },
   {
     title: 'Management',
     adminOnly: true,
     items: [
-      { label: 'Users', href: '/manage/users', icon: Users, plannedIssue: 261 },
-      { label: 'Running Nodes', href: '/manage/nodes', icon: Boxes, plannedIssue: 263 },
+      { label: 'Users', href: '/manage/users', icon: Users },
+      { label: 'Running Nodes', href: '/manage/nodes', icon: Boxes },
     ],
   },
   {
     title: 'Library',
     adminOnly: true,
-    items: [
-      {
-        label: 'Images & Templates',
-        href: '/library/images',
-        icon: HardDrive,
-        plannedIssue: 264,
-      },
-    ],
+    items: [{ label: 'Images & Templates', href: '/library/images', icon: HardDrive }],
   },
   {
     title: 'System',
     adminOnly: true,
     items: [
-      { label: 'Status', href: '/system/status', icon: Gauge, plannedIssue: 265 },
-      { label: 'Logs', href: '/system/logs', icon: ScrollText, plannedIssue: 265 },
-      { label: 'Settings', href: '/system/settings', icon: Settings, plannedIssue: 265 },
+      { label: 'Status', href: '/system/status', icon: Gauge },
+      { label: 'Logs', href: '/system/logs', icon: ScrollText },
+      { label: 'Settings', href: '/system/settings', icon: Settings },
     ],
   },
 ];
