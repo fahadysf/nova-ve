@@ -20,7 +20,13 @@
       cookie_secure: boolean;
       access_token_expire_minutes: number;
     };
-    networking: { nat_cloud_pool: string; nat_cloud_pool_effective: string; docker_host: string };
+    networking: {
+      nat_cloud_pool: string;
+      nat_cloud_pool_effective: string;
+      docker_host: string;
+      external_console_host: string;
+      external_console_host_effective: string;
+    };
     reconciliation: { discovery_cadence_seconds: number; discovery_cadence_seconds_effective: number };
     console: { guacamole_public_path: string; terminal_font_name: string; terminal_font_size: number };
     paths: Record<string, string>;
@@ -32,6 +38,7 @@
   let discoveryCadence = 30;
   let natPool = '';
   let sessionMaxAge = 14400;
+  let externalConsoleHost = '';
   let saving = false;
 
   function readOnlyGroups(data: SettingsData): { title: string; rows: [string, string][] }[] {
@@ -65,6 +72,7 @@
     discoveryCadence = data.data.reconciliation.discovery_cadence_seconds;
     natPool = data.data.networking.nat_cloud_pool;
     sessionMaxAge = data.data.auth.session_max_age;
+    externalConsoleHost = data.data.networking.external_console_host;
   }
 
   async function save() {
@@ -75,7 +83,8 @@
         body: {
           DISCOVERY_CADENCE_SECONDS: discoveryCadence,
           NAT_CLOUD_POOL: natPool,
-          SESSION_MAX_AGE: sessionMaxAge
+          SESSION_MAX_AGE: sessionMaxAge,
+          EXTERNAL_CONSOLE_HOST: externalConsoleHost
         }
       });
       toastStore.push('Settings persisted. Restart the backend to apply.', 'success');
@@ -132,6 +141,24 @@
                 data-testid="settings-nat-pool"
               />
             </label>
+            <div>
+              <label class="block text-[11px] uppercase tracking-[0.05em] text-gray-500">
+                External console host (hostname or IPv4, empty disables)
+                <input
+                  class="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 font-mono text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+                  bind:value={externalConsoleHost}
+                  placeholder="192.168.7.9"
+                  data-testid="settings-external-console-host"
+                />
+              </label>
+              <p class="mt-1 text-[10px] leading-relaxed text-gray-500">
+                Advertised verbatim in telnet://, vnc:// and rdp:// console links.
+                When set, console listeners on newly started nodes become reachable
+                beyond loopback (telnet/VNC/proxy ports bind the wildcard address) —
+                scope them with a firewall. Nodes already running keep their previous
+                binding until restarted.
+              </p>
+            </div>
             <label class="block text-[11px] uppercase tracking-[0.05em] text-gray-500">
               Session lifetime (seconds, min 300)
               <input
