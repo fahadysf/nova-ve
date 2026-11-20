@@ -431,7 +431,7 @@ async def test_html5_respects_user_flag(monkeypatch, patched_settings, sample_la
     monkeypatch.setattr(
         "app.routers.labs.NodeRuntimeService",
         lambda: SimpleNamespace(
-            console_info=lambda _lab_data, _node_id: {
+            console_info=lambda _lab_data, _node_id, mode="primary": {
                 "console": "telnet",
                 "host": "127.0.0.1",
                 "port": 2323,
@@ -504,7 +504,7 @@ async def test_html5_route_prefers_db_backed_service_when_configured(monkeypatch
     monkeypatch.setattr(
         "app.routers.labs.NodeRuntimeService",
         lambda: SimpleNamespace(
-            console_info=lambda _lab_data, _node_id: {
+            console_info=lambda _lab_data, _node_id, mode="primary": {
                 "name": "alpine-a",
                 "console": "telnet",
                 "host": "127.0.0.1",
@@ -3349,6 +3349,41 @@ async def test_external_console_endpoint_rejects_secondary_and_unknown_modes(
 
     response = await labs.node_external_console("sample.json", 1, mode="tertiary", current_user=user)
     assert response["code"] == 422
+
+
+@pytest.mark.asyncio
+async def test_external_console_endpoint_advertises_secondary_console(
+    monkeypatch, patched_settings, sample_lab
+):
+    """#268 + #269 union: a node with a declared secondary console gets a
+    native-launch link for it — scheme and port come from the secondary
+    session, not the primary."""
+    _enable_external_console(monkeypatch, patched_settings)
+    _live_runtime(monkeypatch)
+    lab_path = patched_settings.LABS_DIR / "sample.json"
+    lab_data = json.loads(lab_path.read_text())
+    lab_data["nodes"]["1"]["second_console"] = "vnc"
+    lab_path.write_text(json.dumps(lab_data))
+    _seed_runtime(
+        patched_settings,
+        "lab-123",
+        1,
+        kind="qemu",
+        console="telnet",
+        console_port=47501,
+        second_console="vnc",
+        second_console_port=5910,
+    )
+    user = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
+
+    response = await labs.node_external_console("sample.json", 1, mode="second", current_user=user)
+
+    assert response["code"] == 200
+    assert response["data"]["mode"] == "second"
+    assert response["data"]["scheme"] == "vnc"
+    assert response["data"]["host"] == "192.168.7.9"
+    assert response["data"]["port"] == 5910
+    assert response["data"]["console"] == "vnc"
 
 
 @pytest.mark.asyncio

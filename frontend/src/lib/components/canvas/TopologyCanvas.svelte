@@ -128,7 +128,7 @@
     | { kind: 'network'; networkId: number; linkId: string; endpointKey?: LinkEndpointKey };
 
   const dispatch = createEventDispatcher<{
-    console: { nodeId: number; node: NodeData };
+    console: { nodeId: number; node: NodeData; mode: 'primary' | 'second' };
     'console-select': { tabId: number };
     'console-restore': { tabId: number };
     'console-close': { tabId: number };
@@ -319,6 +319,15 @@
       }
     | null = null;
   let portMenuTarget: ConnectionPointTarget | null = null;
+
+  // #268 — the node the context menu currently targets. The Console entry
+  // renders one pill per available console mode from this node's config.
+  $: menuNode = (() => {
+    if (!menu || menu.targetType !== 'node') return null;
+    const decoded = decodeId(menu.targetId);
+    if (!decoded) return null;
+    return $labState.nodes[String(decoded.id)] ?? null;
+  })();
 
   const nodeColor = (node: Node) => {
     if (node.type === 'network') return '#3b82f6';
@@ -1317,7 +1326,19 @@
     }
   }
 
-  async function handleNodeAction(action: 'start' | 'stop' | 'wipe' | 'delete' | 'console', targetId: string) {
+  // #268 — pill label for a console mode. A paired-template serial primary
+  // is served by the runtime as a telnet server, so the HTML5 session (and
+  // the pill) reports telnet.
+  function consolePillLabel(mode: NodeData['console'] | null | undefined): string {
+    if (!mode) return '';
+    return mode === 'serial' ? 'telnet' : mode;
+  }
+
+  async function handleNodeAction(
+    action: 'start' | 'stop' | 'wipe' | 'delete' | 'console',
+    targetId: string,
+    consoleMode: 'primary' | 'second' = 'primary'
+  ) {
     closeMenu();
     const decoded = decodeId(targetId);
     if (!decoded || decoded.type !== 'node') {
@@ -1330,7 +1351,7 @@
     }
 
     if (action === 'console') {
-      dispatch('console', { nodeId: decoded.id, node });
+      dispatch('console', { nodeId: decoded.id, node, mode: consoleMode });
       return;
     }
 
@@ -1840,6 +1861,7 @@
             ram: number;
             ethernet: number;
             console: NodeData['console'];
+            second_console: NonNullable<NodeData['secondConsole']> | null;
             delay: number;
             extras: Record<string, unknown>;
           };
@@ -1862,6 +1884,7 @@
             ram: number;
             ethernet: number;
             console: NodeData['console'];
+            second_console: NonNullable<NodeData['secondConsole']> | null;
             delay: number;
             extras: Record<string, unknown>;
           };
@@ -2253,9 +2276,30 @@
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('wipe', menu?.targetId ?? '')}>
           <span>Wipe</span><Eraser class="h-3.5 w-3.5 text-gray-400" />
         </button>
-        <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '')}>
-          <span>Console</span><Monitor class="h-3.5 w-3.5 text-gray-400" />
-        </button>
+        <!-- #268: one pill per available console mode; each pill opens that
+             console session. Nodes without a secondary keep a single pill. -->
+        <div class="menu-item">
+          <span>Console</span>
+          <span class="flex items-center gap-1">
+            {#if menuNode}
+              <button
+                type="button"
+                class="rounded-full border border-gray-600 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-300 transition hover:border-blue-400 hover:text-blue-200"
+                data-testid="node-menu-console-primary"
+                on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '', 'primary')}
+              >{consolePillLabel(menuNode.console)}</button>
+              {#if menuNode.secondConsole}
+                <button
+                  type="button"
+                  class="rounded-full border border-gray-600 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-300 transition hover:border-blue-400 hover:text-blue-200"
+                  data-testid="node-menu-console-secondary"
+                  on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '', 'second')}
+                >{consolePillLabel(menuNode.secondConsole)}</button>
+              {/if}
+            {/if}
+          </span>
+          <Monitor class="h-3.5 w-3.5 text-gray-400" />
+        </div>
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleEditNode(menu?.targetId ?? '')}>
           <span>Edit Node</span><Pencil class="h-3.5 w-3.5 text-gray-400" />
         </button>

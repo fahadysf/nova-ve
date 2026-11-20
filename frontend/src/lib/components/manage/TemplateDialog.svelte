@@ -23,7 +23,11 @@
   let ram = 1024;
   let ethernet = 1;
   let consoleType = '';
+  let secondConsole = '';
   let aliases = '';
+
+  // #268 — secondary console options; '' clears the field on save.
+  const SECOND_CONSOLE_OPTIONS = ['telnet', 'vnc', 'rdp'];
 
   $: {
     name = template.name;
@@ -31,6 +35,7 @@
     ram = template.ram;
     ethernet = template.ethernet;
     consoleType = template.console_type;
+    secondConsole = template.second_console ?? '';
     aliases = template.image_aliases.join(', ');
   }
 
@@ -43,6 +48,7 @@
         ram: Math.trunc(ram) || 1,
         ethernet: Math.trunc(ethernet) || 1,
         console_type: consoleType.trim(),
+        second_console: secondConsole === '' ? null : secondConsole,
         image_aliases: aliases
           .split(',')
           .map((item) => item.trim())
@@ -119,6 +125,19 @@
             bind:value={consoleType}
             placeholder="telnet"
           />
+        </label>
+        <label class="block text-[11px] uppercase tracking-[0.05em] text-gray-500">
+          Second console
+          <select
+            class="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+            bind:value={secondConsole}
+            data-testid="template-dialog-second-console"
+          >
+            <option value="">none</option>
+            {#each SECOND_CONSOLE_OPTIONS as mode}
+              <option value={mode}>{mode}</option>
+            {/each}
+          </select>
         </label>
         <label class="col-span-2 block text-[11px] uppercase tracking-[0.05em] text-gray-500">
           Image aliases (comma-separated)
