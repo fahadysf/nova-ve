@@ -265,7 +265,11 @@ function separateCornerCollisions(
 
 /**
  * Spread ports that share one box side far enough that their circular handles
- * keep at least ``minCenterGapPx`` between centers. For the default 10px
+ * keep at least ``minCenterGapPx`` between centers, placed symmetrically
+ * around the CENTER of the side (#258 — NetBird-style center bias): a lone
+ * port sits exactly at the side's midpoint and a group fans out evenly about
+ * it instead of drifting toward a corner. Incoming order (by projected
+ * offset) is preserved so link stubs don't cross. For the default 10px
  * handles this preserves a 1px visual gap between handle edges.
  */
 export function separatePortPositions(
@@ -287,40 +291,20 @@ export function separatePortPositions(
         return offsetDelta === 0 ? a.index - b.index : offsetDelta;
       });
 
-    if (entries.length <= 1) continue;
+    if (entries.length === 0) continue;
 
     const minDelta = (minCenterGapPx + 1e-6) / sideLengthPx(side, nodeBox);
     const effectiveDelta =
-      minDelta * (entries.length - 1) > 1 ? 1 / (entries.length - 1) : minDelta;
+      entries.length > 1 && minDelta * (entries.length - 1) > 1
+        ? 1 / (entries.length - 1)
+        : minDelta;
 
-    const adjusted = entries.map((entry) => entry.position.offset);
-    for (let index = 1; index < adjusted.length; index += 1) {
-      adjusted[index] = Math.max(adjusted[index], adjusted[index - 1] + effectiveDelta);
-    }
-
-    const overflow = adjusted[adjusted.length - 1] - 1;
-    if (overflow > 0) {
-      for (let index = 0; index < adjusted.length; index += 1) {
-        adjusted[index] -= overflow;
-      }
-    }
-
-    for (let index = adjusted.length - 2; index >= 0; index -= 1) {
-      adjusted[index] = Math.min(adjusted[index], adjusted[index + 1] - effectiveDelta);
-    }
-
-    const underflow = 0 - adjusted[0];
-    if (underflow > 0) {
-      for (let index = 0; index < adjusted.length; index += 1) {
-        adjusted[index] += underflow;
-      }
-    }
-
-    for (const [entryIndex, entry] of entries.entries()) {
-      result[entry.index] = {
-        side,
-        offset: clamp01(adjusted[entryIndex]),
-      };
+    for (const [i, entry] of entries.entries()) {
+      const offset =
+        entries.length === 1
+          ? 0.5
+          : 0.5 + (i - (entries.length - 1) / 2) * effectiveDelta;
+      result[entry.index] = { side, offset: clamp01(offset) };
     }
   }
 
