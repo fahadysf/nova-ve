@@ -12,15 +12,20 @@ export interface MockPage {
 }
 
 let currentPathname = '/';
+let currentParams: Record<string, string> = {};
 
 export function setPagePathname(pathname: string): void {
   currentPathname = pathname;
 }
 
+export function setPageParams(params: Record<string, string>): void {
+  currentParams = params;
+}
+
 function makePage(): MockPage {
   return {
     url: { pathname: currentPathname, search: '', origin: 'http://test.local' },
-    params: {},
+    params: currentParams,
     route: { id: null },
   };
 }

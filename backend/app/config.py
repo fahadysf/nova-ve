@@ -111,6 +111,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("NAT_CLOUD_POOL", "NOVA_VE_NAT_CLOUD_POOL"),
     )
 
+    # External console launch (#269). Hostname or IPv4 address operators use
+    # on their workstation to reach node console listeners (e.g. the server's
+    # LAN address). Used verbatim in the telnet://, vnc:// and rdp:// URLs the
+    # external-console endpoint advertises — never credentials, never a port.
+    #
+    # SECURITY: leaving this empty keeps the feature disabled (the endpoint
+    # refuses and the UI falls back to the in-browser console). When set,
+    # node console listeners become reachable beyond loopback: QEMU telnet
+    # serial and VNC displays bind 0.0.0.0 on newly started nodes, on top of
+    # the console-proxy listeners (docker/dynamips/iol) that already publish
+    # on 0.0.0.0. Raw protocol connections bypass the HTML5 session layer,
+    # so those ports are exposed to anything that can route to this host —
+    # scope access with a firewall. Nodes started before the setting was
+    # enabled keep their loopback-only binding until restarted.
+    EXTERNAL_CONSOLE_HOST: str = ""
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _validate_database_url(cls, value: str) -> str:
