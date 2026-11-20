@@ -98,6 +98,7 @@ export interface LibraryTemplate {
   ram: number;
   ethernet: number;
   console_type: string;
+  second_console?: string | null;
   cpulimit: number;
   image_aliases: string[];
   paired_parent?: string | null;
@@ -110,6 +111,7 @@ export type LibraryTemplateEdit = {
   ram?: number;
   ethernet?: number;
   console_type?: string;
+  second_console?: string | null;
   image_aliases?: string[];
 };
 
@@ -341,6 +343,8 @@ export interface NodeData {
   template: string;
   image: string;
   console: 'telnet' | 'vnc' | 'rdp' | 'serial';
+  /** Optional second console mode declared on the template (#268). */
+  secondConsole?: 'telnet' | 'vnc' | 'rdp' | null;
   status: 0 | 2;
   transientStatus?: 'starting' | 'stopping';
   delay: number;
@@ -382,6 +386,7 @@ export interface NodeCatalogDefaults {
   ram: number;
   ethernet: number;
   console_type: 'telnet' | 'vnc' | 'rdp' | 'serial';
+  second_console?: string | null;
   delay: number;
   cpulimit: number;
   extras?: Record<string, unknown>;
