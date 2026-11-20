@@ -222,3 +222,45 @@ describe('portLayout.separatePortPositions', () => {
     expect(centerGapPx).toBeGreaterThanOrEqual(PORT_HANDLE_MIN_CENTER_GAP_PX);
   });
 });
+
+describe('portLayout.separatePortPositions — center bias (#258)', () => {
+  const box = { x: 0, y: 0, w: 100, h: 100 };
+
+  it('pulls a lone port to the exact center of its side', () => {
+    const separated = separatePortPositions(
+      [{ side: 'right', offset: 0.8 }],
+      box
+    );
+    expect(separated).toEqual([{ side: 'right', offset: 0.5 }]);
+  });
+
+  it('fans a clustered group out symmetrically around the side center', () => {
+    const separated = separatePortPositions(
+      [
+        { side: 'right', offset: 0.5 },
+        { side: 'right', offset: 0.5 },
+        { side: 'right', offset: 0.5 },
+      ],
+      box
+    );
+    const offsets = separated.map((position) => position.offset);
+    // Symmetric about 0.5, evenly spaced at the minimum center gap.
+    expect(offsets[1]).toBeCloseTo(0.5, 6);
+    expect((offsets[0] + offsets[2]) / 2).toBeCloseTo(0.5, 6);
+    expect((offsets[1] - offsets[0]) * box.h).toBeGreaterThanOrEqual(PORT_HANDLE_MIN_CENTER_GAP_PX);
+    expect((offsets[2] - offsets[1]) * box.h).toBeGreaterThanOrEqual(PORT_HANDLE_MIN_CENTER_GAP_PX);
+  });
+
+  it('preserves projected order so link stubs do not cross', () => {
+    const separated = separatePortPositions(
+      [
+        { side: 'right', offset: 0.9 },
+        { side: 'right', offset: 0.1 },
+      ],
+      box
+    );
+    // The 0.9-ideal port stays the lower of the two on the side.
+    expect(separated[0].offset).toBeGreaterThan(separated[1].offset);
+    expect((separated[0].offset + separated[1].offset) / 2).toBeCloseTo(0.5, 6);
+  });
+});
