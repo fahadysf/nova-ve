@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Edge } from '@xyflow/svelte';
+import type { Obstacle } from './router';
 import type { Link, LinkReconciliation, LinkStyle } from '$lib/types';
 
 export interface DeriveEdgesDefaults {
@@ -394,6 +395,30 @@ export function deriveEdges(
   }
 
   return edges;
+}
+
+/**
+ * Give every edge the other cards' boxes as router obstacles (#254/#258).
+ *
+ * Without this the orthogonal router sees an empty world: facing ports take
+ * the fast-path Z straight through whatever node happens to sit between
+ * them (e.g. a link passing underneath a router in the middle of the
+ * canvas). Keys are Svelte Flow node ids (``node{id}`` / ``network{id}``);
+ * each edge's own endpoint boxes are excluded so the path may touch its
+ * own ports (JointJS calls this excludeEnds).
+ */
+export function attachRouteObstacles(
+  edges: Edge[],
+  boxesByFlowId: ReadonlyMap<string, Obstacle>
+): Edge[] {
+  return edges.map((edge) => {
+    const obstacles: Obstacle[] = [];
+    for (const [flowId, box] of boxesByFlowId.entries()) {
+      if (flowId === edge.source || flowId === edge.target) continue;
+      obstacles.push(box);
+    }
+    return { ...edge, data: { ...(edge.data ?? {}), obstacles } };
+  });
 }
 
 /**
