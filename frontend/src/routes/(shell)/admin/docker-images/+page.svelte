@@ -5,7 +5,7 @@
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { apiGetData, apiRequest, ApiError } from '$lib/api';
-  import { authStore, logout } from '$lib/stores/auth';
+  import { authStore } from '$lib/stores/auth';
   import { toastStore } from '$lib/stores/toasts';
 
   interface DockerImageRecord {
@@ -128,11 +128,6 @@
     }
   }
 
-  async function handleLogout() {
-    await logout();
-    goto('/login');
-  }
-
   function formatSize(bytes: number): string {
     if (!bytes) return '—';
     const units = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -146,25 +141,7 @@
   }
 </script>
 
-<div class="flex flex-1 flex-col bg-gray-900 text-gray-200">
-  <header class="flex h-14 items-center justify-between border-b border-gray-700 bg-gray-800 px-4">
-    <div class="flex items-center gap-4">
-      <button
-        class="text-lg font-bold tracking-tight text-gray-100 transition hover:text-white"
-        on:click={() => goto('/labs')}
-      >nova-ve</button>
-      <span class="text-xs uppercase tracking-[0.1em] text-gray-500">Admin · Docker Images</span>
-    </div>
-    <div class="flex items-center gap-4">
-      <button class="text-sm text-gray-300 transition hover:text-white" on:click={() => goto('/labs')}>
-        Back to Labs
-      </button>
-      <span class="text-sm text-gray-400">{currentUser?.name || currentUser?.username || ''}</span>
-      <button on:click={handleLogout} class="text-sm text-red-400 transition hover:text-red-300">Logout</button>
-    </div>
-  </header>
-
-  <main class="flex-1 overflow-auto p-6">
+<div class="p-6 text-gray-200">
     <div class="mx-auto max-w-5xl space-y-6">
       <section class="rounded-2xl border border-gray-800 bg-gray-900/95 px-5 py-4">
         <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Lab image curation</div>
@@ -289,5 +266,4 @@
         {/if}
       </section>
     </div>
-  </main>
 </div>
