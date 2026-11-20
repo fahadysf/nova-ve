@@ -10,8 +10,9 @@
  *   2. Drive ``dragLinkStore.start(...)`` directly with the source endpoint —
  *      the legacy ``createEventDispatcher`` chain never bubbled through
  *      SvelteFlow's component-prop renderer.
- *   3. Skip drag-link start for ctrl-modified mousedown (port repositioning)
- *      and right-button (or other non-zero) mousedown.
+ *   3. Skip drag-link start for right-button (or other non-zero) mousedown.
+ *      Ctrl-modified mousedown starts a link drag like plain mousedown since
+ *      port repositioning was removed (#258).
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -150,7 +151,7 @@ describe('Port (US-080)', () => {
     expect(call.pointer).toEqual({ x: 100, y: 200 });
   });
 
-  it('ctrl+mousedown does NOT call dragLinkStore.start and does suppress node drag', () => {
+  it('ctrl+mousedown starts a link drag like plain mousedown (#258 — no repositioning)', () => {
     render(Port, {
       props: {
         interfaceData: baseInterface,
@@ -164,7 +165,7 @@ describe('Port (US-080)', () => {
     const { event, stopSpy, preventSpy } = makeMouseDown({ ctrlKey: true });
     root.dispatchEvent(event);
 
-    expect(startSpy).not.toHaveBeenCalled();
+    expect(startSpy).toHaveBeenCalledTimes(1);
     expect(stopSpy).toHaveBeenCalled();
     expect(preventSpy).toHaveBeenCalled();
   });

@@ -33,7 +33,6 @@
     'port:mouseup': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:mouseenter': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
     'port:mouseleave': { nodeId: number; interfaceIndex: number; port: PortPosition; event: MouseEvent };
-    'port:dragend': { nodeId: number; interfaceIndex: number; port: PortPosition };
   }>();
 
   function openInfo(event: MouseEvent) {
@@ -111,7 +110,6 @@
     on:port:mouseup={(e) => dispatch('port:mouseup', e.detail)}
     on:port:mouseenter={(e) => dispatch('port:mouseenter', e.detail)}
     on:port:mouseleave={(e) => dispatch('port:mouseleave', e.detail)}
-    on:port:dragend={(e) => dispatch('port:dragend', e.detail)}
   />
 
   <button

@@ -29,9 +29,6 @@
   export let connectionPointRef:
     | { linkId: string; endpointKey: 'from' | 'to' }
     | undefined = undefined;
-  export let manualRepositionStart:
-    | ((detail: { event: MouseEvent; nodeId: number; interfaceIndex: number; port: PortPosition }) => void)
-    | undefined = undefined;
   // When true, an inline label with the interface name is rendered next to the
   // port handle without requiring hover. Used to surface link attachments at a
   // glance (US-214: pinned labels on connected ports).
@@ -229,33 +226,26 @@
     clearHoverTimer();
     showTooltip = false;
 
-    if (event.ctrlKey) {
-      manualRepositionStart?.({ event, nodeId, interfaceIndex, port: position });
-      return;
-    }
-
-    if (!event.ctrlKey) {
-      clickStartTs = Date.now();
-      clickStartCoords = { x: event.clientX, y: event.clientY };
-      dragLinkStore.start({
-        source: newConnectionSlot
-          ? {
-              kind: 'node-slot',
-              nodeId,
-              port: position,
-              nodeName,
-            }
-          : {
-              kind: 'interface',
-              nodeId,
-              interfaceIndex,
-              port: position,
-              interfaceName: renderedInterfaceName,
-              plannedMac: interfaceData.planned_mac ?? null,
-            },
-        pointer: { x: event.clientX, y: event.clientY },
-      });
-    }
+    clickStartTs = Date.now();
+    clickStartCoords = { x: event.clientX, y: event.clientY };
+    dragLinkStore.start({
+      source: newConnectionSlot
+        ? {
+            kind: 'node-slot',
+            nodeId,
+            port: position,
+            nodeName,
+          }
+        : {
+            kind: 'interface',
+            nodeId,
+            interfaceIndex,
+            port: position,
+            interfaceName: renderedInterfaceName,
+            plannedMac: interfaceData.planned_mac ?? null,
+          },
+      pointer: { x: event.clientX, y: event.clientY },
+    });
 
     dispatch('port:mousedown', { event, nodeId, interfaceIndex, port: position });
   }

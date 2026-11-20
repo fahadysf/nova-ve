@@ -7,7 +7,6 @@
   import { dragLinkStore, getDragLinkSnapshot, type Side } from '$lib/stores/dragLink';
   import { togglePortInfo } from '$lib/stores/portInfo';
   import { slotHandleId } from '$lib/services/canvasEdges';
-  import { clampToPerimeter } from '$lib/services/portLayout';
   import type { PortPosition } from '$lib/types';
 
   export let networkId: number;
@@ -37,30 +36,20 @@
   let portHandle: HTMLSpanElement | null = null;
   let clickStartTs = 0;
   let clickStartCoords: { x: number; y: number } | null = null;
-  let draggingPosition: PortPosition | null = null;
-  let manualOpenPosition: PortPosition | null = null;
 
-  type PersistConnectionPointPosition = (
-    target: { kind: 'network'; networkId: number; linkId: string; endpointKey?: 'from' | 'to' },
-    port: PortPosition
-  ) => void;
   type ConnectionPointContextMenu = (
     target: { kind: 'network'; networkId: number; linkId: string; endpointKey?: 'from' | 'to' },
     event: MouseEvent
   ) => void;
-  const persistConnectionPointPosition = getContext<PersistConnectionPointPosition | undefined>(
-    'nova-ve:connection-point-position-persist'
-  );
   const openConnectionPointMenu = getContext<ConnectionPointContextMenu | undefined>(
     'nova-ve:connection-point-context-menu'
   );
 
   $: handleId = slotHandleId(networkId, slotIndex);
 
-  $: if (!isOpen) {
-    manualOpenPosition = null;
-  }
-  $: effectivePosition = draggingPosition ?? manualOpenPosition ?? ({ side, offset } as PortPosition);
+  // Slots are fully automatic (#258): the canvas assigns each link a slot
+  // (facing side + min-gap spread); no manual repositioning overrides.
+  $: effectivePosition = ({ side, offset } as PortPosition);
   $: effectiveSide = effectivePosition.side;
   $: effectiveOffset = effectivePosition.offset;
 
@@ -96,61 +85,20 @@
   function handleMouseDown(event: MouseEvent) {
     if (event.button !== 0) return;
 
-    if (event.ctrlKey && (isOpen || linkId)) {
-      const root = portHandle?.closest('[data-testid="network-node"]');
-      const rect = root?.getBoundingClientRect();
-      if (!rect) return;
-      event.stopPropagation();
-      event.preventDefault();
-
-      const onMove = (moveEvent: MouseEvent) => {
-        draggingPosition = clampToPerimeter(
-          { x: moveEvent.clientX, y: moveEvent.clientY },
-          { x: rect.left, y: rect.top, w: rect.width, h: rect.height }
-        );
-      };
-      const onUp = () => {
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onUp);
-        if (draggingPosition) {
-          if (isOpen) {
-            manualOpenPosition = draggingPosition;
-          } else if (linkId) {
-            persistConnectionPointPosition?.(
-              { kind: 'network', networkId, linkId, endpointKey },
-              draggingPosition
-            );
-          }
-        }
-        draggingPosition = null;
-      };
-      window.addEventListener('mousemove', onMove);
-      window.addEventListener('mouseup', onUp);
-      return;
-    }
-
-    if (event.ctrlKey) {
-      event.stopPropagation();
-      event.preventDefault();
-      return;
-    }
-
-    if (!event.ctrlKey) {
-      event.stopPropagation();
-      event.preventDefault();
-      clickStartTs = Date.now();
-      clickStartCoords = { x: event.clientX, y: event.clientY };
-      dragLinkStore.start({
-        source: {
-          kind: 'network',
-          networkId,
-          side: effectiveSide,
-          offset: effectiveOffset,
-          networkName,
-        },
-        pointer: { x: event.clientX, y: event.clientY },
-      });
-    }
+    event.stopPropagation();
+    event.preventDefault();
+    clickStartTs = Date.now();
+    clickStartCoords = { x: event.clientX, y: event.clientY };
+    dragLinkStore.start({
+      source: {
+        kind: 'network',
+        networkId,
+        side: effectiveSide,
+        offset: effectiveOffset,
+        networkName,
+      },
+      pointer: { x: event.clientX, y: event.clientY },
+    });
   }
 
   function handleMouseEnter(event: MouseEvent) {

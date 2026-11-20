@@ -65,6 +65,12 @@ export interface NodeInterface {
   index?: number;
   name: string;
   planned_mac?: string | null;
+  /**
+   * Legacy manual placement from the removed ctrl+drag feature (#258).
+   * Read for lab-JSON compat only — the canvas never honors it; connection
+   * points are auto-positioned (facing side + min-gap spread).
+   * @deprecated Auto-positioning is the only source of truth.
+   */
   port_position?: PortPosition | null;
   /**
    * Synthesised legacy field — populated by the loader from links[]. Mutations
@@ -137,6 +143,12 @@ export interface Link {
   from: LinkEndpoint;
   to: LinkEndpoint;
   style_override?: LinkStyle | null;
+  /**
+   * Legacy manual placements from the removed ctrl+drag feature (#258).
+   * Read for lab-JSON compat only — the canvas ignores them and
+   * auto-positions every connection point.
+   * @deprecated Auto-positioning is the only source of truth.
+   */
   endpoint_positions?: LinkEndpointPositions;
   label?: string;
   color?: string;
