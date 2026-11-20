@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { routeOrthogonal, roundedOrthogonalPath } from '$lib/services/router/orthogonal';
+import { routeOrthogonal, roundedOrthogonalPath, __test as routeOrthogonalTest } from '$lib/services/router/orthogonal';
 import type { RouteRequest } from '$lib/services/router';
 
 interface Fixture {
@@ -159,5 +159,50 @@ describe('roundedOrthogonalPath (#254 NetBird-style corners)', () => {
     );
     expect(d.startsWith('M 12,34')).toBe(true);
     expect(d.endsWith('L 500,300')).toBe(true);
+  });
+});
+
+describe('facing-port centered Z + sub-pixel seam merge (#254)', () => {
+  const { centeredFacingSegments, mergeSubPixelPoints } = routeOrthogonalTest;
+
+  it('routes offset facing ports as one Z with the jog at the corridor midpoint', () => {
+    const segments = centeredFacingSegments(
+      { x: 215.875, y: 59.27, side: 'right' },
+      { x: 302.125, y: 3.27, side: 'left' },
+      'horizontal'
+    );
+    expect(segments).toHaveLength(3);
+    const jogX = segments[1].x1;
+    expect(jogX).toBeCloseTo((215.875 + 302.125) / 2, 6);
+    expect(segments[1].x2).toBe(jogX);
+  });
+
+  it('routes vertical facing ports with the jog at the midpoint row', () => {
+    const segments = centeredFacingSegments(
+      { x: 100, y: 0, side: 'bottom' },
+      { x: 160, y: 200, side: 'top' },
+      'vertical'
+    );
+    expect(segments[1].y1).toBe(100);
+    expect(segments[1].y2).toBe(100);
+  });
+
+  it('merges sub-pixel seams at box edges but keeps the port anchor', () => {
+    // Grid lane x=176 vs port axis x=176.1796875 produced a visible kink.
+    const merged = mergeSubPixelPoints([
+      { x: 176, y: 122 },
+      { x: 176, y: 214 },
+      { x: 176.1796875, y: 214 },
+      { x: 176.1796875, y: 227.125 },
+    ]);
+    expect(merged).toHaveLength(3);
+    // The final point is preserved exactly — the path must land on the port.
+    expect(merged[merged.length - 1]).toEqual({ x: 176.1796875, y: 227.125 });
+    expect(merged[1]).toEqual({ x: 176, y: 214 });
+  });
+
+  it('keeps well-separated points untouched', () => {
+    const pts = [{ x: 0, y: 0 }, { x: 50, y: 0 }, { x: 50, y: 60 }];
+    expect(mergeSubPixelPoints(pts)).toEqual(pts);
   });
 });
