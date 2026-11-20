@@ -18,6 +18,7 @@
  */
 
 import type { PortPosition, PortSide } from '$lib/types';
+import { PORT_CLEARANCE } from './router/orthogonal';
 
 export interface PointLike {
   x: number;
@@ -393,4 +394,156 @@ export function nudgeAwayFromPorts(
   }
 
   return result;
+}
+
+// ---------- route-aware side selection (#258) --------------------------------
+
+/**
+ * Depth of the "exit strip" probed in front of a candidate port. Twice the
+ * router's obstacle clearance, so a blocked strip means the free exit lane
+ * is narrower than the router would ever leave open.
+ */
+const EXIT_STRIP_DEPTH_PX = PORT_CLEARANCE * 2;
+/** Half-width of the probed band across the port handle. */
+const EXIT_STRIP_HALF_WIDTH_PX = PORT_HANDLE_MIN_CENTER_GAP_PX / 2 + 1;
+
+/**
+ * True when the area immediately in front of ``position`` is free of
+ * inflated obstacles — i.e. the link can leave the port moving forward
+ * instead of being forced to bend back behind the origin card.
+ */
+function exitStripIsClear(
+  position: PortPosition,
+  nodeBox: NodeBox,
+  obstacles: readonly NodeBox[],
+  clearance: number
+): boolean {
+  const point = portPositionToPoint(position, nodeBox);
+  let minX: number;
+  let maxX: number;
+  let minY: number;
+  let maxY: number;
+  switch (position.side) {
+    case 'right':
+      minX = nodeBox.x + nodeBox.w;
+      maxX = minX + EXIT_STRIP_DEPTH_PX;
+      minY = point.y - EXIT_STRIP_HALF_WIDTH_PX;
+      maxY = point.y + EXIT_STRIP_HALF_WIDTH_PX;
+      break;
+    case 'left':
+      maxX = nodeBox.x;
+      minX = maxX - EXIT_STRIP_DEPTH_PX;
+      minY = point.y - EXIT_STRIP_HALF_WIDTH_PX;
+      maxY = point.y + EXIT_STRIP_HALF_WIDTH_PX;
+      break;
+    case 'bottom':
+      minY = nodeBox.y + nodeBox.h;
+      maxY = minY + EXIT_STRIP_DEPTH_PX;
+      minX = point.x - EXIT_STRIP_HALF_WIDTH_PX;
+      maxX = point.x + EXIT_STRIP_HALF_WIDTH_PX;
+      break;
+    case 'top':
+    default:
+      maxY = nodeBox.y;
+      minY = maxY - EXIT_STRIP_DEPTH_PX;
+      minX = point.x - EXIT_STRIP_HALF_WIDTH_PX;
+      maxX = point.x + EXIT_STRIP_HALF_WIDTH_PX;
+      break;
+  }
+  return !obstacles.some((obstacle) => {
+    const oMinX = obstacle.x - clearance;
+    const oMaxX = obstacle.x + obstacle.w + clearance;
+    const oMinY = obstacle.y - clearance;
+    const oMaxY = obstacle.y + obstacle.h + clearance;
+    return oMinX < maxX && oMaxX > minX && oMinY < maxY && oMaxY > minY;
+  });
+}
+
+/** Open space between the source side and the target box along ``side``. */
+function sideGapPx(sourceBox: NodeBox, targetBox: NodeBox, side: PortSide): number {
+  switch (side) {
+    case 'right':
+      return Math.max(0, targetBox.x - (sourceBox.x + sourceBox.w));
+    case 'left':
+      return Math.max(0, sourceBox.x - (targetBox.x + targetBox.w));
+    case 'bottom':
+      return Math.max(0, targetBox.y - (sourceBox.y + sourceBox.h));
+    case 'top':
+    default:
+      return Math.max(0, sourceBox.y - (targetBox.y + targetBox.h));
+  }
+}
+
+/** Perimeter position on ``sourceBox`` for ``side`` facing ``targetBox``. */
+function projectedPortPosition(
+  sourceBox: NodeBox,
+  targetBox: NodeBox,
+  side: PortSide
+): PortPosition {
+  const w = sourceBox.w > 0 ? sourceBox.w : 1;
+  const h = sourceBox.h > 0 ? sourceBox.h : 1;
+  const targetCenter = {
+    x: targetBox.x + Math.max(targetBox.w, 1) / 2,
+    y: targetBox.y + Math.max(targetBox.h, 1) / 2,
+  };
+  if (side === 'top' || side === 'bottom') {
+    return { side, offset: clamp01((targetCenter.x - sourceBox.x) / w) };
+  }
+  return { side, offset: clamp01((targetCenter.y - sourceBox.y) / h) };
+}
+
+/**
+ * Gap-facing port position, relocated when the chosen side is boxed in
+ * (#258). ``closestPortPositionToBox`` only looks at the two endpoint boxes,
+ * so a peer sitting on the far side of an unrelated card gets a port whose
+ * exit is blocked — the router then bends the link BACK behind the origin
+ * node (observed live: net-bridge → vm-linux doubled back off its right
+ * edge because iol-rtr blocked the corridor). When the gap-facing side's
+ * exit strip is obstructed, move the connection point to the unconstricted
+ * side that heads most directly toward the target (ties on the wider gap);
+ * with a clear exit the position is exactly ``closestPortPositionToBox``.
+ */
+export function bestRouteAwarePortPosition(
+  sourceBox: NodeBox,
+  targetBox: NodeBox,
+  obstacles: readonly NodeBox[] = [],
+  clearance = PORT_CLEARANCE
+): PortPosition {
+  const chosen = closestPortPositionToBox(sourceBox, targetBox);
+  if (obstacles.length === 0) return chosen;
+  if (exitStripIsClear(chosen, sourceBox, obstacles, clearance)) return chosen;
+
+  const sourceCenter = {
+    x: sourceBox.x + sourceBox.w / 2,
+    y: sourceBox.y + sourceBox.h / 2,
+  };
+  const targetCenter = {
+    x: targetBox.x + targetBox.w / 2,
+    y: targetBox.y + targetBox.h / 2,
+  };
+  const toPeerX = targetCenter.x - sourceCenter.x;
+  const toPeerY = targetCenter.y - sourceCenter.y;
+  const toPeerLen = Math.hypot(toPeerX, toPeerY) || 1;
+
+  let best: PortPosition | null = null;
+  let bestScore = -Infinity;
+  for (const side of SIDES) {
+    if (side === chosen.side) continue;
+    const candidate = projectedPortPosition(sourceBox, targetBox, side);
+    if (!exitStripIsClear(candidate, sourceBox, obstacles, clearance)) continue;
+    const towardPeer =
+      side === 'top'
+        ? -toPeerY
+        : side === 'bottom'
+          ? toPeerY
+          : side === 'right'
+            ? toPeerX
+            : -toPeerX;
+    const score = (towardPeer / toPeerLen) * 1000 + sideGapPx(sourceBox, targetBox, side);
+    if (score > bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best ?? chosen;
 }

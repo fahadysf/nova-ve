@@ -47,7 +47,7 @@
     type LayoutDebouncer,
   } from '$lib/services/labApi';
   import {
-    closestPortPositionToBox,
+    bestRouteAwarePortPosition,
     nudgeAwayFromPorts,
     placeInterfaces,
     separatePortPositions,
@@ -580,16 +580,32 @@
   function endpointPortPosition(
     link: Link,
     key: LinkEndpointKey,
-    implicitPairs: Map<number, Link[]>
+    implicitPairs: Map<number, Link[]>,
+    routeBoxes: ReadonlyMap<string, NodeBox>
   ): PortPosition | null {
     // Fully automatic (#258): the side faces the peer and the offset projects
-    // toward the peer center. Persisted manual placements
-    // (endpoint_positions.mode 'manual') are no longer honored —
-    // NetBird-style auto-positioning is the only source of truth.
-    const ownBox = endpointBox(link[key]);
-    const peerBox = endpointBox(autoPeerEndpointFor(link, key, implicitPairs));
+    // toward the peer center — relocated to an unconstricted side when an
+    // unrelated card blocks the gap-facing exit (bestRouteAwarePortPosition).
+    // Persisted manual placements (endpoint_positions.mode 'manual') are no
+    // longer honored — NetBird-style auto-positioning is the only truth.
+    const ownEndpoint = link[key];
+    const peerEndpoint = autoPeerEndpointFor(link, key, implicitPairs);
+    const ownBox = endpointBox(ownEndpoint);
+    const peerBox = endpointBox(peerEndpoint);
     if (!ownBox || !peerBox) return null;
-    return closestPortPositionToBox(ownBox, peerBox);
+
+    const flowId = (endpoint: Link['from'] | Link['to'] | null | undefined): string | null => {
+      if (typeof endpoint?.node_id === 'number') return `node${endpoint.node_id}`;
+      if (typeof endpoint?.network_id === 'number') return `network${endpoint.network_id}`;
+      return null;
+    };
+    const ownId = flowId(ownEndpoint);
+    const peerId = flowId(peerEndpoint);
+    const obstacles = [...routeBoxes.entries()]
+      .filter(([flowKey]) => flowKey !== ownId && flowKey !== peerId)
+      .map(([, box]) => box);
+
+    return bestRouteAwarePortPosition(ownBox, peerBox, obstacles);
   }
 
   function buildConnectionPointPositions(): {
@@ -608,10 +624,28 @@
     const networkOpenSlot = new Map<number, PortPosition>();
     const implicitPairs = implicitLinkPairsByNetwork();
 
+    // Card boxes (visible ones only) so port placement can tell when the
+    // gap-facing side's exit is boxed in by an unrelated card (#258).
+    const routeBoxes = new Map<string, NodeBox>();
+    for (const nodeRecord of Object.values($labState.nodes)) {
+      const box = nodeBox(nodeRecord.id);
+      if (box) routeBoxes.set(`node${nodeRecord.id}`, box);
+    }
+    for (const networkRecord of Object.values($labState.networks)) {
+      const box = networkBox(networkRecord.id);
+      if (!box) continue;
+      const networkLinkCount = $labState.links.filter(
+        (link) => link?.id && link.to?.network_id === networkRecord.id
+      ).length;
+      const forceVisible = networkRecord.implicit === true && networkLinkCount !== 2;
+      if (!networkRecord.visibility && !forceVisible) continue;
+      routeBoxes.set(`network${networkRecord.id}`, box);
+    }
+
     for (const link of $labState.links) {
       for (const key of ['from', 'to'] as const) {
         const endpoint = link[key];
-        const port = endpointPortPosition(link, key, implicitPairs);
+        const port = endpointPortPosition(link, key, implicitPairs, routeBoxes);
         if (!endpoint || !port) continue;
 
         if (typeof endpoint.node_id === 'number' && typeof endpoint.interface_index === 'number') {

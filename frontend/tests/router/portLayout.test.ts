@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import {
   clampToPerimeter,
   closestPortPositionToBox,
+  bestRouteAwarePortPosition,
   nudgeAwayFromPorts,
   PORT_HANDLE_MIN_CENTER_GAP_PX,
   placeInterfaces,
@@ -338,5 +339,64 @@ describe('portLayout.nudgeAwayFromPorts — dotted open-slot aversion (#258)', (
   it('returns the slot untouched when there are no occupants at all', () => {
     const nudged = nudgeAwayFromPorts({ side: 'bottom', offset: 0 }, [], box);
     expect(nudged).toEqual({ side: 'bottom', offset: 0 });
+  });
+});
+
+describe('portLayout.bestRouteAwarePortPosition — no backward-hugging ports (#258)', () => {
+  // Exact live ST-Demo geometry (flow coords) where the gap-facing right
+  // port's exit was boxed in by iol-rtr and the route doubled back behind
+  // net-bridge. The port must relocate to the unconstricted forward side.
+  const NET = (x: number, y: number) => ({ x, y, w: 130, h: 50 });
+  const NODE = (x: number, y: number) => ({ x, y, w: 152, h: 58 });
+
+  const netBridge = NET(216, 65);
+  const vmLinux = NODE(518, 242);
+  const unrelated = [NODE(365, 53), NODE(162, 243), NODE(573, -65), NET(430, -85)];
+
+  it('relocates a boxed-in gap-facing port to the forward-unconstricted side', () => {
+    // closestPortPositionToBox alone would pick 'right' (gap 172 > 121).
+    expect(closestPortPositionToBox(netBridge, vmLinux).side).toBe('right');
+
+    const relocated = bestRouteAwarePortPosition(netBridge, vmLinux, unrelated);
+    expect(relocated.side).toBe('bottom');
+    // Projection toward the peer center, clamped to the side as before.
+    expect(relocated.offset).toBe(1);
+  });
+
+  it('keeps the gap-facing side when its exit strip is clear', () => {
+    const kept = bestRouteAwarePortPosition(netBridge, vmLinux, [
+      NODE(365, -200), // far away — nothing near the exit
+    ]);
+    expect(kept.side).toBe('right');
+  });
+
+  it('reduces to closestPortPositionToBox when there are no obstacles', () => {
+    expect(bestRouteAwarePortPosition(netBridge, vmLinux, [])).toEqual(
+      closestPortPositionToBox(netBridge, vmLinux)
+    );
+  });
+
+  it('falls back to the original side when every side is boxed in', () => {
+    // Ring of cards around every face of the source box.
+    const ring = [
+      NODE(216 - 24, 65 - 24), // overlapping top-left front
+      NODE(346 - 12, 65 - 24), // right front
+      NODE(216 - 12, 115 - 12), // bottom front
+      NODE(216 - 12, 65 - 12), // inside-adjacent top front
+      NODE(400, 30), // right, again
+    ];
+    const result = bestRouteAwarePortPosition(netBridge, vmLinux, ring);
+    expect(result.side).toBe(closestPortPositionToBox(netBridge, vmLinux).side);
+  });
+
+  it('prefers the unconstricted side that heads most toward the peer', () => {
+    // Peer far to the bottom-right; a wall blocks only the right exit strip
+    // (its inflated left edge stops short of the bottom corner strip), and
+    // top/left are unconstricted but point away — bottom must win.
+    const source = NODE(0, 0);
+    const target = NODE(600, 400);
+    const wall = NODE(175, 0);
+    const result = bestRouteAwarePortPosition(source, target, [wall]);
+    expect(result.side).toBe('bottom');
   });
 });
