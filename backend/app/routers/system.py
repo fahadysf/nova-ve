@@ -320,13 +320,16 @@ async def poll(
 
 
 # ----------------------------------------------------------------------
-# Log viewer (#265): per-node runtime stdout logs, pattern-filtered tail.
+# Log viewer (#265): per-node runtime logs, pattern-filtered tail.
 # ----------------------------------------------------------------------
 def _collect_log_files() -> list[dict]:
-    """Every node runtime stdout log that exists on disk.
+    """Every node runtime log on disk or in the docker daemon.
 
-    Runtime records live in TMP_DIR/node-runtime/*.json; their
-    ``stdout_log`` field points at the per-node output file.
+    Runtime records live in TMP_DIR/node-runtime/*.json. qemu/iol/dynamips
+    records carry ``stdout_log`` (addressable by file path); docker records
+    have no stdout file — they are addressable via the synthetic
+    ``docker://{lab_id}/{node_id}`` path and read through the runtime
+    service's docker-logs adapter.
     """
     settings = get_settings()
     records_dir = settings.TMP_DIR / "node-runtime"
@@ -338,8 +341,24 @@ def _collect_log_files() -> list[dict]:
             record = json.loads(record_file.read_text())
         except (OSError, json.JSONDecodeError):
             continue
+        lab_id = str(record.get("lab_id") or "")
+        node_id = record.get("node_id")
+        kind = str(record.get("kind") or "")
         log_path_raw = record.get("stdout_log")
         if not log_path_raw:
+            if kind == "docker" and lab_id and node_id is not None:
+                entries.append(
+                    {
+                        "name": record_file.name.replace(".json", ""),
+                        "label": str(record.get("name") or record_file.stem),
+                        "kind": kind,
+                        "lab_id": lab_id,
+                        "node_id": node_id,
+                        "path": f"docker://{lab_id}/{node_id}",
+                        "size": 0,
+                        "mtime": int(time.time()),
+                    }
+                )
             continue
         log_path = Path(str(log_path_raw))
         try:
@@ -357,9 +376,9 @@ def _collect_log_files() -> list[dict]:
             {
                 "name": record_file.name.replace(".json", ""),
                 "label": str(record.get("name") or record_file.stem),
-                "kind": str(record.get("kind") or ""),
-                "lab_id": str(record.get("lab_id") or ""),
-                "node_id": record.get("node_id"),
+                "kind": kind,
+                "lab_id": lab_id,
+                "node_id": node_id,
                 "path": str(resolved),
                 "size": stat.st_size,
                 "mtime": int(stat.st_mtime),
@@ -387,16 +406,59 @@ async def tail_log_file(
     pattern: str = "",
     current_user: UserRead = Depends(get_current_admin),
 ):
-    """Tail a runtime log file, optionally filtering by substring.
+    """Tail a runtime log, optionally filtering by substring.
 
-    Only files registered under TMP_DIR/node-runtime are addressable —
-    the request path must match one of the listed entries verbatim.
+    File-backed logs must match one of the listed entries verbatim
+    (path-safety allowlist); ``docker://`` synthetic paths read through the
+    runtime service's docker-logs adapter.
     """
     if lines < 1 or lines > 2000:
         return JSONResponse(
             status_code=422,
             content={"code": 422, "status": "fail", "message": "lines must be 1..2000."},
         )
+
+    raw_path = str(path)
+    if raw_path.startswith("docker://"):
+        allowed = {entry["path"]: entry for entry in _collect_log_files()}
+        target = allowed.get(raw_path)
+        if target is None:
+            return JSONResponse(
+                status_code=404,
+                content={"code": 404, "status": "fail", "message": "Unknown log file."},
+            )
+        try:
+            from app.services.node_runtime_service import NodeRuntimeService
+
+            content = NodeRuntimeService().read_logs(
+                target["lab_id"], int(target["node_id"] or 0), tail=lines
+            )
+        except (ValueError, TypeError):
+            return JSONResponse(
+                status_code=422,
+                content={"code": 422, "status": "fail", "message": "Malformed docker log path."},
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content={"code": 500, "status": "fail", "message": f"Docker logs read failed: {exc}"},
+            )
+        collected = content.splitlines(keepends=True)
+        needle = pattern.strip().lower()
+        if needle:
+            collected = [line for line in collected if needle in line.lower()]
+        return {
+            "code": 200,
+            "status": "success",
+            "message": "Log tail fetched.",
+            "data": {
+                "log": target,
+                "lines": len(collected),
+                "pattern": needle,
+                "content": "".join(collected),
+            },
+        }
+
     allowed = {entry["path"]: entry for entry in _collect_log_files()}
     target = allowed.get(str(Path(path).resolve()))
     if target is None:

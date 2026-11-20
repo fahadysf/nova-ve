@@ -203,3 +203,42 @@ async def test_settings_put_requires_admin(client, sys_settings):
     )
 
     assert response.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_docker_runtime_logs_are_listed_and_tailed(client, sys_settings, monkeypatch):
+    records = sys_settings.TMP_DIR / "node-runtime"
+    records.mkdir(exist_ok=True)
+    (records / "arc-docker-3.json").write_text(
+        json.dumps(
+            {
+                "lab_id": "arc-id",
+                "node_id": 3,
+                "name": "alpine-n1",
+                "kind": "docker",
+                "container_name": "nve-arc-alpine",
+            }
+        )
+    )
+    _as("admin")
+
+    listing = await client.get("/api/system/logs")
+    logs = listing.json()["data"]["logs"]
+    assert logs and logs[0]["path"].startswith("docker://arc-id/3")
+
+    class _FakeRuntime:
+        def read_logs(self, lab_id, node_id, tail=200):
+            return "\n".join(f"docker log {i}: boot ok" for i in range(tail)) + "\n"
+
+    import app.routers.system as system_module
+
+    monkeypatch.setattr(system_module.NodeRuntimeService, "read_logs", _FakeRuntime.read_logs)
+
+    tail = await client.get(
+        "/api/system/logs/tail", params={"path": logs[0]["path"], "lines": 10, "pattern": "log 7"}
+    )
+    assert tail.status_code == 200
+    data = tail.json()["data"]
+    # 10 tail lines fetched, pattern "log 7" narrows to one.
+    assert data["lines"] == 1
+    assert "docker log 7" in data["content"]
