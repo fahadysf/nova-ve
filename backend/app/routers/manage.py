@@ -40,6 +40,12 @@ router = APIRouter(
     responses=COMMON_RESPONSES,
 )
 
+nodes_router = APIRouter(
+    prefix="/api/manage/nodes",
+    tags=["manage"],
+    responses=COMMON_RESPONSES,
+)
+
 
 def _ok(message: str, data: Any) -> dict:
     return {"code": 200, "status": "success", "message": message, "data": data}
@@ -233,3 +239,102 @@ async def wipe_lab(
     if current_user.role != "admin":
         return _fail("Admin role required.", code=403)
     return _stop_or_wipe(lab_path, wipe=True)
+
+
+# ----------------------------------------------------------------------
+# Node management (#263): every node across labs with live usage.
+# ----------------------------------------------------------------------
+@nodes_router.get("")
+async def list_managed_nodes(
+    state: str = "running",
+    lab: str = "",
+    template: str = "",
+    node_type: str = "",
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Cross-lab node inventory with live usage from the runtime registry.
+
+    ``state`` filters running|stopped|all (default running); ``lab`` matches
+    the lab file name, ``template`` the node template, ``node_type`` the
+    runtime kind (qemu/docker/iol/dynamips). Admin-only: this view spans
+    every lab regardless of folder tenancy.
+    """
+    if current_user.role != "admin":
+        return _fail("Admin role required.", code=403)
+
+    labs_dir = _labs_dir_from_config()
+    runtime = NodeRuntimeService()
+
+    state_norm = state.strip().lower()
+    if state_norm not in {"running", "stopped", "all"}:
+        return _fail("state must be one of running|stopped|all.")
+    lab_needle = lab.strip().lower()
+    template_needle = template.strip().lower()
+    type_needle = node_type.strip().lower()
+
+    rows: list[dict[str, Any]] = []
+    if labs_dir.exists():
+        for lab_file in sorted(labs_dir.rglob("*.json")):
+            try:
+                data = json.loads(lab_file.read_text())
+            except (OSError, json.JSONDecodeError):
+                continue
+            lab_id = str(data.get("id", "")).strip()
+            if not lab_id:
+                continue
+            try:
+                lab_path = f"/{lab_file.relative_to(labs_dir).as_posix()}"
+            except ValueError:
+                continue
+            lab_name = str((data.get("meta") or {}).get("name") or lab_file.stem)
+            if lab_needle and lab_needle not in lab_file.name.lower() and lab_needle not in lab_name.lower():
+                continue
+            nodes = data.get("nodes")
+            if not isinstance(nodes, dict):
+                continue
+            for node_id_raw, node in nodes.items():
+                if not isinstance(node, dict):
+                    continue
+                if template_needle and template_needle not in str(node.get("template", "")).lower():
+                    continue
+                if type_needle and type_needle not in str(node.get("type", "")).lower():
+                    continue
+                try:
+                    node_id = int(node_id_raw)
+                except (TypeError, ValueError):
+                    continue
+                enriched = runtime.enrich_node(lab_id, node_id, node)
+                status = int(enriched.get("status", 0) or 0)
+                is_running = status == 2
+                if state_norm == "running" and not is_running:
+                    continue
+                if state_norm == "stopped" and is_running:
+                    continue
+                rows.append(
+                    {
+                        "lab_path": lab_path,
+                        "lab_name": lab_name,
+                        "node_id": node_id,
+                        "name": str(node.get("name") or f"node-{node_id}"),
+                        "type": str(node.get("type") or ""),
+                        "template": str(node.get("template") or ""),
+                        "image": str(node.get("image") or ""),
+                        "status": status,
+                        "state": "running" if is_running else "stopped",
+                        "console": str(node.get("console") or ""),
+                        "url": enriched.get("url"),
+                        "cpu_allocated": node.get("cpu"),
+                        "ram_allocated_mb": node.get("ram"),
+                        "cpu_usage": enriched.get("cpu_usage", 0),
+                        "ram_usage": enriched.get("ram_usage", 0),
+                        "disk_usage": enriched.get("disk_usage", 0),
+                    }
+                )
+
+    totals = {
+        "nodes": len(rows),
+        "running": sum(1 for row in rows if row["state"] == "running"),
+        "cpu_allocated": sum(int(row.get("cpu_allocated") or 0) for row in rows),
+        "ram_allocated_mb": sum(int(row.get("ram_allocated_mb") or 0) for row in rows),
+    }
+    return _ok("Managed nodes listed.", {"nodes": rows, "totals": totals})
