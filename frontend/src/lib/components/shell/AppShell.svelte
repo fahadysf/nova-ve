@@ -67,12 +67,6 @@
                 >
                   <svelte:component this={item.icon} class={`h-4 w-4 shrink-0 ${active ? 'text-blue-300' : ''}`} />
                   <span class="flex-1 truncate">{item.label}</span>
-                  {#if item.plannedIssue}
-                    <span
-                      class="rounded-full border border-gray-700 px-1.5 py-px text-[9px] uppercase tracking-[0.05em] text-gray-500"
-                      title={`Planned — tracked in #${item.plannedIssue}`}
-                    >planned</span>
-                    {/if}
                 </a>
               </li>
             {/each}
@@ -93,7 +87,12 @@
           {$authStore.user.role}
         </span>
       {/if}
-      <span class="text-[13px] text-gray-400">{userLabel}</span>
+      <a
+        href="/profile"
+        class="text-[13px] text-gray-400 transition hover:text-gray-100"
+        title="Open profile"
+        data-testid="app-profile-link"
+      >{userLabel}</a>
       <button
         class="inline-flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-[12px] text-gray-400 transition hover:bg-gray-800/70 hover:text-red-300"
         on:click={handleLogout}
