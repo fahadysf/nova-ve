@@ -10,6 +10,7 @@ from app.routers import (
     dynamips,
     folders,
     labs,
+    library,
     links,
     listing,
     networks,
@@ -85,6 +86,7 @@ app.include_router(links.router)
 app.include_router(networks.router)
 app.include_router(labs.router)
 app.include_router(listing.router)
+app.include_router(library.router)
 app.include_router(system.router)
 app.include_router(users.router)
 app.include_router(ws.router)
