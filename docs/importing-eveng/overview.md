@@ -25,7 +25,7 @@ Every run prints numbered, human-readable step lines (`[3/12] qemu/vyos-1.4 — 
 ## Prerequisites
 
 1. **A reachable nova-ve host.** Use the [quick-start one-liner](../getting-started/quick-start.md) to provision a fresh Ubuntu 26.04 host from scratch. The provisioner creates `/var/lib/nova-ve/{images,templates,labs}` with the right ownership.
-2. **Read access to the EVE-NG source tree.** Default source path is `/opt/unetlab`. If your EVE-NG host is on a different machine, `rsync` the addon directory to the nova-ve host first:
+2. **Write access to the EVE-NG source tree.** Default source path is `/opt/unetlab`. The default move+symlink mode replaces each image file with a symlink at its original path, so the importer needs write permission there (`--copy-only` only needs read). If your EVE-NG host is on a different machine, `rsync` the addon directory to the nova-ve host first:
    ```bash
    sudo rsync -a --info=progress2 \
      root@old-eveng-host:/opt/unetlab/ \
@@ -68,7 +68,7 @@ cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
 ./deploy/scripts/import-eveng-templates.sh --dry-run
 ```
 
-The dry run walks the source tree, evaluates each file's idempotency check (sha256 vs the existing destination), and emits a planned manifest on stdout. No filesystem mutation, no manifest written. If `/opt/unetlab` is missing or empty, the planned manifest is empty (`imported: []`, `skipped: []`, `templates: []`, `errors: []`).
+The dry run walks the source tree, evaluates each file's idempotency check (sha256 vs the existing destination), and prints a planned step-by-step narration (`would be moving ...`) plus the planned summary on stdout. No filesystem mutation, no manifest written. If `/opt/unetlab` is missing or empty, the planned manifest is empty (`imported: []`, `skipped: []`, `templates: []`, `errors: []`).
 
 `--dry-run` does **not** require root.
 

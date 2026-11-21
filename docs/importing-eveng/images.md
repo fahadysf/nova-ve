@@ -2,6 +2,12 @@
 
 The importer is image-aware: it walks the four addon directories EVE-NG ships, materialises each as a `<kind>/<image_key>/` tree under the destination, and emits a structured manifest entry per file.
 
+## How files move (default mode)
+
+Since [#271](https://github.com/fahadysf/nova-ve/issues/271), image files are **moved, not copied**: each file is renamed into the nova-ve destination and a symlink is left at its original `/opt/unetlab` path pointing at the moved file. The bytes exist exactly once, EVE-NG keeps resolving its original paths, and a multi-GiB import takes seconds instead of a full disk write. When the source and destination live on different filesystems, those files fall back to copy + sha256 verify + symlink and the step output and manifest `note` say so.
+
+Pass `--copy-only` for the conservative pre-#271 behaviour (copy + sha256 verify, sources left untouched).
+
 ## Source → destination mapping
 
 | Kind | EVE-NG / PNETLab source | nova-ve destination |
@@ -15,7 +21,7 @@ Anything outside these four addon trees is ignored. To slim down a long-running 
 
 ## QEMU images
 
-Each vendor directory (`/opt/unetlab/addons/qemu/<vendor-ver>/`) is treated as one image. **Every file** inside it is copied to the matching `qemu/<vendor-ver>/` destination — `.qcow2` boot disks, `cdrom.iso` install media, and any vendor-specific helper files. The destination preserves filenames byte-for-byte so a QEMU-launched node sees the same disk geometry it saw under EVE-NG.
+Each vendor directory (`/opt/unetlab/addons/qemu/<vendor-ver>/`) is treated as one image. **Every file** inside it is moved to the matching `qemu/<vendor-ver>/` destination — `.qcow2` boot disks, `cdrom.iso` install media, and any vendor-specific helper files. The destination preserves filenames byte-for-byte so a QEMU-launched node sees the same disk geometry it saw under EVE-NG.
 
 **Boot-disk precedence** (per-directory, used by template adapters to know which disk to attach as boot media):
 
@@ -24,26 +30,26 @@ Each vendor directory (`/opt/unetlab/addons/qemu/<vendor-ver>/`) is treated as o
 3. `hda.qcow2`
 4. The lexicographically-first `*.qcow2`
 
-The chosen boot disk is recorded in the manifest as `meta.boot_disk` on the imported entry.
+The chosen boot disk is recorded in the manifest as `meta.boot_disk` on the imported entry. In the default mode the destination dir also keeps the stable `cdrom.iso` handle: a symlink inside the destination pointing at the chosen boot disk.
 
 ## Dynamips images
 
-Each `*.image` file under `addons/dynamips/` becomes a single-file image: it is copied to `dynamips/<image_stem>/<image>.image`. Non-`.image` files in that directory are skipped.
+Each `*.image` file under `addons/dynamips/` becomes a single-file image: it is moved to `dynamips/<image_stem>/<image>.image` and symlinked back at its original path. Non-`.image` files in that directory are skipped.
 
 ## IOL images
 
-Each `*.bin` file under `addons/iol/bin/` becomes one image. **The `iourc` license file is copied alongside every IOL image** if it exists in the source bin directory. The importer records `meta.iourc_present` (`true` / `false`) on every IOL entry.
+Each `*.bin` file under `addons/iol/bin/` becomes one image: moved like the other kinds. **The `iourc` license file is the exception — it stays copy-based** even in the default mode, because it is one shared license referenced by every IOL image; moving it for the first image would break the others. The importer records `meta.iourc_present` (`true` / `false`) on every IOL entry.
 
 At runtime nova-ve first uses an image-local `iourc` next to the selected IOL image. If that file is absent, it falls back to the system IOURC directory, `/var/lib/nova-ve/iourc/` by default. Upload the license from the IOL node add modal, or place a valid file in that directory manually. The node add modal shows whether the system IOURC license is installed and displays the host identity details needed to prepare a license.
 
 ## Docker images
 
-Docker is the only kind that does not byte-copy. Each `addons/docker/<image>/` directory containing a `Dockerfile` becomes a build unit: the importer runs `docker build` against the source context and writes a single `image.txt` marker file at `docker/<image>/image.txt` recording the resulting tag (`nova-ve/<image>:latest` by default).
+Docker is the only kind that does not byte-move. Each `addons/docker/<image>/` directory containing a `Dockerfile` becomes a build unit: the importer runs `docker build` against the source context and writes a single `image.txt` marker file at `docker/<image>/image.txt` recording the resulting tag (`nova-ve/<image>:latest` by default).
 
 Implications:
 
 - The host running the importer must have a usable Docker daemon. The default `install.sh` provisioner installs Docker, so this just works on a fresh nova-ve host.
-- Re-running the importer on an unchanged build context will re-trigger the Docker build (the daemon's layer cache makes this cheap, but it is not skipped at the importer level the way file copies are).
+- Re-running the importer on an unchanged build context will re-trigger the Docker build (the daemon's layer cache makes this cheap, but it is not skipped at the importer level the way file moves are).
 
 ## Verifying what landed
 
@@ -58,9 +64,13 @@ ls /var/lib/nova-ve/images/qemu/
 jq '.imported[] | select(.dst | contains("/qemu/vyos-1.4/"))' \
   /var/lib/nova-ve/import-manifest.json
 
+# Show which files were moved + symlinked vs copy-based:
+jq '.imported[] | select(.symlinked == true) | .dst' \
+  /var/lib/nova-ve/import-manifest.json
+
 # Show every IOL image that landed without a license file:
 jq '.imported[] | select(.dst | contains("/iol/")) | select(.meta.iourc_present == false)' \
   /var/lib/nova-ve/import-manifest.json
 ```
 
-If a destination already matches the source sha256, the entry lands in `manifest.skipped[]` instead. Use `--force` to overwrite mismatched destinations.
+Re-running the importer is idempotent: a source path that is already a symlink to its destination lands in `manifest.skipped[]` with `reason: "already migrated: source is a symlink to the destination"`, and any destination that already matches the source sha256 is skipped too. Use `--force` to overwrite mismatched destinations.

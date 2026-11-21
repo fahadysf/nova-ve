@@ -1,6 +1,6 @@
 # Vendor adapter coverage
 
-After image copy, the importer attempts to emit a nova-ve template per priority-vendor image. Adapters live under `backend/scripts/import_eveng/adapters/`. The current supported set:
+After image migration, the importer attempts to emit a nova-ve template per priority-vendor image. Adapters live under `backend/scripts/import_eveng/adapters/`. The current supported set:
 
 | Vendor | Image kind | Adapter |
 |---|---|---|

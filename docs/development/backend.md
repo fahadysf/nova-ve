@@ -62,16 +62,16 @@ The EVE-NG importer is **not** part of the running backend. It lives at `backend
 
 ```
 backend/scripts/import_eveng/
-├── cli.py              # argparse entry; resolves modes, walks, plans, copies
+├── cli.py              # argparse entry; resolves modes, walks, plans, migrates
 ├── walker.py           # KIND_QEMU / KIND_DYNAMIPS / KIND_IOL / KIND_DOCKER discovery
-├── copy_engine.py      # Idempotent copy + sha256 verify
+├── copy_engine.py      # Idempotent move+symlink / copy + sha256 verify (#271)
 ├── idempotency.py      # Per-file skip decisions
-├── migrate.py          # Top-level run orchestrator
+├── migrate.py          # Top-level run orchestrator (step reporter wiring)
 ├── manifest.py         # Manifest schema + writer
-├── permissions.py      # chown / chmod after copy
+├── permissions.py      # chown / chmod after migration
 ├── _app_owner.py       # Service-user resolution (NOVA_VE_SERVICE_USER → NOVA_VE_OWNER → nova-ve)
 ├── _hash.py            # sha256 helper
-├── logging_setup.py    # JSON-line logger config
+├── logging_setup.py    # Step reporter + rotating run-log config (#271)
 ├── template_schema.py  # Result schema for adapter convert()
 ├── parsers/            # PHP / YAML parsers for EVE-NG source templates
 └── adapters/           # One module per vendor (arista_veos, cisco_iol, …)
@@ -89,7 +89,7 @@ cd backend && .venv/bin/pytest
 .venv/bin/pytest tests/test_networks_api.py -k "test_create_network_duplicate"
 
 # Importer-only
-.venv/bin/pytest tests/import_eveng/
+.venv/bin/pytest tests/scripts/test_import_eveng/
 ```
 
 Integration tests use a real Postgres via the host package; unit tests for services run without it.

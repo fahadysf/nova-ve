@@ -12,7 +12,7 @@ cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
 sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
-The wrapper sources the installed nova-ve environment, finds the backend virtual environment, copies addon assets into `/var/lib/nova-ve/images`, writes generated templates under `/var/lib/nova-ve/templates`, and records `/var/lib/nova-ve/import-manifest.json`. The Python module (`backend/scripts/import_eveng`) is the implementation detail behind that wrapper.
+The wrapper sources the installed nova-ve environment, finds the backend virtual environment, moves addon assets into `/var/lib/nova-ve/images` (symlinking the original EVE-NG paths back at the moved files), writes generated templates under `/var/lib/nova-ve/templates`, records `/var/lib/nova-ve/import-manifest.json`, and appends a step-by-step run log to `/var/log/eve-ng-importer.log`. The Python module (`backend/scripts/import_eveng`) is the implementation detail behind that wrapper.
 
 ## Pages in this section
 

@@ -4,10 +4,14 @@ Every non-`--dry-run` invocation writes a structured JSON manifest to the path p
 
 | Field | Contents |
 |---|---|
-| `imported` | one entry per file copied to the destination, with `src` / `dst` / `sha256` / `bytes` / `mode` |
+| `imported` | one entry per file landed at the destination, with `src` / `dst` / `sha256` / `bytes` / `mode` |
 | `templates` | one entry per emitted template, with `name` / `status` (one of `ok`, `needs-manual-review`) and on `needs-manual-review` a `reason` |
-| `skipped` | one entry per destination skipped because the bytes already matched (idempotency) |
+| `skipped` | one entry per destination skipped because it was already migrated (idempotency) |
 | `errors` | one entry per failure that did not abort the run; each has `path` and `error` |
+
+On `imported` entries, `mode` records the copy strategy used for that file (`move-symlink`, `default`, `delete-source`, `move`). Since [#271](https://github.com/fahadysf/nova-ve/issues/271), two optional fields appear on move+symlink outcomes: `symlinked: true` (the original `/opt/unetlab` path is now a symlink pointing at `dst`) and `note` (a human-readable detail, e.g. `symlinked back to /opt/unetlab/addons/qemu/vyos-1.4/hda.qcow2` or `cross-filesystem: copied + sha256 verified`). Older manifests without these fields still parse identically.
+
+The shared IOL `iourc` license is always copy-based even in the default mode, so its entries read `mode: "default"` without `symlinked`.
 
 ## Handling `needs-manual-review` templates
 
@@ -27,7 +31,17 @@ Workflow:
 
 ## Rollback
 
-Because the default mode is non-destructive, rollback is straightforward:
+The default move+symlink mode is non-destructive to your data — the bytes were moved, not deleted — but a rollback must also undo the back-symlinks so the EVE-NG tree points at real files again. Two options:
+
+**Option A — move everything back into the EVE-NG tree** (full revert):
+
+```bash
+# For every symlink under /opt/unetlab/addons, move the target file back:
+sudo find /opt/unetlab/addons -type l -exec sh -c \
+  'mv "$(readlink -f "$1")" "$1"' _ {} \;
+```
+
+**Option B — discard the nova-ve copy and re-import with `--copy-only`** (leaves the EVE-NG tree untouched, bytes still at `/opt/unetlab`):
 
 ```bash
 # Reset the nova-ve image + template tree:
@@ -37,6 +51,8 @@ sudo install -d -o nova-ve -g nova-ve /var/lib/nova-ve/images /var/lib/nova-ve/t
 # Re-run the provisioner (idempotent) to re-create directory perms:
 sudo bash deploy/scripts/provision-ubuntu-2604.sh
 ```
+
+Option B only makes sense after Option A has restored the source files (otherwise the source paths are symlinks into the tree you just deleted — check with `find /opt/unetlab/addons -type l` first).
 
 If you ran with `--delete-source` and want to restore from your EVE-NG host, re-`rsync` the source tree.
 
