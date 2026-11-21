@@ -148,15 +148,16 @@ def test_builtin_vyos_template_defaults_to_virtio_nic(
     monkeypatch, template_settings
 ):
     """vyos ships virtio drivers; the template pins virtio-net-pci instead
-    of relying on the global e1000 fallback."""
+    of relying on the global e1000 fallback. Panorama (same PAN-OS
+    family) pins it too."""
     template_settings.TEMPLATES_DIR = REPO_ROOT / "backend" / "templates"
     monkeypatch.setattr("app.services.template_service.get_settings", lambda: template_settings)
 
     service = TemplateService()
     templates = service.list_templates("qemu")
-    vyos = templates["vyos"]
 
-    assert vyos["extras"]["qemu_nic"] == "virtio-net-pci"
+    assert templates["vyos"]["extras"]["qemu_nic"] == "virtio-net-pci"
+    assert templates["panorama"]["extras"]["qemu_nic"] == "virtio-net-pci"
 
 
 def test_builtin_fortinet_template_matches_fgt_image_aliases(
