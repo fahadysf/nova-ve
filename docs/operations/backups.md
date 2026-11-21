@@ -34,7 +34,7 @@ sudo -u postgres pg_dump -Fc novadb > /backup/dest/novadb-$(date +%F).dump
 
 ## Vendor images (slow, large, infrequent)
 
-`/var/lib/nova-ve/images/` is reproducible from the source EVE-NG / PNETLab tree by re-running `deploy/scripts/import-eveng-templates.sh` from the nova-ve checkout. The default checkout is `/var/lib/nova-ve/nova-ve-git`, unless `NOVA_VE_REPO_DIR` was set during install. If you have the source tree archived, you do not strictly need to back the images directory up. If you don't:
+`/var/lib/nova-ve/images/` is reproducible from the source EVE-NG / PNETLab tree by re-running `deploy/scripts/import-eveng-templates.sh` from the nova-ve checkout. The default checkout is `/var/lib/nova-ve/nova-ve-git`, unless `NOVA_VE_REPO_DIR` was set during install. If you have the source tree archived, you do not strictly need to back the images directory up. One caveat: the importer's default mode **moves** source files into the images tree and symlinks the original `/opt/unetlab` paths back at them, so an already-migrated source tree holds symlinks, not real files. If you archive the source tree as-is, re-importing from it will mostly skip (each symlink source is recognised as already migrated); archive a real copy (`rsync -aL` dereferences symlinks) or keep the images backup instead. If you don't back up either:
 
 ```bash
 sudo rsync -a --delete \
