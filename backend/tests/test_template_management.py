@@ -129,7 +129,9 @@ def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(
     assert paloalto["ram"] == 8192
     assert paloalto["ethernet"] == 4
     assert paloalto["console_type"] == "telnet"
-    assert paloalto["extras"]["qemu_nic"] == "e1000"
+    # virtio-net-pci default (was e1000): modern PAN-OS ships virtio
+    # drivers and virtio NICs avoid the e1000 device-limit issues.
+    assert paloalto["extras"]["qemu_nic"] == "virtio-net-pci"
     assert paloalto["extras"]["qemu_version"] == "2.12.0"
     assert paloalto["capabilities"] == {
         "hotplug": True,
@@ -140,6 +142,21 @@ def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(
         "format": "mgmt,ethernet1/{port}"
     }
     assert "paloalto-10.1.1" in service.list_images("qemu", "paloalto")
+
+
+def test_builtin_vyos_template_defaults_to_virtio_nic(
+    monkeypatch, template_settings
+):
+    """vyos ships virtio drivers; the template pins virtio-net-pci instead
+    of relying on the global e1000 fallback."""
+    template_settings.TEMPLATES_DIR = REPO_ROOT / "backend" / "templates"
+    monkeypatch.setattr("app.services.template_service.get_settings", lambda: template_settings)
+
+    service = TemplateService()
+    templates = service.list_templates("qemu")
+    vyos = templates["vyos"]
+
+    assert vyos["extras"]["qemu_nic"] == "virtio-net-pci"
 
 
 def test_builtin_fortinet_template_matches_fgt_image_aliases(
