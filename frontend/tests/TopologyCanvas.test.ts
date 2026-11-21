@@ -419,23 +419,30 @@ describe('TopologyCanvas minimap collapse (#273)', () => {
     expect(screen.queryByTestId('minimap-frame')).toBeNull();
   });
 
-  it('expands the minimap on click and collapses again', async () => {
+  it('swaps the minimap into the corner and minimizes back', async () => {
     renderCanvas({
       '1': makeNode(1, 'edge-a', 0, { hotplug: false, max_nics: 8, machine: 'pc' }),
     });
 
+    // Expanding replaces the toggle box with the minimap itself — the
+    // minimap carries its own minimize control.
     await fireEvent.click(screen.getByTestId('minimap-toggle'));
     await tick();
     expect(screen.getByTestId('minimap-frame')).toBeInTheDocument();
-    expect(screen.getByTestId('minimap-toggle').getAttribute('aria-label')).toBe('Hide minimap');
+    expect(screen.queryByTestId('minimap-toggle')).toBeNull();
+    const minimize = screen.getByTestId('minimap-minimize');
+    expect(minimize.getAttribute('aria-label')).toBe('Hide minimap');
     expect(JSON.parse(window.localStorage.getItem('nova-ve.canvas-prefs') ?? '{}')).toEqual({
       minimapExpanded: true
     });
 
-    await fireEvent.click(screen.getByTestId('minimap-toggle'));
+    await fireEvent.click(minimize);
     await tick();
     expect(screen.queryByTestId('minimap-frame')).toBeNull();
     expect(screen.getByTestId('minimap-toggle').getAttribute('aria-label')).toBe('Show minimap');
+    expect(JSON.parse(window.localStorage.getItem('nova-ve.canvas-prefs') ?? '{}')).toEqual({
+      minimapExpanded: false
+    });
   });
 
   it('restores the persisted expanded choice on load', async () => {
