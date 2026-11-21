@@ -2408,30 +2408,39 @@
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('wipe', menu?.targetId ?? '')}>
           <span>Wipe</span><Eraser class="h-3.5 w-3.5 text-gray-400" />
         </button>
-        <!-- #268: one pill per available console mode; each pill opens that
-             console session. Nodes without a secondary keep a single pill. -->
-        <div class="menu-item">
+        <!-- #268: one clickable row per console session — the primary, plus
+             a "2nd" row when the node declares a secondary console. The
+             console type rides as small right-aligned text next to the
+             icon (fits the menu width; the old pill buttons were too wide
+             and left the row itself unclickable). -->
+        <button
+          type="button"
+          class="menu-item"
+          data-testid="node-menu-console-primary"
+          on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '', 'primary')}
+        >
           <span>Console</span>
-          <span class="flex items-center gap-1">
+          <span class="flex items-center gap-1.5">
             {#if menuNode}
-              <button
-                type="button"
-                class="rounded-full border border-gray-600 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-300 transition hover:border-blue-400 hover:text-blue-200"
-                data-testid="node-menu-console-primary"
-                on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '', 'primary')}
-              >{consolePillLabel(menuNode.console)}</button>
-              {#if menuNode.secondConsole}
-                <button
-                  type="button"
-                  class="rounded-full border border-gray-600 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-300 transition hover:border-blue-400 hover:text-blue-200"
-                  data-testid="node-menu-console-secondary"
-                  on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '', 'second')}
-                >{consolePillLabel(menuNode.secondConsole)}</button>
-              {/if}
+              <span class="text-[9px] uppercase tracking-wide text-gray-500">{consolePillLabel(menuNode.console)}</span>
             {/if}
+            <Monitor class="h-3.5 w-3.5 text-gray-400" />
           </span>
-          <Monitor class="h-3.5 w-3.5 text-gray-400" />
-        </div>
+        </button>
+        {#if menuNode?.secondConsole}
+          <button
+            type="button"
+            class="menu-item"
+            data-testid="node-menu-console-secondary"
+            on:click|preventDefault|stopPropagation={() => handleNodeAction('console', menu?.targetId ?? '', 'second')}
+          >
+            <span>2nd Console</span>
+            <span class="flex items-center gap-1.5">
+              <span class="text-[9px] uppercase tracking-wide text-gray-500">{consolePillLabel(menuNode.secondConsole)}</span>
+              <Monitor class="h-3.5 w-3.5 text-gray-400" />
+            </span>
+          </button>
+        {/if}
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleEditNode(menu?.targetId ?? '')}>
           <span>Edit Node</span><Pencil class="h-3.5 w-3.5 text-gray-400" />
         </button>
