@@ -11,7 +11,7 @@ ram: 8192
 ethernet: 4
 console_type: telnet
 architecture: x86_64
-qemu_nic: e1000
+qemu_nic: virtio-net-pci
 qemu_version: "2.12.0"
 qemu_options: "-rtc base=utc -cpu host"
 capabilities:
