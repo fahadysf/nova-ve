@@ -168,13 +168,21 @@ def _make_lab_data(
     }
 
 
-def _stub_reconciler_host_net(monkeypatch, *, tap_exists: bool = True):
+def _stub_reconciler_host_net(
+    monkeypatch,
+    *,
+    tap_exists: bool = True,
+    link_states: dict[str, tuple[bool, str | None, bool]] | None = None,
+):
     """Stub the ``host_net`` surface used by the reconciler.
 
     The reconciler reads ``bridge_name`` / ``tap_name`` (deterministic
-    name derivation) and writes via ``link_master`` / ``link_up`` /
-    ``link_set_nomaster``. We capture writes so tests can assert call
-    sequences.
+    name derivation) and ``link_state`` (#277 check-before-write guard),
+    and writes via ``link_master`` / ``link_up`` / ``link_set_nomaster``.
+    We capture writes so tests can assert call sequences. ``link_states``
+    overrides per-interface state; the default for a TAP that exists is
+    ``(exists, None, False)`` — no master, admin-down — so every write
+    proceeds (pre-#277 behavior) unless a test says otherwise.
     """
     calls: dict[str, list] = {
         "tap_exists": [],
@@ -183,6 +191,7 @@ def _stub_reconciler_host_net(monkeypatch, *, tap_exists: bool = True):
         "link_up": [],
         "link_set_nomaster": [],
     }
+    state_overrides = link_states or {}
 
     monkeypatch.setattr(
         "app.services.node_runtime_service.host_net.bridge_name",
@@ -196,6 +205,11 @@ def _stub_reconciler_host_net(monkeypatch, *, tap_exists: bool = True):
     def fake_tap_exists(name: str) -> bool:
         calls["tap_exists"].append(name)
         return tap_exists
+
+    def fake_link_state(name: str) -> tuple[bool, str | None, bool]:
+        if name in state_overrides:
+            return state_overrides[name]
+        return (tap_exists, None, False)
 
     def fake_tap_add(name: str) -> None:
         calls["tap_add"].append(name)
@@ -218,6 +232,9 @@ def _stub_reconciler_host_net(monkeypatch, *, tap_exists: bool = True):
 
     monkeypatch.setattr(
         "app.services.node_runtime_service.host_net.tap_exists", fake_tap_exists
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_state", fake_link_state
     )
     monkeypatch.setattr(
         "app.services.node_runtime_service.host_net.tap_add", fake_tap_add
@@ -315,6 +332,120 @@ def test_reconciler_phase1_attaches_missing_iface(monkeypatch, patched_settings)
     ), f"expected set_link(net0, up=True) in {set_link_calls}"
 
 
+def test_reconciler_phase1_skips_writes_when_state_matches(monkeypatch, patched_settings):
+    """#277: when sysfs already shows the TAP mastered to the right bridge
+    and admin-up, Phase 1 issues NO privileged writes — no tap_add, no
+    link_master, no link_up — but still refreshes the attachment record
+    and drives QMP set_link (the steady-state lab-open path)."""
+    lab_id = "lab-recon-A2"
+    node_id = 11
+    service = NodeRuntimeService()
+    runtime = _seed_running_qemu_runtime(
+        service, lab_id=lab_id, node_id=node_id, interface_attachments=[]
+    )
+    lab_data = _make_lab_data(
+        lab_id=lab_id, node_id=node_id, network_id=1, attach_generation=1
+    )
+
+    steady_tap = f"nve-test-d{node_id}i0"
+    host_calls = _stub_reconciler_host_net(
+        monkeypatch,
+        tap_exists=True,
+        link_states={steady_tap: (True, "nve-test-bridge-1", True)},
+    )
+    qmp_calls = _capture_qmp(service)
+
+    result = service.reconcile_qemu_node_links(
+        lab_id, lab_data, lab_data["nodes"][str(node_id)]
+    )
+
+    assert host_calls["tap_add"] == []
+    assert host_calls["link_master"] == []
+    assert host_calls["link_up"] == []
+
+    # Attachment bookkeeping and QMP still run.
+    assert len(result["applied"]) == 1
+    assert runtime["interface_attachments"][0]["tap_name"] == steady_tap
+    set_link_calls = [c for c in qmp_calls if c["command"] == "set_link"]
+    assert any(
+        c["arguments"] == {"name": "net0", "up": True} for c in set_link_calls
+    ), f"expected set_link(net0, up=True) in {set_link_calls}"
+
+
+def test_reconciler_phase1_applies_partial_drift(monkeypatch, patched_settings):
+    """#277: state that already satisfies HALF the convergence issues only
+    the missing half — mastered-but-down gets link_up only; unmastered-but-
+    up gets link_master only."""
+    lab_id = "lab-recon-A3"
+    node_id = 12
+    service = NodeRuntimeService()
+    runtime = _seed_running_qemu_runtime(
+        service, lab_id=lab_id, node_id=node_id, interface_attachments=[]
+    )
+    lab_data = _make_lab_data(
+        lab_id=lab_id, node_id=node_id, network_id=1, attach_generation=1
+    )
+
+    tap = f"nve-test-d{node_id}i0"
+    host_calls = _stub_reconciler_host_net(
+        monkeypatch,
+        tap_exists=True,
+        link_states={tap: (True, "nve-test-bridge-1", False)},  # mastered, down
+    )
+    _capture_qmp(service)
+
+    service.reconcile_qemu_node_links(lab_id, lab_data, lab_data["nodes"][str(node_id)])
+
+    assert host_calls["link_master"] == []  # already mastered
+    assert host_calls["link_up"] == [tap]  # was down
+
+
+def test_reconciler_phase2_skips_nomaster_when_detached(monkeypatch, patched_settings):
+    """#277: Phase 2 skips the nomaster spawn when the TAP exists but has
+    no master (never-connected boot NIC) — QMP carrier-down still runs."""
+    lab_id = "lab-recon-B2"
+    node_id = 13
+    service = NodeRuntimeService()
+    _seed_running_qemu_runtime(
+        service, lab_id=lab_id, node_id=node_id, boot_ethernet=1,
+        interface_attachments=[]
+    )
+    lab_data = {
+        "schema": 2,
+        "id": lab_id,
+        "meta": {"name": "phase2-skip"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            str(node_id): {
+                "id": node_id,
+                "name": "vm-13",
+                "type": "qemu",
+                "ethernet": 1,
+                "interfaces": [],
+            }
+        },
+        "networks": {},
+        "links": [],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+    host_calls = _stub_reconciler_host_net(
+        monkeypatch, tap_exists=True  # default link_state: exists, no master, down
+    )
+    qmp_calls = _capture_qmp(service)
+
+    result = service.reconcile_qemu_node_links(
+        lab_id, lab_data, lab_data["nodes"][str(node_id)]
+    )
+
+    assert result["pinned_down"] == [{"interface_index": 0, "tap": f"nve-test-d{node_id}i0"}]
+    assert host_calls["link_set_nomaster"] == []
+    set_link_calls = [c for c in qmp_calls if c["command"] == "set_link"]
+    assert any(
+        c["arguments"] == {"name": "net0", "up": False} for c in set_link_calls
+    ), f"expected set_link(net0, up=False) in {set_link_calls}"
+
+
 def test_reconciler_phase2_tears_down_stale_attachment(
     monkeypatch, patched_settings
 ):
@@ -365,7 +496,14 @@ def test_reconciler_phase2_tears_down_stale_attachment(
         "defaults": {"link_style": "orthogonal"},
     }
 
-    host_calls = _stub_reconciler_host_net(monkeypatch, tap_exists=True)
+    host_calls = _stub_reconciler_host_net(
+        monkeypatch,
+        tap_exists=True,
+        # The stale attachment is still mastered to its bridge in the
+        # kernel (#277 check-before-write: that state is what makes the
+        # nomaster write necessary).
+        link_states={stale_tap: (True, "nve-test-bridge-1", True)},
+    )
     qmp_calls = _capture_qmp(service)
 
     result = service.reconcile_qemu_node_links(
@@ -457,7 +595,10 @@ def test_reconciler_pins_unattached_unconnected_boot_nic_down(
     assert result["pinned_down"] == [
         {"interface_index": 2, "tap": f"nve-test-d{node_id}i2"}
     ]
-    assert f"nve-test-d{node_id}i2" in host_calls["link_set_nomaster"]
+    # #277: the never-connected boot NIC's TAP is provisioned but left
+    # with NO master at start time, so the check-before-write guard skips
+    # the nomaster spawn — carrier-down is driven by QMP alone.
+    assert host_calls["link_set_nomaster"] == []
 
     set_link_calls = [c for c in qmp_calls if c["command"] == "set_link"]
     assert any(

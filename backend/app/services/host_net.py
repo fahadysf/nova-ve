@@ -692,6 +692,45 @@ def tap_exists(name: str) -> bool:
     return proc.returncode == 0
 
 
+# Read anchor for :func:`link_state` (module-level so tests can point it
+# at a synthetic sysfs tree).
+_SYSFS_NET = Path("/sys/class/net")
+
+
+def link_state(name: str) -> tuple[bool, str | None, bool]:
+    """``(exists, master, admin_up)`` for a host link, read from sysfs.
+
+    Zero-subprocess companion to the privileged write verbs (#277): the
+    reconcile paths consult this before ``link_master_any`` / ``link_up`` /
+    ``link_set_nomaster`` and skip writes the kernel state already
+    satisfies — each skipped write saves a ~150ms sudo+helper spawn, which
+    is what made lab-open reconciles take ~30s on node-dense labs.
+    ``master`` is ``None`` when the link has no master (or doesn't exist).
+    Admin-up is the IFF_UP flag (``/sys/class/net/<name>/flags``), not
+    operstate — a masterless down TAP reports ``(True, None, False)``.
+
+    Sandbox mode (#253): the kernel holds nothing — ``(False, None, False)``,
+    mirroring :func:`tap_exists` / :func:`bridge_exists`.
+    """
+    if sandbox_mode():
+        return False, None, False
+    base = _SYSFS_NET / name
+    if not base.is_dir():
+        return False, None, False
+    master: str | None = None
+    try:
+        master = os.readlink(base / "master").rstrip("/").rsplit("/", 1)[-1]
+    except OSError:
+        master = None
+    admin_up = False
+    try:
+        flags = int((base / "flags").read_text().strip(), 16)
+        admin_up = bool(flags & 0x1)  # IFF_UP
+    except (OSError, ValueError):
+        admin_up = False
+    return True, master, admin_up
+
+
 def tap_add(name: str) -> None:
     """Create a Linux TAP device with ``name`` via the privileged helper.
 

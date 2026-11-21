@@ -1038,6 +1038,37 @@ def test_ensure_lab_bridges_raises_bridge_with_link(
     assert link_up_calls == [bridge]
 
 
+def test_ensure_lab_bridges_skips_link_up_when_already_up(
+    instance_id, settings, helper_mocks, monkeypatch, labs_dir
+):
+    """#277: when sysfs already shows the bridge admin-up, the privileged
+    link-up spawn is skipped — but the bridge still counts as raised
+    (ensured). This is the steady-state lab-open path."""
+    lab_id = "ensure-lab-up-1b"
+    bridge = host_net.bridge_name(lab_id, 1)
+    link_up_calls: list[str] = []
+    monkeypatch.setattr(host_net, "link_up", lambda n: link_up_calls.append(n))
+    monkeypatch.setattr(host_net, "link_state", lambda n: (True, None, True))
+    lab_name = _seed_lab_with_links(
+        labs_dir,
+        lab_id,
+        networks={"1": {"id": 1, "name": "lan"}},
+        links=[
+            {
+                "id": "lnk_001",
+                "from": {"node_id": 7, "interface_index": 0},
+                "to": {"network_id": 1},
+            }
+        ],
+    )
+
+    summary = NetworkService().ensure_lab_bridges(lab_name)
+
+    assert summary["created"] == [bridge]
+    assert summary["raised"] == [bridge]
+    assert link_up_calls == []
+
+
 def test_ensure_lab_bridges_leaves_unused_bridge_down(
     instance_id, settings, helper_mocks, monkeypatch, labs_dir
 ):

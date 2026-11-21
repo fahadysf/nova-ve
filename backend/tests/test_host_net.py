@@ -345,3 +345,53 @@ def test_host_bridge_name_regex_rejects_injection() -> None:
         "",
     ):
         assert not host_net.RE_HOST_BRIDGE_NAME.match(bad), bad
+
+
+# ---------------------------------------------------------------------------
+# link_state (#277): zero-subprocess sysfs read backing the reconcile
+# check-before-write guards.
+# ---------------------------------------------------------------------------
+def _make_sysfs_net(tmp_path: Path, links: dict[str, tuple[str | None, str]]) -> Path:
+    """Build a synthetic /sys/class/net tree.
+
+    ``links`` maps interface name -> (master bridge name or None, flags hex).
+    A master is represented as a real symlink (the production code reads it
+    with os.readlink), like the kernel does.
+    """
+    base = tmp_path / "sysfs" / "class" / "net"
+    for name, (master, flags) in links.items():
+        dev = base / name
+        dev.mkdir(parents=True)
+        (dev / "flags").write_text(flags)
+        if master is not None:
+            (base / master).mkdir(parents=True, exist_ok=True)
+            (dev / "master").symlink_to(base / master)
+    return base
+
+
+def test_link_state_reports_mastered_up_interface(tmp_path, monkeypatch) -> None:
+    base = _make_sysfs_net(
+        tmp_path, {"nve1234n1i0": ("nve1lab-net1", "0x1103")}  # IFF_UP set
+    )
+    monkeypatch.setattr(host_net, "_SYSFS_NET", base)
+    assert host_net.link_state("nve1234n1i0") == (True, "nve1lab-net1", True)
+
+
+def test_link_state_reports_masterless_down_interface(tmp_path, monkeypatch) -> None:
+    base = _make_sysfs_net(tmp_path, {"nve1234n1i0": (None, "0x1102")})  # IFF_UP clear
+    monkeypatch.setattr(host_net, "_SYSFS_NET", base)
+    assert host_net.link_state("nve1234n1i0") == (True, None, False)
+
+
+def test_link_state_missing_interface(tmp_path, monkeypatch) -> None:
+    base = _make_sysfs_net(tmp_path, {})
+    monkeypatch.setattr(host_net, "_SYSFS_NET", base)
+    assert host_net.link_state("nve1234n1i9") == (False, None, False)
+
+
+def test_link_state_tolerates_missing_flags(tmp_path, monkeypatch) -> None:
+    base = _make_sysfs_net(tmp_path, {"nve1234n1i0": ("nve1lab-net1", "0x1003")})
+    (base / "nve1234n1i0" / "flags").unlink()
+    monkeypatch.setattr(host_net, "_SYSFS_NET", base)
+    # exists + master still reported; admin-up degrades to False.
+    assert host_net.link_state("nve1234n1i0") == (True, "nve1lab-net1", False)
