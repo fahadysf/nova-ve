@@ -496,9 +496,66 @@
     return false;
   }
 
+  // #275: hover focus — while a node is hovered (and no wire drag is in
+  // flight) everything except the hovered node, its links and its
+  // neighbors fades to reduced opacity. Purely visual: faded elements
+  // keep their pointer events.
+  let hoverFocusId: string | null = null;
+
+  function computeHoverFocus(
+    hoveredId: string,
+    edges: Edge[]
+  ): { nodes: Set<string>; edges: Set<string> } {
+    const focusNodes = new Set<string>([hoveredId]);
+    const focusEdges = new Set<string>();
+    const adopt = (edge: Edge) => {
+      focusEdges.add(edge.id);
+      focusNodes.add(edge.source);
+      focusNodes.add(edge.target);
+    };
+    // Direct links of the hovered node.
+    edges
+      .filter((edge) => edge.source === hoveredId || edge.target === hoveredId)
+      .forEach(adopt);
+    // Network-brokered connections extend one hop THROUGH networks: a
+    // node → network → node path lights both endpoint nodes and both
+    // links, without opening device nodes' other links.
+    for (const id of [...focusNodes]) {
+      if (!id.startsWith('network')) continue;
+      edges
+        .filter((edge) => edge.source === id || edge.target === id)
+        .forEach(adopt);
+    }
+    return { nodes: focusNodes, edges: focusEdges };
+  }
+
   function publishFlowState() {
-    nodesStore.set(buildFlowNodes());
-    edgesStore.set(buildFlowEdges());
+    const builtNodes = buildFlowNodes();
+    const builtEdges = buildFlowEdges();
+    // A stale hover target (node removed while hovered) must not dim the
+    // whole canvas — focus only applies to nodes that still render.
+    const focus =
+      hoverFocusId && builtNodes.some((node) => node.id === hoverFocusId)
+        ? computeHoverFocus(hoverFocusId, builtEdges)
+        : null;
+    nodesStore.set(
+      focus
+        ? builtNodes.map((node) =>
+            focus.nodes.has(node.id)
+              ? node
+              : { ...node, class: `${node.class ? `${node.class} ` : ''}nv-focus-faded` }
+          )
+        : builtNodes
+    );
+    edgesStore.set(
+      focus
+        ? builtEdges.map((edge) =>
+            focus.edges.has(edge.id)
+              ? edge
+              : { ...edge, class: `${edge.class ? `${edge.class} ` : ''}nv-focus-faded` }
+          )
+        : builtEdges
+    );
   }
 
   // #245: the canvas is a pure view of the shared labState store. Any store
@@ -2009,6 +2066,20 @@
         targetType: event.detail.node.id.startsWith('network') ? 'network' : 'node'
       };
     }}
+    on:nodemouseenter={(event: CustomEvent<{ node: Node }>) => {
+      // #275: no hover focus while a wire drag is choosing a target —
+      // the drag's own highlight owns the visual then.
+      if (!dragLinkSourceAnchor) {
+        hoverFocusId = event.detail.node.id;
+        publishFlowState();
+      }
+    }}
+    on:nodemouseleave={() => {
+      if (hoverFocusId !== null) {
+        hoverFocusId = null;
+        publishFlowState();
+      }
+    }}
     on:paneclick={() => {
       selectedEdgeId = null;
       closeMenu();
@@ -2492,6 +2563,20 @@
   /* #273: the expanded minimap sits above its always-present toggle box. */
   :global(.canvas-minimap.canvas-minimap-lifted) {
     bottom: 3.1rem;
+  }
+
+  /* #275: hover focus — non-neighbors fade; the transition smooths both
+     directions. Opacity only: faded elements stay interactive. */
+  :global(.svelte-flow__node),
+  :global(.svelte-flow__edge) {
+    transition:
+      opacity 140ms ease-in-out,
+      transform 0ms;
+  }
+
+  :global(.svelte-flow__node.nv-focus-faded),
+  :global(.svelte-flow__edge.nv-focus-faded) {
+    opacity: 0.4;
   }
 
   :global(.canvas-minimap svg) {

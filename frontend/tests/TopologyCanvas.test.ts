@@ -449,3 +449,90 @@ describe('TopologyCanvas minimap collapse (#273)', () => {
     expect(get(freshStore).minimapExpanded).toBe(true);
   });
 });
+
+describe('TopologyCanvas hover focus (#275)', () => {
+  const caps = { hotplug: false, max_nics: 8, machine: 'pc' } as TemplateCapabilities;
+
+  function link(id: string, nodeId: number, networkId: number): Link {
+    return {
+      id,
+      from: { node_id: nodeId, interface_index: 0 },
+      to: { network_id: networkId },
+      style_override: null,
+      label: '',
+      color: '',
+      width: '1',
+    };
+  }
+
+  function flowSummary(kind: 'nodes' | 'edges'): Array<{ id: string; class: string | null }> {
+    const flow = screen.getByTestId('svelte-flow-mock');
+    return JSON.parse(flow.getAttribute(`data-flow-${kind}`) ?? '[]');
+  }
+
+  function faded(kind: 'nodes' | 'edges', id: string): boolean {
+    return flowSummary(kind).find((item) => item.id === id)?.class?.includes('nv-focus-faded') ?? false;
+  }
+
+  function hoverNode(id: string) {
+    screen.getByTestId('svelte-flow-mock').dispatchEvent(
+      new CustomEvent('mock-flow-event', { detail: { type: 'nodemouseenter', detail: { node: { id } } } })
+    );
+  }
+
+  function leaveNode() {
+    screen.getByTestId('svelte-flow-mock').dispatchEvent(
+      new CustomEvent('mock-flow-event', { detail: { type: 'nodemouseleave', detail: {} } })
+    );
+  }
+
+  it('keeps the hovered node, its links and neighbors lit; fades the rest', async () => {
+    renderCanvas(
+      {
+        '1': makeNode(1, 'edge-a', 0, caps),
+        '2': makeNode(2, 'edge-b', 0, caps),
+        '3': makeNode(3, 'edge-c', 0, caps),
+      },
+      { '9': makeNetwork(9, 'bridge-a'), '8': makeNetwork(8, 'bridge-b') },
+      [link('l1', 1, 9), link('l2', 2, 9), link('l3', 3, 8)]
+    );
+
+    hoverNode('node1');
+    await tick();
+    await tick();
+
+    // Hovered node + network broker + peer stay lit (both endpoint nodes
+    // and both links of the node → network → node path).
+    expect(faded('nodes', 'node1')).toBe(false);
+    expect(faded('nodes', 'network9')).toBe(false);
+    expect(faded('nodes', 'node2')).toBe(false);
+    expect(faded('edges', 'link:l1')).toBe(false);
+    expect(faded('edges', 'link:l2')).toBe(false);
+    // The unrelated island fades.
+    expect(faded('nodes', 'node3')).toBe(true);
+    expect(faded('nodes', 'network8')).toBe(true);
+    expect(faded('edges', 'link:l3')).toBe(true);
+
+    leaveNode();
+    await tick();
+    await tick();
+    expect(flowSummary('nodes').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
+    expect(flowSummary('edges').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
+  });
+
+  it('lights an isolated hovered node alone', async () => {
+    renderCanvas(
+      { '1': makeNode(1, 'solo', 0, caps), '2': makeNode(2, 'edge-b', 0, caps) },
+      { '8': makeNetwork(8, 'bridge-b') },
+      [link('l3', 2, 8)]
+    );
+
+    hoverNode('node1');
+    await tick();
+    await tick();
+
+    expect(faded('nodes', 'node1')).toBe(false);
+    expect(faded('nodes', 'node2')).toBe(true);
+    expect(faded('edges', 'link:l3')).toBe(true);
+  });
+});
