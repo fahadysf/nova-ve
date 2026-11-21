@@ -21,7 +21,7 @@ import psutil
 
 from pydantic import BaseModel
 
-from app.config import get_settings
+from app.config import EDITABLE_SETTING_KEYS, get_settings
 
 router = APIRouter(prefix="/api", tags=["system"], responses=COMMON_RESPONSES)
 
@@ -29,14 +29,9 @@ _logger = logging.getLogger("nova-ve.system")
 
 # Editable settings subset (#265). Values persist to
 # BASE_DATA_DIR/system-settings.json and take effect on backend restart —
-# the GET reports which keys carry a persisted override so the UI can flag
-# "restart required" after an edit.
-EDITABLE_SETTING_KEYS = (
-    "DISCOVERY_CADENCE_SECONDS",
-    "NAT_CLOUD_POOL",
-    "SESSION_MAX_AGE",
-    "EXTERNAL_CONSOLE_HOST",
-)
+# get_settings() applies them at boot, and the GET below reports which keys
+# carry a persisted override so the UI can flag "restart required" after an
+# edit. The tuple lives in config.py (single source of truth).
 
 
 def _settings_overrides_path():
