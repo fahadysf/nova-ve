@@ -477,8 +477,12 @@ describe('TopologyCanvas hover focus (#275)', () => {
     return JSON.parse(flow.getAttribute(`data-flow-${kind}`) ?? '[]');
   }
 
-  function faded(kind: 'nodes' | 'edges', id: string): boolean {
-    return flowSummary(kind).find((item) => item.id === id)?.class?.includes('nv-focus-faded') ?? false;
+  function pulsing(kind: 'nodes' | 'edges', id: string): boolean {
+    return flowSummary(kind).find((item) => item.id === id)?.class?.includes('nv-focus-pulse') ?? false;
+  }
+
+  function classOf(kind: 'nodes' | 'edges', id: string): string | null {
+    return flowSummary(kind).find((item) => item.id === id)?.class ?? null;
   }
 
   function hoverNode(id: string) {
@@ -493,7 +497,7 @@ describe('TopologyCanvas hover focus (#275)', () => {
     );
   }
 
-  it('keeps the hovered node, its links and neighbors lit; fades the rest', async () => {
+  it('pulses the hovered node and its connected nodes; everything else is untouched', async () => {
     renderCanvas(
       {
         '1': makeNode(1, 'edge-a', 0, caps),
@@ -508,33 +512,33 @@ describe('TopologyCanvas hover focus (#275)', () => {
     await tick();
     await tick();
 
-    // Hovered node + network broker + peer stay lit (both endpoint nodes
-    // and both links of the node → network → node path).
-    expect(faded('nodes', 'node1')).toBe(false);
-    expect(faded('nodes', 'network9')).toBe(false);
-    expect(faded('nodes', 'node2')).toBe(false);
-    expect(faded('edges', 'link:l1')).toBe(false);
-    expect(faded('edges', 'link:l2')).toBe(false);
-    // The unrelated island fades.
-    expect(faded('nodes', 'node3')).toBe(true);
-    expect(faded('nodes', 'network8')).toBe(true);
-    expect(faded('edges', 'link:l3')).toBe(true);
+    // Hovered node + network broker + peer pulse (both endpoint nodes of
+    // the node → network → node path).
+    expect(pulsing('nodes', 'node1')).toBe(true);
+    expect(pulsing('nodes', 'network9')).toBe(true);
+    expect(pulsing('nodes', 'node2')).toBe(true);
+    // The unrelated island receives no focus class at all.
+    expect(classOf('nodes', 'node3')).toBeNull();
+    expect(classOf('nodes', 'network8')).toBeNull();
+    // Edges are never touched by the revision.
+    expect(classOf('edges', 'link:l1')).toBeNull();
+    expect(classOf('edges', 'link:l2')).toBeNull();
+    expect(classOf('edges', 'link:l3')).toBeNull();
 
     leaveNode();
     await tick();
     await tick();
     // The clear is debounced by a short grace period (rapid node crossings
-    // cancel it); settle past it before asserting the fade lifted.
+    // cancel it); settle past it before asserting the pulse lifted.
     await waitFor(
       () => {
-        expect(flowSummary('nodes').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
-        expect(flowSummary('edges').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
+        expect(flowSummary('nodes').every((item) => !item.class?.includes('nv-focus-pulse'))).toBe(true);
       },
       { timeout: 1500 }
     );
   });
 
-  it('does not un-dim while the pointer sweeps from one node to another (#275 flicker)', async () => {
+  it('does not drop the pulse while the pointer sweeps from one node to another (#275 flicker)', async () => {
     renderCanvas(
       {
         '1': makeNode(1, 'edge-a', 0, caps),
@@ -548,30 +552,30 @@ describe('TopologyCanvas hover focus (#275)', () => {
     hoverNode('node1');
     await tick();
     await tick();
-    expect(faded('nodes', 'node3')).toBe(true);
+    expect(pulsing('nodes', 'node1')).toBe(true);
 
     // Rapid crossing: leave fires BEFORE the next mouseenter — the debounced
-    // clear must not lift the dim in between.
+    // clear must not drop the highlight in between.
     leaveNode();
     hoverNode('node2');
     await tick();
     await tick();
 
-    // node2's neighborhood applies immediately: node1/network9/l2 lit via
-    // the shared bridge, node3's island stays dimmed — no flash to normal.
-    expect(faded('nodes', 'node1')).toBe(false);
-    expect(faded('nodes', 'network9')).toBe(false);
-    expect(faded('nodes', 'node2')).toBe(false);
-    expect(faded('nodes', 'node3')).toBe(true);
+    // node2's neighborhood applies immediately: node1/network9 pulse via
+    // the shared bridge, node3's island stays untouched.
+    expect(pulsing('nodes', 'node1')).toBe(true);
+    expect(pulsing('nodes', 'network9')).toBe(true);
+    expect(pulsing('nodes', 'node2')).toBe(true);
+    expect(pulsing('nodes', 'node3')).toBe(false);
 
     // The pending clear was cancelled by the enter: past the grace period
     // the node2 focus is still applied (no late wipe).
     await new Promise((resolve) => setTimeout(resolve, 250));
-    expect(faded('nodes', 'node3')).toBe(true);
-    expect(faded('nodes', 'node2')).toBe(false);
+    expect(pulsing('nodes', 'node2')).toBe(true);
+    expect(pulsing('nodes', 'node3')).toBe(false);
   });
 
-  it('lights an isolated hovered node alone', async () => {
+  it('pulses an isolated hovered node alone', async () => {
     renderCanvas(
       { '1': makeNode(1, 'solo', 0, caps), '2': makeNode(2, 'edge-b', 0, caps) },
       { '8': makeNetwork(8, 'bridge-b') },
@@ -582,8 +586,8 @@ describe('TopologyCanvas hover focus (#275)', () => {
     await tick();
     await tick();
 
-    expect(faded('nodes', 'node1')).toBe(false);
-    expect(faded('nodes', 'node2')).toBe(true);
-    expect(faded('edges', 'link:l3')).toBe(true);
+    expect(pulsing('nodes', 'node1')).toBe(true);
+    expect(pulsing('nodes', 'node2')).toBe(false);
+    expect(classOf('edges', 'link:l3')).toBeNull();
   });
 });
