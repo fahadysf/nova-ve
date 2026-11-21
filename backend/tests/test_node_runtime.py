@@ -2952,24 +2952,13 @@ def test_merge_qemu_args_malformed_extra_raises_value_error():
 
 
 # ---------------------------------------------------------------------------
-# External console launch (#269): bind-address behavior on freshly started
-# nodes. With EXTERNAL_CONSOLE_HOST configured, console listeners must be
-# reachable from operator workstations, so QEMU telnet/VNC binds go explicit
-# wildcard and the port probe checks the same address.
+# Fixed console port ranges (#276): allocation is first-free from the mode's
+# per-protocol range, probed on the wildcard (listeners are wildcard-bound in
+# every mode — the HTML5 guacd path and native clients share the surface).
+# The range no longer depends on EXTERNAL_CONSOLE_HOST; that setting gates
+# link advertisement only.
 # ---------------------------------------------------------------------------
-def test_console_bind_address_follows_external_host_setting(monkeypatch, patched_settings):
-    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
-    assert NodeRuntimeService()._console_bind_address() == "0.0.0.0"
-
-    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "   ", raising=False)
-    assert NodeRuntimeService()._console_bind_address() == "127.0.0.1"
-
-    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
-    assert NodeRuntimeService()._console_bind_address() == "127.0.0.1"
-
-
-def test_allocate_console_port_probes_external_bind_address(monkeypatch, patched_settings):
-    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
+def test_allocate_console_port_returns_range_start_per_mode(monkeypatch, patched_settings):
     probed = []
 
     def fake_port_available(port, bind_host="127.0.0.1"):
@@ -2978,72 +2967,57 @@ def test_allocate_console_port_probes_external_bind_address(monkeypatch, patched
 
     monkeypatch.setattr(NodeRuntimeService, "_port_available", staticmethod(fake_port_available))
     service = NodeRuntimeService()
-    assert service._allocate_console_port("vnc") == 5900
-    assert probed and probed[0][1] == "0.0.0.0"
+    assert service._allocate_console_port("telnet") == 15000
+    assert service._allocate_console_port("vnc") == 25000
+    assert service._allocate_console_port("rdp") == 35000
+    # "serial" shares the telnet range — it exposes a telnet server too.
+    assert service._allocate_console_port("serial") == 15000
+    assert probed and {host for _port, host in probed} == {"0.0.0.0"}
 
 
-def test_allocate_console_port_binds_ephemeral_probe_on_external_address(
-    monkeypatch, patched_settings
-):
-    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
-    bound = []
+def test_allocate_console_port_ignores_external_host_setting(monkeypatch, patched_settings):
+    # #276: binding no longer switches on EXTERNAL_CONSOLE_HOST — the same
+    # range port is allocated whether or not external links are advertised.
+    probed = []
 
-    class _RecordingSocket:
-        def __init__(self, *_args, **_kwargs):
-            pass
+    def fake_port_available(port, bind_host="127.0.0.1"):
+        probed.append((port, bind_host))
+        return True
 
-        def __enter__(self):
-            return self
+    monkeypatch.setattr(NodeRuntimeService, "_port_available", staticmethod(fake_port_available))
+    for external_host in ("192.168.7.9", ""):
+        monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", external_host, raising=False)
+        probed.clear()
+        assert NodeRuntimeService()._allocate_console_port("telnet") == 15000
+        assert probed[0] == (15000, "0.0.0.0")
 
-        def __exit__(self, *exc):
-            return False
 
-        def setsockopt(self, *args):
-            pass
+def test_allocate_console_port_skips_occupied_ports(monkeypatch, patched_settings):
+    monkeypatch.setattr(
+        patched_settings, "CONSOLE_PORT_RANGE_TELNET", "15123-15125", raising=False
+    )
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "_port_available",
+        staticmethod(lambda port, bind_host="127.0.0.1": port != 15123),
+    )
+    assert NodeRuntimeService()._allocate_console_port("telnet") == 15124
 
-        def bind(self, addr):
-            bound.append(addr)
 
-        def getsockname(self):
-            host, _port = bound[-1]
-            return (host, 47511)
+def test_allocate_console_port_raises_when_range_exhausted(monkeypatch, patched_settings):
+    from app.services.node_runtime_service import NodeRuntimeError
 
     monkeypatch.setattr(
-        "app.services.node_runtime_service.socket.socket", _RecordingSocket
+        patched_settings, "CONSOLE_PORT_RANGE_TELNET", "15123-15125", raising=False
     )
-    assert NodeRuntimeService()._allocate_console_port("telnet") == 47511
-    assert bound == [("0.0.0.0", 0)]
-
-
-def test_allocate_console_port_defaults_to_loopback(monkeypatch, patched_settings):
-    monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
-    bound = []
-
-    class _RecordingSocket:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-        def setsockopt(self, *args):
-            pass
-
-        def bind(self, addr):
-            bound.append(addr)
-
-        def getsockname(self):
-            host, _port = bound[-1]
-            return (host, 47512)
-
     monkeypatch.setattr(
-        "app.services.node_runtime_service.socket.socket", _RecordingSocket
+        NodeRuntimeService,
+        "_port_available",
+        staticmethod(lambda port, bind_host="127.0.0.1": False),
     )
-    assert NodeRuntimeService()._allocate_console_port("telnet") == 47512
-    assert bound == [("127.0.0.1", 0)]
+    with pytest.raises(NodeRuntimeError) as exc_info:
+        NodeRuntimeService()._allocate_console_port("telnet")
+    assert "15123-15125" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -3100,9 +3074,12 @@ async def test_qemu_start_binds_telnet_wildcard_when_external_host_set(
 
 
 @pytest.mark.asyncio
-async def test_qemu_start_keeps_legacy_bind_without_external_host(
+async def test_qemu_start_binds_range_port_wildcard_without_external_host(
     monkeypatch, patched_settings, sample_lab
 ):
+    """#276: EXTERNAL_CONSOLE_HOST no longer switches the bind — a telnet
+    console binds the explicit wildcard on its fixed-range port even with
+    external launching disabled."""
     recorded_popen = []
     _mock_runtime_binaries(monkeypatch)
     _stub_host_net_for_qemu_start(monkeypatch)
@@ -3134,14 +3111,26 @@ async def test_qemu_start_keeps_legacy_bind_without_external_host(
 
     cmd = recorded_popen[0]["cmd"]
     serial_values = [cmd[i + 1] for i, flag in enumerate(cmd) if flag == "-serial"]
-    assert any(arg.startswith("telnet::") for arg in serial_values)
-    assert not any("0.0.0.0" in arg for arg in serial_values)
+    assert any(
+        arg.startswith("telnet:0.0.0.0:") and arg.endswith(",server,nowait")
+        for arg in serial_values
+    )
+    assert not any(arg.startswith("telnet::") for arg in serial_values)
+
+    sample_lab_data = json.loads((patched_settings.LABS_DIR / "sample.json").read_text())
+    console = NodeRuntimeService().console_info(sample_lab_data, 1)
+    port = console["port"]
+    assert 15000 <= port <= 20000
+    assert f"telnet:0.0.0.0:{port},server,nowait" in serial_values
 
 
 @pytest.mark.asyncio
-async def test_qemu_start_binds_vnc_wildcard_when_external_host_set(
+async def test_qemu_start_vnc_binds_range_port_via_display_arithmetic(
     monkeypatch, patched_settings, sample_lab
 ):
+    """#276: VNC consoles listen on their fixed-range port through display
+    arithmetic — display = port - 5900 — so 5900 + display lands exactly on
+    the allocated TCP port and the legacy 5900-5999 pool is gone."""
     recorded_popen = []
     _mock_runtime_binaries(monkeypatch)
     _stub_host_net_for_qemu_start(monkeypatch)
@@ -3180,9 +3169,17 @@ async def test_qemu_start_binds_vnc_wildcard_when_external_host_set(
     response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
     assert response["code"] == 200
 
+    vnc_lab_data = json.loads((patched_settings.LABS_DIR / "sample.json").read_text())
+    console = NodeRuntimeService().console_info(vnc_lab_data, 1)
+    port = console["port"]
+    assert 25000 <= port <= 30000
+
     cmd = recorded_popen[0]["cmd"]
     vnc_values = [cmd[i + 1] for i, flag in enumerate(cmd) if flag == "-vnc"]
-    assert any(arg == "0.0.0.0:0" for arg in vnc_values), vnc_values
+    assert vnc_values == [f"0.0.0.0:{port - 5900}"], vnc_values
+    # Display arithmetic round-trip: the TCP listener sits on the port the
+    # endpoint advertises.
+    assert 5900 + int(vnc_values[0].rsplit(":", 1)[1]) == port
 
 
 # ---------------------------------------------------------------------------

@@ -82,6 +82,61 @@ def test_nat_cloud_pool_too_small_raises(monkeypatch):
     assert "NAT_CLOUD_POOL" in str(exc.value)
 
 
+# ---------------------------------------------------------------------------
+# Console port ranges (#276)
+# ---------------------------------------------------------------------------
+def test_console_port_range_defaults(monkeypatch):
+    for key in (
+        "CONSOLE_PORT_RANGE_TELNET",
+        "NOVA_VE_CONSOLE_PORT_RANGE_TELNET",
+        "CONSOLE_PORT_RANGE_VNC",
+        "NOVA_VE_CONSOLE_PORT_RANGE_VNC",
+        "CONSOLE_PORT_RANGE_RDP",
+        "NOVA_VE_CONSOLE_PORT_RANGE_RDP",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    settings = Settings()
+    assert settings.CONSOLE_PORT_RANGE_TELNET == "15000-20000"
+    assert settings.CONSOLE_PORT_RANGE_VNC == "25000-30000"
+    assert settings.CONSOLE_PORT_RANGE_RDP == "35000-40000"
+
+
+def test_console_port_range_env_override(monkeypatch):
+    monkeypatch.setenv("NOVA_VE_CONSOLE_PORT_RANGE_TELNET", "16000-17000")
+    monkeypatch.setenv("CONSOLE_PORT_RANGE_VNC", "26000-27000")
+    settings = Settings()
+    assert settings.CONSOLE_PORT_RANGE_TELNET == "16000-17000"
+    assert settings.CONSOLE_PORT_RANGE_VNC == "26000-27000"
+
+
+def test_console_port_range_malformed_raises(monkeypatch):
+    monkeypatch.setenv("NOVA_VE_CONSOLE_PORT_RANGE_TELNET", "16000")
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "CONSOLE_PORT_RANGE_TELNET" in str(exc.value)
+
+
+def test_console_port_range_out_of_bounds_raises(monkeypatch):
+    monkeypatch.setenv("NOVA_VE_CONSOLE_PORT_RANGE_TELNET", "1023-2000")
+    with pytest.raises(ValidationError):
+        Settings()
+    monkeypatch.setenv("NOVA_VE_CONSOLE_PORT_RANGE_TELNET", "16000-16000")
+    with pytest.raises(ValidationError):
+        Settings()
+    monkeypatch.setenv("NOVA_VE_CONSOLE_PORT_RANGE_TELNET", "16000-65536")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_console_port_range_vnc_floor_raises(monkeypatch):
+    """QEMU binds VNC via display arithmetic (port = 5900 + display), so the
+    VNC range must start at 5900 or above."""
+    monkeypatch.setenv("NOVA_VE_CONSOLE_PORT_RANGE_VNC", "4000-5000")
+    with pytest.raises(ValidationError) as exc:
+        Settings()
+    assert "CONSOLE_PORT_RANGE_VNC" in str(exc.value)
+
+
 def test_get_settings_resolves_missing_secrets_from_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("SECRET_KEY", "")
