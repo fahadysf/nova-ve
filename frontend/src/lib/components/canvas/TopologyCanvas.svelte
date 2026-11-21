@@ -12,6 +12,7 @@
     Lock,
     LockOpen,
     Map as MapIcon,
+    Minus,
     Monitor,
     Pencil,
     Play,
@@ -2071,6 +2072,7 @@
     autoPanOnConnect={!canvasLocked}
     autoPanOnNodeDrag={!canvasLocked}
     defaultEdgeOptions={{ type: 'default' }}
+    proOptions={{ hideAttribution: true }}
     on:nodedragstop={handleNodeDragStop}
     on:moveend={(event: CustomEvent<LabViewport>) => handleViewportEnd(event)}
     on:edgeclick={(event: CustomEvent<{ edge: Edge }>) => {
@@ -2119,31 +2121,44 @@
   >
     <Background patternColor="#374151" gap={20} />
     <!-- #273: the minimap starts collapsed to a small floating box (same
-         style as the top-right legend) and only renders when expanded from
-         that box; the choice persists per user. -->
+         style as the top-right legend). Expanding swaps the minimap INTO
+         that corner spot — the box is replaced by the minimap itself,
+         which carries its own minimize control. The choice persists per
+         user. Both states sit close to the corner to cover less canvas. -->
     {#if $canvasPrefs.minimapExpanded}
-      <div class="contents" data-testid="minimap-frame">
+      <div class="canvas-minimap-anchor" data-testid="minimap-frame">
         <MiniMap
           nodeColor={nodeColor}
           maskColor="rgba(17, 24, 39, 0.7)"
-          class="canvas-minimap canvas-minimap-lifted"
+          class="canvas-minimap"
         />
+        <button
+          type="button"
+          class="canvas-minimap-minimize"
+          data-testid="minimap-minimize"
+          aria-label="Hide minimap"
+          title="Hide minimap"
+          on:click={() => canvasPrefs.setMinimapExpanded(false)}
+        >
+          <Minus class="h-3 w-3" />
+        </button>
       </div>
+    {:else}
+      <Panel position="bottom-right" class="minimap-chip-panel">
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs font-normal text-gray-300 shadow-lg shadow-black/20 backdrop-blur transition-colors hover:border-blue-500 hover:text-white"
+          data-testid="minimap-toggle"
+          aria-label="Show minimap"
+          title="Show minimap"
+          on:click={() => canvasPrefs.setMinimapExpanded(true)}
+        >
+          <MapIcon class="h-3.5 w-3.5 text-gray-400" />
+          <span>Minimap</span>
+          <span class="text-[9px] text-gray-500">▴</span>
+        </button>
+      </Panel>
     {/if}
-    <Panel position="bottom-right">
-      <button
-        type="button"
-        class="inline-flex items-center gap-1.5 rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs font-normal text-gray-300 shadow-lg shadow-black/20 backdrop-blur transition-colors hover:border-blue-500 hover:text-white"
-        data-testid="minimap-toggle"
-        aria-label={$canvasPrefs.minimapExpanded ? 'Hide minimap' : 'Show minimap'}
-        title={$canvasPrefs.minimapExpanded ? 'Hide minimap' : 'Show minimap'}
-        on:click={() => canvasPrefs.toggleMinimap()}
-      >
-        <MapIcon class="h-3.5 w-3.5 text-gray-400" />
-        <span>Minimap</span>
-        <span class="text-[9px] text-gray-500">{$canvasPrefs.minimapExpanded ? '▾' : '▴'}</span>
-      </button>
-    </Panel>
 
     <Panel position="top-left">
       <div class="rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-500 shadow-lg shadow-black/20">
@@ -2591,9 +2606,49 @@
     box-shadow: 0 20px 40px -20px rgb(0 0 0 / 0.65);
   }
 
-  /* #273: the expanded minimap sits above its always-present toggle box. */
-  :global(.canvas-minimap.canvas-minimap-lifted) {
-    bottom: 3.1rem;
+  /* #273: expanded, the minimap takes the corner spot itself (the toggle
+     box is swapped out) with its own minimize control; both states hug
+     the corner closer than the library default 15px so less canvas is
+     covered. The anchor is the positioned ancestor the minimap's own
+     absolute panel attaches to. */
+  :global(.minimap-chip-panel) {
+    margin: 8px;
+  }
+
+  :global(.canvas-minimap-anchor) {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    z-index: 5;
+  }
+
+  :global(.canvas-minimap-anchor .svelte-flow__panel) {
+    position: static;
+    margin: 0;
+  }
+
+  :global(.canvas-minimap-minimize) {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    z-index: 6;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 1.15rem;
+    width: 1.15rem;
+    border-radius: 0.375rem;
+    border: 1px solid rgb(55 65 81 / 1);
+    background: rgb(17 24 39 / 0.92);
+    color: rgb(209 213 219 / 1);
+    transition:
+      color 120ms,
+      border-color 120ms;
+  }
+
+  :global(.canvas-minimap-minimize:hover) {
+    color: rgb(255 255 255 / 1);
+    border-color: rgb(96 165 250 / 1);
   }
 
   /* #275: hover focus — non-neighbors fade; the transition smooths both
