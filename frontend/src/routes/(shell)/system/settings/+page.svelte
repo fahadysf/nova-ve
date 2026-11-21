@@ -153,10 +153,9 @@
               </label>
               <p class="mt-1 text-[10px] leading-relaxed text-gray-500">
                 Advertised verbatim in telnet://, vnc:// and rdp:// console links.
-                When set, console listeners on newly started nodes become reachable
-                beyond loopback (telnet/VNC/proxy ports bind the wildcard address) —
-                scope them with a firewall. Nodes already running keep their previous
-                binding until restarted.
+                Console ports listen on the host in fixed ranges
+                (telnet 15000-20000, VNC 25000-30000, RDP 35000-40000) — scope
+                them with a firewall.
               </p>
             </div>
             <label class="block text-[11px] uppercase tracking-[0.05em] text-gray-500">

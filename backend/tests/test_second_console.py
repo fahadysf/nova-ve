@@ -477,31 +477,38 @@ class TestQemuBaseCmdSecondaryMatrix:
     pytestmark = pytest.mark.usefixtures("runtime_settings")
     def test_telnet_primary_vnc_secondary_emits_both(self, monkeypatch):
         cmd = _build_cmd(monkeypatch, _qemu_node("telnet", "vnc"), 23000, 5905)
-        assert _flag_values(cmd, "-serial") == ["telnet::23000,server,nowait"]
-        assert _flag_values(cmd, "-vnc") == [":5"]
+        assert _flag_values(cmd, "-serial") == ["telnet:0.0.0.0:23000,server,nowait"]
+        assert _flag_values(cmd, "-vnc") == ["0.0.0.0:5"]
 
     def test_vnc_primary_telnet_secondary_emits_both(self, monkeypatch):
         cmd = _build_cmd(monkeypatch, _qemu_node("vnc", "telnet"), 5903, 23001)
-        assert _flag_values(cmd, "-vnc") == [":3"]
-        assert _flag_values(cmd, "-serial") == ["telnet::23001,server,nowait"]
+        assert _flag_values(cmd, "-vnc") == ["0.0.0.0:3"]
+        assert _flag_values(cmd, "-serial") == ["telnet:0.0.0.0:23001,server,nowait"]
 
     def test_serial_primary_telnet_secondary_emits_two_serials(self, monkeypatch):
         cmd = _build_cmd(monkeypatch, _qemu_node("serial", "telnet"), 23002, 23003)
         assert _flag_values(cmd, "-serial") == [
-            "telnet::23002,server,nowait",
-            "telnet::23003,server,nowait",
+            "telnet:0.0.0.0:23002,server,nowait",
+            "telnet:0.0.0.0:23003,server,nowait",
         ]
         assert not _flag_values(cmd, "-vnc")
 
     def test_serial_primary_vnc_secondary_emits_serial_and_vnc(self, monkeypatch):
         cmd = _build_cmd(monkeypatch, _qemu_node("serial", "vnc"), 23004, 5907)
-        assert _flag_values(cmd, "-serial") == ["telnet::23004,server,nowait"]
-        assert _flag_values(cmd, "-vnc") == [":7"]
+        assert _flag_values(cmd, "-serial") == ["telnet:0.0.0.0:23004,server,nowait"]
+        assert _flag_values(cmd, "-vnc") == ["0.0.0.0:7"]
 
     def test_no_secondary_keeps_single_console(self, monkeypatch):
         cmd = _build_cmd(monkeypatch, _qemu_node("telnet"), 23010)
-        assert _flag_values(cmd, "-serial") == ["telnet::23010,server,nowait"]
+        assert _flag_values(cmd, "-serial") == ["telnet:0.0.0.0:23010,server,nowait"]
         assert not _flag_values(cmd, "-vnc")
+
+    def test_range_ports_use_display_arithmetic(self, monkeypatch):
+        """#276: vnc range ports land on the allocated TCP port through
+        display arithmetic — display = port - 5900 — instead of the legacy
+        5900-5999 display pool."""
+        cmd = _build_cmd(monkeypatch, _qemu_node("vnc", "vnc"), 25905, 26007)
+        assert _flag_values(cmd, "-vnc") == ["0.0.0.0:20005", "0.0.0.0:20107"]
 
 
 class TestParseBackSecondaryPorts:
@@ -711,12 +718,18 @@ async def test_qemu_start_allocates_second_console_port(
     cmd = recorded_popen[0]["cmd"]
     serial_values = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "-serial"]
     vnc_values = [cmd[i + 1] for i, tok in enumerate(cmd) if tok == "-vnc"]
-    assert serial_values == [f"telnet::{runtime['console_port']},server,nowait"]
-    assert vnc_values == [f":{runtime['second_console_port'] - 5900}"]
+    # #276: both listeners bind the wildcard explicitly on their fixed-range
+    # public ports, regardless of EXTERNAL_CONSOLE_HOST.
+    assert serial_values == [f"telnet:0.0.0.0:{runtime['console_port']},server,nowait"]
+    assert vnc_values == [f"0.0.0.0:{runtime['second_console_port'] - 5900}"]
     assert runtime["console"] == "telnet"
     assert runtime["second_console"] == "vnc"
     assert runtime["second_console_port"] != runtime["console_port"]
-    assert runtime["second_console_port"] >= 5900
+    # Ports come from the per-protocol ranges: telnet 15000-20000, vnc
+    # 25000-30000 (the SimpleNamespace settings stub omits the range keys,
+    # so the documented defaults apply).
+    assert 15000 <= runtime["console_port"] <= 20000
+    assert 25000 <= runtime["second_console_port"] <= 30000
 
     # The record round-trips through the persisted state file.
     service._persist_runtime(runtime)

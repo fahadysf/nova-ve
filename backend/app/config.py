@@ -116,16 +116,38 @@ class Settings(BaseSettings):
     # LAN address). Used verbatim in the telnet://, vnc:// and rdp:// URLs the
     # external-console endpoint advertises — never credentials, never a port.
     #
-    # SECURITY: leaving this empty keeps the feature disabled (the endpoint
-    # refuses and the UI falls back to the in-browser console). When set,
-    # node console listeners become reachable beyond loopback: QEMU telnet
-    # serial and VNC displays bind 0.0.0.0 on newly started nodes, on top of
-    # the console-proxy listeners (docker/dynamips/iol) that already publish
-    # on 0.0.0.0. Raw protocol connections bypass the HTML5 session layer,
-    # so those ports are exposed to anything that can route to this host —
-    # scope access with a firewall. Nodes started before the setting was
-    # enabled keep their loopback-only binding until restarted.
+    # Advertisement-only since #276: console listeners always bind the
+    # wildcard on fixed per-protocol port ranges (below) — the HTML5 path
+    # (guacd via host.docker.internal) requires that, and native clients
+    # share the same surface. This setting only gates whether external
+    # links are emitted; leaving it empty keeps external launching
+    # disabled (the endpoint refuses and the UI falls back to the
+    # in-browser console).
+    #
+    # SECURITY: raw protocol connections on the console port ranges bypass
+    # the HTML5 session layer, so those ports are reachable by anything
+    # that can route to this host — scope them with a firewall. The fixed
+    # ranges exist precisely so such an allow-list is practical.
     EXTERNAL_CONSOLE_HOST: str = ""
+
+    # Console port ranges (#276). Public host-side listener ports for node
+    # consoles, allocated first-free per running node and persisted on the
+    # runtime record. One range per protocol so operators can allow-list
+    # exactly the console types they expose. The telnet/vnc defaults sit
+    # below the Linux ephemeral port range; RDP overlaps it by design
+    # (see #276's deploy note on ip_local_port_range).
+    CONSOLE_PORT_RANGE_TELNET: str = Field(
+        default="15000-20000",
+        validation_alias=AliasChoices("CONSOLE_PORT_RANGE_TELNET", "NOVA_VE_CONSOLE_PORT_RANGE_TELNET"),
+    )
+    CONSOLE_PORT_RANGE_VNC: str = Field(
+        default="25000-30000",
+        validation_alias=AliasChoices("CONSOLE_PORT_RANGE_VNC", "NOVA_VE_CONSOLE_PORT_RANGE_VNC"),
+    )
+    CONSOLE_PORT_RANGE_RDP: str = Field(
+        default="35000-40000",
+        validation_alias=AliasChoices("CONSOLE_PORT_RANGE_RDP", "NOVA_VE_CONSOLE_PORT_RANGE_RDP"),
+    )
 
     @field_validator("DATABASE_URL")
     @classmethod
@@ -172,6 +194,42 @@ class Settings(BaseSettings):
         if network.prefixlen > 24:
             raise ValueError("NAT_CLOUD_POOL must be at least large enough to allocate /24 networks")
         return str(network)
+
+    @field_validator(
+        "CONSOLE_PORT_RANGE_TELNET",
+        "CONSOLE_PORT_RANGE_VNC",
+        "CONSOLE_PORT_RANGE_RDP",
+    )
+    @classmethod
+    def _validate_console_port_range(cls, value: str) -> str:
+        # "#276" ranges: "lo-hi", 1024 <= lo < hi <= 65535. VNC additionally
+        # needs lo >= 5900 — QEMU binds VNC via display arithmetic
+        # (-vnc :<port-5900>), which requires a non-negative display.
+        import re
+
+        text = str(value).strip()
+        match = re.fullmatch(r"(\d{1,5})-(\d{1,5})", text)
+        if not match:
+            raise ValueError(
+                f"Console port range must be formatted 'lo-hi' (got {value!r})"
+            )
+        lo, hi = int(match.group(1)), int(match.group(2))
+        if not 1024 <= lo < hi <= 65535:
+            raise ValueError(
+                f"Console port range must satisfy 1024 <= lo < hi <= 65535 (got {value!r})"
+            )
+        return f"{lo}-{hi}"
+
+    @field_validator("CONSOLE_PORT_RANGE_VNC")
+    @classmethod
+    def _validate_console_port_range_vnc_floor(cls, value: str) -> str:
+        lo = int(str(value).strip().split("-", 1)[0])
+        if lo < 5900:
+            raise ValueError(
+                "CONSOLE_PORT_RANGE_VNC must start at 5900 or above — QEMU VNC "
+                "listeners bind via display arithmetic (port = 5900 + display)"
+            )
+        return value
 
     class Config:
         env_file = ".env"

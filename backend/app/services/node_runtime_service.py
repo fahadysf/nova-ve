@@ -125,6 +125,34 @@ def _qemu_accel() -> str:
     return "kvm" if Path("/dev/kvm").exists() else "tcg"
 
 
+# Console port ranges (#276): settings key plus the documented default, per
+# protocol. "serial" and any other non-graphical mode share the telnet range
+# — they all expose a telnet server on the serial line.
+_CONSOLE_PORT_RANGE_SETTINGS: dict[str, tuple[str, int, int]] = {
+    "telnet": ("CONSOLE_PORT_RANGE_TELNET", 15000, 20000),
+    "vnc": ("CONSOLE_PORT_RANGE_VNC", 25000, 30000),
+    "rdp": ("CONSOLE_PORT_RANGE_RDP", 35000, 40000),
+}
+
+
+def _console_port_range(console_mode: str) -> tuple[int, int]:
+    """Public host-port range for a console mode (#276), as (lo, hi).
+
+    Read defensively off the settings object (tests stub it with
+    SimpleNamespace namespaces that may omit the range keys) and fall back
+    to the defaults documented in config.py.
+    """
+    key, default_lo, default_hi = _CONSOLE_PORT_RANGE_SETTINGS.get(
+        console_mode, _CONSOLE_PORT_RANGE_SETTINGS["telnet"]
+    )
+    raw = str(getattr(get_settings(), key, "") or "").strip()
+    try:
+        lo_text, hi_text = raw.split("-", 1)
+        return int(lo_text), int(hi_text)
+    except ValueError:
+        return default_lo, default_hi
+
+
 def _parse_qemu_tokens(tokens: list[str]) -> list[tuple[str, list[str]]]:
     """Group a QEMU argv list into [(flag, [value_tokens...]), ...].
 
@@ -1897,35 +1925,27 @@ class NodeRuntimeService:
             cmd += ["-cpu", "max"]
         # Primary console backend (#268): a vnc primary binds the QEMU VNC
         # display, everything else (telnet and the paired-template serial)
-        # exposes a telnet server on the serial line. With
-        # EXTERNAL_CONSOLE_HOST set (#269) console listeners must be
-        # reachable from operator workstations, so pin an explicit wildcard
-        # bind on freshly started nodes (the bare-host forms leave the bind
-        # address to QEMU defaults). Nodes started while the setting is off
-        # keep their previous binding until restarted.
+        # exposes a telnet server on the serial line. Console listeners
+        # always bind the wildcard explicitly on the node's fixed-range
+        # public port (#276) — the HTML5 path (guacd via
+        # host.docker.internal) and native clients (telnet://, vnc://,
+        # #269) share the same surface, so there is no loopback mode to
+        # switch between anymore. VNC lands on the allocated port through
+        # display arithmetic: display = port - 5900, so the TCP listener
+        # sits exactly on console_port (any port >= 5900 works).
         if console_mode == "vnc":
-            if self._external_console_enabled():
-                cmd += ["-vnc", f"0.0.0.0:{console_port - 5900}"]
-            else:
-                cmd += ["-vnc", f":{console_port - 5900}"]
-        elif self._external_console_enabled():
-            cmd += ["-serial", f"telnet:0.0.0.0:{console_port},server,nowait"]
+            cmd += ["-vnc", f"0.0.0.0:{console_port - 5900}"]
         else:
-            cmd += ["-serial", f"telnet::{console_port},server,nowait"]
+            cmd += ["-serial", f"telnet:0.0.0.0:{console_port},server,nowait"]
         # Secondary console backend: QEMU keeps the primary backend and adds
         # a second one — the VNC display coexists with the serial server, and
         # a telnet secondary becomes serial1 (second ``-serial`` argument).
-        # The same #269 wildcard-bind rule applies to the second listener.
+        # The same #276 wildcard-on-range-port rule applies to the second
+        # listener.
         if second_console_mode == "vnc" and second_console_port:
-            if self._external_console_enabled():
-                cmd += ["-vnc", f"0.0.0.0:{second_console_port - 5900}"]
-            else:
-                cmd += ["-vnc", f":{second_console_port - 5900}"]
+            cmd += ["-vnc", f"0.0.0.0:{second_console_port - 5900}"]
         elif second_console_mode == "telnet" and second_console_port:
-            if self._external_console_enabled():
-                cmd += ["-serial", f"telnet:0.0.0.0:{second_console_port},server,nowait"]
-            else:
-                cmd += ["-serial", f"telnet::{second_console_port},server,nowait"]
+            cmd += ["-serial", f"telnet:0.0.0.0:{second_console_port},server,nowait"]
         cmd += ["-qmp", f"unix:{qmp_path},server,nowait"]
 
         if machine == "q35" and max_nics > 0:
@@ -5735,36 +5755,22 @@ class NodeRuntimeService:
         ).hexdigest().upper()
         return f"/html5/#/client/{connection}?token={token}"
 
-    def _console_bind_address(self) -> str:
-        """Address console listeners bind on freshly started nodes.
-
-        Loopback by default. With EXTERNAL_CONSOLE_HOST set (#269), consoles
-        must be reachable from the operator's workstation, so listeners bind
-        the wildcard and the port probe checks the same address — probing
-        loopback would happily hand out a port the wildcard listener cannot
-        use. The external-console endpoint advertises the configured host
-        verbatim; see config.py for the exposure trade-offs.
-        """
-        external_host = str(getattr(get_settings(), "EXTERNAL_CONSOLE_HOST", "") or "")
-        if external_host.strip():
-            return "0.0.0.0"
-        return "127.0.0.1"
-
-    def _external_console_enabled(self) -> bool:
-        """True when EXTERNAL_CONSOLE_HOST is configured (#269)."""
-        return self._console_bind_address() == "0.0.0.0"
-
     def _allocate_console_port(self, console_mode: str) -> int:
-        bind_host = self._console_bind_address()
-        if console_mode == "vnc":
-            for port in range(5900, 6000):
-                if self._port_available(port, bind_host):
-                    return port
-            raise NodeRuntimeError("No VNC console ports available")
+        """First free public console port from the mode's fixed range (#276).
 
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.bind((bind_host, 0))
-            return int(sock.getsockname()[1])
+        Console listeners are wildcard-bound in every mode — the HTML5 path
+        (guacd via host.docker.internal) and native clients share the same
+        public surface — so the probe checks the wildcard address too. The
+        chosen port is persisted on the runtime record by the caller and
+        freed when the node stops.
+        """
+        lo, hi = _console_port_range(console_mode)
+        for port in range(lo, hi + 1):
+            if self._port_available(port, "0.0.0.0"):
+                return port
+        raise NodeRuntimeError(
+            f"No {console_mode} console ports available in {lo}-{hi}."
+        )
 
     @staticmethod
     def _port_available(port: int, bind_host: str = "127.0.0.1") -> bool:
