@@ -41,6 +41,8 @@ class GenericLinuxAdapter(VendorAdapter):
             "console": str(raw.get("console", "telnet")),
             "extras": {
                 "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
+                # #278: carry the emulator generation the source template pinned.
+                "qemu_version": str(raw.get("qemu_version", "") or ""),
                 "qemu_options": str(raw.get("qemu_options", "")),
                 "_eveng_raw": eveng_raw if eveng_raw is not None else dict(raw),
             },

@@ -55,6 +55,7 @@ def test_cisco_iosv_l3_convert_snapshot() -> None:
         "console": "telnet",
         "extras": {
             "qemu_nic": "e1000",
+            "qemu_version": "",
             "qemu_options": "",
             "_eveng_raw": raw,
         },

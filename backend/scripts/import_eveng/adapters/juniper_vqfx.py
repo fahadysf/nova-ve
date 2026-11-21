@@ -54,6 +54,7 @@ class JuniperVQFXAdapter(VendorAdapter):
                     "interface_naming": {"explicit": ["fxp0", "em1"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
+                        "qemu_version": str(raw.get("qemu_version", "") or ""),
                         "_eveng_paired_role": "re",
                     },
                 },
@@ -69,6 +70,7 @@ class JuniperVQFXAdapter(VendorAdapter):
                     "interface_naming": {"explicit": ["em0", "em1", "em2", "em3"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
+                        "qemu_version": str(raw.get("qemu_version", "") or ""),
                         "_eveng_paired_role": "pfe",
                     },
                 },

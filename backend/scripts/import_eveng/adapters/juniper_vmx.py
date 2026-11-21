@@ -69,6 +69,7 @@ class JuniperVMXAdapter(VendorAdapter):
                     "interface_naming": {"explicit": ["fxp0"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
+                        "qemu_version": str(raw.get("qemu_version", "") or ""),
                         "_eveng_paired_role": "vcp",
                     },
                 },
@@ -84,6 +85,7 @@ class JuniperVMXAdapter(VendorAdapter):
                     "interface_naming": {"explicit": ["em0", "em1", "em2", "em3"]},
                     "extras": {
                         "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
+                        "qemu_version": str(raw.get("qemu_version", "") or ""),
                         "_eveng_paired_role": "vfp",
                     },
                 },

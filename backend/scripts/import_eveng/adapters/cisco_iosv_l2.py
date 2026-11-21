@@ -39,6 +39,8 @@ class CiscoIOSvL2Adapter(VendorAdapter):
             "console": str(raw["console_type"]),
             "extras": {
                 "qemu_nic": str(raw.get("qemu_nic", "e1000")),
+                # #278: carry the emulator generation the source template pinned.
+                "qemu_version": str(raw.get("qemu_version", "") or ""),
                 "qemu_options": str(raw.get("qemu_options", "")),
                 "_eveng_raw": raw.get("_eveng_raw") or dict(raw),
             },

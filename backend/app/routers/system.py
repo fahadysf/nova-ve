@@ -8,7 +8,7 @@ from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services.cloud_inventory_service import list_nat_clouds
 from app.services.bridge_cloud_service import list_bridge_clouds
-from app.services import iourc_service
+from app.services import iourc_service, qemu_versions
 from app.services.node_runtime_service import NodeRuntimeService
 import ipaddress
 import json
@@ -110,7 +110,8 @@ async def get_status(
         "message": "Fetched system status (60001).",
         "data": {
             "version": "0.1.0-alpha",
-            "qemu_version": "8.0.0",
+            # #278: the real distro QEMU version (was a hardcoded 8.0.0).
+            "qemu_version": qemu_versions.default_version(),
             "uksm": "unsupported",
             "ksm": "unsupported",
             "cpulimit": "enabled",
@@ -142,6 +143,26 @@ async def get_status(
             "labs_dir": str(settings.LABS_DIR),
             "images_dir": str(settings.IMAGES_DIR),
         },
+    }
+
+
+@router.get("/system/qemu-versions")
+async def get_qemu_versions(
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Installed side-by-side QEMU versions (#278).
+
+    Feeds the node-form/template emulator dropdowns and boot-time
+    validation hints. ``default`` is the distribution QEMU that every node
+    boots on when ``extras.qemu_version`` is empty; ``versions`` lists the
+    optional ``nova-ve-qemu-*`` packages installed under
+    ``QEMU_VERSIONS_ROOT`` (``/opt/nova-ve/qemu/<version>/``).
+    """
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "QEMU versions successfully fetched.",
+        "data": qemu_versions.catalog(),
     }
 
 

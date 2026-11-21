@@ -251,6 +251,24 @@
     return template?.extras_schema ?? [];
   }
 
+  /**
+   * Options for a schema-driven select, with the current value guaranteed
+   * present. #278: the qemu_version dropdown options are computed from the
+   * host's installed versions at catalog time — a node/template pinned to a
+   * version that was later uninstalled must still render (and save) its
+   * stored value instead of silently snapping to the first option.
+   */
+  function selectOptionsFor(
+    field: NodeCatalogExtraField,
+    currentValue: string
+  ): { value: string; label?: string }[] {
+    const options = (field.options ?? []).map((option) => ({ ...option }));
+    if (currentValue !== '' && !options.some((option) => option.value === currentValue)) {
+      options.push({ value: currentValue, label: `${currentValue} (not installed)` });
+    }
+    return options;
+  }
+
   function imageOptionFor(template: NodeCatalogTemplate | undefined, imageName: string) {
     return template?.images.find((entry) => entry.image === imageName);
   }
@@ -1172,7 +1190,7 @@
                             disabled={isExtraDisabled(field)}
                             class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                           >
-                            {#each field.options ?? [] as option}
+                            {#each selectOptionsFor(field, String(extras[field.key] ?? '')) as option}
                               <option value={option.value}>{option.label ?? option.value}</option>
                             {/each}
                           </select>

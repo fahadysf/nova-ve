@@ -435,6 +435,26 @@ _DYNAMIPS_PA_PORT_COUNT: dict[str, int] = {
 }
 
 
+def _qemu_version_options() -> list[dict[str, str]]:
+    """Dropdown options for the #278 emulator selector.
+
+    ``Host default`` (the distribution QEMU) first, then every side-by-side
+    build present under ``QEMU_VERSIONS_ROOT``. Served fresh per catalog
+    request, so a newly installed ``nova-ve-qemu-*`` deb shows up without a
+    backend restart.
+    """
+    from app.services import qemu_versions
+
+    default_label = "Host default"
+    default_version = qemu_versions.default_version()
+    if default_version != "unknown":
+        default_label = f"Host default ({default_version})"
+    options = [{"value": "", "label": default_label}]
+    for version in qemu_versions.installed_versions():
+        options.append({"value": version, "label": version})
+    return options
+
+
 def _qemu_extras_schema() -> list[dict[str, Any]]:
     return [
         {
@@ -470,9 +490,10 @@ def _qemu_extras_schema() -> list[dict[str, Any]]:
         {
             "key": "qemu_version",
             "label": "QEMU version",
-            "type": "text",
+            "type": "select",
+            "options": _qemu_version_options(),
             "default": "",
-            "placeholder": "(auto)",
+            "description": "Side-by-side emulator generation for this node (#278). Host default uses the distribution QEMU.",
             "stoppedOnly": True,
             "runtime": True,
         },

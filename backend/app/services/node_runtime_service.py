@@ -41,7 +41,7 @@ from typing import Any, Callable, Iterator, Optional
 import psutil
 
 from app.config import get_settings
-from app.services import host_net, runtime_pids
+from app.services import host_net, qemu_versions, runtime_pids
 
 
 _DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
@@ -2017,8 +2017,19 @@ class NodeRuntimeService:
         """
         extras = _node_extras(node)
         architecture = _extra_str(extras, "architecture") or "x86_64"
-        qemu_binary = self._resolve_qemu_binary(architecture)
+        qemu_version = _extra_str(extras, "qemu_version")
+        qemu_binary = self._resolve_qemu_binary(architecture, version=qemu_version)
         if not qemu_binary:
+            if qemu_version:
+                # #278: the node pins a side-by-side QEMU version that is not
+                # installed on this host — a typed, actionable error instead
+                # of a raw file-not-found or a silent wrong-generation boot.
+                raise NodeRuntimeError(
+                    f"QEMU version {qemu_version} is not installed on this host "
+                    f"(no binary at {qemu_versions.version_binary(qemu_version, architecture)}). "
+                    f"Install the nova-ve-qemu-{qemu_version} package or clear the "
+                    f"node's QEMU version override."
+                )
             raise NodeRuntimeError(
                 f"QEMU binary not found for arch {architecture}: {self.settings.QEMU_BINARY}"
             )
@@ -2227,6 +2238,9 @@ class NodeRuntimeService:
             "qmp_socket": str(qmp_socket_path),
             "command": cmd,
             "machine": machine,
+            # #278: what actually launched, for introspection/debugging.
+            "qemu_binary": qemu_binary,
+            "qemu_version": qemu_version or qemu_versions.default_version(),
             "max_nics": max_nics,
             "boot_ethernet": ethernet_count,
             "hotplug_capable": hotplug_capable,
@@ -2280,7 +2294,10 @@ class NodeRuntimeService:
         # ── Stopped node: dry-run ─────────────────────────────────────────
         extras = _node_extras(node)
         architecture = _extra_str(extras, "architecture") or "x86_64"
-        qemu_binary = self._resolve_qemu_binary(architecture) or f"qemu-system-{architecture}"
+        qemu_version = _extra_str(extras, "qemu_version")
+        qemu_binary = self._resolve_qemu_binary(architecture, version=qemu_version) or (
+            f"qemu-system-{architecture}"
+        )
 
         ethernet_count = int(node.get("ethernet", 0))
         attachments = self._qemu_attachments(lab_data, node)
@@ -2332,7 +2349,19 @@ class NodeRuntimeService:
             source = "user" if current_flag in user_flags else "default"
             tokens.append({"token": tok, "source": source})
 
-        return {"tokens": tokens, "running": False}
+        return {
+            "tokens": tokens,
+            "running": False,
+            # #278: which emulator this node would boot on right now.
+            "qemu_binary": qemu_binary,
+            "qemu_version": qemu_version or qemu_versions.default_version(),
+            "qemu_version_installed": (
+                None
+                if not qemu_version
+                else qemu_versions.resolve_version_binary(qemu_version, architecture)
+                is not None
+            ),
+        }
 
     @staticmethod
     def _interface_uplink(interfaces: list[Any], interface_index: int) -> bool:
@@ -5805,7 +5834,26 @@ class NodeRuntimeService:
             return binary
         return shutil.which(binary)
 
-    def _resolve_qemu_binary(self, arch: str) -> str | None:
+    def _resolve_qemu_binary(self, arch: str, version: str = "") -> str | None:
+        """Resolve the QEMU binary for ``arch``, honouring a version override.
+
+        ``version`` (from ``extras.qemu_version``) selects a side-by-side
+        build from the #278 registry (``/opt/nova-ve/qemu/<version>/``).
+        Empty/unknown-fallback behaviour: when the version is requested but
+        not installed we return ``None`` so the caller raises the typed
+        install-hint error; otherwise the distro QEMU (``QEMU_BINARY``)
+        applies exactly as before.
+        """
+        if version:
+            registry_binary = qemu_versions.resolve_version_binary(version, arch)
+            if registry_binary is not None:
+                return str(registry_binary)
+            # Requested version missing from the registry — fall through to
+            # None only when the distro fallback is intentionally suppressed
+            # by the caller's contract: here we return None so the boot path
+            # can produce the precise "version not installed" error instead
+            # of silently booting on the wrong emulator generation.
+            return None
         configured = self.settings.QEMU_BINARY
         if not arch or arch == "x86_64":
             return self._resolve_binary(configured)

@@ -42,6 +42,8 @@ class MikrotikCHRAdapter(VendorAdapter):
             "console": str(raw.get("console_type", "telnet")),
             "extras": {
                 "qemu_nic": "e1000",  # CHR is sensitive: forced e1000, not virtio
+                # #278: carry the emulator generation the source template pinned.
+                "qemu_version": str(raw.get("qemu_version", "") or ""),
                 "qemu_options": str(raw.get("qemu_options", "")),
                 "_eveng_raw": raw.get("_eveng_raw") or dict(raw),
             },
