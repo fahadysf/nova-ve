@@ -4407,12 +4407,20 @@ class NodeRuntimeService:
             tap = want["tap_name"]
             bridge = want["bridge_name"]
             try:
-                if not host_net.tap_exists(tap):
+                # #277: consult sysfs link state first and only issue the
+                # privileged helper spawns the kernel state doesn't already
+                # satisfy — unconditional re-application cost ~150ms per op
+                # (200+ spawns, ~30s frozen event loop on node-dense labs).
+                exists, master, admin_up = host_net.link_state(tap)
+                if not exists:
                     # Defensive: a pre-#174 process or a race left no TAP.
                     # Recreate so the e1000 backend has something to talk to.
                     host_net.tap_add(tap)
-                host_net.link_master_any(tap, bridge, driver=want.get("driver"))
-                host_net.link_up(tap)
+                    master, admin_up = None, False
+                if master != bridge:
+                    host_net.link_master_any(tap, bridge, driver=want.get("driver"))
+                if not admin_up:
+                    host_net.link_up(tap)
                 if socket_path:
                     try:
                         self._qmp_command(
@@ -4505,7 +4513,12 @@ class NodeRuntimeService:
                         "reason": "set_link up=False failed (best-effort)",
                     })
             try:
-                host_net.link_set_nomaster(tap)
+                # #277: nomaster only when a master is actually set — a
+                # never-created or already-detached TAP needs no
+                # privileged spawn.
+                _exists, _master, _up = host_net.link_state(tap)
+                if _exists and _master is not None:
+                    host_net.link_set_nomaster(tap)
             except host_net.HostNetError as exc:
                 warnings.append({"interface_index": idx, "reason": f"nomaster: {exc}"})
 
@@ -4539,7 +4552,11 @@ class NodeRuntimeService:
                 except Exception:  # noqa: BLE001
                     pass
             try:
-                host_net.link_set_nomaster(tap)
+                # #277: same state guard as Phase 2 — skip the privileged
+                # spawn when the TAP is absent or already detached.
+                _exists, _master, _up = host_net.link_state(tap)
+                if _exists and _master is not None:
+                    host_net.link_set_nomaster(tap)
             except host_net.HostNetError as exc:
                 warnings.append({"interface_index": idx, "reason": f"nomaster: {exc}"})
 

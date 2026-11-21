@@ -11,6 +11,7 @@ legacy PUT.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict
 
 from fastapi import APIRouter, Body, Depends, Query
@@ -196,12 +197,18 @@ async def reconcile_runtime(
     or labs whose bridges were lost (host reboot, manual removal) find
     their host state already provisioned by the time the user starts a
     node or creates a link.
+
+    #277: the walk shells out to the privileged helper per host op, which
+    is far too slow to run on the event loop — a node-dense lab froze
+    every concurrent request for ~30s. It runs in a worker thread; all
+    state it touches is guarded by threading locks (lab_lock, the runtime
+    registry mutex, the per-node runtime mutex).
     """
     data, err = _read_lab_or_error(lab_path)
     if err is not None:
         return err
 
-    summary = network_service.ensure_lab_bridges(lab_path)
+    summary = await asyncio.to_thread(network_service.ensure_lab_bridges, lab_path)
     return {
         "code": 200,
         "status": "success",

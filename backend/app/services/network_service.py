@@ -694,7 +694,12 @@ class NetworkService:
 
                 if network_id in networks_with_links:
                     try:
-                        host_net.link_up(bridge)
+                        # #277: skip the privileged link-up spawn when the
+                        # bridge is already admin-up (the common case on
+                        # every lab open after the first).
+                        _exists, _master, admin_up = host_net.link_state(bridge)
+                        if not admin_up:
+                            host_net.link_up(bridge)
                         raised.append(bridge)
                     except host_net.HostNetError as exc:
                         logger.warning(
