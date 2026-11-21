@@ -20,8 +20,43 @@
       destroy: () => node.removeEventListener('mock-flow-event', handler),
     };
   }
+
+  // Test summaries of the nodes/edges props: id + class only (node data
+  // carries DOM refs, so a full JSON dump would throw on circular refs).
+  // The canvas passes STORES — a plain attribute expression would compute
+  // once from the stable store object, so subscribe to keep the summary
+  // live as the store republishes.
+  function summarize(items: unknown) {
+    const list = Array.isArray(items) ? items : [];
+    return JSON.stringify(list.map((item: { id: string; class?: string }) => ({ id: item.id, class: item.class ?? null })));
+  }
+
+  // $state: the mock is runes mode — plain ``let`` assignments in
+  // the subscribe callbacks below would not invalidate the template.
+  let nodeSummary = $state('[]');
+  let edgeSummary = $state('[]');
+  if (typeof (rest.nodes as { subscribe?: unknown } | undefined)?.subscribe === 'function') {
+    (rest.nodes as { subscribe: (run: (value: unknown) => void) => void }).subscribe((items) => {
+      nodeSummary = summarize(items);
+    });
+  } else {
+    nodeSummary = summarize(rest.nodes);
+  }
+  if (typeof (rest.edges as { subscribe?: unknown } | undefined)?.subscribe === 'function') {
+    (rest.edges as { subscribe: (run: (value: unknown) => void) => void }).subscribe((items) => {
+      edgeSummary = summarize(items);
+    });
+  } else {
+    edgeSummary = summarize(rest.edges);
+  }
 </script>
 
-<div data-testid="svelte-flow-mock" {...rest} use:bridgeFlowEvents>
+<div
+  data-testid="svelte-flow-mock"
+  data-flow-nodes={nodeSummary}
+  data-flow-edges={edgeSummary}
+  {...rest}
+  use:bridgeFlowEvents
+>
   <slot />
 </div>
