@@ -497,10 +497,11 @@
     return false;
   }
 
-  // #275: hover focus — while a node is hovered (and no wire drag is in
-  // flight) everything except the hovered node, its links and its
-  // neighbors fades to reduced opacity. Purely visual: faded elements
-  // keep their pointer events.
+  // #275 (revision): hover focus — while a node is hovered (and no wire
+  // drag is in flight) the related set — the hovered node and its
+  // connected nodes — pulses its outlines instead of dimming everything
+  // else. Class changes touch only the few related nodes, never the
+  // N-1 remainder, and edges are left untouched.
   const HOVER_CLEAR_GRACE_MS = 120;
   let hoverFocusId: string | null = null;
   // Rapid pointer crossings fire mouseleave on the old node BEFORE
@@ -538,60 +539,47 @@
 
   onDestroy(() => cancelPendingHoverClear());
 
-  function computeHoverFocus(
-    hoveredId: string,
-    edges: Edge[]
-  ): { nodes: Set<string>; edges: Set<string> } {
+  function computeHoverFocus(hoveredId: string, edges: Edge[]): Set<string> {
     const focusNodes = new Set<string>([hoveredId]);
-    const focusEdges = new Set<string>();
-    const adopt = (edge: Edge) => {
-      focusEdges.add(edge.id);
+    const adoptEndpoints = (edge: Edge) => {
       focusNodes.add(edge.source);
       focusNodes.add(edge.target);
     };
     // Direct links of the hovered node.
     edges
       .filter((edge) => edge.source === hoveredId || edge.target === hoveredId)
-      .forEach(adopt);
+      .forEach(adoptEndpoints);
     // Network-brokered connections extend one hop THROUGH networks: a
-    // node → network → node path lights both endpoint nodes and both
-    // links, without opening device nodes' other links.
+    // node → network → node path lights both endpoint nodes, without
+    // opening device nodes' other links.
     for (const id of [...focusNodes]) {
       if (!id.startsWith('network')) continue;
       edges
         .filter((edge) => edge.source === id || edge.target === id)
-        .forEach(adopt);
+        .forEach(adoptEndpoints);
     }
-    return { nodes: focusNodes, edges: focusEdges };
+    return focusNodes;
   }
 
   function publishFlowState() {
     const builtNodes = buildFlowNodes();
     const builtEdges = buildFlowEdges();
-    // A stale hover target (node removed while hovered) must not dim the
-    // whole canvas — focus only applies to nodes that still render.
-    const focus =
+    // A stale hover target (node removed while hovered) must not light
+    // ghosts — focus only applies to nodes that still render.
+    const focusNodes =
       hoverFocusId && builtNodes.some((node) => node.id === hoverFocusId)
         ? computeHoverFocus(hoverFocusId, builtEdges)
         : null;
     nodesStore.set(
-      focus
+      focusNodes
         ? builtNodes.map((node) =>
-            focus.nodes.has(node.id)
-              ? node
-              : { ...node, class: `${node.class ? `${node.class} ` : ''}nv-focus-faded` }
+            focusNodes.has(node.id)
+              ? { ...node, class: `${node.class ? `${node.class} ` : ''}nv-focus-pulse` }
+              : node
           )
         : builtNodes
     );
-    edgesStore.set(
-      focus
-        ? builtEdges.map((edge) =>
-            focus.edges.has(edge.id)
-              ? edge
-              : { ...edge, class: `${edge.class ? `${edge.class} ` : ''}nv-focus-faded` }
-          )
-        : builtEdges
-    );
+    edgesStore.set(builtEdges);
   }
 
   // #245: the canvas is a pure view of the shared labState store. Any store
@@ -2651,18 +2639,27 @@
     border-color: rgb(96 165 250 / 1);
   }
 
-  /* #275: hover focus — non-neighbors fade; the transition smooths both
-     directions. Opacity only: faded elements stay interactive. */
-  :global(.svelte-flow__node),
-  :global(.svelte-flow__edge) {
-    transition:
-      opacity 140ms ease-in-out,
-      transform 0ms;
+  /* #275 (revision): hover focus pulses the related set's outlines
+     (#e0e0e0 <-> #000000) on both the outer card and the icon container.
+     Outline — not border or box-shadow — so the #274 run-state ring and
+     the card's layout/hit area stay untouched. */
+  :global {
+    @keyframes nv-focus-pulse {
+      0%,
+      100% {
+        outline-color: #e0e0e0;
+      }
+      50% {
+        outline-color: #000000;
+      }
+    }
   }
 
-  :global(.svelte-flow__node.nv-focus-faded),
-  :global(.svelte-flow__edge.nv-focus-faded) {
-    opacity: 0.4;
+  :global(.svelte-flow__node.nv-focus-pulse) :global(.nb-card),
+  :global(.svelte-flow__node.nv-focus-pulse) :global([data-testid='node-icon-container']) {
+    outline: 2px solid #e0e0e0;
+    outline-offset: 2px;
+    animation: nv-focus-pulse 1.1s ease-in-out infinite;
   }
 
   :global(.canvas-minimap svg) {
