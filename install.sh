@@ -38,7 +38,10 @@
 #          running same-name container or removes a stopped stale same-name
 #          container before starting a Docker node;
 #        - runs deploy/scripts/smoke-check.sh.
-#   4. Writes nova-ve-install-summary.md into the launch directory with the
+#   4. Optionally installs the side-by-side QEMU version pack (nova-ve-qemu
+#      debs from GitHub Releases) under /opt/nova-ve/qemu/<version>/ —
+#      the per-image emulator generations used by qemu templates (#278).
+#   5. Writes nova-ve-install-summary.md into the launch directory with the
 #      bootstrapped admin credentials and a map of every critical file +
 #      env var on the host.
 #
@@ -48,6 +51,12 @@
 #   NOVA_VE_REPO_DIR      default /var/lib/nova-ve/nova-ve-git
 #   NOVA_VE_SERVICE_USER  default nova-ve
 #   NOVA_VE_OWNER         compatibility alias for NOVA_VE_SERVICE_USER
+#   NOVA_VE_QEMU_PKGS     default 1 (install the side-by-side QEMU version
+#                         pack from the nova-ve-qemu companion repo; set 0 to
+#                         skip)
+#   NOVA_VE_QEMU_RELEASE  default v1.0.0 (nova-ve-qemu GitHub Release tag)
+#   NOVA_VE_QEMU_VERSIONS default "2.12.1 4.1.0 5.2.0 11.1.3" (which versions
+#                         from the release to install)
 
 set -euo pipefail
 
@@ -176,6 +185,72 @@ NOVA_VE_BRIDGE_CLOUD_REBOOT_SENTINEL="${REBOOT_SENTINEL}" \
 SUDO_USER="${APP_OWNER}" \
 bash "${PROVISIONER}"
 
+# Side-by-side QEMU version pack (#278): per-image emulator generations
+# installed under /opt/nova-ve/qemu/<version>/ by the companion
+# fahadysf/nova-ve-qemu repo's GitHub Release debs. Fully optional — the
+# distro QEMU remains the global default, existing nodes never change
+# behaviour, and a missing/renamed release downgrades to a warning.
+install_qemu_version_pack() {
+  local release="${NOVA_VE_QEMU_RELEASE:-v1.0.0}"
+  local versions="${NOVA_VE_QEMU_VERSIONS:-2.12.1 4.1.0 5.2.0 11.1.3}"
+  local base="https://github.com/fahadysf/nova-ve-qemu/releases/download/${release}"
+  local tmp
+  tmp="$(mktemp -d /tmp/nova-ve-qemu-pkgs.XXXXXX)"
+
+  log "Installing QEMU version pack (${versions}) from nova-ve-qemu ${release}..."
+  if ! curl -fsSL -o "${tmp}/SHA256SUMS" "${base}/SHA256SUMS"; then
+    log "WARN: nova-ve-qemu release ${release} not reachable; skipping QEMU version pack (distro QEMU remains the only emulator)."
+    rm -rf "${tmp}"
+    return 0
+  fi
+
+  local pkgs=()
+  local v pkg expected actual
+  for v in ${versions}; do
+    pkg="nova-ve-qemu-${v}_1_amd64.deb"
+    if dpkg-query -W -f='${Status}' "nova-ve-qemu-${v}" 2>/dev/null | grep -q "install ok installed"; then
+      log "nova-ve-qemu-${v} already installed; skipping download."
+      continue
+    fi
+    curl -fsSL -o "${tmp}/${pkg}" "${base}/${pkg}"
+    expected="$(awk -v f="${pkg}" '$2 == f {print $1}' "${tmp}/SHA256SUMS")"
+    if [[ -z "${expected}" ]]; then
+      echo "install.sh: ${pkg} not listed in ${release} SHA256SUMS" >&2
+      exit 1
+    fi
+    actual="$(sha256sum "${tmp}/${pkg}" | awk '{print $1}')"
+    if [[ "${actual}" != "${expected}" ]]; then
+      echo "install.sh: sha256 mismatch for ${pkg} (expected ${expected}, got ${actual})" >&2
+      exit 1
+    fi
+    pkgs+=("${tmp}/${pkg}")
+  done
+
+  if [[ ${#pkgs[@]} -eq 0 ]]; then
+    log "QEMU version pack already fully installed."
+    rm -rf "${tmp}"
+    return 0
+  fi
+  apt-get install -y "${pkgs[@]}"
+
+  for v in ${versions}; do
+    local bin="/opt/nova-ve/qemu/${v}/bin/qemu-system-x86_64"
+    if [[ -x "${bin}" ]]; then
+      log "nova-ve-qemu-${v}: $(${bin} --version | head -1)"
+    else
+      echo "install.sh: expected ${bin} after pack install" >&2
+      exit 1
+    fi
+  done
+  rm -rf "${tmp}"
+}
+
+if [[ "${NOVA_VE_QEMU_PKGS:-1}" == "1" ]]; then
+  install_qemu_version_pack
+else
+  log "NOVA_VE_QEMU_PKGS=0 — skipping QEMU version pack."
+fi
+
 log "Generating install summary..."
 ENV_FILE="/etc/nova-ve/backend.env"
 if [[ ! -r "${ENV_FILE}" ]]; then
@@ -281,6 +356,7 @@ Skip on next install: \`NOVA_VE_SKIP_DEMO_IMAGES=1 curl -fsSL ... | sudo bash\`.
 | \`/var/lib/nova-ve/www\` | Caddy webroot (built SPA) |
 | \`/var/lib/nova-ve/labs\` | Lab JSON files |
 | \`/var/lib/nova-ve/images\` | VM images (qemu/, etc.) |
+| \`/opt/nova-ve/qemu/<version>/\` | Side-by-side QEMU builds (nova-ve-qemu debs, #278); \`dpkg -l 'nova-ve-qemu-*'\` lists them |
 | \`/var/lib/nova-ve/iourc\` | System IOURC license directory for IOL / IOU nodes |
 | \`/var/lib/nova-ve/runtime\` | PID registry, namespace bookkeeping |
 | \`/var/lib/nova-ve/guacamole/db\` | Postgres data dir for the dockerized guacamole DB |
