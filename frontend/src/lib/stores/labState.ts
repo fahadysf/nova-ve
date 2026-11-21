@@ -99,6 +99,36 @@ function preservePositions<T extends { left?: number; top?: number }>(
   return patched ? next : incoming;
 }
 
+/**
+ * Server nodes carry the second console as ``second_console`` (snake_case
+ * JSON) while the UI reads ``NodeData.secondConsole`` (#268). Normalize on
+ * ingest — both directions, camelCase wins — so every consumer (node
+ * context menu, config modal) sees a consistent pair regardless of which
+ * side produced the record. Returns the same object when nothing changes.
+ */
+function normalizeNode(node: NodeData): NodeData {
+  const snake = (node as NodeData & { second_console?: string | null }).second_console;
+  let out = node;
+  if (snake !== undefined && snake !== null && !node.secondConsole) {
+    out = { ...out, secondConsole: snake as NodeData['secondConsole'] };
+  }
+  if (node.secondConsole && node.secondConsole !== snake) {
+    out = { ...out, second_console: node.secondConsole } as NodeData;
+  }
+  return out;
+}
+
+function normalizeNodes(nodes: Record<string, NodeData>): Record<string, NodeData> {
+  let changed = false;
+  const out: Record<string, NodeData> = {};
+  for (const [key, node] of Object.entries(nodes)) {
+    const normalized = normalizeNode(node);
+    if (normalized !== node) changed = true;
+    out[key] = normalized;
+  }
+  return changed ? out : nodes;
+}
+
 function createLabState() {
   const store = writable<LabEditorState>(emptyState());
 
@@ -115,7 +145,7 @@ function createLabState() {
     },
 
     setNodes(nodes: Record<string, NodeData>): void {
-      store.update((state) => ({ ...state, nodes }));
+      store.update((state) => ({ ...state, nodes: normalizeNodes(nodes) }));
     },
 
     setNetworks(networks: Record<string, NetworkData>): void {
@@ -137,7 +167,7 @@ function createLabState() {
     upsertNode(nodeId: number, node: NodeData): void {
       store.update((state) => ({
         ...state,
-        nodes: { ...state.nodes, [String(nodeId)]: node },
+        nodes: { ...state.nodes, [String(nodeId)]: normalizeNode(node) },
       }));
     },
 
@@ -174,7 +204,7 @@ function createLabState() {
           snapshot.meta && typeof snapshot.meta.revision === 'number'
             ? snapshot.meta.revision
             : state.revision,
-        nodes: preservePositions(snapshot.nodes, state.nodes, preserve.nodeIds),
+        nodes: preservePositions(normalizeNodes(snapshot.nodes), state.nodes, preserve.nodeIds),
         networks: preservePositions(snapshot.networks, state.networks, preserve.networkIds),
         topology: snapshot.topology,
         links: snapshot.links,

@@ -56,6 +56,39 @@ describe('labState', () => {
     labState.reset();
   });
 
+  it('normalizes server snake_case second_console to secondConsole on ingest (#268)', () => {
+    const serverNode = {
+      ...node(1, 0, 0),
+      second_console: 'vnc',
+    } as NodeData & { second_console?: string | null };
+    expect(serverNode.secondConsole).toBeUndefined();
+
+    labState.applySnapshot({
+      nodes: { '1': serverNode },
+      networks: {},
+      topology: [],
+      links: [],
+    });
+
+    const stored = get(labState).nodes['1'];
+    expect(stored.secondConsole).toBe('vnc');
+    // Round-trip key stays in sync so wholesale PUTs carry it too.
+    expect((stored as NodeData & { second_console?: string | null }).second_console).toBe('vnc');
+  });
+
+  it('keeps camelCase secondConsole authoritative and syncs the snake key', () => {
+    labState.upsertNode(2, { ...node(2, 0, 0), secondConsole: 'telnet' });
+    const stored = get(labState).nodes['2'];
+    expect(stored.secondConsole).toBe('telnet');
+    expect((stored as NodeData & { second_console?: string | null }).second_console).toBe('telnet');
+  });
+
+  it('leaves nodes without a second console untouched (identity preserved)', () => {
+    const plain = node(3, 0, 0);
+    labState.setNodes({ '3': plain });
+    expect(get(labState).nodes['3']).toBe(plain);
+  });
+
   it('starts empty and reset() clears adopted state', () => {
     expect(get(labState).nodes).toEqual({});
     labState.setNodes({ '1': node(1, 0, 0) });
