@@ -177,19 +177,27 @@ async function consoleEvents(): Promise<string> {
   return screen.getByTestId('console-events').textContent ?? '';
 }
 
-describe('node context menu console pills', () => {
-  it('renders one pill per available console mode', async () => {
+describe('node context menu console rows', () => {
+  it('renders a full-width console row per session with small type text', async () => {
     renderCanvas({ '1': makeCanvasNode(1, 'vnc') });
     openNodeMenu(1);
     await tick();
 
     const primary = screen.getByTestId('node-menu-console-primary');
     const secondary = screen.getByTestId('node-menu-console-secondary');
-    expect(primary.textContent).toBe('telnet');
-    expect(secondary.textContent).toBe('vnc');
+    // Rows carry the row label plus the console type as small text — not
+    // standalone pills.
+    expect(primary.textContent).toContain('Console');
+    expect(primary.textContent).toContain('telnet');
+    expect(secondary.textContent).toContain('2nd Console');
+    expect(secondary.textContent).toContain('vnc');
+    // The whole row is the button (the old pill row left the outer div
+    // unclickable).
+    expect(primary.tagName).toBe('BUTTON');
+    expect(secondary.tagName).toBe('BUTTON');
   });
 
-  it('keeps the single-console look when no secondary is declared', async () => {
+  it('keeps the single console row when no secondary is declared', async () => {
     renderCanvas({ '1': makeCanvasNode(1, null) });
     openNodeMenu(1);
     await tick();
@@ -198,7 +206,7 @@ describe('node context menu console pills', () => {
     expect(screen.queryByTestId('node-menu-console-secondary')).toBeNull();
   });
 
-  it('dispatches console with mode second when the secondary pill is clicked', async () => {
+  it('dispatches console with mode second when the secondary row is clicked', async () => {
     renderCanvas({ '1': makeCanvasNode(1, 'vnc') });
     openNodeMenu(1);
     await tick();
@@ -207,7 +215,7 @@ describe('node context menu console pills', () => {
     expect(await consoleEvents()).toBe('1:second');
   });
 
-  it('dispatches console with mode primary when the primary pill is clicked', async () => {
+  it('dispatches console with mode primary when the primary row is clicked', async () => {
     renderCanvas({ '1': makeCanvasNode(1, 'vnc') });
     openNodeMenu(1);
     await tick();
@@ -222,7 +230,7 @@ describe('node context menu console pills', () => {
     openNodeMenu(1);
     await tick();
 
-    expect(screen.getByTestId('node-menu-console-primary').textContent).toBe('telnet');
+    expect(screen.getByTestId('node-menu-console-primary').textContent).toContain('telnet');
   });
 });
 
