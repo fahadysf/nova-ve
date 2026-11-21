@@ -2640,14 +2640,14 @@
   }
 
   /* #275 (revision): hover focus pulses the related set's outlines
-     (#e0e0e0 <-> #000000) on both the outer card and the icon container.
+     (#c0c0c0 <-> #000000) on both the outer card and the icon container.
      Outline — not border or box-shadow — so the #274 run-state ring and
      the card's layout/hit area stay untouched. */
   :global {
     @keyframes nv-focus-pulse {
       0%,
       100% {
-        outline-color: #e0e0e0;
+        outline-color: #c0c0c0;
       }
       50% {
         outline-color: #000000;
@@ -2657,9 +2657,9 @@
 
   :global(.svelte-flow__node.nv-focus-pulse) :global(.nb-card),
   :global(.svelte-flow__node.nv-focus-pulse) :global([data-testid='node-icon-container']) {
-    outline: 2px solid #e0e0e0;
+    outline: 2px solid #c0c0c0;
     outline-offset: 2px;
-    animation: nv-focus-pulse 1.1s ease-in-out infinite;
+    animation: nv-focus-pulse 2.2s ease-in-out infinite;
   }
 
   :global(.canvas-minimap svg) {
