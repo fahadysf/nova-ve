@@ -68,6 +68,8 @@ class AristaVEosAdapter(VendorAdapter):
                 # vEOS front-panel interfaces need its in-guest KVM data
                 # plane — the host must expose nested virtualization (#249).
                 "nested_virt": "true",
+                # #278: carry the emulator generation the source template pinned.
+                "qemu_version": str(raw.get("qemu_version", "") or ""),
                 "qemu_options": str(raw.get("qemu_options", "")),
                 "boot_cdrom": "aboot-veos.iso",
                 "_eveng_raw": raw.get("_eveng_raw") or dict(raw),

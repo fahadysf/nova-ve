@@ -40,6 +40,8 @@ class JuniperVSRXAdapter(VendorAdapter):
             "console": str(raw.get("console_type", "serial")),
             "extras": {
                 "qemu_nic": str(raw.get("qemu_nic", "virtio-net-pci")),
+                # #278: carry the emulator generation the source template pinned.
+                "qemu_version": str(raw.get("qemu_version", "") or ""),
                 "qemu_options": str(raw.get("qemu_options", "")),
                 "_eveng_raw": raw.get("_eveng_raw") or dict(raw),
             },

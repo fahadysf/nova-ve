@@ -82,6 +82,10 @@ class Settings(BaseSettings):
     # QEMU / System
     QEMU_BINARY: str = "/usr/bin/qemu-system-x86_64"
     QEMU_IMG_BINARY: str = "/usr/bin/qemu-img"
+    # #278: root of the side-by-side QEMU version registry (nova-ve-qemu
+    # deb packages land here). Empty/nonexistent root = no alternatives,
+    # distro QEMU stays the only emulator.
+    QEMU_VERSIONS_ROOT: str = "/opt/nova-ve/qemu"
     DOCKER_HOST: str = _default_docker_host()
     GUACAMOLE_PUBLIC_PATH: str = "/html5/"
     GUACAMOLE_INTERNAL_URL: str = "http://127.0.0.1:8081/html5/"
