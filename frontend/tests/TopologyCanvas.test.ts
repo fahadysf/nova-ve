@@ -516,8 +516,52 @@ describe('TopologyCanvas hover focus (#275)', () => {
     leaveNode();
     await tick();
     await tick();
-    expect(flowSummary('nodes').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
-    expect(flowSummary('edges').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
+    // The clear is debounced by a short grace period (rapid node crossings
+    // cancel it); settle past it before asserting the fade lifted.
+    await waitFor(
+      () => {
+        expect(flowSummary('nodes').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
+        expect(flowSummary('edges').every((item) => !item.class?.includes('nv-focus-faded'))).toBe(true);
+      },
+      { timeout: 1500 }
+    );
+  });
+
+  it('does not un-dim while the pointer sweeps from one node to another (#275 flicker)', async () => {
+    renderCanvas(
+      {
+        '1': makeNode(1, 'edge-a', 0, caps),
+        '2': makeNode(2, 'edge-b', 0, caps),
+        '3': makeNode(3, 'edge-c', 0, caps),
+      },
+      { '9': makeNetwork(9, 'bridge-a'), '8': makeNetwork(8, 'bridge-b') },
+      [link('l1', 1, 9), link('l2', 2, 9), link('l3', 3, 8)]
+    );
+
+    hoverNode('node1');
+    await tick();
+    await tick();
+    expect(faded('nodes', 'node3')).toBe(true);
+
+    // Rapid crossing: leave fires BEFORE the next mouseenter — the debounced
+    // clear must not lift the dim in between.
+    leaveNode();
+    hoverNode('node2');
+    await tick();
+    await tick();
+
+    // node2's neighborhood applies immediately: node1/network9/l2 lit via
+    // the shared bridge, node3's island stays dimmed — no flash to normal.
+    expect(faded('nodes', 'node1')).toBe(false);
+    expect(faded('nodes', 'network9')).toBe(false);
+    expect(faded('nodes', 'node2')).toBe(false);
+    expect(faded('nodes', 'node3')).toBe(true);
+
+    // The pending clear was cancelled by the enter: past the grace period
+    // the node2 focus is still applied (no late wipe).
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    expect(faded('nodes', 'node3')).toBe(true);
+    expect(faded('nodes', 'node2')).toBe(false);
   });
 
   it('lights an isolated hovered node alone', async () => {

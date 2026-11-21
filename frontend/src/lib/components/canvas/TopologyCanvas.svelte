@@ -500,7 +500,42 @@
   // flight) everything except the hovered node, its links and its
   // neighbors fades to reduced opacity. Purely visual: faded elements
   // keep their pointer events.
+  const HOVER_CLEAR_GRACE_MS = 120;
   let hoverFocusId: string | null = null;
+  // Rapid pointer crossings fire mouseleave on the old node BEFORE
+  // mouseenter on the new one; clearing focus synchronously on leave
+  // would flash everything to full opacity between the two events
+  // (visible flicker when sweeping across nodes). The clear is therefore
+  // debounced by a short grace period that any new mouseenter cancels;
+  // entering a node still applies its focus immediately.
+  let hoverClearTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelPendingHoverClear() {
+    if (hoverClearTimer !== null) {
+      clearTimeout(hoverClearTimer);
+      hoverClearTimer = null;
+    }
+  }
+
+  function setHoverFocus(nodeId: string | null) {
+    cancelPendingHoverClear();
+    if (hoverFocusId === nodeId) return;
+    hoverFocusId = nodeId;
+    publishFlowState();
+  }
+
+  function scheduleHoverClear() {
+    if (hoverFocusId === null || hoverClearTimer !== null) return;
+    hoverClearTimer = setTimeout(() => {
+      hoverClearTimer = null;
+      if (hoverFocusId !== null) {
+        hoverFocusId = null;
+        publishFlowState();
+      }
+    }, HOVER_CLEAR_GRACE_MS);
+  }
+
+  onDestroy(() => cancelPendingHoverClear());
 
   function computeHoverFocus(
     hoveredId: string,
@@ -2070,15 +2105,11 @@
       // #275: no hover focus while a wire drag is choosing a target —
       // the drag's own highlight owns the visual then.
       if (!dragLinkSourceAnchor) {
-        hoverFocusId = event.detail.node.id;
-        publishFlowState();
+        setHoverFocus(event.detail.node.id);
       }
     }}
     on:nodemouseleave={() => {
-      if (hoverFocusId !== null) {
-        hoverFocusId = null;
-        publishFlowState();
-      }
+      scheduleHoverClear();
     }}
     on:paneclick={() => {
       selectedEdgeId = null;
