@@ -306,4 +306,57 @@ def get_settings() -> Settings:
     settings = Settings()
     _resolve_database_url(settings)
     _resolve_secret_key(settings)
+    _apply_persisted_settings_overrides(settings)
     return settings
+
+
+# Editable settings subset (#265). The settings UI persists these to
+# BASE_DATA_DIR/system-settings.json with "applies on backend restart"
+# semantics; get_settings() applies them to the cached instance on first
+# construction (that application point is what makes the restart matter).
+# Kept here (not in the settings router) so boot-time application and the
+# PUT/GET validation surface cannot drift apart.
+EDITABLE_SETTING_KEYS = (
+    "DISCOVERY_CADENCE_SECONDS",
+    "NAT_CLOUD_POOL",
+    "SESSION_MAX_AGE",
+    "EXTERNAL_CONSOLE_HOST",
+)
+
+
+def _apply_persisted_settings_overrides(settings: Settings) -> None:
+    """Apply persisted settings overrides to a freshly built instance (#265).
+
+    The router validates values on write; entries are still coerced
+    defensively here — an invalid or unknown entry is logged and skipped so
+    a hand-edited file cannot keep the backend from booting.
+    """
+    import json
+
+    path = settings.BASE_DATA_DIR / "system-settings.json"
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    if not isinstance(raw, dict):
+        return
+
+    for key, value in raw.items():
+        if key not in EDITABLE_SETTING_KEYS or not hasattr(settings, key):
+            continue
+        try:
+            current = getattr(settings, key)
+            if isinstance(current, bool):
+                applied: object = str(value).strip().lower() in {"1", "true", "yes", "on"}
+            elif isinstance(current, int):
+                applied = int(value)
+            else:
+                applied = str(value).strip()
+        except (TypeError, ValueError):
+            logger.warning(
+                "Skipping invalid persisted setting override %s=%r", key, value
+            )
+            continue
+        if applied != current:
+            setattr(settings, key, applied)
+            logger.info("Applied persisted setting override %s=%r", key, applied)

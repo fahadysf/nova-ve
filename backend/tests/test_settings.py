@@ -137,6 +137,71 @@ def test_console_port_range_vnc_floor_raises(monkeypatch):
     assert "CONSOLE_PORT_RANGE_VNC" in str(exc.value)
 
 
+# ---------------------------------------------------------------------------
+# Persisted overrides applied at boot (#265 fix; blocks #276 otherwise — the
+# external-console host could never take effect through the settings UI)
+# ---------------------------------------------------------------------------
+def test_get_settings_applies_persisted_overrides(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("SECRET_KEY", "")
+    monkeypatch.setenv("BASE_DATA_DIR", str(tmp_path))
+    (tmp_path / "db_password").write_text("strong-db-password", encoding="ascii")
+    (tmp_path / "system-settings.json").write_text(
+        json.dumps(
+            {
+                "EXTERNAL_CONSOLE_HOST": "192.168.100.236",
+                "SESSION_MAX_AGE": 9999,
+                "NAT_CLOUD_POOL": "10.88.0.0/16",
+            }
+        )
+    )
+
+    settings = get_settings()
+
+    assert settings.EXTERNAL_CONSOLE_HOST == "192.168.100.236"
+    assert settings.SESSION_MAX_AGE == 9999
+    assert settings.NAT_CLOUD_POOL == "10.88.0.0/16"
+
+
+def test_get_settings_skips_invalid_persisted_overrides(monkeypatch, tmp_path):
+    import json
+
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("SECRET_KEY", "")
+    monkeypatch.setenv("BASE_DATA_DIR", str(tmp_path))
+    (tmp_path / "db_password").write_text("strong-db-password", encoding="ascii")
+    (tmp_path / "system-settings.json").write_text(
+        json.dumps(
+            {
+                # Not in EDITABLE_SETTING_KEYS — ignored.
+                "SECRET_KEY": "x" * 64,
+                # Wrong type for an int field — skipped, not fatal.
+                "SESSION_MAX_AGE": "not-a-number",
+                "EXTERNAL_CONSOLE_HOST": "",
+            }
+        )
+    )
+
+    settings = get_settings()
+
+    assert settings.EXTERNAL_CONSOLE_HOST == ""
+    assert settings.SESSION_MAX_AGE == 14400
+    assert settings.SECRET_KEY != "x" * 64
+
+
+def test_get_settings_without_override_file_boots_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", "")
+    monkeypatch.setenv("SECRET_KEY", "")
+    monkeypatch.setenv("BASE_DATA_DIR", str(tmp_path))
+    (tmp_path / "db_password").write_text("strong-db-password", encoding="ascii")
+
+    settings = get_settings()
+
+    assert settings.EXTERNAL_CONSOLE_HOST == ""
+
+
 def test_get_settings_resolves_missing_secrets_from_data_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", "")
     monkeypatch.setenv("SECRET_KEY", "")
