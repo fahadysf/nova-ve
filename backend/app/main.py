@@ -145,6 +145,12 @@ async def startup():
     # changes land within one cycle once ``get_settings`` cache is cleared.
     NodeRuntimeService.start_discovery()
 
+    # #282: keep recently-used Guacamole auth tokens warm so the first
+    # console open after an idle period doesn't pay the cold token path.
+    from app.services.guacamole_db_service import start_token_keepalive
+
+    start_token_keepalive()
+
     # US-206: backend-startup orphan sweep.  Scan the host for nove*/nve* kernel
     # objects that belong to labs no longer on disk (or that survived a crash).
     # Best-effort — never blocks startup, never raises.

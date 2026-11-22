@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import os
@@ -65,6 +66,7 @@ def runtime_settings(tmp_path):
         DOCKER_HOST="unix:///var/run/docker.sock",
         GUACAMOLE_DATABASE_URL="",
         GUACAMOLE_DATA_SOURCE="postgresql",
+        SECRET_KEY="unit-test-secret-key",
         GUACAMOLE_INTERNAL_URL="http://127.0.0.1:8081/html5/",
         GUACAMOLE_JSON_SECRET_KEY="4c0b569e4c96df157eee1b65dd0e4d41",
         GUACAMOLE_PUBLIC_PATH="/html5/",
@@ -636,6 +638,86 @@ async def test_guacamole_auth_token_refreshes_when_cached_token_is_invalid(monke
     assert token == "fresh-token"
     assert calls == [("admin", "pw")]
     assert _AUTH_TOKEN_CACHE[cache_key] == "fresh-token"
+
+
+@pytest.mark.asyncio
+async def test_warm_auth_token_populates_cache_off_critical_path(monkeypatch, runtime_settings):
+    """#282: warm_auth_token requests a token for the username alone and
+    lands it in the shared cache, so the first console open after login
+    skips the cold token request."""
+    import time as _time
+
+    from app.services import guacamole_db_service as guac_module
+
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    # Non-empty so warm_auth_token doesn't take its "not configured" exit;
+    # the network calls are mocked below.
+    service.database_url = "postgresql://guacdb-test"
+
+    requested = []
+
+    async def fake_request_auth_token(username: str, password: str) -> str:
+        requested.append((username, password))
+        return "warm-token"
+
+    async def fake_token_is_valid(token: str) -> bool:
+        return False  # cache miss -> must request
+
+    monkeypatch.setattr(service, "_request_auth_token", fake_request_auth_token)
+    monkeypatch.setattr(service, "_token_is_valid", fake_token_is_valid)
+
+    await service.warm_auth_token("admin")
+
+    cache_key = (runtime_settings.GUACAMOLE_INTERNAL_URL.strip(), "admin")
+    assert _AUTH_TOKEN_CACHE[cache_key] == "warm-token"
+    # The password matches the SECRET_KEY-derived material _guacamole_password uses.
+    assert requested and requested[0][1] == service._token_password_for("admin")
+    # Last-use bookkeeping drives the keepalive window.
+    assert guac_module._AUTH_TOKEN_LAST_USE[cache_key] <= _time.monotonic()
+
+
+@pytest.mark.asyncio
+async def test_warm_auth_token_swallows_failures(monkeypatch, runtime_settings):
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = runtime_settings.GUACAMOLE_DATABASE_URL
+
+    async def failing_request_auth_token(username: str, password: str) -> str:
+        raise ConnectionError("guacamole unreachable")
+
+    monkeypatch.setattr(service, "_request_auth_token", failing_request_auth_token)
+
+    # Must not raise — warm-up is fire-and-forget from the login path.
+    await service.warm_auth_token("admin")
+
+
+def test_token_password_for_matches_guacamole_password_material(runtime_settings):
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = runtime_settings.GUACAMOLE_DATABASE_URL
+
+    user = SimpleNamespace(username="admin")
+    assert service._token_password_for("admin") == service._guacamole_password(user)
+    # Username normalization mirrors _guacamole_username.
+    assert service._token_password_for("  ") == service._guacamole_password(SimpleNamespace(username=""))
+    assert service._token_password_for(" spaced ") == service._token_password_for("spaced")
+
+
+@pytest.mark.asyncio
+async def test_token_keepalive_start_is_idempotent():
+    from app.services import guacamole_db_service as guac_module
+
+    guac_module.start_token_keepalive()
+    first = guac_module._token_keepalive_task
+    assert first is not None and not first.done()
+    guac_module.start_token_keepalive()
+    assert guac_module._token_keepalive_task is first
+    first.cancel()
+    try:
+        await first
+    except asyncio.CancelledError:
+        pass
 
 
 @pytest.mark.asyncio
