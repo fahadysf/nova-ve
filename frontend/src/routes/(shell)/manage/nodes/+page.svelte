@@ -8,7 +8,8 @@
 -->
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
-  import { ExternalLink, RefreshCw, Square } from 'lucide-svelte';
+  import { ExternalLink, ListVideo, RefreshCw, Square } from 'lucide-svelte';
+  import RecordingsPanel from '$lib/components/canvas/RecordingsPanel.svelte';
   import PageHeader from '$lib/components/shell/PageHeader.svelte';
   import { apiRequest } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
@@ -40,6 +41,7 @@
   let templateFilter = '';
   let typeFilter = '';
   let stopTarget: ManagedNode | null = null;
+  let recordingsTarget: ManagedNode | null = null;
   let busyNode: string | null = null;
   let autoRefresh: ReturnType<typeof setInterval> | undefined;
 
@@ -153,6 +155,7 @@
         bind:value={stateFilter}
         on:change={() => void refresh()}
         data-testid="nodes-state-filter"
+        aria-label="Filter by node state"
       >
         <option value="running">Running</option>
         <option value="stopped">Stopped</option>
@@ -190,7 +193,7 @@
         Loading nodes…
       </div>
     {:else}
-      <section class="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/95" data-testid="nodes-table">
+      <section class="overflow-x-auto rounded-2xl border border-gray-800 bg-gray-900/95" data-testid="nodes-table">
         <table class="w-full text-left text-sm">
           <thead>
             <tr class="border-b border-gray-800 text-[10px] uppercase tracking-[0.05em] text-gray-500">
@@ -240,6 +243,15 @@
                         Console
                       </a>
                     {/if}
+                    <button
+                      type="button"
+                      class="whitespace-nowrap rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+                      aria-label={`Recordings for ${node.name}`}
+                      on:click={() => (recordingsTarget = node)}
+                    >
+                      <ListVideo class="mr-1 inline h-3 w-3" aria-hidden="true" />
+                      Recordings
+                    </button>
                     {#if node.state === 'running'}
                       <button
                         class="rounded-md border border-red-500/40 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-red-200 transition hover:bg-red-500/10 disabled:opacity-40"
@@ -261,6 +273,16 @@
     {/if}
   </div>
 </div>
+
+{#if recordingsTarget}
+  <RecordingsPanel
+    labId={recordingsTarget.lab_path}
+    labName={recordingsTarget.lab_name}
+    nodeId={recordingsTarget.node_id}
+    nodeName={recordingsTarget.name}
+    onClose={() => (recordingsTarget = null)}
+  />
+{/if}
 
 {#if stopTarget}
   <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation" data-testid="node-stop-confirm">

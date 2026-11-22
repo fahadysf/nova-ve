@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 from app.config import get_settings
+from app.services.console_recording import RECORDINGS_FOLDER, get_console_recorder
 
 # Static virtual folders that always appear at root. Shared moved out of the
 # pure-stub set in #285: it is a real directory, listed by the file scan once
@@ -32,7 +33,7 @@ def _normalize_folder_path(folder_path: str) -> str:
     if clean in {"", "."}:
         return ""
     parts = [part for part in clean.split("/") if part not in {"", "."}]
-    if any(part == ".." for part in parts):
+    if ".." in parts or RECORDINGS_FOLDER in parts:
         raise ValueError("Invalid folder path: directory traversal detected")
     return "/".join(parts)
 
@@ -90,6 +91,8 @@ class FolderService:
         if target_dir.exists() and target_dir.is_dir():
             entries = sorted(target_dir.rglob("*")) if recursive else sorted(target_dir.iterdir())
             for entry in entries:
+                if RECORDINGS_FOLDER in entry.relative_to(target_dir).parts:
+                    continue
                 if entry.is_dir() and entry.name not in ("__pycache__", ".git"):
                     st = entry.stat()
                     folders.append({
@@ -173,6 +176,7 @@ class FolderService:
         if dest.exists():
             raise FileExistsError(f"Folder already exists: {new_path}")
         shutil.move(str(source), str(dest))
+        get_console_recorder().relocate_folder(source, dest)
         return dest
 
     @staticmethod

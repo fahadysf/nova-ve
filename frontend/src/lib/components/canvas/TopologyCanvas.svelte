@@ -8,6 +8,7 @@
   import {
     ChevronLeft,
     Eraser,
+    ListVideo,
     LocateFixed,
     LoaderCircle,
     Lock,
@@ -138,6 +139,7 @@
 
   const dispatch = createEventDispatcher<{
     console: { nodeId: number; node: NodeData; mode: 'primary' | 'second' };
+    recordings: { node: NodeData };
     'console-select': { tabId: number };
     'console-restore': { tabId: number };
     'console-close': { tabId: number };
@@ -1538,7 +1540,7 @@
   }
 
   async function handleNodeAction(
-    action: NodeLifecycleAction | 'delete' | 'console',
+    action: NodeLifecycleAction | 'delete' | 'console' | 'recordings',
     targetId: string,
     consoleMode: 'primary' | 'second' = 'primary'
   ) {
@@ -1555,6 +1557,11 @@
 
     if (action === 'console') {
       dispatch('console', { nodeId: decoded.id, node, mode: consoleMode });
+      return;
+    }
+
+    if (action === 'recordings') {
+      dispatch('recordings', { node });
       return;
     }
 
@@ -2588,6 +2595,14 @@
             </span>
           </button>
         {/if}
+        <button
+          type="button"
+          class="menu-item"
+          data-testid="node-menu-recordings"
+          on:click|preventDefault|stopPropagation={() => handleNodeAction('recordings', menu?.targetId ?? '')}
+        >
+          <span>Recordings</span><ListVideo class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+        </button>
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleEditNode(menu?.targetId ?? '')}>
           <span>Edit Node</span><Pencil class="h-3.5 w-3.5 text-gray-400" />
         </button>
