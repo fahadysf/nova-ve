@@ -7,8 +7,9 @@
 -->
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { LogOut, Waypoints } from 'lucide-svelte';
+  import { LogOut } from 'lucide-svelte';
   import { authStore, logout } from '$lib/stores/auth';
+  import BrandMark from '$lib/components/BrandMark.svelte';
   import { NAV_SECTIONS, isNavActive } from './nav';
 
   /** Current route pathname (drives the active-nav state). */
@@ -34,8 +35,8 @@
   >
     <!-- Brand sits at the top of the sidebar; the top bar stays utility-only. -->
     <div class="flex h-12 shrink-0 items-center gap-2.5 border-b border-gray-800 px-4" data-testid="app-brand">
-      <div class="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-500/15 text-blue-300">
-        <Waypoints class="h-4 w-4" />
+      <div class="flex h-7 w-7 items-center justify-center rounded-lg border border-gray-700 bg-gray-950/90">
+        <BrandMark size={15} />
       </div>
       <div class="min-w-0 leading-tight">
         <div class="text-sm font-semibold tracking-tight text-gray-100">nova-ve</div>
