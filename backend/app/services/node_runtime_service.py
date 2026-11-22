@@ -25,6 +25,7 @@ Machine-type discrimination:
 import asyncio
 import base64
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -45,6 +46,10 @@ from app.services import host_net, qemu_versions, runtime_pids
 
 
 _DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
+
+# US-287: truthy spellings accepted for the docker node ``mgmt_access``
+# extras flag (opt-in per-lab management attachment, ``mgmt0``).
+_MGMT_ACCESS_TRUTHY = {"1", "true", "yes", "on"}
 _HEARTBEAT_INTERVAL_S: float = 5.0
 _TRANSITION_SUPPRESS_S: float = 30.0
 
@@ -2560,6 +2565,10 @@ class NodeRuntimeService:
 
           1. Pre-flight: confirm every declared network's bridge exists on
              the host (``host_net.bridge_exists``).
+          1b. (#287) Opt-in management: when node extras ``mgmt_access`` is
+             truthy, ensure the per-lab mgmt bridge (``nove{h}mg``) and
+             derive the node's static ``mgmt0`` address BEFORE ``docker
+             run`` so a bridge/subnet failure needs no container rollback.
           2. ``docker run --network=none ...`` — no Docker-managed network.
           3. ``docker inspect`` to get the container PID.
           4. Register the PID into ``/var/lib/nova-ve/runtime/pids.json``
@@ -2570,6 +2579,9 @@ class NodeRuntimeService:
              → ``link_up`` (host end) → ``link_netns`` (peer → container)
              → ``link_set_name_in_netns`` (rename peer to ``eth{iface}``)
              → ``addr_up_in_netns`` (bring ``eth{iface}`` up).
+          5b. (#287) When management is opted in, attach ``mgmt0`` the same
+             way onto the per-lab mgmt bridge and assign its host-computed
+             static address — on-link reachability only, no default route.
           6. On any failure mid-sequence: roll back to a clean state
              (``try_link_del`` host-ends, ``docker rm -f`` the container,
              ``runtime_pids.unregister``) and raise ``NodeRuntimeError``.
@@ -2587,6 +2599,9 @@ class NodeRuntimeService:
         container_name = self._container_name(lab_id, node["id"])
         network_specs = self._docker_network_specs(lab_data, node)
         extras = _node_extras(node)
+        mgmt_enabled = (
+            _extra_str(extras, "mgmt_access").strip().lower() in _MGMT_ACCESS_TRUTHY
+        )
         container_console_port = self._docker_container_console_port(console_mode, extras)
         # Optional second console (#268): publish and proxy a second host port
         # into the container's secondary console service, mirroring the
@@ -2616,6 +2631,14 @@ class NodeRuntimeService:
                     f"is not present on the host; provision it via create_network "
                     f"(US-202) before starting the node."
                 )
+
+        # ----- Step 1b: per-lab mgmt bridge ensure (#287) ------------------
+        # Opt-in via node extras ``mgmt_access``.  Runs before ``docker run``
+        # so a bridge/subnet failure surfaces while there is no container to
+        # roll back.  Yields the node's static mgmt0 address.
+        mgmt_runtime: dict[str, Any] | None = None
+        if mgmt_enabled:
+            mgmt_runtime = self._ensure_docker_mgmt_bridge(lab_id, node_id)
 
         # ----- Build the docker run command (no networking flags) ----------
         # No ``--rm``: it conflicts with ``--restart`` (docker rejects with
@@ -2732,6 +2755,20 @@ class NodeRuntimeService:
                     attachment=attachment,
                     provisioned_host_ends=provisioned_host_ends,
                 )
+            # ----- Step 5b: opt-in mgmt0 attach (#287) ---------------------
+            # Same helper-verb sequence as lab interfaces, onto the per-lab
+            # mgmt bridge with a host-assigned static address.  The mgmt
+            # host end joins ``provisioned_host_ends`` so the rollback sweep
+            # and the stop-path ``veth_host_ends`` loop cover it unchanged.
+            if mgmt_runtime:
+                self._attach_docker_mgmt_initial(
+                    lab_id=lab_id,
+                    node_id=node_id,
+                    pid=pid,
+                    bridge_name=mgmt_runtime["bridge_name"],
+                    container_ip_cidr=mgmt_runtime["container_ip_cidr"],
+                    provisioned_host_ends=provisioned_host_ends,
+                )
         except Exception:
             # ----- Step 6: rollback on partial veth setup -----------------
             for host_end in provisioned_host_ends:
@@ -2817,6 +2854,18 @@ class NodeRuntimeService:
                 }
                 for a in attachments
             ],
+            # US-287: opt-in management attachment (None when not opted in).
+            "mgmt": (
+                {
+                    "iface": "mgmt0",
+                    "bridge_name": mgmt_runtime["bridge_name"],
+                    "gateway_cidr": mgmt_runtime["gateway_cidr"],
+                    "container_ip": mgmt_runtime["container_ip_cidr"],
+                    "host_end": host_net.mgmt_veth_host_name(lab_id, node_id),
+                }
+                if mgmt_runtime
+                else None
+            ),
             "started_at": time.time(),
         }
 
@@ -2851,6 +2900,119 @@ class NodeRuntimeService:
         host_net.link_netns(peer_end, pid)
         host_net.link_set_name_in_netns(pid, peer_end, netns_iface)
         host_net.addr_up_in_netns(pid, netns_iface)
+
+    # ------------------------------------------------------------------
+    # US-287: opt-in per-lab management attachment (mgmt0)
+    # ------------------------------------------------------------------
+
+    def _ensure_docker_mgmt_bridge(
+        self, lab_id: str, node_id: int
+    ) -> dict[str, Any]:
+        """Ensure the per-lab ``mgmt`` bridge exists and pick the node's address.
+
+        Subnet choice is deterministic per (instance, lab) with collision
+        avoidance: candidate third octets come from
+        ``host_net.mgmt_subnet_candidates`` and the first /24 of
+        172.16.0.0/16 not owned by another host interface wins.  An
+        existing mgmt bridge is reused as-is — its already-assigned
+        gateway keeps the lab's mgmt subnet stable across restarts; a
+        bridge without an address gets one added.
+
+        Returns ``{bridge_name, gateway_cidr, container_ip_cidr}`` where
+        ``container_ip_cidr`` is the static address handed to the node's
+        ``mgmt0`` (``172.16.X.{2 + (node_id - 1) % 250}/24`` — the bridge
+        gateway ``.1`` is never handed to a node).
+
+        Raises ``NodeRuntimeError`` when no candidate subnet is free.
+        """
+        bridge = host_net.mgmt_bridge_name(lab_id)
+        owned: dict[str, str] = {}
+        for iface, cidr in host_net.list_ipv4_addrs():
+            owned.setdefault(iface, cidr)
+
+        if host_net.bridge_exists(bridge):
+            gateway_cidr = owned.get(bridge)
+            if not gateway_cidr:
+                gateway_cidr = self._pick_mgmt_gateway_cidr(lab_id, owned, owner=bridge)
+                host_net.bridge_addr_add(bridge, gateway_cidr)
+        else:
+            gateway_cidr = self._pick_mgmt_gateway_cidr(lab_id, owned, owner=bridge)
+            host_net.bridge_add(bridge)
+            host_net.link_up(bridge)
+            host_net.bridge_addr_add(bridge, gateway_cidr)
+
+        subnet = ipaddress.ip_network(gateway_cidr, strict=False)
+        host_octet = 2 + (max(int(node_id), 1) - 1) % 250
+        container_ip = f"{subnet.network_address + host_octet}/24"
+        return {
+            "bridge_name": bridge,
+            "gateway_cidr": str(gateway_cidr),
+            "container_ip_cidr": container_ip,
+        }
+
+    def _pick_mgmt_gateway_cidr(
+        self,
+        lab_id: str,
+        owned: dict[str, str],
+        *,
+        owner: str,
+    ) -> str:
+        """Return ``172.16.X.1/24`` for the first candidate /24 with no clash.
+
+        Candidates come from ``host_net.mgmt_subnet_candidates``; a /24 is
+        rejected when a host interface other than ``owner`` already holds an
+        address overlapping it (partial ranges included).
+        """
+        for x in host_net.mgmt_subnet_candidates(lab_id):
+            network = ipaddress.ip_network(f"172.16.{x}.0/24")
+            clash = next(
+                (
+                    iface
+                    for iface, cidr in owned.items()
+                    if iface != owner
+                    and ipaddress.ip_network(cidr, strict=False).overlaps(network)
+                ),
+                None,
+            )
+            if clash is None:
+                return f"172.16.{x}.1/24"
+        raise NodeRuntimeError(
+            "No free 172.16.0.0/16 /24 found for the per-lab mgmt bridge "
+            f"(lab={lab_id}) after exhausting candidate octets; resolve the "
+            "address conflict on the host and retry."
+        )
+
+    def _attach_docker_mgmt_initial(
+        self,
+        *,
+        lab_id: str,
+        node_id: int,
+        pid: int,
+        bridge_name: str,
+        container_ip_cidr: str,
+        provisioned_host_ends: list[str],
+    ) -> None:
+        """Attach the opt-in ``mgmt0`` interface for a freshly-started container.
+
+        Same sequence shape as :meth:`_attach_docker_interface_initial` but
+        with a host-assigned static address and **no default route** —
+        ``mgmt0`` is on-link only (host + mgmt peers in the same lab), so a
+        lab node cannot silently reach the internet or other labs through
+        the management plane.  The host end is appended to
+        ``provisioned_host_ends`` BEFORE the kernel object is created so
+        the caller's rollback path sweeps a partially-created pair.
+        """
+        host_end = host_net.mgmt_veth_host_name(lab_id, node_id)
+        peer_end = host_net.mgmt_veth_peer_name(lab_id, node_id)
+
+        provisioned_host_ends.append(host_end)
+        host_net.veth_pair_add(host_end, peer_end)
+        host_net.link_master_any(host_end, bridge_name)
+        host_net.link_up(host_end)
+        host_net.link_netns(peer_end, pid)
+        host_net.link_set_name_in_netns(pid, peer_end, "mgmt0")
+        host_net.addr_add_in_netns(pid, "mgmt0", container_ip_cidr)
+        host_net.addr_up_in_netns(pid, "mgmt0")
 
     def attach_docker_interface(
         self,
