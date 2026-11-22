@@ -64,34 +64,61 @@ wait_for_postgres() {
   done
 }
 
-patch_guacamole_webapp() {
+patch_guacamole_war() {
+  # The exploded webapp lives in an ephemeral /tmp/catalina-base.* that is
+  # regenerated on every container start, so patching it in place is wiped
+  # by any restart. Patch the WAR itself instead: every future explode then
+  # carries the patch script + viewport fix. Idempotent — a WAR that already
+  # contains the patch script is left untouched.
   local container_id="$1"
-  local html5_root
-  local start_ts
-  start_ts="$(date +%s)"
+  local war_path="/opt/guacamole/webapp/guacamole.war"
 
-  while true; do
-    html5_root="$(docker exec "${container_id}" sh -lc 'find /tmp -type d -path "*/webapps/html5" | head -n1')"
-    if [[ -n "${html5_root}" ]] && docker exec "${container_id}" test -f "${html5_root}/index.html" >/dev/null 2>&1; then
-      break
-    fi
-    if (( "$(date +%s)" - start_ts >= 60 )); then
-      break
-    fi
-    sleep 1
-  done
-
-  if [[ -z "${html5_root}" ]]; then
-    echo "Unable to locate Guacamole webapp root inside ${container_id}" >&2
-    return 1
+  if docker exec "${container_id}" jar tf "${war_path}" 2>/dev/null | grep -q "nova-ve-guac-patch.js"; then
+    return 0
   fi
+  # Return codes: 0 = already patched, 3 = repacked (restart needed),
+  # non-zero otherwise (set -e aborts before we get here on hard failure).
 
-  docker cp "${GUAC_PATCH_JS}" "${container_id}:${html5_root}/nova-ve-guac-patch.js"
-  docker exec "${container_id}" sh -lc "
-    sed -i 's/,target-densitydpi=medium-dpi//g' '${html5_root}/index.html'
-    grep -q 'nova-ve-guac-patch.js' '${html5_root}/index.html' || \
-      sed -i 's#</body>#<script src=\"nova-ve-guac-patch.js\"></script></body>#' '${html5_root}/index.html'
-  "
+  local workdir
+  workdir="$(mktemp -d)"
+  trap 'rm -rf "${workdir}"' RETURN
+
+  docker cp "${container_id}:${war_path}" "${workdir}/guacamole.war"
+
+  python3 - "$workdir" "${GUAC_PATCH_JS}" <<'PYEOF'
+import sys, zipfile
+
+workdir, patch_js = sys.argv[1], sys.argv[2]
+war = f"{workdir}/guacamole.war"
+
+patch_source = open(patch_js, "rb").read()
+index_html = None
+
+with zipfile.ZipFile(war) as zin:
+    entries = [(item, zin.read(item.filename)) for item in zin.infolist()]
+
+for info, data in entries:
+    if info.filename == "index.html":
+        text = data.decode("utf-8")
+        text = text.replace(",target-densitydpi=medium-dpi", "")
+        if "nova-ve-guac-patch.js" not in text:
+            text = text.replace("</body>", '<script src="nova-ve-guac-patch.js"></script></body>')
+        index_html = text.encode("utf-8")
+        break
+
+if index_html is None:
+    sys.exit("index.html not found in WAR")
+
+with zipfile.ZipFile(f"{workdir}/guacamole-patched.war", "w", zipfile.ZIP_DEFLATED) as zout:
+    for info, data in entries:
+        if info.filename == "index.html":
+            data = index_html
+        zout.writestr(info.filename, data)
+    zout.writestr("nova-ve-guac-patch.js", patch_source)
+PYEOF
+
+  docker cp "${workdir}/guacamole-patched.war" "${container_id}:${war_path}"
+  return 3
 }
 
 install_guacd_fonts() {
@@ -128,4 +155,18 @@ docker compose -f "${COMPOSE_FILE}" up -d --pull missing
 guacd_container="$(wait_for_container guacd 30)"
 install_guacd_fonts "${guacd_container}"
 guacamole_container="$(wait_for_container guacamole 30)"
-patch_guacamole_webapp "${guacamole_container}"
+
+war_rc=0
+patch_guacamole_war "${guacamole_container}" || war_rc=$?
+if [[ "${war_rc}" -eq 3 ]]; then
+  # Freshly repacked WAR: restart the webapp so Tomcat re-explodes the
+  # patched archive, then wait for it to answer again.
+  echo "guacamole: WAR patched, restarting webapp to apply"
+  docker compose -f "${COMPOSE_FILE}" restart guacamole >/dev/null
+  for _ in $(seq 1 60); do
+    if curl -fsS -o /dev/null "http://127.0.0.1:8081/html5/"; then
+      break
+    fi
+    sleep 2
+  done
+fi
