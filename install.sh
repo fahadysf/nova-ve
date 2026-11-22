@@ -266,6 +266,7 @@ INSTANCE_ID="$(cat /etc/nova-ve/instance_id 2>/dev/null || echo '<missing>')"
 GIT_COMMIT="$(sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" rev-parse --short HEAD)"
 GENERATED_AT="$(date --iso-8601=seconds)"
 DEMO_IMAGES_STATUS="$(cat /var/lib/nova-ve/.demo-images-status 2>/dev/null || echo unknown)"
+PLATFORM_IMAGES_STATUS="$(cat /var/lib/nova-ve/.platform-images-status 2>/dev/null || echo unknown)"
 BASE_DATA_DIR="${BASE_DATA_DIR:-/var/lib/nova-ve}"
 LABS_DIR="${LABS_DIR:-${BASE_DATA_DIR}/labs}"
 IMAGES_DIR="${IMAGES_DIR:-${BASE_DATA_DIR}/images}"
@@ -333,6 +334,24 @@ cd ${REPO_DIR} && bash deploy/scripts/build-demo-images.sh
 \`\`\`
 
 Skip on next install: \`NOVA_VE_SKIP_DEMO_IMAGES=1 curl -fsSL ... | sudo bash\`.
+
+## Platform containers (#288)
+
+Status: \`${PLATFORM_IMAGES_STATUS}\` (one of: \`ok\`, \`skipped\`, \`failed\`, \`unknown\`)
+
+\`nova-ve/mgmt-server:latest\` (EVE eve-gui-server analog: python 3.13,
+ansible, napalm, netmiko, sshd) and \`nova-ve/browser:latest\` (EVE
+eve-firefox analog: current Firefox, VNC console) are pulled from
+ghcr.io during provisioning (auto mode falls back to a local build when
+the registry is unreachable) and marker-tagged for the node catalog.
+
+Re-pull manually:
+
+\`\`\`
+cd ${REPO_DIR} && NOVA_VE_PLATFORM_MODE=auto bash deploy/scripts/build-platform-images.sh
+\`\`\`
+
+Skip on next install: \`NOVA_VE_SKIP_PLATFORM_IMAGES=1 curl -fsSL ... | sudo bash\`.
 
 ## Critical files
 

@@ -155,9 +155,8 @@ class Settings(BaseSettings):
 
     # Console session recording (#291). Every in-built (HTML5/Guacamole)
     # telnet console session is relayed through a recording proxy that
-    # writes an asciinema cast v2 file plus the raw output log. Recordings
-    # live under RECORDINGS_DIR/<lab-id>/<node-id>/ so each lab owns a
-    # folder of sessions. External (OS scheme-handler) consoles bypass the
+    # writes an asciinema cast v2 file plus the raw output log in a hidden
+    # recordings directory alongside the lab JSON. External consoles bypass the
     # proxy and are never recorded. Disable globally with
     # NOVA_VE_RECORDINGS_ENABLED=false.
     #
@@ -168,6 +167,7 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("RECORDINGS_ENABLED", "NOVA_VE_RECORDINGS_ENABLED"),
     )
+    # Read location for recordings created before lab-local storage.
     RECORDINGS_DIR: str = Field(
         default="/var/lib/nova-ve/recordings",
         validation_alias=AliasChoices("RECORDINGS_DIR", "NOVA_VE_RECORDINGS_DIR"),
