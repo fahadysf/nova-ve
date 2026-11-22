@@ -390,6 +390,90 @@ def test_bridge_add_rejects_bad_name(helper, capsys, name):
     assert "argument failed validation" in capsys.readouterr().err
 
 
+# ---------------------------------------------------------------------------
+# #287 — per-lab management attachment name shapes
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "argv, expected_tail",
+    [
+        (
+            ["bridge-add", "novec0demg"],
+            ["link", "add", "novec0demg", "type", "bridge"],
+        ),
+        (
+            ["bridge-addr-add", "novec0demg", "172.16.42.1/24"],
+            ["addr", "replace", "172.16.42.1/24", "dev", "novec0demg"],
+        ),
+        (
+            ["link-master", "nvec0ded1mth", "novec0demg"],
+            ["link", "set", "nvec0ded1mth", "master", "novec0demg"],
+        ),
+        (
+            ["veth-pair-add", "nvec0ded1mth", "nvec0ded1mtp"],
+            ["link", "add", "nvec0ded1mth", "type", "veth", "peer", "name", "nvec0ded1mtp"],
+        ),
+        (
+            ["link-up", "novec0demg"],
+            ["link", "set", "novec0demg", "up"],
+        ),
+    ],
+)
+def test_mgmt_verbs_emit_correct_argv(helper, argv, expected_tail):
+    """#287: the mgmt bridge (``nove{h}mg``) and mgmt veths (``mt[hp]``)
+    pass helper validation and produce the expected argv."""
+    rc = helper.main(argv)
+    assert rc == 0, f"verb {argv[0]} returned {rc}"
+    assert helper._test_calls, "helper did not invoke _run"
+    spawned = helper._test_calls[-1]
+    assert spawned[1:] == expected_tail
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "novec0demg2",   # mg followed by digits
+        "novec0demG",    # uppercase suffix
+        "novec0dem",     # missing g
+    ],
+)
+def test_bridge_add_rejects_bad_mgmt_names(helper, capsys, name):
+    rc = helper.main(["bridge-add", name])
+    assert rc == 2
+    assert not helper._test_calls
+
+
+@pytest.mark.parametrize(
+    "hostend, peerend",
+    [
+        ("nvec0ded1mthh", "nvec0ded1mtp"),   # doubled h
+        ("nvec0ded1mth", "nvec0ded1mtpx"),   # bad peer suffix
+        ("nvec0ded1mtx", "nvec0ded1mtp"),    # x is not h/p
+    ],
+)
+def test_veth_pair_rejects_bad_mgmt_names(helper, hostend, peerend):
+    rc = helper.main(["veth-pair-add", hostend, peerend])
+    assert rc == 2
+    assert not helper._test_calls
+
+
+def test_mgmt_netns_verbs_accept_mgmt0(helper):
+    """#287: the container-side ``mgmt0`` interface passes netns validation."""
+    _seed_pid(helper, 4242)
+    rc = helper.main(["link-netns", "nvec0ded1mtp", "4242"])
+    assert rc == 0
+    rc = helper.main(["link-set-name-in-netns", "4242", "nvec0ded1mtp", "mgmt0"])
+    assert rc == 0
+    assert helper._test_calls[-1][5:] == ["link", "set", "nvec0ded1mtp", "name", "mgmt0"]
+    rc = helper.main(["addr-add-in-netns", "4242", "mgmt0", "172.16.42.2/24"])
+    assert rc == 0
+    assert helper._test_calls[-1][5:] == ["addr", "add", "172.16.42.2/24", "dev", "mgmt0"]
+    rc = helper.main(["addr-up-in-netns", "4242", "mgmt0"])
+    assert rc == 0
+    assert helper._test_calls[-1][5:] == ["link", "set", "mgmt0", "up"]
+
+
 @pytest.mark.parametrize(
     "name",
     [
