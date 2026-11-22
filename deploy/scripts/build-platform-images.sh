@@ -24,8 +24,20 @@
 # image also gets a ``nova-ve-lab/<sanitized>:<tag>`` reverse tag; the
 # backend catalog only surfaces marked images.
 #
-# Honoured env vars:
-#   NOVA_VE_SKIP_PLATFORM_IMAGES=1  Skip every build cleanly.
+# GHCR: CI publishes both images automatically on main when the sources
+# change (.github/workflows/build-platform-images.yml) as
+#   ghcr.io/fahadysf/nova-ve-mgmt-server:latest
+#   ghcr.io/fahadysf/nova-ve-browser:latest
+# Container storage/bandwidth on GHCR is currently free, so fresh deploys
+# can pull instead of building. Honoured env vars:
+#   NOVA_VE_SKIP_PLATFORM_IMAGES=1  Skip every build/pull cleanly.
+#   NOVA_VE_PLATFORM_PULL=1        Pull the GHCR images instead of building
+#                                  (no pip/git fetches; needs docker login to
+#                                  ghcr.io only if the packages are private —
+#                                  anonymous pull works once they are public).
+#   GHCR_PUSH=1                    Also tag+push the built images to GHCR
+#                                  (requires docker login ghcr.io with
+#                                  write:packages).
 #
 # Idempotency: images rebuild from the checked-out repo so stale local tags
 # do not mask fixes; marker tags refresh when the source image id changes.
@@ -40,6 +52,7 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PLATFORM_DIR="${REPO_ROOT}/deploy/platform-images"
 
+GHCR_OWNER="${GHCR_OWNER:-fahadysf}"
 MARKER_NS="nova-ve-lab"
 
 image_id() {
@@ -83,10 +96,47 @@ build_platform_image() {
   docker build -t "$tag" "$context"
 }
 
-build_platform_image "nova-ve/mgmt-server:latest" "${PLATFORM_DIR}/mgmt-server"
-build_platform_image "nova-ve/browser:latest"     "${PLATFORM_DIR}/browser"
+pull_platform_image() {
+  local local_tag="$1"
+  local ghcr_name="$2"
+  echo "build-platform-images: pulling ghcr.io/${GHCR_OWNER}/${ghcr_name}:latest -> ${local_tag}" >&2
+  docker pull "ghcr.io/${GHCR_OWNER}/${ghcr_name}:latest"
+  docker tag "ghcr.io/${GHCR_OWNER}/${ghcr_name}:latest" "${local_tag}"
+}
 
-mark_for_lab "nova-ve/mgmt-server:latest"
-mark_for_lab "nova-ve/browser:latest"
+push_ghcr() {
+  local local_tag="$1"
+  local ghcr_name="$2"
+  local reference="ghcr.io/${GHCR_OWNER}/${ghcr_name}:latest"
+  echo "build-platform-images: pushing ${local_tag} -> ${reference}" >&2
+  docker tag "${local_tag}" "${reference}"
+  docker push "${reference}"
+}
+
+# image pairs: <local tag> <ghcr name> <build context>
+IMAGES=(
+  "nova-ve/mgmt-server:latest|nova-ve-mgmt-server|${PLATFORM_DIR}/mgmt-server"
+  "nova-ve/browser:latest|nova-ve-browser|${PLATFORM_DIR}/browser"
+)
+
+if [[ "${NOVA_VE_PLATFORM_PULL:-0}" == "1" ]]; then
+  for pair in "${IMAGES[@]}"; do
+    IFS='|' read -r local_tag ghcr_name _context <<< "$pair"
+    pull_platform_image "$local_tag" "$ghcr_name"
+  done
+else
+  for pair in "${IMAGES[@]}"; do
+    IFS='|' read -r local_tag _ghcr_name context <<< "$pair"
+    build_platform_image "$local_tag" "$context"
+  done
+fi
+
+for pair in "${IMAGES[@]}"; do
+  IFS='|' read -r local_tag ghcr_name _context <<< "$pair"
+  mark_for_lab "$local_tag"
+  if [[ "${GHCR_PUSH:-0}" == "1" ]]; then
+    push_ghcr "$local_tag" "$ghcr_name"
+  fi
+done
 
 echo "build-platform-images: done." >&2
