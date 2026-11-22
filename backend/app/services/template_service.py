@@ -611,6 +611,25 @@ def _docker_extras_schema() -> list[dict[str, Any]]:
             "runtime": True,
         },
         {
+            "key": "mgmt_access",
+            "label": "Management access (mgmt0)",
+            "type": "select",
+            "options": [
+                {"value": "false", "label": "Disabled"},
+                {"value": "true", "label": "Enabled"},
+            ],
+            "default": "false",
+            "description": (
+                "Attach an extra mgmt0 interface onto the lab's dedicated "
+                "management bridge (172.16.X.0/24, per lab) with a "
+                "host-assigned static IP. On-link reachability only — the "
+                "host and mgmt peers in this lab; no default route, no "
+                "internet. Lab interfaces keep their eth0..N numbering. "
+                "Applied at node start."
+            ),
+            "stoppedOnly": True,
+        },
+        {
             "key": "environment",
             "label": "Environment variables",
             "type": "env",
