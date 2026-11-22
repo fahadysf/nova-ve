@@ -13,6 +13,7 @@ RUN apk add --no-cache \
       bash \
       busybox-extras \
       openssh-server \
+      openssh-client \
       iperf3 \
       tcpdump \
       git \
