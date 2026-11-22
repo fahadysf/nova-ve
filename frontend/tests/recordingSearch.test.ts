@@ -80,8 +80,12 @@ describe('formatting helpers', () => {
   });
 
   it('formats byte sizes', () => {
+    expect(formatSize(0)).toBe('0 B');
     expect(formatSize(512)).toBe('512 B');
-    expect(formatSize(2048)).toBe('2.0 KB');
-    expect(formatSize(3 * 1024 * 1024)).toBe('3.0 MB');
+    expect(formatSize(1023)).toBe('1023 B');
+    expect(formatSize(1024)).toBe('1.0 KiB');
+    expect(formatSize(1536)).toBe('1.5 KiB');
+    expect(formatSize(1024 ** 2)).toBe('1.0 MiB');
+    expect(formatSize(1024 ** 3)).toBe('1.0 GiB');
   });
 });

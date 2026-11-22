@@ -50,7 +50,7 @@
   let loading = true;
   let error = '';
   let zenMode = false;
-  let showRecordings = false;
+  let recordingsTarget: { nodeId: number | null; nodeName?: string } | null = null;
   let showConsolesInZen = false;
   $: hideConsoles = zenMode && !showConsolesInZen;
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
@@ -242,6 +242,7 @@
     if ($authStore.authenticated && routeKey !== lastLoadedRoute) {
       lastLoadedRoute = routeKey;
       zenMode = false;
+      recordingsTarget = null;
       void (isLabIndexRoute ? loadLabIndex() : loadLab());
     }
   }
@@ -1138,20 +1139,18 @@
           </span>
         </div>
 
+        <button
+          type="button"
+          data-testid="open-recordings"
+          aria-label="Lab recordings"
+          title="Lab recordings"
+          class={`${compactActionButtonClass} shrink-0 gap-1.5 self-center`}
+          on:click={() => (recordingsTarget = { nodeId: null })}
+        >
+          <ListVideo class="h-4 w-4" aria-hidden="true" />
+          <span class="hidden md:inline">Recordings</span>
+        </button>
         <div class="hidden shrink-0 items-center gap-2 md:flex">
-          <div class="flex flex-col gap-1 rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
-            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Session recordings</div>
-            <button
-              type="button"
-              data-testid="open-recordings"
-              title="Browse recorded telnet console sessions: view logs with find/regex search, download asciinema replays (.cast) or raw logs."
-              class="inline-flex items-center justify-center gap-1.5 rounded-md border border-gray-800 bg-gray-900/80 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-gray-400 transition hover:border-red-500/50 hover:text-white"
-              on:click={() => (showRecordings = true)}
-            >
-              <ListVideo class="h-3 w-3" aria-hidden="true" />
-              Recordings
-            </button>
-          </div>
           <div class="flex flex-col gap-1 rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">External console</div>
             <button
@@ -1272,6 +1271,7 @@
             {consoleSelectorWindows}
             {consoleMinimizedWindows}
             on:console={(event) => openConsole(event.detail.node, event.detail.mode ?? 'primary')}
+            on:recordings={({ detail: { node } }) => (recordingsTarget = { nodeId: node.id, nodeName: node.name })}
             on:console-select={(event) => handleConsoleRestore(event.detail.tabId)}
             on:console-restore={(event) => handleConsoleRestore(event.detail.tabId)}
             on:console-close={(event) => handleConsoleClose(event.detail.tabId)}
@@ -1333,6 +1333,17 @@
                     recording={!!recordingStates[activeConsoleTabState.id]}
                     onToggle={() => activeConsoleTabState && toggleRecording(activeConsoleTabState)}
                   />
+                {/if}
+                {#if activeConsoleTabState}
+                  {@const tab = activeConsoleTabState}
+                  <button
+                    type="button"
+                    aria-label={`Recordings for ${tab.nodeName}`}
+                    title="Console recordings"
+                    class={compactIconButtonClass}
+                    on:pointerdown|stopPropagation
+                    on:click={() => (recordingsTarget = { nodeId: tab.nodeId, nodeName: tab.nodeName })}
+                  ><ListVideo class="h-3.5 w-3.5" aria-hidden="true" /></button>
                 {/if}
                 <label class="sr-only" for="console-node-select">Console target</label>
                 <select
@@ -1489,6 +1500,14 @@
                   {/if}
                   <button
                     type="button"
+                    aria-label={`Recordings for ${tab.nodeName}`}
+                    title="Console recordings"
+                    class={compactIconButtonClass}
+                    on:pointerdown|stopPropagation
+                    on:click={() => (recordingsTarget = { nodeId: tab.nodeId, nodeName: tab.nodeName })}
+                  ><ListVideo class="h-3.5 w-3.5" aria-hidden="true" /></button>
+                  <button
+                    type="button"
                     aria-label={`Reload ${tab.nodeName} console`}
                     title="Reload console"
                     class="inline-flex items-center justify-center rounded-md border border-gray-700 bg-gray-950 px-1.5 py-[3px] text-gray-300 hover:border-blue-500 hover:text-white"
@@ -1528,8 +1547,12 @@
   {/if}
 </div>
 
-{#if showRecordings}
-  <RecordingsPanel {labId} onClose={() => (showRecordings = false)} />
+{#if recordingsTarget}
+  <RecordingsPanel {labId}
+    labName={$labState.meta?.name || labId}
+    {...recordingsTarget}
+    onClose={() => (recordingsTarget = null)}
+  />
 {/if}
 
 <style>
