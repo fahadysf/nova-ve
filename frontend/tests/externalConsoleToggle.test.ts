@@ -161,6 +161,12 @@ describe('lab editor controls', () => {
       expect(screen.getByTestId('topology-canvas-stub')).toBe(canvas);
       expect(canvas).toHaveAttribute('data-zen-mode', 'true');
 
+      await fireEvent.click(screen.getByTestId('canvas-console-button'));
+      expect(dialog).toBeVisible();
+      expect(dialog?.inert).toBe(false);
+      expect(screen.getByTitle('Guacamole console for router-1')).toBe(iframe);
+      expect(header).not.toBeVisible();
+
       await fireEvent.click(toggle);
 
       expect(toggle).toHaveFocus();

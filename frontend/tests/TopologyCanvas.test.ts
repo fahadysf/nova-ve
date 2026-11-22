@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
 import { get, writable } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DragEndpoint, InterfaceEndpoint, NetworkEndpoint, NodeSlotEndpoint } from '$lib/stores/dragLink';
@@ -346,7 +346,7 @@ describe('TopologyCanvas lab controls', () => {
     }
   });
 
-  it('hides the canvas controls in Zen mode while keeping the same topology mounted', async () => {
+  it('keeps the canvas controls and topology mounted in Zen mode', async () => {
     const view = renderCanvas({ '1': makeNode(1, 'edge-a', 0, capabilities) });
     selectedPortInfoStore.set({
       kind: 'interface', nodeId: 1, interfaceIndex: 0, anchorRect: null,
@@ -354,13 +354,16 @@ describe('TopologyCanvas lab controls', () => {
     });
     const topology = screen.getByTestId('svelte-flow-mock');
     const nodeSummary = topology.getAttribute('data-flow-nodes');
-    expect(screen.getByRole('group', { name: 'Lab controls' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'zoom in' })).toBeInTheDocument();
+    const controls = screen.getByRole('group', { name: 'Lab controls' });
+    const zoom = screen.getByRole('button', { name: 'zoom in' });
     expect(await screen.findByRole('dialog', { name: 'Port info for eth0' })).toBeVisible();
 
     await view.rerender({ zenMode: true });
-    expect(screen.queryByRole('group', { name: 'Lab controls' })).toBeNull();
-    expect(screen.queryByRole('button', { name: 'zoom in' })).toBeNull();
+    expect(screen.getByRole('group', { name: 'Lab controls' })).toBe(controls);
+    expect(screen.getByRole('button', { name: 'zoom in' })).toBe(zoom);
+    expect(screen.getByRole('button', { name: 'center content' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'lock canvas' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Show minimap' })).toBeEnabled();
     expect(screen.queryByTestId('port-info-popover')).toBeNull();
     expect(screen.getByTestId('svelte-flow-mock')).toBe(topology);
     expect(topology).toHaveAttribute('data-flow-nodes', nodeSummary);
@@ -369,6 +372,27 @@ describe('TopologyCanvas lab controls', () => {
     expect(screen.getByRole('group', { name: 'Lab controls' })).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Port info for eth0' })).toBeVisible();
     expect(screen.getByTestId('svelte-flow-mock')).toBe(topology);
+  });
+
+  it('opens node context menus and configuration dialogs in Zen mode', async () => {
+    const view = renderCanvas({ '1': makeNode(1, 'edge-a', 0, capabilities) });
+    await view.rerender({ zenMode: true });
+    await fireEvent(screen.getByTestId('svelte-flow-mock'), new CustomEvent('mock-flow-event', {
+      detail: {
+        type: 'nodecontextmenu',
+        detail: { node: { id: 'node1' }, event: new MouseEvent('contextmenu') },
+      },
+    }));
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getByRole('button', { name: 'Start' })).toBeEnabled();
+    await fireEvent.click(within(menu).getByRole('button', { name: 'Edit Node' }));
+    expect(screen.getByRole('dialog', { name: 'Edit node' })).toBeVisible();
+    await fireEvent.click(screen.getByRole('button', { name: 'Close node configuration modal' }));
+
+    await fireEvent.click(screen.getByRole('button', { name: 'Open add element menu' }));
+    await fireEvent.click(screen.getByRole('button', { name: /network container type/i }));
+    await fireEvent.click(screen.getByRole('button', { name: /bridge network/i }));
+    expect(screen.getByTestId('network-config-modal')).toBeVisible();
   });
 
   it('leaves Zen shortcuts available and preserves a pending link', async () => {

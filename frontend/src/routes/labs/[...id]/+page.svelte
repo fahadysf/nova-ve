@@ -47,6 +47,8 @@
   let loading = true;
   let error = '';
   let zenMode = false;
+  let showConsolesInZen = false;
+  $: hideConsoles = zenMode && !showConsolesInZen;
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
   type FloatingWindowState = ConsoleBounds & {
     maximized: boolean;
@@ -177,6 +179,7 @@
   })();
 
   function handleConsoleRestore(tabId: number) {
+    showConsolesInZen = zenMode;
     if (tabId === TABBED_WORKSPACE_BAR_ID) {
       if (consoleWorkspace?.minimized) toggleConsoleMinimize();
       focusConsoleWorkspace();
@@ -194,6 +197,7 @@
     closeFloatingWindow(tabId);
   }
   function handleConsoleMaximizeFromBar(tabId: number) {
+    showConsolesInZen = zenMode;
     if (tabId === TABBED_WORKSPACE_BAR_ID) {
       if (!consoleWorkspace) return;
       if (consoleWorkspace.minimized) toggleConsoleMinimize();
@@ -239,6 +243,7 @@
   }
 
   function toggleZenMode(event: MouseEvent & { currentTarget: HTMLButtonElement }) {
+    showConsolesInZen = false;
     zenMode = !zenMode;
     event.currentTarget.focus();
   }
@@ -532,7 +537,7 @@
   }
 
   function focusGuacamoleWindow(tabId?: number, attempts = 4) {
-    if (zenMode) return;
+    if (hideConsoles) return;
 
     const iframe = consoleIframe(tabId);
     if (!iframe) {
@@ -755,6 +760,7 @@
       // External launch failed — fall through to the embedded console.
     }
 
+    showConsolesInZen = zenMode;
     const existingTab = consoleWorkspace?.tabs.find(
       (tab) => tab.nodeId === node.id && (tab.mode ?? 'primary') === mode
     );
@@ -1206,12 +1212,7 @@
             {consoleSelectorWindows}
             {consoleMinimizedWindows}
             on:console={(event) => openConsole(event.detail.node, event.detail.mode ?? 'primary')}
-            on:console-select={(event) => {
-              const tabId = event.detail.tabId;
-              updateFloatingWindow(tabId, { minimized: false });
-              bringFloatingWindowToFront(tabId);
-              setTimeout(() => focusGuacamoleWindow(tabId), 0);
-            }}
+            on:console-select={(event) => handleConsoleRestore(event.detail.tabId)}
             on:console-restore={(event) => handleConsoleRestore(event.detail.tabId)}
             on:console-close={(event) => handleConsoleClose(event.detail.tabId)}
             on:console-maximize={(event) => handleConsoleMaximizeFromBar(event.detail.tabId)}
@@ -1228,8 +1229,8 @@
           aria-label="Console workspace"
           class="pointer-events-auto fixed overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
           style={`left: ${consoleWorkspace.x}px; top: ${consoleWorkspace.y}px; width: ${consoleWorkspace.width}px; height: ${consoleWorkspace.height}px; z-index: 50; display: ${consoleWorkspace.minimized ? 'none' : 'flex'};`}
-          style:visibility={zenMode ? 'hidden' : null}
-          inert={zenMode}
+          style:visibility={hideConsoles ? 'hidden' : null}
+          inert={hideConsoles}
           on:pointerdown={focusConsoleWorkspace}
         >
           <div class="flex h-full w-full flex-col">
@@ -1366,8 +1367,8 @@
             aria-label={`Console window for ${tab.nodeName}`}
             class="pointer-events-auto fixed overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
             style={`left: ${tab.floating.x}px; top: ${tab.floating.y}px; width: ${tab.floating.width}px; height: ${tab.floating.height}px; z-index: ${zIndex}; display: ${tab.floating.minimized ? 'none' : 'flex'};`}
-            style:visibility={zenMode ? 'hidden' : null}
-            inert={zenMode}
+            style:visibility={hideConsoles ? 'hidden' : null}
+            inert={hideConsoles}
             on:pointerdown={() => {
               bringFloatingWindowToFront(tab.id);
               setTimeout(() => focusGuacamoleWindow(tab.id), 0);
