@@ -1,3 +1,4 @@
+import logging
 import time
 
 from fastapi import APIRouter, Depends
@@ -13,6 +14,9 @@ from app.services.cloud_inventory_service import (
     assert_no_external_nat_cloud_references_for_scope,
 )
 from app.services.folder_service import FolderService
+from app.services.lab_service import LabService
+
+logger = logging.getLogger("nova-ve.folders")
 from app.services.lab_service import LabService
 
 router = APIRouter(
@@ -57,6 +61,15 @@ async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recur
 
     for lab in await lab_service.list_labs():
         relative_filename = lab.filename.strip("/")
+        # #284: a DB row whose backing file was removed out-of-band is a
+        # ghost — never list it (the file scan below is authoritative for
+        # what actually exists). The startup reconciliation drops the row.
+        if not LabService.file_exists(lab.filename):
+            logger.warning(
+                "labs listing: skipping ghost lab row without backing file (filename=%s)",
+                lab.filename,
+            )
+            continue
         if folder_prefix:
             if recursive:
                 if not (relative_filename == folder_prefix or relative_filename.startswith(f"{folder_prefix}/")):
