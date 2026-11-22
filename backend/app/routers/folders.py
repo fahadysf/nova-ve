@@ -110,7 +110,7 @@ async def list_root(
 ):
     try:
         scoped_root = _scoped_folder_path(current_user, "", treat_as_absolute=False)
-        result = FolderService.list_folder(scoped_root, recursive=True)
+        result = FolderService.list_folder(scoped_root, recursive=True, at_user_root=True)
         result = await _merge_db_labs(result, db, scoped_root, recursive=True)
     except ValueError as e:
         return {

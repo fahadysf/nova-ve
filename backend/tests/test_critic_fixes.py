@@ -415,7 +415,12 @@ async def test_folder_listing_and_lab_creation_are_scoped_to_user_root(patched_s
 
     root_listing = await folders.list_root(current_user=current_user, db=db)
     assert root_listing["code"] == 200
-    assert all(item["path"].startswith("/Users/alice") for item in root_listing["data"]["folders"])
+    # #285: a scoped user's root listing is confined to their own subtree,
+    # plus the shared space visible to every authenticated user.
+    assert all(
+        item["path"].startswith("/Users/alice") or item["path"] == "/Shared"
+        for item in root_listing["data"]["folders"]
+    )
     assert all(item["path"].startswith("/Users/alice") for item in root_listing["data"]["labs"])
     assert "/Users/alice/root/lab-a.json" in {item["path"] for item in root_listing["data"]["labs"]}
 
