@@ -1,0 +1,55 @@
+name: Platform container images
+
+# #288 — build and publish the platform containers (mgmt-server, browser)
+# to GHCR. Runs when the image sources change on main, or on demand.
+#
+# Billing note: container image storage and bandwidth on ghcr.io are
+# currently free for public AND private images (the classic Packages 500MB
+# quota does not apply to the Container registry), and this repo is public,
+# so Actions minutes for this workflow are free too. See the GitHub Packages
+# billing docs before relying on that long-term.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'deploy/platform-images/**'
+      - '.github/workflows/build-platform-images.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: nova-ve-mgmt-server
+            context: deploy/platform-images/mgmt-server
+          - name: nova-ve-browser
+            context: deploy/platform-images/browser
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push ${{ matrix.name }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:latest
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=nova-ve platform container (${{ matrix.name }})
