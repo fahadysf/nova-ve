@@ -1059,6 +1059,29 @@ else
 fi
 run chown "${APP_OWNER}:${APP_GROUP}" "${DEMO_IMAGES_STATUS_FILE}" || true
 
+# Platform containers (#288): make nova-ve/mgmt-server + nova-ve/browser
+# available for labs. GHCR-first (auto mode: pull the published images,
+# fall back to building from the checked-out repo when the registry is
+# unreachable) so installs don't pay the pip/git build fetches. Failure
+# does NOT abort the provisioner; the install summary records the status.
+PLATFORM_IMAGES_STATUS_FILE=/var/lib/nova-ve/.platform-images-status
+run rm -f "${PLATFORM_IMAGES_STATUS_FILE}"
+PLATFORM_BUILD_CMD=(sudo -u "${APP_OWNER}" -H env NOVA_VE_PLATFORM_MODE=auto bash "${REPO_ROOT}/deploy/scripts/build-platform-images.sh")
+if [[ "${NOVA_VE_SKIP_PLATFORM_IMAGES:-0}" == "1" ]]; then
+  PLATFORM_BUILD_CMD=(env NOVA_VE_SKIP_PLATFORM_IMAGES=1 "${PLATFORM_BUILD_CMD[@]}")
+fi
+if run "${PLATFORM_BUILD_CMD[@]}"; then
+  if [[ "${NOVA_VE_SKIP_PLATFORM_IMAGES:-0}" == "1" ]]; then
+    run bash -c "echo skipped > ${PLATFORM_IMAGES_STATUS_FILE}"
+  else
+    run bash -c "echo ok > ${PLATFORM_IMAGES_STATUS_FILE}"
+  fi
+else
+  run bash -c "echo failed > ${PLATFORM_IMAGES_STATUS_FILE}"
+  echo "WARN: platform-image pull/build failed; nova-ve/mgmt-server / nova-ve-browser may not be available locally for labs." >&2
+fi
+run chown "${APP_OWNER}:${APP_GROUP}" "${PLATFORM_IMAGES_STATUS_FILE}" || true
+
 ensure_backend_env
 ensure_instance_id
 
