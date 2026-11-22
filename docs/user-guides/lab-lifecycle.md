@@ -46,6 +46,15 @@ Deleting:
 - Removes the lab JSON.
 - Tears down host bridges that no other lab references. Running node processes are not stopped by the delete itself — they lose their lab binding and are reconciled away by the runtime registry.
 
+## Moving a lab
+
+From the **Labs** index:
+
+1. Hover the lab card → click **Move…**.
+2. Pick the target folder and confirm.
+
+The lab keeps its file name — only its folder changes. You can move labs between your own folders and the **Shared** folder, a read-write space visible to every signed-in user (use it to publish a lab for others, or pick one up into your own folder). Moving a lab never disturbs a running node or its console: runtime state tracks the lab's internal ID, not its file path.
+
 ## Files and ownership
 
 | Path | Owner | Purpose |

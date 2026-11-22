@@ -125,3 +125,10 @@ export async function apiGetData<T>(path: string, options: ApiRequestOptions = {
   const response = await apiRequest<T>(path, { ...options, method: options.method ?? 'GET' });
   return response.data;
 }
+
+export async function moveLab(labPath: string, targetFolder: string) {
+  return apiRequest(`/labs/_${labPath}/move`, {
+    method: 'POST',
+    body: { target_folder: targetFolder }
+  });
+}

@@ -5,8 +5,22 @@ from pathlib import Path
 
 from app.config import get_settings
 
-# Static virtual folders that always appear at root
+# Static virtual folders that always appear at root. Shared moved out of the
+# pure-stub set in #285: it is a real directory, listed by the file scan once
+# it exists and synthesized for every user's root listing until then.
 STATIC_FOLDERS = ["Running", "Shared", "Users"]
+
+
+def _shared_folder_entry() -> dict:
+    return {
+        "name": "Shared",
+        "path": "/Shared",
+        "umtime": int(time.time()),
+        "mtime": _fmt_time(time.time()),
+        "spy": -1,
+        "lock": False,
+        "shared": 0,
+    }
 
 
 def _labs_dir() -> Path:
@@ -49,8 +63,12 @@ def _fmt_time(ts: float) -> str:
 
 class FolderService:
     @staticmethod
-    def list_folder(folder_path: str = "", recursive: bool = False) -> dict:
-        """List contents of a folder. Returns folders and labs."""
+    def list_folder(folder_path: str = "", recursive: bool = False, at_user_root: bool = False) -> dict:
+        """List contents of a folder. Returns folders and labs.
+
+        ``at_user_root`` marks a folder-scoped user's own root listing so the
+        Shared space is surfaced there too (#285).
+        """
         labs_dir = _labs_dir()
 
         if folder_path == "" or folder_path == "/":
@@ -60,21 +78,14 @@ class FolderService:
             target_dir = _safe_folder_path(folder_path)
             is_root = False
 
+        # Lazy-create the Shared space on first use (entering it directly),
+        # so hosts provisioned before #285 grow it without re-provisioning.
+        normalized = _normalize_folder_path(folder_path)
+        if normalized == "Shared" or normalized.startswith("Shared/"):
+            target_dir.mkdir(parents=True, exist_ok=True)
+
         folders = []
         labs = []
-
-        # Static folders at root
-        if is_root:
-            for name in STATIC_FOLDERS:
-                folders.append({
-                    "name": name,
-                    "path": f"/{name}",
-                    "umtime": int(time.time()),
-                    "mtime": _fmt_time(time.time()),
-                    "spy": -1,
-                    "lock": False,
-                    "shared": 0,
-                })
 
         if target_dir.exists() and target_dir.is_dir():
             entries = sorted(target_dir.rglob("*")) if recursive else sorted(target_dir.iterdir())
@@ -102,6 +113,33 @@ class FolderService:
                         "lock": False,
                         "shared": 0,
                     })
+
+        # Static folders at the labs root, listed ahead of the scan results
+        # as before. Shared is skipped when the scan already listed the real
+        # directory (dedupe by path, #285).
+        if is_root:
+            scanned_paths = {folder["path"] for folder in folders}
+            stubs = []
+            for name in STATIC_FOLDERS:
+                if name == "Shared":
+                    if "/Shared" not in scanned_paths:
+                        stubs.append(_shared_folder_entry())
+                else:
+                    stubs.append({
+                        "name": name,
+                        "path": f"/{name}",
+                        "umtime": int(time.time()),
+                        "mtime": _fmt_time(time.time()),
+                        "spy": -1,
+                        "lock": False,
+                        "shared": 0,
+                    })
+            folders = stubs + folders
+
+        # A folder-scoped user's root is their own folder, not the labs
+        # root — surface the shared space ahead of their folders (#285).
+        if at_user_root and not is_root and "/Shared" not in {f["path"] for f in folders}:
+            folders = [_shared_folder_entry()] + folders
 
         return {"folders": folders, "labs": labs}
 

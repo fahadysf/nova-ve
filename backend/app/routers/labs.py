@@ -4,6 +4,7 @@
 import asyncio
 import copy
 import logging
+import shutil
 import uuid
 from urllib.parse import quote
 
@@ -14,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.config import get_settings
 from app.dependencies import get_current_user
-from app.schemas.lab import LabMetaCreate, LabMetaUpdate
+from app.routers.folders import _scoped_folder_path
+from app.schemas.lab import LabMetaCreate, LabMetaUpdate, LabMoveRequest
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import (
     NodeBatchCreate,
@@ -147,6 +149,10 @@ def _user_root(current_user: UserRead) -> str:
 
 def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: bool) -> str:
     normalized = raw_path.strip().replace("\\", "/").strip("/")
+    # #285: /Shared is a real read-write space for every authenticated user,
+    # resolved at the labs root — never prefixed into a scoped user's root.
+    if normalized == "Shared" or normalized.startswith("Shared/"):
+        return normalized
     root = _user_root(current_user)
     if not root:
         return normalized
@@ -2920,4 +2926,77 @@ async def delete_lab(
         "code": 404,
         "status": "fail",
         "message": "Lab does not exist (60038).",
+    }
+
+
+@router.post("/_/{lab_path:path}/move")
+async def move_lab(
+    lab_path: str,
+    request: LabMoveRequest,
+    current_user: UserRead = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    lab_service = LabService(db)
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        scoped_target = _scoped_folder_path(current_user, request.target_folder, treat_as_absolute=True)
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    settings = get_settings()
+    try:
+        source = _lab_file_path(scoped_path)
+        new_relative = "/".join(part for part in [scoped_target, source.name] if part)
+        target = _lab_file_path(new_relative)
+    except ValueError as e:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    if not source.is_file():
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    if target.exists():
+        return {
+            "code": 409,
+            "status": "fail",
+            "message": f"Lab already exists at target: /{new_relative} (60039).",
+        }
+
+    # Lazy-create the target folder (including LABS_DIR/Shared on first use).
+    with lab_lock(scoped_path, settings.LABS_DIR):
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(source), str(target))
+        lab = await lab_service.get_lab_by_filename(scoped_path)
+        if lab is not None:
+            lab.filename = new_relative
+            lab.path = f"/{new_relative}"
+            try:
+                await db.commit()
+            except Exception:
+                shutil.move(str(target), str(source))
+                _logger.exception(
+                    "move_lab: DB update failed; rolled file back to %s",
+                    source,
+                )
+                return {
+                    "code": 500,
+                    "status": "fail",
+                    "message": "Lab move failed: could not update the lab record (60039).",
+                }
+
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Lab has been moved (60039).",
+        "data": {"path": f"/{new_relative}"},
     }

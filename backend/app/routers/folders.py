@@ -38,6 +38,10 @@ def _user_root(current_user: UserRead) -> str:
 
 def _scoped_folder_path(current_user: UserRead, raw_path: str, treat_as_absolute: bool) -> str:
     normalized = raw_path.strip().replace("\\", "/").strip("/")
+    # #285: /Shared is a real read-write space for every authenticated user,
+    # resolved at the labs root — never prefixed into a scoped user's root.
+    if normalized == "Shared" or normalized.startswith("Shared/"):
+        return normalized
     root = _user_root(current_user)
     if not root:
         return normalized
@@ -106,7 +110,7 @@ async def list_root(
 ):
     try:
         scoped_root = _scoped_folder_path(current_user, "", treat_as_absolute=False)
-        result = FolderService.list_folder(scoped_root, recursive=True)
+        result = FolderService.list_folder(scoped_root, recursive=True, at_user_root=True)
         result = await _merge_db_labs(result, db, scoped_root, recursive=True)
     except ValueError as e:
         return {
