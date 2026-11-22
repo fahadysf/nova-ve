@@ -476,6 +476,7 @@ export interface NodeCatalog {
   templates: NodeCatalogTemplate[];
   paired_templates?: NodeCatalogPairedTemplate[];
   icon_options: string[];
+  icon_assets?: string[];
   create_fields: string[];
   edit_fields: string[];
   runtime_editability: {

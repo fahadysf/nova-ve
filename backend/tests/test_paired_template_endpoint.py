@@ -595,6 +595,27 @@ async def test_206_paired_create_writes_synthetic_template_key_on_children(patch
     assert by_name["vMX VFP"]["template"] == "juniper-vmx__vfp"
 
 
+@pytest.mark.asyncio
+async def test_paired_child_creation_inherits_custom_icon(patched_split):
+    vcp = {**VMX_PAIRED_TEMPLATE["nodes"][0], "icon": "Router.png"}
+    vfp = VMX_PAIRED_TEMPLATE["nodes"][1]
+    _seed_paired_template(patched_split, {**VMX_PAIRED_TEMPLATE, "nodes": [vcp, vfp]})
+    lab_path = _seed_empty_lab(patched_split)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 200
+    nodes = json.loads(lab_path.read_text())["nodes"].values()
+    assert {node["name"]: node["icon"] for node in nodes} == {
+        "vMX VCP": "",
+        "vMX VFP": "Router.png",
+    }
+    assert TemplateService().get_template("qemu", "juniper-vmx__vcp").icon == "Router.png"
+
+
 def test_206_synthetic_key_helper_is_stable(patched_split):
     """synthetic_paired_child_key must produce the documented format and be
     importable from app.services.template_service so callers (including

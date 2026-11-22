@@ -9,6 +9,7 @@
     ChevronLeft,
     Eraser,
     LocateFixed,
+    LoaderCircle,
     Lock,
     LockOpen,
     Map as MapIcon,
@@ -17,6 +18,7 @@
     Pencil,
     Play,
     Plus,
+    RotateCcw,
     Square,
     Trash2,
     ZoomIn,
@@ -33,6 +35,7 @@
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import { apiRequest, ApiError } from '$lib/api';
+  import { nodeIconSources } from '$lib/services/nodeIcons';
   import CustomNode from '$lib/components/canvas/CustomNode.svelte';
   import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
   import NetworkNode from '$lib/components/canvas/NetworkNode.svelte';
@@ -87,6 +90,7 @@
   } from '$lib/types';
 
   export let labId: string;
+  export let zenMode = false;
   /** v2 links[] — the source of truth for edges (US-082). */
   /** v2 lab defaults (notably ``link_style`` for edge routing). */
   export let consoleSelectorWindows: ConsoleSelectorWindow[] = [];
@@ -120,6 +124,8 @@
   };
   type LinkEndpointKey = 'from' | 'to';
   type ConnectionPointRef = { linkId: string; endpointKey: LinkEndpointKey };
+  type LabNodeAction = 'start' | 'stop';
+  type NodeLifecycleAction = LabNodeAction | 'wipe';
   type ConnectionPointTarget =
     | {
         kind: 'node';
@@ -313,6 +319,12 @@
   let nodeActionSequence = 0;
   const nodeActionTokens = new Map<number, number>();
   const nodeActionPollSchedule = [0, 250, 500, 1000, 2000];
+  let canvasDestroyed = false;
+  let labNodeAction: { action: LabNodeAction; completed: number; total: number } | null = null;
+  const labControlButtonClass = 'inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-800 bg-gray-950/80 text-gray-200 transition enabled:hover:border-blue-500/40 enabled:hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
+
+  $: canStartLabNodes = Object.values($labState.nodes).some((node) => isEligibleForLabAction(node, 'start'));
+  $: canStopLabNodes = Object.values($labState.nodes).some((node) => isEligibleForLabAction(node, 'stop'));
   let menu:
     | {
         x: number;
@@ -449,52 +461,55 @@
 
   async function settleNodeAction(
     nodeId: number,
-    token: number,
-    action: 'start' | 'stop' | 'wipe',
+    actionLabId: string,
+    actionIsCurrent: () => boolean,
+    action: NodeLifecycleAction,
     targetStatus: 0 | 2,
-    transientStatus: 'starting' | 'stopping'
+    transientStatus: 'starting' | 'stopping',
+    bulk: boolean
   ) {
     for (const delayMs of nodeActionPollSchedule) {
-      if (nodeActionTokens.get(nodeId) !== token) {
-        return false;
-      }
-
       if (delayMs > 0) {
         await pause(delayMs);
       }
+      if (!actionIsCurrent()) return false;
 
-      const response = await apiRequest<Record<string, NodeData>>(`/labs/${labId}/nodes`, {
-        suppressToast: true,
-      });
-      const refreshedNode = response.data?.[String(nodeId)];
-      if (!refreshedNode) {
-        return false;
-      }
+      const nodesPath = `/labs/${actionLabId}/nodes`;
+      const options = { suppressToast: true };
+      // Bulk actions only need to refresh the affected node. Listing every
+      // node here would reconcile the entire lab once per action and poll.
+      const refreshedNode = bulk
+        ? (await apiRequest<NodeData>(`${nodesPath}/${nodeId}`, options)).data
+        : (await apiRequest<Record<string, NodeData>>(nodesPath, options)).data?.[String(nodeId)];
+      const currentNode = $labState.nodes[String(nodeId)];
+      if (!actionIsCurrent() || !refreshedNode || !currentNode) return false;
 
-      const nextNode =
-        refreshedNode.status === targetStatus
-          ? refreshedNode
-          : { ...refreshedNode, transientStatus };
-
-      labState.setNodes({
-        ...$labState.nodes,
-        [String(nodeId)]: nextNode,
-      });
-      publishFlowState();
-      dispatchCanvasChange(
-        refreshedNode.status === targetStatus ? `node-${action}` : `node-${action}-pending`,
-        {
-          nodeId,
-          node: deepClone(nextNode),
+      // A bulk run can outlast local canvas edits. Adopt just the refreshed
+      // runtime fields and preserve the current node's geometry and config.
+      const nextNode = bulk
+        ? {
+          ...currentNode,
+          status: refreshedNode.status,
+          cpu_usage: refreshedNode.cpu_usage,
+          ram_usage: refreshedNode.ram_usage,
         }
-      );
-
+        : { ...refreshedNode };
       if (refreshedNode.status === targetStatus) {
+        delete nextNode.transientStatus;
+        publishNodeAction(nextNode, `node-${action}`);
         return true;
       }
+      nextNode.transientStatus = transientStatus;
+      publishNodeAction(nextNode, `node-${action}-pending`);
     }
 
     return false;
+  }
+
+  function publishNodeAction(node: NodeData, reason: string) {
+    labState.upsertNode(node.id, node);
+    publishFlowState();
+    dispatchCanvasChange(reason, { nodeId: node.id, node: deepClone(node) });
   }
 
   // #275 (revision): hover focus — while a node is hovered (and no wire
@@ -833,6 +848,24 @@
     return Object.fromEntries(keys.map((key, index) => [key, separated[index]]));
   }
 
+  function projectNodeIcons(flowNodes: Node[]): Node[] {
+    const iconAssets = new Set(nodeCatalog?.icon_assets);
+    if (iconAssets.size === 0) return flowNodes;
+    const templateIcons = new Map(
+      nodeCatalog?.templates.map((template) => [
+        `${template.type}:${template.key}`,
+        template.defaults.icon
+      ])
+    );
+    return flowNodes.map((flowNode) => {
+      const node = flowNode.type === 'device' ? $labState.nodes[String(flowNode.data.nodeId)] : undefined;
+      if (!node) return flowNode;
+      const templateIcon = templateIcons.get(`${node.type}:${node.template}`);
+      const iconSources = nodeIconSources(node.icon, templateIcon, iconAssets);
+      return { ...flowNode, data: { ...flowNode.data, iconSources } };
+    });
+  }
+
   function buildFlowNodes(): Node[] {
     const flowNodes: Node[] = [];
     const connectionPointPositions = buildConnectionPointPositions();
@@ -844,7 +877,6 @@
         position: { x: node.left, y: node.top },
         data: {
           label: node.name,
-          icon: node.icon,
           status: node.status,
           transientStatus: node.transientStatus,
           type: node.type,
@@ -904,7 +936,7 @@
       });
     }
 
-    return flowNodes;
+    return projectNodeIcons(flowNodes);
   }
 
   function buildFlowEdges(): Edge[] {
@@ -1065,6 +1097,7 @@
         suppressToast: true
       });
       nodeCatalog = catalogResponse.data;
+      nodesStore.update(projectNodeIcons);
       paletteItems = NETWORK_PALETTE;
     } catch (_error) {
       paletteItems = NETWORK_PALETTE;
@@ -1417,8 +1450,89 @@
     return mode === 'serial' ? 'telnet' : mode;
   }
 
+  function isEligibleForLabAction(node: NodeData, action: LabNodeAction) {
+    return node.status === (action === 'start' ? 0 : 2) && !node.transientStatus;
+  }
+
+  async function runLabNodeAction(action: LabNodeAction) {
+    if (labNodeAction) return;
+    const candidates = Object.values($labState.nodes).filter((node) => isEligibleForLabAction(node, action));
+    if (!candidates.length) return;
+
+    const actionLabId = labId;
+    const stillInLab = () => !canvasDestroyed && labId === actionLabId;
+    const failures: Array<{ name: string; message: string }> = [];
+    let succeeded = 0;
+    labNodeAction = { action, completed: 0, total: candidates.length };
+    try {
+      // Run one lifecycle operation at a time so large labs don't flood the
+      // runtime with concurrent image copies, launches, or status requests.
+      for (const [index, candidate] of candidates.entries()) {
+        if (!stillInLab()) return;
+        const currentNode = $labState.nodes[String(candidate.id)];
+        if (currentNode && isEligibleForLabAction(currentNode, action) && !nodeActionTokens.has(currentNode.id)) {
+          try {
+            const settled = await runNodeLifecycle(action, currentNode, true);
+            if (settled) {
+              succeeded += 1;
+            } else {
+              failures.push({ name: currentNode.name, message: 'Node did not reach the requested state.' });
+            }
+          } catch (error) {
+            failures.push({
+              name: currentNode.name,
+              message: error instanceof Error ? error.message : 'The lifecycle request failed.',
+            });
+          }
+        }
+        labNodeAction = { action, completed: index + 1, total: candidates.length };
+      }
+
+      if (!stillInLab()) return;
+      const pastTense = action === 'start' ? 'Started' : 'Stopped';
+      const success = `${pastTense} ${succeeded} ${succeeded === 1 ? 'node' : 'nodes'}.`;
+      if (failures.length) {
+        const [first, ...remaining] = failures;
+        const more = remaining.length ? ` and ${remaining.length} more` : '';
+        toastStore.push(`${success} Failed to ${action} ${first.name}${more}. ${first.message}`, 'error');
+      } else {
+        toastStore.push(success, 'success');
+      }
+    } finally {
+      labNodeAction = null;
+    }
+  }
+
+  async function runNodeLifecycle(action: NodeLifecycleAction, node: NodeData, bulk = false) {
+    const { id: nodeId } = node;
+    if (nodeActionTokens.has(nodeId)) return false;
+    const actionLabId = labId;
+    const token = ++nodeActionSequence;
+    const actionIsCurrent = () => !canvasDestroyed && labId === actionLabId && nodeActionTokens.get(nodeId) === token;
+    const transientStatus = action === 'start' ? 'starting' : 'stopping';
+    const targetStatus = action === 'start' ? 2 : 0;
+
+    nodeActionTokens.set(nodeId, token);
+    publishNodeAction({ ...node, transientStatus }, `node-${action}-pending`);
+    try {
+      const options = bulk ? { suppressToast: true, retry: 0 } : undefined;
+      await apiRequest(`/labs/${actionLabId}/nodes/${nodeId}/${action}`, options);
+      return await settleNodeAction(nodeId, actionLabId, actionIsCurrent, action, targetStatus, transientStatus, bulk);
+    } finally {
+      if (actionIsCurrent()) {
+        const currentNode = $labState.nodes[String(nodeId)];
+        if (currentNode?.transientStatus === transientStatus) {
+          const cleanedNode = { ...currentNode };
+          delete cleanedNode.transientStatus;
+          publishNodeAction(cleanedNode, 'node-edit');
+        }
+      }
+      if (nodeActionTokens.get(nodeId) === token) nodeActionTokens.delete(nodeId);
+    }
+  }
+
   async function handleNodeAction(
-    action: 'start' | 'stop' | 'wipe' | 'delete' | 'console',
+    action: NodeLifecycleAction | 'delete' | 'console',
     targetId: string,
     consoleMode: 'primary' | 'second' = 'primary'
   ) {
@@ -1456,55 +1570,7 @@
       return;
     }
 
-    if (action === 'start') {
-      node.transientStatus = 'starting';
-    }
-    if (action === 'stop' || action === 'wipe') {
-      node.transientStatus = 'stopping';
-    }
-    const token = ++nodeActionSequence;
-    nodeActionTokens.set(decoded.id, token);
-    labState.setNodes({ ...$labState.nodes });
-    publishFlowState();
-    dispatchCanvasChange(`node-${action}-pending`, {
-      nodeId: decoded.id,
-      node: deepClone(node),
-    });
-
-    try {
-      await apiRequest(`/labs/${labId}/nodes/${decoded.id}/${action}`);
-      const targetStatus = action === 'start' ? 2 : 0;
-      const settled = await settleNodeAction(
-        decoded.id,
-        token,
-        action,
-        targetStatus,
-        action === 'start' ? 'starting' : 'stopping'
-      );
-      if (settled) {
-        nodeActionTokens.delete(decoded.id);
-        return;
-      }
-
-      delete node.transientStatus;
-      labState.setNodes({ ...$labState.nodes });
-      publishFlowState();
-      dispatchCanvasChange('node-edit', {
-        nodeId: decoded.id,
-        node: deepClone(node),
-      });
-      nodeActionTokens.delete(decoded.id);
-    } catch (error) {
-      delete node.transientStatus;
-      labState.setNodes({ ...$labState.nodes });
-      publishFlowState();
-      dispatchCanvasChange('node-edit', {
-        nodeId: decoded.id,
-        node: deepClone(node),
-      });
-      nodeActionTokens.delete(decoded.id);
-      throw error;
-    }
+    await runNodeLifecycle(action, node);
   }
 
   function handleEditNode(targetId: string) {
@@ -1636,6 +1702,7 @@
     target: ConnectionPointTarget,
     event: MouseEvent
   ) => {
+    if (zenMode) return;
     const point = eventPoint(event);
     closeAddMenu();
     portMenuTarget = target;
@@ -1689,12 +1756,14 @@
   }
 
   function handleWindowMouseMove(event: MouseEvent) {
+    if (zenMode) return;
     const snap = getDragLinkSnapshot();
     if (snap.state === 'idle' || snap.state === 'confirming') return;
     dragLinkStore.move({ pointer: { x: event.clientX, y: event.clientY } });
   }
 
   function handleWindowMouseUp(event: MouseEvent) {
+    if (zenMode) return;
     const snap = getDragLinkSnapshot();
     if (snap.state === 'idle' || snap.state === 'confirming') return;
     if (snap.state === 'near_target') {
@@ -1713,7 +1782,7 @@
   }
 
   function handleWindowKeyDown(event: KeyboardEvent) {
-    if (event.key !== 'Escape') return;
+    if (zenMode || event.key !== 'Escape') return;
     const snap = getDragLinkSnapshot();
     if (snap.state !== 'idle') {
       dragLinkStore.cancel();
@@ -1908,6 +1977,7 @@
   });
 
   onDestroy(() => {
+    canvasDestroyed = true;
     clearTopologyChangeBanner();
   });
 
@@ -2036,14 +2106,14 @@
   }
 </script>
 
-<div class="relative h-full w-full flex-1">
+<div class="relative h-full w-full flex-1" class:zen-mode={zenMode}>
   <SvelteFlow
     nodes={nodesStore}
     edges={edgesStore}
     {nodeTypes}
     {edgeTypes}
     fitView
-    nodesConnectable={!canvasLocked}
+    nodesConnectable={!canvasLocked && !zenMode}
     nodesDraggable={!canvasLocked}
     elementsSelectable={!canvasLocked}
     colorMode="dark"
@@ -2070,6 +2140,7 @@
     }}
     on:edgecontextmenu={(event: CustomEvent<{ edge: Edge; event: MouseEvent | TouchEvent }>) => {
       event.detail.event.preventDefault();
+      if (zenMode) return;
       const point = eventPoint(event.detail.event);
       selectedEdgeId = event.detail.edge.id;
       closeAddMenu();
@@ -2082,6 +2153,7 @@
     }}
     on:nodecontextmenu={(event: CustomEvent<{ node: Node; event: MouseEvent | TouchEvent }>) => {
       event.detail.event.preventDefault();
+      if (zenMode) return;
       const point = eventPoint(event.detail.event);
       closeAddMenu();
       menu = {
@@ -2108,6 +2180,7 @@
     }}
   >
     <Background patternColor="#374151" gap={20} />
+    {#if !zenMode}
     <!-- #273: the minimap starts collapsed to a small floating box (same
          style as the top-right legend). Expanding swaps the minimap INTO
          that corner spot — the box is replaced by the minimap itself,
@@ -2223,6 +2296,75 @@
             </div>
           </div>
         {/each}
+      </div>
+    </Panel>
+
+    <Panel position="center-left" class="lab-controls-panel">
+      <div class="relative flex items-center">
+        <div
+          role="group"
+          aria-label="Lab controls"
+          aria-busy={labNodeAction !== null}
+          class="flex flex-col gap-1 rounded-2xl border border-gray-700 bg-gray-900/95 p-1 shadow-2xl shadow-black/30 backdrop-blur"
+        >
+          <button
+            type="button"
+            class={labControlButtonClass}
+            disabled={labNodeAction !== null || !canStartLabNodes}
+            aria-label="Start all nodes"
+            title="Start all nodes"
+            on:click={() => runLabNodeAction('start')}
+          >
+            {#if labNodeAction?.action === 'start'}
+              <LoaderCircle class="h-5 w-5 animate-spin" aria-hidden="true" />
+            {:else}
+              <Play class="h-5 w-5" aria-hidden="true" />
+            {/if}
+          </button>
+          <button
+            type="button"
+            class={labControlButtonClass}
+            disabled={labNodeAction !== null || !canStopLabNodes}
+            aria-label="Stop all nodes"
+            title="Stop all nodes"
+            on:click={() => runLabNodeAction('stop')}
+          >
+            {#if labNodeAction?.action === 'stop'}
+              <LoaderCircle class="h-5 w-5 animate-spin" aria-hidden="true" />
+            {:else}
+              <Square class="h-5 w-5" aria-hidden="true" />
+            {/if}
+          </button>
+          <button
+            type="button"
+            class={labControlButtonClass}
+            disabled
+            aria-label="Restart all nodes"
+            title="Restart all nodes (unavailable)"
+          >
+            <RotateCcw class="h-5 w-5" aria-hidden="true" />
+          </button>
+          <button
+            type="button"
+            class={labControlButtonClass}
+            disabled
+            aria-label="Open all consoles"
+            title="Open all consoles (unavailable)"
+          >
+            <Monitor class="h-5 w-5" aria-hidden="true" />
+          </button>
+        </div>
+        <div
+          role="status"
+          class="pointer-events-none absolute left-full ml-2 whitespace-nowrap"
+        >
+          {#if labNodeAction}
+            <span class="rounded-xl border border-gray-700 bg-gray-900/95 px-2.5 py-2 text-xs text-gray-200 shadow-lg">
+              {labNodeAction.action === 'start' ? 'Starting' : 'Stopping'} nodes
+              ({labNodeAction.completed}/{labNodeAction.total})
+            </span>
+          {/if}
+        </div>
       </div>
     </Panel>
 
@@ -2364,9 +2506,10 @@
         {/if}
       </div>
     </Panel>
+    {/if}
   </SvelteFlow>
 
-  {#if selectedEdgeId}
+  {#if !zenMode && selectedEdgeId}
     <div class="absolute bottom-4 left-4 z-20 rounded-xl border border-gray-700 bg-gray-900/95 p-3 text-xs text-gray-200 shadow-lg shadow-black/20 backdrop-blur">
       <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Selected Link</div>
       <button
@@ -2384,7 +2527,7 @@
     </div>
   {/if}
 
-  {#if menu}
+  {#if !zenMode && menu}
     <div
       role="menu"
       tabindex="-1"
@@ -2506,7 +2649,7 @@
     </div>
   {/if}
 
-  {#if topologyChangeBanner}
+  {#if !zenMode && topologyChangeBanner}
     <div class="pointer-events-none absolute inset-x-4 top-4 z-40 flex justify-center" data-testid="topology-hotplug-banner">
       <div class="pointer-events-auto flex w-full max-w-xl items-start gap-3 rounded-2xl border border-amber-700/60 bg-amber-950/90 px-4 py-3 text-sm text-amber-100 shadow-2xl shadow-black/30 backdrop-blur">
         <div class="min-w-0 flex-1">
@@ -2526,14 +2669,17 @@
     </div>
   {/if}
 
+  <div hidden={zenMode} inert={zenMode}>
   <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
   <LinkConfirmModal
+    suspended={zenMode}
     nodes={$labState.nodes}
     links={$labState.links}
     on:confirm={handleLinkConfirm}
     on:cancel={handleLinkConfirmCancel}
   />
   <NetworkConfigModal
+    suspended={zenMode}
     open={networkModalOpen}
     defaultName={networkModalDefaultName}
     defaultType={networkModalDefaultType}
@@ -2541,7 +2687,7 @@
     on:cancel={onNetworkModalCancel}
   />
 
-  {#if selectedPortInfo}
+  {#if !zenMode && selectedPortInfo}
     {#if selectedPortInfo.kind === 'interface'}
       <PortInfoPopover
         kind="interface"
@@ -2592,9 +2738,21 @@
     }}
     on:submit={handleNodeModalSubmit}
   />
+  </div>
 </div>
 
 <style>
+  .zen-mode :global([data-port-node-id]),
+  .zen-mode :global([data-network-port-id]) {
+    pointer-events: none;
+  }
+
+  @media (max-height: 560px) {
+    :global(.svelte-flow__panel.lab-controls-panel) {
+      margin-left: 3.75rem;
+    }
+  }
+
   :global(.canvas-minimap) {
     overflow: hidden;
     border-radius: 0.75rem;

@@ -19,6 +19,7 @@
 
   export let nodes: Record<string, NodeData> = {};
   export let links: Link[] = [];
+  export let suspended = false;
 
   $: snapshot = $dragLinkStore;
   $: open = snapshot.state === 'confirming';
@@ -145,7 +146,8 @@
   }
 
   function onKey(event: KeyboardEvent) {
-    if (!open) return;
+    if (!open || suspended || event.defaultPrevented) return;
+    if (event.target instanceof HTMLElement && event.target !== document.body && !modalEl?.contains(event.target)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       close();

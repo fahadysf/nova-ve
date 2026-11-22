@@ -19,6 +19,19 @@ Templates pre-fill all the bits a runtime needs (image path, CPU, RAM, NIC count
 4. Click a template card to instantiate. The node lands on the canvas at the click point.
 5. Optionally edit the name / NIC count / per-port naming before clicking **Add**.
 
+## Canvas icons
+
+Place custom PNG, JPEG, WebP, or GIF files in the `icons/` subdirectory of
+`USER_TEMPLATES_DIR`. On a default install this is
+`/var/lib/nova-ve/templates/icons/`. The service must be able to read the files.
+
+To set a default for nodes created from a template, add `icon: edge-router.png`
+to that template's YAML. Reopen the lab editor to refresh its icon choices. In
+the node settings, select an image under **Icon** to override the template, or
+select **Use template default** to reset the override. The canvas tries the
+template icon when an override is unavailable, then uses its built-in glyph
+if neither image can be displayed.
+
 ## Without a template
 
 Use **Blank node** if you want full control:

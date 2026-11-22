@@ -38,6 +38,7 @@ from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeServi
 from app.services.template_service import (
     TemplateError,
     TemplateService,
+    _custom_icon_filename,
     _icon_filename_for,
     normalize_paired_child_kind,
     render_interface_name,
@@ -313,6 +314,10 @@ def _build_node_payload(
     template_extras = TemplateService().template_extras(request.type, request.template)
     request_extras = dict(getattr(request, "extras", None) or {})
     merged_extras = {**template_extras, **request_extras}
+    icon = request.icon
+    if icon is None:
+        # An empty override follows the template's current custom artwork.
+        icon = "" if getattr(template, "custom_icon", None) else _icon_filename_for(template.icon_type)
 
     if request.type == "qemu":
         if not merged_extras.get("uuid"):
@@ -338,7 +343,7 @@ def _build_node_payload(
         "firstmac": merged_extras.get("firstmac") if request.type == "qemu" else None,
         "left": left,
         "top": top,
-        "icon": request.icon if "icon" in provided_fields and request.icon else _icon_filename_for(template.icon_type),
+        "icon": icon,
         "width": "0",
         "config": False,
         "config_list": [],
@@ -947,6 +952,8 @@ def _build_paired_child_payload(
     child_type = normalize_paired_child_kind(child.get("kind"))
     ethernet = int(child.get("ethernet", 1))
     extras = dict(child.get("extras") or {})
+    icon_type = str(child.get("icon_type") or "router")
+    icon = "" if _custom_icon_filename(child.get("icon")) else _icon_filename_for(icon_type)
 
     if child_type == "qemu":
         if not extras.get("uuid"):
@@ -991,7 +998,7 @@ def _build_paired_child_payload(
         "firstmac": extras.get("firstmac") if child_type == "qemu" else None,
         "left": left,
         "top": top,
-        "icon": _icon_filename_for(str(child.get("icon_type") or "router")),
+        "icon": icon,
         "width": "0",
         "config": False,
         "config_list": [],

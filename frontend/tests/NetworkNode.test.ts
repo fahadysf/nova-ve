@@ -40,6 +40,7 @@ describe('NetworkNode', () => {
 
     expect(screen.getByText('edge-transport-bridge-01')).toBeInTheDocument();
     expect(screen.queryByText('Network')).toBeNull();
+    expect(screen.getByTestId('network-node').querySelector('svg.h-5.w-5')).toBeInTheDocument();
   });
 
   it('places the info button at the bottom-right corner inside the network box', () => {

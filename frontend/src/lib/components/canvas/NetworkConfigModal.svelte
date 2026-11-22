@@ -6,6 +6,7 @@
   import type { NetworkCreateConfig, NetworkType } from '$lib/types';
 
   export let open = false;
+  export let suspended = false;
   export let defaultName = '';
   export let defaultType: NetworkType = 'linux_bridge';
 
@@ -166,6 +167,7 @@
 
   async function focusName() {
     await tick();
+    if (suspended) return;
     nameInputEl?.focus();
     nameInputEl?.select();
   }
@@ -195,7 +197,8 @@
   }
 
   function onKey(event: KeyboardEvent) {
-    if (!open) return;
+    if (!open || suspended || event.defaultPrevented) return;
+    if (event.target instanceof HTMLElement && event.target !== document.body && !modalEl?.contains(event.target)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       cancel();

@@ -10,6 +10,7 @@
   import { createEventDispatcher } from 'svelte';
 
   export let labId: string = '';
+  export let zenMode = false;
   export let consoleSelectorWindows: unknown = undefined;
   export let consoleMinimizedWindows: unknown = undefined;
 
@@ -25,7 +26,7 @@
   }
 </script>
 
-<div data-testid="topology-canvas-stub">
+<div data-testid="topology-canvas-stub" data-zen-mode={zenMode}>
   <button type="button" data-testid="canvas-console-button" on:click={fireConsole}>
     Fire console
   </button>

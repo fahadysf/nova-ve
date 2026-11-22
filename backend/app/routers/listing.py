@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 from app.dependencies import get_current_admin, get_current_user
 from app.openapi import COMMON_RESPONSES
@@ -6,6 +7,19 @@ from app.schemas.user import UserRead
 from app.services.template_service import TemplateError, TemplateService
 
 router = APIRouter(prefix="/api/list", tags=["list"], responses=COMMON_RESPONSES)
+
+
+@router.get("/icons/{filename}", response_class=FileResponse)
+def get_node_icon(filename: str, current_user: UserRead = Depends(get_current_user)):
+    asset = TemplateService().icon_asset(filename)
+    if asset is None:
+        raise HTTPException(status_code=404, detail="Node icon does not exist.")
+    path, media_type = asset
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "private"},
+    )
 
 
 @router.get("/templates/{template_type}")

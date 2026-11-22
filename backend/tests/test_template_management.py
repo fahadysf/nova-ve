@@ -1,12 +1,16 @@
+from base64 import b64decode
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from starlette.datastructures import UploadFile
 
+from app.dependencies import get_current_user
+from app.main import app
 from app.routers import labs, listing
-from app.schemas.node import NodeBatchCreate, NodeCreate
+from app.schemas.node import NodeBatchCreate, NodeCreate, NodeFromTemplate, NodeUpdate
 from app.services.lab_service import LabService
 from app.services.template_service import TemplateService
 
@@ -107,6 +111,103 @@ async def test_list_templates_images_and_upload(prepared_template_data):
     catalog = TemplateService().build_node_catalog()
     assert catalog["templates"][0]["defaults"]["icon"] == "Router.png"
     assert "Router.png" in catalog["icon_options"]
+
+
+@pytest.mark.asyncio
+async def test_canvas_icon_catalog_serving_and_override(prepared_template_data, monkeypatch):
+    settings = prepared_template_data
+    settings.USER_TEMPLATES_DIR = settings.TEMPLATES_DIR.parent / "user-templates"
+    icons = settings.USER_TEMPLATES_DIR / "icons"
+    icons.mkdir(parents=True)
+    png = b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAADUlEQVR4nGP4DwQMDAAR9QP9WWIlXQAAAABJRU5ErkJggg=="
+    )
+    (icons / "default.png").write_bytes(png)
+    (icons / "custom node.png").write_bytes(png)
+    (icons / "unsupported.svg").write_text("<svg/>")
+    (icons / "linked.png").symlink_to(icons / "default.png")
+    template = settings.TEMPLATES_DIR / "qemu" / "csr.yml"
+    template.write_text(template.read_text() + "icon: default.png\n")
+
+    current_user = SimpleNamespace(username="admin", role="admin")
+    monkeypatch.setitem(app.dependency_overrides, get_current_user, lambda: current_user)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/list/icons/custom%20node.png")
+        assert response.status_code == 200
+        assert response.content == png
+        assert response.headers["content-type"] == "image/png"
+        assert response.headers["x-content-type-options"] == "nosniff"
+        for filename in ("missing.png", "linked.png", "unsupported.svg"):
+            response = await client.get(f"/api/list/icons/{filename}")
+            assert response.status_code == 404
+
+    catalog = await labs.node_catalog("demo.json", current_user=current_user)
+    assert catalog["data"]["templates"][0]["defaults"]["icon"] == "default.png"
+    assert catalog["data"]["icon_assets"] == ["custom node.png", "default.png"]
+
+    created = await labs.create_node(
+        "demo.json",
+        NodeCreate(name="edge", type="qemu", template="csr", image="csr1000v", icon=""),
+        current_user=current_user,
+    )
+    assert created["data"]["icon"] == ""
+
+    for icon in ("custom node.png", ""):
+        updated = await labs.update_node(
+            "demo.json", 1, NodeUpdate(icon=icon), current_user=current_user
+        )
+        assert updated["data"]["icon"] == icon
+        lab_data = LabService.read_lab_json_static("demo.json")
+        assert lab_data["nodes"]["1"]["icon"] == icon
+
+
+def test_canvas_icon_rejects_a_symlinked_registry(patched_template_settings, tmp_path):
+    settings = patched_template_settings
+    settings.USER_TEMPLATES_DIR = tmp_path / "user-templates"
+    settings.USER_TEMPLATES_DIR.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "outside.png").touch()
+    (settings.USER_TEMPLATES_DIR / "icons").symlink_to(outside, target_is_directory=True)
+
+    service = TemplateService()
+    assert service.list_icon_assets() == []
+    assert service.icon_asset("outside.png") is None
+
+
+@pytest.mark.asyncio
+async def test_api_node_creation_inherits_omitted_custom_icon(prepared_template_data):
+    template = prepared_template_data.TEMPLATES_DIR / "qemu" / "csr.yml"
+    template.write_text(template.read_text() + "icon: missing.png\n")
+    current_user = SimpleNamespace(username="admin", role="admin")
+
+    created = await labs.create_node(
+        "demo.json",
+        NodeCreate(name="edge", type="qemu", template="csr", image="csr1000v"),
+        current_user=current_user,
+    )
+    assert created["data"]["icon"] == ""
+
+    batch = await labs.create_nodes_batch(
+        "demo.json",
+        NodeBatchCreate(type="qemu", template="csr", image="csr1000v"),
+        current_user=current_user,
+    )
+    assert batch["data"]["nodes"][0]["icon"] == ""
+
+    from_template = await labs.create_node_from_template(
+        "demo.json",
+        NodeFromTemplate(template_type="qemu", template_key="csr", name="template-edge", image="csr1000v"),
+        current_user=current_user,
+    )
+    assert from_template["data"]["icon"] == ""
+
+    saved = LabService.read_lab_json_static("demo.json")
+    assert len(saved["nodes"]) == 3
+    assert all(node["icon"] == "" for node in saved["nodes"].values())
+    catalog = TemplateService().build_node_catalog()
+    assert catalog["templates"][0]["defaults"]["icon"] == "missing.png"
+    assert "missing.png" not in catalog["icon_assets"]
 
 
 def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(

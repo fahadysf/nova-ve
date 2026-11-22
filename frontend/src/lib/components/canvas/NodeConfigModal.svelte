@@ -335,7 +335,7 @@
       name = node.name;
       namePrefix = node.name;
       image = node.image;
-      icon = node.icon;
+      icon = node.icon ?? '';
       count = 1;
       placement = 'grid';
       cpu = node.cpu;
@@ -373,6 +373,7 @@
     options: { force?: boolean } = {}
   ) {
     const force = options.force === true;
+    if (force) icon = '';
     const setIfClean = <T>(field: string, current: T, next: T): T => {
       if (force || !dirty[field]) {
         return next;
@@ -382,7 +383,6 @@
 
     if (!template) {
       image = setIfClean('image', image, '');
-      icon = setIfClean('icon', icon, '');
       cpu = setIfClean('cpu', cpu, 1);
       ram = setIfClean('ram', ram, 1024);
       ethernet = setIfClean('ethernet', ethernet, 1);
@@ -395,7 +395,6 @@
     }
 
     image = setIfClean('image', image, template.defaults.image);
-    icon = setIfClean('icon', icon, template.defaults.icon);
     cpu = setIfClean('cpu', cpu, template.defaults.cpu);
     ram = setIfClean('ram', ram, template.defaults.ram);
     ethernet = setIfClean('ethernet', ethernet, template.defaults.ethernet);
@@ -591,6 +590,10 @@
     initializeForm();
   }
   $: selectedTemplate = templateForId(selectedTemplateId);
+  $: defaultIcon = mode === 'edit' && selectedTemplate?.key !== node?.template
+    ? undefined
+    : selectedTemplate?.defaults.icon;
+  $: iconAssets = catalog?.icon_assets ?? [];
   $: displayedCapabilities = displayedCapabilitiesFor(selectedTemplate);
   $: selectedImageOption = imageOptionFor(selectedTemplate, image);
   $: currentConsoleType = mode === 'edit' && node ? node.type : selectedTemplate?.type ?? selectedType;
@@ -927,10 +930,16 @@
                 <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Icon</div>
                 <select
                   bind:value={icon}
-                  on:change={() => markDirty('icon')}
+                  aria-label="Icon"
                   class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                 >
-                  {#each selectedTemplate?.icon_options ?? catalog.icon_options as iconOption}
+                  <option value="">
+                    Use template default{defaultIcon && iconAssets.includes(defaultIcon) ? ` (${defaultIcon})` : ''}
+                  </option>
+                  {#if icon && !iconAssets.includes(icon)}
+                    <option value={icon}>{icon} (unavailable)</option>
+                  {/if}
+                  {#each iconAssets as iconOption}
                     <option value={iconOption}>{iconOption}</option>
                   {/each}
                 </select>
