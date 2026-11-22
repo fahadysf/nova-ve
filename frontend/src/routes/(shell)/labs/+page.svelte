@@ -4,12 +4,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { apiGetData, apiRequest, ApiError } from '$lib/api';
+  import { apiGetData, apiRequest, ApiError, moveLab } from '$lib/api';
   import { authStore } from '$lib/stores/auth';
   import { toastStore } from '$lib/stores/toasts';
   import type { FolderEntry, FolderListing, LabListItem } from '$lib/types';
 
-  const STATIC_ROOT_FOLDERS = new Set(['Running', 'Shared', 'Users']);
+  const STATIC_ROOT_FOLDERS = new Set(['Running', 'Users']);
 
   let currentFolder = '';
   let folders: FolderEntry[] = [];
@@ -195,6 +195,50 @@
     }
   }
 
+  let movePicker: { lab: LabListItem; options: string[] } | null = null;
+  let moveDestination = '';
+
+  async function openMovePicker(lab: LabListItem) {
+    busy = true;
+    try {
+      const tree = await apiGetData<FolderListing>('/folders/');
+      const paths = new Set<string>(['/Shared']);
+      for (const folder of tree.folders || []) {
+        const normalized = normalizePath(folder.path);
+        if (normalized) paths.add(normalized);
+      }
+      const currentDir = normalizePath(lab.path.split('/').slice(0, -1).join('/'));
+      const options = [...paths].filter((path) => path !== currentDir).sort();
+      moveDestination = options[0] || '/Shared';
+      movePicker = { lab, options };
+    } catch (_error) {
+      // toast already handled by api layer
+    } finally {
+      busy = false;
+    }
+  }
+
+  function cancelMove() {
+    movePicker = null;
+    moveDestination = '';
+  }
+
+  async function confirmMove() {
+    if (!movePicker || !moveDestination) return;
+    busy = true;
+    try {
+      await moveLab(movePicker.lab.path, moveDestination);
+      toastStore.push(`Lab moved to ${moveDestination}.`, 'success');
+      movePicker = null;
+      moveDestination = '';
+      await fetchContents(currentFolder);
+    } catch (_error) {
+      // toast already handled by api layer
+    } finally {
+      busy = false;
+    }
+  }
+
   function goToRoot() {
     void fetchContents('');
   }
@@ -310,6 +354,9 @@
                   <button class="w-full text-left" on:click={() => openFolder(folder)}>
                     <div class="font-medium text-gray-100">{folder.name}</div>
                     <div class="mt-2 font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">{folder.path}</div>
+                    {#if folder.path === '/Shared'}
+                      <span class="mt-2 inline-block rounded border border-blue-500/40 px-2 py-0.5 text-[9px] uppercase tracking-[0.18em] text-blue-300">Shared space</span>
+                    {/if}
                     {#if folder.mtime}
                       <div class="mt-3 text-sm text-gray-500">{folder.mtime}</div>
                     {/if}
@@ -365,6 +412,13 @@
                       Open
                     </button>
                     <button
+                      class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white disabled:opacity-40"
+                      disabled={busy}
+                      on:click={() => openMovePicker(lab)}
+                    >
+                      Move…
+                    </button>
+                    <button
                       class="rounded-md border border-red-500/40 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-red-200 transition hover:bg-red-500/10"
                       on:click={() => deleteLab(lab)}
                     >
@@ -376,6 +430,42 @@
             </div>
           {/if}
         </section>
+      {/if}
+
+      {#if movePicker}
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div class="w-full max-w-md rounded-2xl border border-gray-700 bg-gray-900 p-5">
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Move lab</div>
+            <h2 class="mt-2 text-lg font-semibold text-gray-100">{movePicker.lab.file}</h2>
+            <label for="move-destination" class="mt-4 block text-[10px] uppercase tracking-[0.05em] text-gray-500">
+              Target folder
+            </label>
+            <select
+              id="move-destination"
+              bind:value={moveDestination}
+              class="mt-2 w-full rounded-md border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-100"
+            >
+              {#each movePicker.options as option}
+                <option value={option}>{option}</option>
+              {/each}
+            </select>
+            <div class="mt-5 flex justify-end gap-2">
+              <button
+                class="rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+                on:click={cancelMove}
+              >
+                Cancel
+              </button>
+              <button
+                class="rounded-md border border-blue-500 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-blue-200 transition hover:bg-blue-500/10 disabled:opacity-40"
+                disabled={busy || !moveDestination}
+                on:click={confirmMove}
+              >
+                Move
+              </button>
+            </div>
+          </div>
+        </div>
       {/if}
   </div>
 </div>
