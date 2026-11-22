@@ -20,7 +20,7 @@ Direct pushes to the upstream repository are reserved for project maintainers.
 ## Before You Start
 
 - Read [README.md](README.md) for project context and conventions
-- Review the relevant documents in `research/` before changing API behavior
+- Review the relevant documents in [docs/](docs/index.md) (see especially [docs/development/](docs/development/index.md)) before changing API behavior
 - Prefer discussing large changes in an issue before starting implementation
 
 ## Ground Rules
@@ -48,7 +48,7 @@ Run backend checks:
 
 ```bash
 cd backend
-PYTHONPATH=. .venv/bin/pytest
+.venv/bin/python -m pytest tests/
 ```
 
 ### Frontend
@@ -57,6 +57,7 @@ PYTHONPATH=. .venv/bin/pytest
 cd frontend
 npm install
 npm run check
+npm test
 npm run build
 ```
 
@@ -78,16 +79,17 @@ Please include, at minimum:
 
 - backend test results if backend code changed
 - frontend `npm run check` results if frontend code changed
+- frontend `npm test` results if frontend code changed
 - frontend `npm run build` results if frontend code changed
 - any manual test notes for behavior that is not yet automated
 
 ## Commit Guidance
 
-Commits should be small, coherent, and easy to review.
-
-This repository uses structured commit messages with decision-record trailers.
-If you are contributing through a PR, clean, descriptive commits are preferred
-even if maintainers later squash or rewrite history.
+Commits should be small, coherent, and easy to review — one topic per
+commit, with a concise subject line that references the related issue
+where applicable (this is the style practiced on `main`). If you are
+contributing through a PR, clean, descriptive commits are preferred even
+if maintainers later squash or rewrite history.
 
 ## Licensing
 
