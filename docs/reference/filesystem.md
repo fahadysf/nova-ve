@@ -6,10 +6,15 @@ Every path nova-ve writes to or reads from, in one table.
 
 | Path | Owner | Mode | Purpose |
 |---|---|---|---|
-| `/var/lib/nova-ve/labs/` | `nova-ve` service user | 0700 | Lab JSON files + per-node runtime state. |
-| `/var/lib/nova-ve/labs/<lab>.json` | `nova-ve` service user | 0600 | A single lab's topology. |
-| `/var/lib/nova-ve/labs/<lab>.json.lock` | `nova-ve` service user | 0600 | Cooperative write lock. |
-| `/var/lib/nova-ve/labs/<lab>/<node-id>/` | `nova-ve` service user | 0700 | Per-node runtime state (qcow2 overlays, console-log files). |
+| `/var/lib/nova-ve/labs/` | `nova-ve` service user | 0755 | Lab JSON files. |
+| `/var/lib/nova-ve/labs/<lab>.json` | `nova-ve` service user | 0644 (umask) | A single lab's topology. |
+| `/var/lib/nova-ve/labs/<lab>.json.lock` | `nova-ve` service user | 0644 (umask) | Cooperative write lock. |
+| `/var/lib/nova-ve/tmp/<lab>/<node-id>/` | `nova-ve` service user | 0755 | Per-node runtime state — qcow2 overlays, stdout/stderr logs, QMP sockets. |
+| `/var/lib/nova-ve/tmp/node-runtime/` | `nova-ve` service user | 0755 | Persisted per-node runtime records (`<lab>-<node>.json`). |
+| `/var/lib/nova-ve/runtime/pids.json` | `nova-ve` service user | 0644 | Registered process PIDs (survive backend restarts for re-adoption). |
+| `/var/lib/nova-ve/system-settings.json` | `nova-ve` service user | 0644 (umask) | Persisted editable settings (apply at backend startup). |
+| `/var/lib/nova-ve/iourc/` | `nova-ve` service user | 0700 | System IOURC license directory for IOL nodes. |
+| `/var/lib/nova-ve/guacamole/` | root | 0755 | Guacamole compose stack state. |
 | `/var/lib/nova-ve/images/` | `nova-ve` service user | 0755 | Vendor base images. |
 | `/var/lib/nova-ve/images/<kind>/<key>/` | `nova-ve` service user | 0755 | Per-image bundle (qemu / dynamips / iol / docker). |
 | `/var/lib/nova-ve/templates/` | `nova-ve` service user | 0755 | Node templates (importer output + hand-authored). |
@@ -39,8 +44,11 @@ Every path nova-ve writes to or reads from, in one table.
 
 | Path | Owner | Mode | Purpose |
 |---|---|---|---|
-| `/opt/nova-ve/bin/` | root | 0755 | Privileged network helper binaries. |
-| `/opt/nova-ve/bin/nova-ve-net` | root | 0755 | Bridge / veth / TAP operations. Invoked via sudo from the backend. |
+| `/opt/nova-ve/bin/` | root | 0755 | Privileged helper binaries. |
+| `/opt/nova-ve/bin/nova-ve-net.py` | root | 0755 | Bridge / veth / TAP / NAT / dnsmasq operations. Invoked via sudo from the backend. |
+| `/opt/nova-ve/bin/nova-ve-console-proxy.py` | root | 0755 | Console TCP forwarder for Docker / Dynamips consoles. |
+| `/opt/nova-ve/bin/nova-ve-backup.py` | root | 0755 | Netplan snapshot / restore used by Bridge-Cloud provisioning. |
+| `/opt/nova-ve/qemu/<version>/` | root | 0755 | Side-by-side QEMU builds for per-node QEMU version selection (installed by `install.sh` from the `nova-ve-qemu` pack; optional). |
 
 ## What you can safely move
 

@@ -48,8 +48,8 @@ The FastAPI backend is the only writer to lab JSON. The frontend treats the lab 
 | Concern | Source of truth |
 |---|---|
 | Lab topology (nodes / networks / links / per-node config) | `<lab>.json` |
-| Runtime state (running PIDs, live MACs, interface attachments) | In-memory runtime tracker in the backend |
-| Per-node disk overlays | `<lab>/<node-id>/` on the host filesystem |
+| Runtime state (running PIDs, live MACs, interface attachments) | In-memory runtime tracker in the backend, persisted to `tmp/node-runtime/` + `runtime/pids.json` |
+| Per-node disk overlays | `tmp/<lab>/<node-id>/` on the host filesystem |
 | User accounts, sessions, audit log | Postgres `novadb` |
 | Vendor base images | `/var/lib/nova-ve/images/<kind>/<key>/` |
 | Templates | `/var/lib/nova-ve/templates/<vendor>/<key>.json` |
@@ -68,7 +68,7 @@ The FastAPI backend is the only writer to lab JSON. The frontend treats the lab 
 
 - **The backend does not self-migrate.** Alembic migrations are operator-driven (`alembic upgrade head` then restart). The contract lets the unit fail fast on missing migrations rather than silently mutate the schema.
 - **The privileged helper is the only path to host networking.** The backend never calls `ip link` or `brctl` directly; everything goes through `/opt/nova-ve/bin/nova-ve-net` via the sudoers fragment.
-- **Lab JSON is the topology source of truth.** Runtime state is derived, not authoritative. After a restart, the backend re-derives runtime state from the lab JSON, not the other way around.
+- **Lab JSON is the topology source of truth.** Runtime state is derived, not authoritative. After a restart, the backend rebuilds runtime state from the lab JSON **plus** process re-adoption: orphan QEMU processes that survived the restart are identified and re-registered from their argv and the persisted PID/runtime records.
 
 ## Further reading
 

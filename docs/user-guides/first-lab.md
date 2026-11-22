@@ -9,7 +9,7 @@ A lab in nova-ve is a JSON file under `/var/lib/nova-ve/labs/` that describes a 
 3. Give the lab a name (this becomes the filename — `<name>.json`).
 4. The editor opens with an empty canvas.
 
-The lab JSON is created server-side at `/var/lib/nova-ve/labs/<name>.json`. It is owned by root with mode `0600`; reading it directly from the host requires `sudo cat`.
+The lab JSON is created server-side at `/var/lib/nova-ve/labs/<name>.json`. It is owned by the `nova-ve` service user; reading it directly from the host may require `sudo`, depending on the host's permission setup.
 
 ## What you can do next
 
@@ -17,7 +17,7 @@ The lab JSON is created server-side at `/var/lib/nova-ve/labs/<name>.json`. It i
 - **Add networks** — Linux bridges (or OVS bridges) that act as L2 hubs between nodes. The canvas calls these "Network" pills with a count badge.
 - **Wire them together** — drag from a node port to a network or another node port. See [Connecting nodes](connecting-nodes.md).
 - **Start nodes** — right-click a node → Start, or use the lab-level Start All control.
-- **Open consoles** — once a node is running, click its console icon to open a Guacamole HTML5 console. See [Console access](console-access.md).
+- **Open consoles** — once a node is running, right-click it → **Console** to open a Guacamole HTML5 console. See [Console access](console-access.md).
 
 ## Anatomy of the editor
 
@@ -25,7 +25,7 @@ The lab JSON is created server-side at `/var/lib/nova-ve/labs/<name>.json`. It i
 |---|---|
 | Top bar | Lab name + path + metric pills (Nodes / Running / Networks / vCPU) and console-layout selector |
 | Canvas | The main drag-pannable Svelte Flow canvas with nodes, networks, and links |
-| Palette (left) | Add new nodes / networks; opens a modal for templated nodes |
+| Add menu (round **+** button, bottom-left) | Adds nodes and networks via a small menu; opens the template-based "Add node" modal |
 | Info panels (top-left, floating) | Up to 4 draggable panels with per-node or per-network metadata |
 | Console workspace | A tabbed (or floating) console pane that hosts Guacamole sessions |
 

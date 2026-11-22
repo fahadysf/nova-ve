@@ -15,6 +15,8 @@ A working nova-ve install carries state in three places. A complete backup captu
 
 ## The two backups you should automate
 
+The commands below use `rsync`, which is not part of the provisioner's package list — `apt-get install rsync` if it is missing on your host.
+
 **A — Application state (small, fast, frequent):**
 
 ```bash

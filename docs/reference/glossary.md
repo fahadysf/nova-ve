@@ -6,7 +6,7 @@ Project-specific terms, in alphabetical order.
 :   A Python class under `backend/scripts/import_eveng/adapters/` that converts one EVE-NG template into one nova-ve template. See [Vendor coverage](../importing-eveng/vendor-coverage.md).
 
 **Bridge**
-:   Synonym for **network** in nova-ve. The host-side Linux bridge (or OVS bridge) that joins node interfaces at L2. Bridge name: `nove<lab_hash:04x>n<network_id>`.
+:   Synonym for **network** in nova-ve. The host-side Linux bridge that joins node interfaces at L2. Bridge name: `nove<lab_hash:04x>n<network_id>`.
 
 **Canvas**
 :   The drag-pannable Svelte Flow editor surface in the lab UI.
@@ -27,10 +27,10 @@ Project-specific terms, in alphabetical order.
 :   The 0-based ordinal position of an interface within a node's NIC list. Used as the stable key for (node, interface) tuples in link endpoints and runtime attachment records.
 
 **KVM acceleration**
-:   The hardware-virtualization mode that makes QEMU nodes fast. Requires VT-x (Intel) or AMD-V (AMD) plus the `kvm` and `kvm-intel` / `kvm-amd` kernel modules. Verify with `kvm-ok`.
+:   The hardware-virtualization mode that makes QEMU nodes fast. Requires VT-x (Intel) or AMD-V (AMD) plus the `kvm` and `kvm-intel` / `kvm-amd` kernel modules. Verify with `egrep -c '(vmx|svm)' /proc/cpuinfo`.
 
 **Lab**
-:   A JSON file under `/var/lib/nova-ve/labs/` plus its per-node runtime state directory. Owned by the `nova-ve` service user, mode 0600 / 0700.
+:   A JSON file under `/var/lib/nova-ve/labs/` describing the topology, plus its per-node runtime state under `/var/lib/nova-ve/tmp/`. Owned by the `nova-ve` service user.
 
 **Link**
 :   An attachment between two endpoints. One endpoint is always a node interface; the other is either a node interface (peer link) or a network (network link).
@@ -39,7 +39,7 @@ Project-specific terms, in alphabetical order.
 :   The MAC address currently bound to a running node's interface, as observed by the backend MAC reader. Compared against the planned MAC to flag mismatches in the port tooltip.
 
 **`needs-manual-review`**
-:   A template status flag the importer sets when an adapter cannot fully convert an EVE-NG template. The parsed-but-unconverted EVE-NG fields land under `_eveng_raw` for human inspection. See [Reading the manifest](../importing-eveng/manifest.md).
+:   A template status flag the importer sets when an adapter cannot fully convert a source template. The manifest entry carries a human-readable `reason`. See [Reading the manifest](../importing-eveng/manifest.md).
 
 **Open slot**
 :   The always-empty connection slot on a network pill, used to draw a new link. A network with N existing links displays N + 1 slots; the last one is the open slot.
@@ -63,7 +63,7 @@ Project-specific terms, in alphabetical order.
 :   The 0-based ordinal slot position on a network pill. Slot 0 is the lexicographically-first attached link; slot N (where N is the link count) is the always-open free slot.
 
 **Template**
-:   A JSON file under `/var/lib/nova-ve/templates/<vendor>/<key>.json` that pre-fills the parameters of a new node. Sourced from the EVE-NG importer or hand-authored.
+:   A JSON or YAML file under `/var/lib/nova-ve/templates/<vendor>/` that pre-fills the parameters of a new node. Sourced from the EVE-NG importer (YAML) or hand-authored (JSON).
 
 **veth pair**
 :   The pair of virtual Ethernet devices used to connect a Docker container to a host bridge. One end lives in the container's network namespace; the other end is enslaved to the bridge.

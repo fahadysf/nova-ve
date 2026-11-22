@@ -93,7 +93,7 @@ nova-ve generates collision-resistant Linux bridge and TAP interface names using
 `/etc/nova-ve/instance_id` holds a UUID (generated via `/proc/sys/kernel/random/uuid` at first provisioning).
 The backend derives a 16-bit `lab_hash = blake2b(instance_id + ":" + lab_id, digest_size=2)` used in:
 - Bridge names: `nove{lab_hash:04x}n{network_id}` (≤14 chars)
-- TAP names: `nve{lab_hash:04x}d{node_id}i{iface}` (≤13 chars)
+- TAP names: `nve{lab_hash:04x}d{node_id}i{iface}` (≤14 chars)
 
 ### Rules
 
@@ -107,17 +107,16 @@ The backend derives a 16-bit `lab_hash = blake2b(instance_id + ":" + lab_id, dig
   or empty. There is no silent fallback — this is intentional to prevent bridge name
   collisions across hosts.
 
-### Temporary override (non-production only)
+### Temporary relocation (non-production only)
 
-To run the backend on a dev machine without a provisioned file, set both:
+There is no env-var override for the instance UUID value itself — startup fails
+hard without the file. On a dev machine you can point the backend at a different
+file location instead:
 ```
-NOVA_VE_INSTANCE_ID=<some-uuid>
-NOVA_VE_INSTANCE_ID_OVERRIDE_OK=1
+NOVA_VE_INSTANCE_ID_FILE=/path/to/instance_id     # default /etc/nova-ve/instance_id
+NOVA_VE_INSTANCE_DIR=/path/to/dir                 # dir to auto-create the file in
 ```
-The backend will emit a `WARNING` on every startup when these are active.
-This override is **not suitable for production** — persist via the deploy script instead.
-The override env var is ignored if the file exists (file-wins precedence prevents a stale
-shell variable from silently colliding bridge names against a production host).
+This is **not suitable for production** — provisioning writes the canonical file.
 
 ## Toolchain Expectations
 
@@ -135,7 +134,7 @@ them only when an operator has a specific reason to deviate.
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
-| `NOVA_VE_DISCOVERY_CADENCE_SECONDS` | `30` | `[5, 300]` | Period of the discovery loop that walks each lab network's Linux bridge (`bridge link show master <bridge>`) plus container netns and cross-references against `links[]`. Discrepancies emit a `discovered_link` WS event consumed by the canvas overlay. Out-of-range values fail backend startup. Edits take effect within one cycle once the settings cache is reloaded (`systemctl reload nova-ve-backend.service`). |
+| `NOVA_VE_DISCOVERY_CADENCE_SECONDS` | `30` | `[5, 300]` | Period of the discovery loop that walks each lab network's Linux bridge (`bridge link show master <bridge>`) plus container netns and cross-references against `links[]`. Discrepancies emit a `discovered_link` WS event consumed by the canvas overlay. Out-of-range values fail backend startup. Also editable in the UI (System → Settings); edits persist to `system-settings.json` and apply at the next backend restart (`systemctl restart nova-ve-backend.service` — the unit has no reload action). |
 | `NOVA_VE_NAT_CLOUD_POOL` | `10.255.0.0/16` | IPv4 CIDR, prefix `/0`-`/24` | Root pool for auto-allocating one `/24` per NAT-Cloud network. |
 
 ## Health And Smoke Checks

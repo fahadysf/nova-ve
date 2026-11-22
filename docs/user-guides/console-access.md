@@ -5,8 +5,14 @@ nova-ve uses Apache Guacamole for HTML5 consoles. Telnet, VNC, and supported RDP
 ## Opening a console
 
 1. Start the node (right-click → Start, or use Start All from the lab top bar).
-2. Once the status badge flips to **running** (emerald), click the console icon on the node card.
+2. Once the status badge flips to **running** (emerald), right-click the node and pick **Console** — or **2nd Console** if the node has a secondary console configured.
 3. The Guacamole pane opens in the lab's console workspace.
+
+## Native clients (optional)
+
+With an externally reachable console host configured (System → Settings → Networking → *External console host*), console launches emit `telnet://`, `vnc://`, or `rdp://` links for your OS protocol handler instead of opening the embedded workspace — provided your desktop has a handler registered for the scheme. With no host configured, everything stays in-browser.
+
+Every running node's console also listens directly on the nova-ve host in a fixed per-protocol port range — telnet/serial 15000–20000, VNC 25000–30000, RDP 35000–40000 — so you can dial a console by hand from any client. The advertised links use whatever reachable host name/IP you configured.
 
 ## Layout modes
 
@@ -27,7 +33,7 @@ You can flip modes any time — existing consoles re-flow into the new layout.
 | QEMU/KVM | VNC or telnet | VNC is the expected graphical console for desktop/server guests such as Windows. QEMU RDP is not advertised because RDP runs inside the guest OS and needs guest IP and credential handling. |
 | IOL / Dynamips | Telnet | Vendor IOL and Dynamips images speak telnet on a per-node port. |
 
-The exact console type is template-defined and constrained by node type. Blank nodes default to the safest supported console for their runtime.
+The exact console type is template-defined and constrained by node type. A node can also declare a **secondary console** (a second telnet or VNC session, set in the node editor); it takes effect at the node's next start and gets its own **2nd Console** entry in the context menu.
 
 ## Closing / minimizing
 

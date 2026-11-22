@@ -4,8 +4,8 @@ Dynamips emulates Cisco router hardware by running an unpacked IOS `.bin`
 image under a MIPS/PowerPC instruction translator. nova-ve Phase 1 supports
 two platforms:
 
-- **c3725** — 2 NM slots (slot 0 = built-in `GT96100-FE` 2-port
-  FastEthernet, slot 1 user-configurable). Lightweight; IOS 12.4 fits.
+- **c3725** — 3 NM slots (slot 0 = built-in `GT96100-FE` 2-port
+  FastEthernet, slots 1–2 user-configurable). Lightweight; IOS 12.4 fits.
 - **c7200** — 7 PA slots, configurable NPE / midplane. Beefier; more
   interface types.
 
@@ -85,10 +85,11 @@ the change). Phase 1 deliberately keeps this off:
 > Adding, removing, or rewiring a link on a Dynamips node requires
 > stopping the node and starting it again.
 
-The canvas surfaces this as a "restart required" indicator on the
-affected node after a link change. The same rule applies to `iol`
-nodes today and is intentional — see issue #180 for the broader
-hot-attach roadmap.
+For IOL nodes — and for nodes whose template disables hotplug — the
+canvas blocks the drag outright and shows a "Restart required to change
+topology" banner for a few seconds. Dynamips templates default to
+`hotplug: true`, so a link change on a running Dynamips node commits to
+the lab JSON and binds at the node's next start.
 
 ## Authoring a template by hand
 
@@ -134,10 +135,12 @@ The frontend's node-edit modal will let you override `idlepc`,
 ## Phase 1 limitations recap
 
 - **Platforms:** c3725 + c7200 only.
-- **Hot-attach:** not supported. Link changes require node restart.
-- **Calibration CLI:** the planned `nova-ve dynamips calibrate <image>`
-  CLI subcommand is Phase 1B. For now: rely on EVE-NG-imported idle-PCs
-  or set them manually.
+- **Hot-attach:** not supported. Link changes bind at the node's next start.
+- **Calibration API:** idle-PC calibration is available via
+  `POST /api/dynamips/calibrate` — it boots a throwaway VM against one
+  image and populates the per-image cache. There is no CLI subcommand or
+  UI affordance for it yet; template- or node-level `idlepc` values are
+  the usual path.
 
 ## IOL / IOU nodes
 

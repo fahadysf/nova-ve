@@ -1,116 +1,53 @@
 # Node Add/Edit Workflow Architecture
 
+!!! note "Status: implemented"
+    Everything in this design record has shipped: the node catalog
+    (`GET /api/labs/{lab}/node-catalog`), the batch-create route
+    (`POST /api/labs/{lab}/nodes/batch`), the shared `NodeConfigModal.svelte`
+    (add + edit), the `Edit Node` context-menu action, server-side
+    runtime-aware editability, and per-node advanced extras (`qemu_nic`,
+    `qemu_version`, `architecture`, `nested_virt`, `boot_order`,
+    `qemu_options`, `firstmac`). The "Original state" and "Proposed"
+    sections below are kept as the historical design record.
+
 ## Purpose
 
-Define a durable architecture for replacing the current inline node picker with a centered, capability-driven add-node workflow and a shared edit-node workflow.
+Define a durable architecture for replacing the original inline node picker with a centered, capability-driven add-node workflow and a shared edit-node workflow.
 
-This work is broader than a visual polish pass. The current UI only exposes a thin template/image picker, while the requested experience needs richer frontend forms plus backend contracts that can validate, persist, and enforce runtime-aware editability.
+This work was broader than a visual polish pass: the starting UI only exposed a thin template/image picker, while the target experience needed richer frontend forms plus backend contracts that can validate, persist, and enforce runtime-aware editability.
 
-## Current State
+## Original state (historical, pre-implementation)
 
 ### Frontend
 
 - `frontend/src/lib/components/canvas/TopologyCanvas.svelte`
-  - `+` already opens the correct first step: `Node` vs `Network`.
-  - Choosing `Node` currently opens an inline scrollable list anchored to the bottom-left canvas control area.
-  - `createNodeAt()` posts a single node to `POST /api/labs/{lab}/nodes` with only:
-    - `name`
-    - `type`
-    - `template`
-    - `image`
-    - `left`
-    - `top`
-  - The node context menu exposes `Start`, `Stop`, `Wipe`, `Console`, and `Delete Node`, but no `Edit Node`.
+  - `+` opened a first step: `Node` vs `Network`.
+  - Choosing `Node` opened an inline scrollable list anchored to the bottom-left canvas control area.
+  - Node creation posted a single node to `POST /api/labs/{lab}/nodes` with only `name` / `type` / `template` / `image` / `left` / `top`.
+  - The node context menu exposed `Start`, `Stop`, `Wipe`, `Console`, and `Delete Node`, but no `Edit Node`.
 
 ### Backend
 
 - `backend/app/schemas/node.py`
-  - `NodeCreate` supports:
-    - `name`
-    - `type`
-    - `template`
-    - `image`
-    - `console`
-    - `cpu`
-    - `ram`
-    - `ethernet`
-    - `left`
-    - `top`
-  - `NodeUpdate` supports:
-    - `name`
-    - `cpu`
-    - `ram`
-    - `ethernet`
-    - `left`
-    - `top`
-    - `icon`
-    - `config`
+  - `NodeCreate` supported only `name` / `type` / `template` / `image` / `console` / `cpu` / `ram` / `ethernet` / `left` / `top`.
+  - `NodeUpdate` supported only `name` / `cpu` / `ram` / `ethernet` / `left` / `top` / `icon` / `config`.
 - `backend/app/routers/labs.py`
-  - `create_node()` applies template defaults and writes one node at a time.
-  - `update_node()` writes the provided fields directly and resizes interfaces.
-  - There is no batch-create route.
-  - There is no server-side editability policy based on running state.
+  - `create_node()` applied template defaults and wrote one node at a time.
+  - No batch-create route, no server-side editability policy based on running state.
 - `backend/app/services/template_service.py`
-  - exposes template defaults and available images
-  - does not expose a single node-catalog or form-schema payload
-  - does not expose an icon catalog
+  - exposed template defaults and available images, but no node-catalog/form-schema payload and no icon catalog.
 - `backend/app/services/node_runtime_service.py`
-  - current runtime actually honors only a subset of node fields at start time:
-    - `name`
-    - `image`
-    - `console`
-    - `cpu`
-    - `ram`
-    - `ethernet`
-    - `uuid`
-    - `firstmac`
-  - it does not currently honor per-node overrides for advanced template fields like `qemu_version`, `qemu_arch`, `qemu_nic`, or arbitrary `qemu_options`
+  - honored only `name` / `image` / `console` / `cpu` / `ram` / `ethernet` / `uuid` / `firstmac` at start time; no per-node overrides for advanced template fields.
 
-## External Reference Summary
+## Field model (neutral checklist)
 
-### EVE-NG
+The node authoring surface covers these fields, grouped by role:
 
-Reference material reviewed:
-
-- EVE-NG API docs: `https://www.eve-ng.net/index.php/how-to-eve-ng-api/`
-- EVE cookbook snippets surfaced from the published cookbook PDFs
-
-Observed common add-node fields:
-
-- template
-- number of nodes to add
-- image
-- name/prefix
-- icon
-- UUID
-- CPU limit
-- CPU
-- RAM
-- ethernets
-- delay
-- console
-- left/top
-
-Observed advanced fields in the cookbook UI:
-
-- qemu version
-- qemu arch
-- qemu nic
-- qemu custom options
-- startup configuration
-
-### PNETLab
-
-Reference material reviewed:
-
-- `https://github.com/pnetlab/pnetlab_main`
-- `https://pnetlab.com/pages/documentation`
-
-Observed patterns:
-
-- templates carry defaults like `icon`, `cpu`, `ram`, `ethernet`, and `console`
-- the platform treats node resource controls and icon choice as first-class concerns
-- the UI model is template-driven rather than hard-coded per one frontend list shape
+- **Identity**: template, image, name prefix, count, icon, UUID.
+- **Resources**: CPU (+ CPU limit), RAM, ethernet count, delay.
+- **Console**: primary console type, optional secondary console.
+- **Placement**: left/top anchor, grid/row multi-add placement.
+- **Advanced extras (per-type, stopped-only unless marked runtime)**: `qemu_nic` (NIC model), `qemu_version` (side-by-side QEMU build), `architecture`, `nested_virt`, `boot_order`, `qemu_options` (custom args), `firstmac`.
 
 ## Design Decision
 
@@ -305,21 +242,7 @@ This keeps the behavior predictable and avoids stacking all new nodes at the exa
 
 ### 7. Advanced Template-Specific Fields
 
-The reference products expose more fields than the current runtime can honor safely.
-
-For this tracker:
-
-- support the common cross-template fields listed above end-to-end
-- design the node catalog payload so future per-template advanced fields can be added
-- do not fake support for fields that the runtime ignores today
-
-Explicitly out of scope for the first implementation unless backend runtime support is added in the same tracker:
-
-- per-node `qemu_version`
-- per-node `qemu_arch`
-- per-node `qemu_nic`
-- arbitrary per-node `qemu_options`
-- HDD sizing/management
+Now implemented (see the status banner): the runtime honors per-node `qemu_nic`, `qemu_version`, `architecture` (`qemu_arch` was renamed during implementation), `nested_virt`, `boot_order`, arbitrary `qemu_options`, and `firstmac` — all exposed through the catalog's `extras_schema` with `stoppedOnly` / `runtime` flags. HDD sizing/management remains future work.
 
 ## Issue Slices
 

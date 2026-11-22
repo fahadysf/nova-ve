@@ -30,7 +30,7 @@ Each vendor directory (`/opt/unetlab/addons/qemu/<vendor-ver>/`) is treated as o
 3. `hda.qcow2`
 4. The lexicographically-first `*.qcow2`
 
-The chosen boot disk is recorded in the manifest as `meta.boot_disk` on the imported entry. In the default mode the destination dir also keeps the stable `cdrom.iso` handle: a symlink inside the destination pointing at the chosen boot disk.
+In the default mode the destination dir keeps the stable `cdrom.iso` handle: a symlink inside the destination pointing at the chosen boot disk.
 
 ## Dynamips images
 
@@ -38,7 +38,7 @@ Each `*.image` file under `addons/dynamips/` becomes a single-file image: it is 
 
 ## IOL images
 
-Each `*.bin` file under `addons/iol/bin/` becomes one image: moved like the other kinds. **The `iourc` license file is the exception — it stays copy-based** even in the default mode, because it is one shared license referenced by every IOL image; moving it for the first image would break the others. The importer records `meta.iourc_present` (`true` / `false`) on every IOL entry.
+Each `*.bin` file under `addons/iol/bin/` becomes one image: moved like the other kinds. **The `iourc` license file is the exception — it stays copy-based** even in the default mode, because it is one shared license referenced by every IOL image; moving it for the first image would break the others. An IOL image imported with no license file found gets a `needs-manual-review` template entry noting the missing license.
 
 At runtime nova-ve first uses an image-local `iourc` next to the selected IOL image. If that file is absent, it falls back to the system IOURC directory, `/var/lib/nova-ve/iourc/` by default. Upload the license from the IOL node add modal, or place a valid file in that directory manually. The node add modal shows whether the system IOURC license is installed and displays the host identity details needed to prepare a license.
 
@@ -68,8 +68,8 @@ jq '.imported[] | select(.dst | contains("/qemu/vyos-1.4/"))' \
 jq '.imported[] | select(.symlinked == true) | .dst' \
   /var/lib/nova-ve/import-manifest.json
 
-# Show every IOL image that landed without a license file:
-jq '.imported[] | select(.dst | contains("/iol/")) | select(.meta.iourc_present == false)' \
+# Show IOL templates flagged for a missing license file:
+jq '.templates[] | select(.status == "needs-manual-review")' \
   /var/lib/nova-ve/import-manifest.json
 ```
 

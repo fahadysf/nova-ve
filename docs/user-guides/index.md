@@ -6,6 +6,7 @@ Hands-on workflows for the things you will do most often as an operator.
 2. [Adding nodes](adding-nodes.md)
 3. [Connecting nodes](connecting-nodes.md)
 4. [Console access](console-access.md)
-5. [The lab canvas](canvas.md) — info panels, top-bar metrics, link boldening, pinned port labels
-6. [NAT-Cloud networks](nat-cloud-networks.md) — DHCP and outbound NAT for lab clients
-7. [Lab lifecycle](lab-lifecycle.md) — start, stop, save, fork
+5. [Dynamips nodes](dynamips-nodes.md) — Cisco IOS routers and IOL/IOU license handling
+6. [The lab canvas](canvas.md) — info panels, top-bar metrics, minimap, hover focus, pinned port labels
+7. [NAT-Cloud networks](nat-cloud-networks.md) — DHCP and outbound NAT for lab clients
+8. [Lab lifecycle](lab-lifecycle.md) — start, stop, save, delete

@@ -17,14 +17,14 @@ The pills update in real time as you add / remove / start / stop things.
 
 Every node and every network has a small `(i)` button:
 
-- **Nodes** — bottom-left corner of the node card.
+- **Nodes** — bottom-right corner of the node card.
 - **Networks** — inline next to the connection count badge.
 
 Click it to open an **info panel** — a floating, draggable panel anchored to the top-left of the canvas. Panels stack vertically with a 12 px gap. You can have **up to 4 panels open at once**; opening a fifth evicts the oldest (LRU drop).
 
 | Panel kind | Fields shown |
 |---|---|
-| Node | ID, Type, Template, Console, Image, CPU, RAM, NICs, Status, Runtime PID, IPs |
+| Node | ID, Type, Template, Console, Image, CPU, RAM, NICs, Status, PID, IPs |
 | Network | ID, Type, Links, Visible, Bridge name, Driver, Created at, Position |
 
 Drag a panel by its header. The pointer-capture model keeps the drag alive even when the pointer crosses other elements. Viewport clamping ensures at least 48 px of the panel header stays on-screen so you can always grab it back.
@@ -53,6 +53,17 @@ When you first open a lab, the canvas shows a single full-width dashed-bordered 
 | Pinch (trackpad) | Same as scroll |
 | Click + drag on empty canvas | Pan |
 | Click + drag on a node | Move the node |
-| Shift + click + drag on a port | Reposition the port around the node's perimeter |
 
-Port positions are persisted to the lab JSON automatically (with a small debounce window so a continuous drag commits once at the end).
+Port (connection-point) positions are computed automatically from the topology — each port sits on the side of the node it faces, with a minimum-gap spread so they never overlap. Ports cannot be dragged, and nothing per-port is stored in the lab JSON.
+
+## Minimap
+
+The minimap is collapsed to a small **Minimap** chip in the bottom-right corner of the canvas by default. Clicking the chip expands the minimap in place of the chip (same corner), and a minimize button on the expanded minimap collapses it back. The choice is remembered per browser profile.
+
+## Hover focus
+
+Hovering a node **pulses the outline** of the hovered node and every node it is (directly or through a network) connected to — the outline color animates between light and dark on both the node card and its icon container, so the related set stands out. Nothing else changes: other nodes and links keep their normal look.
+
+## Run-state ring
+
+Each node's icon container carries a 2 px outline ring that mirrors the status dot: emerald while the node is running, amber while it is starting/stopping, gray when stopped.

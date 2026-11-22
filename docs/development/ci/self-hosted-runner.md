@@ -1,8 +1,6 @@
 # GitHub Self-Hosted Runner
 
-This repository now expects the CI workflow to run on a labeled self-hosted runner instead of GitHub-hosted `ubuntu-latest`.
-
-The workflow is intentionally limited to `push` on `main` plus `workflow_dispatch`. It does **not** run `pull_request` on the privileged self-hosted runner by default.
+The CI workflow (`.github/workflows/ci.yml`) currently runs on GitHub-hosted `ubuntu-latest` runners and triggers on `push` to `main` and `pull_request` targeting `main`. This page documents how to register a **self-hosted runner** and switch the workflow to it (change `runs-on: ubuntu-latest` to the label set below) if you want CI on your own hardware.
 
 Required labels:
 
@@ -68,16 +66,13 @@ sudo ./svc.sh start
 
 Confirm the runner is online in GitHub, then trigger the workflow manually with `workflow_dispatch`.
 
-Expected capabilities:
+Expected capabilities (what the current workflow needs):
 
-- `docker compose config -q`
-- `docker compose up -d db`
-- backend `pytest`, import, and `compileall`
-- frontend `npm ci`, `npm run check`, and `npm run build`
+- backend `pytest`, import, and `compileall` (no live database — the suite runs without one)
+- frontend `npm install`, `npm run check`, `npm test`, and `npm run build`
 
 ## Operational Notes
 
 - Do not route untrusted `pull_request` jobs onto this runner while it has Docker-capable host access.
-- The workflow now includes a `docker compose down -v || true` cleanup step before the compose smoke test to reduce stale self-hosted-runner state.
 - The runner user must remain in the `docker` group.
 - Keep the runner patched, and avoid using it as a shared general-purpose VM.
