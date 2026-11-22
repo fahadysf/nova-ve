@@ -140,6 +140,10 @@ class DockerImageService:
         "alpine:latest",
         "nginx:alpine",
         "busybox:latest",
+        # Platform containers (#288) — data-only in sandbox mode; the
+        # declared-image templates resolve without a daemon.
+        "nova-ve/mgmt-server:latest",
+        "nova-ve/browser:latest",
     )
 
     def list_all_images(self) -> list[ImageRecord]:

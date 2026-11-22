@@ -1,0 +1,18 @@
+type: docker
+name: Mgmt Server
+description: >-
+  Management workstation (EVE eve-gui-server analog, no GUI): python3,
+  ansible, napalm, netmiko, sshd, iperf3, tcpdump, git. Telnet console in
+  the browser; SSH over the mgmt0 address (lab-default root/nova, override
+  via extras environment NOVA_VE_MGMT_PASSWORD). Requires the platform image
+  nova-ve/mgmt-server:latest — build it with
+  deploy/scripts/build-platform-images.sh.
+cpulimit: 1
+icon_type: server
+cpu: 1
+ram: 1024
+ethernet: 1
+console_type: telnet
+image: nova-ve/mgmt-server:latest
+extras:
+  mgmt_access: "true"
