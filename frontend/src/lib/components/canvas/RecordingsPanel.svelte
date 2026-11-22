@@ -24,6 +24,7 @@
     filename: string;
     title: string;
     started_at: string;
+    stopped_at: string | null;
     duration: number;
     cast_size: number;
     log_size: number;
@@ -109,7 +110,7 @@
       <div>
         <h2 class="text-sm font-semibold text-gray-100">Session recordings</h2>
         <p class="mt-0.5 text-[11px] text-gray-500">
-          Telnet console sessions are recorded automatically. Recordings include everything shown and typed, including passwords.
+          Use the red record button in a telnet console window to start and stop recording. Recordings include everything shown and typed, including passwords.
         </p>
       </div>
       <div class="flex items-center gap-2">
@@ -131,7 +132,7 @@
             <div class="p-4 text-xs text-red-300">{error}</div>
           {:else if recordings.length === 0}
             <div class="p-4 text-xs leading-relaxed text-gray-500">
-              No recordings yet. Open a node's telnet console in this lab — the session is recorded automatically and appears here.
+              No recordings yet. Open a node's telnet console and press the hollow red record button to start recording; press it again to stop. Each start/stop cycle saves one recording.
             </div>
           {:else}
             {#each recordings as recording (recording.id)}
@@ -150,6 +151,13 @@
                   {/if}
                 </div>
                 <div class="mt-0.5 text-[11px] text-gray-500">{new Date(recording.started_at).toLocaleString()}</div>
+                <div class="mt-0.5 text-[10px] text-gray-600">
+                  {#if recording.in_progress}
+                    recording…
+                  {:else if recording.stopped_at}
+                    stopped {new Date(recording.stopped_at).toLocaleString()}
+                  {/if}
+                </div>
                 <div class="mt-0.5 font-mono text-[10px] text-gray-600">
                   {formatDuration(recording.duration)} · {formatSize(recording.log_size)}
                 </div>

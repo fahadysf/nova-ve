@@ -40,6 +40,12 @@ require_floor() {
   say "$1 version $2.$3 >= floor $4.$5"
 }
 
+listener_up() {
+  # listener_up <port> — busybox netstat is present in every platform image;
+  # pgrep -x is NOT reliable across busybox versions (comm matching differs).
+  run "netstat -ltn 2>/dev/null | grep -q ':$1 '"
+}
+
 case "$kind" in
   mgmt-server)
     python_version="$(run 'python3 -c "import sys; print(f\"{sys.version_info.major} {sys.version_info.minor}\")"')" \
@@ -65,11 +71,11 @@ case "$kind" in
     netmiko_minor="$(echo "$netmiko_version" | cut -d. -f2)"
     require_floor "netmiko" "$netmiko_major" "$netmiko_minor" 4 4
 
-    run 'pgrep -x sshd >/dev/null' || fail "sshd is not running"
-    say "sshd running (port 22)"
+    listener_up 22 || fail "sshd is not listening on 22"
+    say "sshd listening (port 22)"
 
-    run 'pgrep -x telnetd >/dev/null' || fail "telnetd is not running"
-    say "telnet console running (port 23)"
+    listener_up 23 || fail "telnet console is not listening on 23"
+    say "telnet console listening (port 23)"
 
     for tool in ssh iperf3 tcpdump git curl; do
       run "command -v $tool >/dev/null" || fail "$tool missing"
@@ -82,18 +88,17 @@ case "$kind" in
     firefox_minor="$(echo "$firefox_version" | awk '{print $NF}' | cut -d. -f2)"
     require_floor "firefox" "$firefox_major" "$firefox_minor" 125 0
 
+    listener_up 5900 || fail "VNC console is not listening on 5900"
+    say "VNC console listening (port 5900)"
+
+    listener_up 23 || fail "telnet second console is not listening on 23"
+    say "telnet second console listening (port 23)"
+
     run 'pgrep -x Xvfb >/dev/null' || fail "Xvfb is not running"
     say "Xvfb running"
 
-    run 'pgrep -x x11vnc >/dev/null' || fail "x11vnc is not running"
-    say "VNC console running (port 5900)"
-
     run 'pgrep -x openbox >/dev/null' || fail "openbox is not running"
     say "window manager running"
-
-    # Console shell for the telnet second console.
-    run 'pgrep -x telnetd >/dev/null' || fail "telnetd (second console) is not running"
-    say "telnet second console running (port 23)"
     ;;
 esac
 

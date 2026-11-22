@@ -27,6 +27,7 @@
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
   import RecordingsPanel from '$lib/components/canvas/RecordingsPanel.svelte';
+  import RecordButton from '$lib/components/canvas/RecordButton.svelte';
   import InfoPanelStack from '$lib/components/canvas/InfoPanelStack.svelte';
   import { infoPanels } from '$lib/stores/infoPanels';
   import type {
@@ -534,10 +535,43 @@
   }
 
   function isRecordedTab(tab: ConsoleTab): boolean {
-    // #291: in-built telnet consoles are recorded; vnc/rdp are not.
+    // #291: in-built telnet consoles can be recorded; vnc/rdp cannot.
     const node = $labState.nodes?.[tab.nodeId];
     const mode = tab.mode === 'second' ? node?.secondConsole : node?.console;
     return (mode ?? 'telnet') === 'telnet';
+  }
+
+  // #291: on-demand recording state per console tab (recording off by default).
+  let recordingStates: Record<number, boolean> = {};
+
+  async function refreshRecordingState(tab: ConsoleTab) {
+    try {
+      const response = await apiRequest<{ recording: boolean }>(
+        `/labs/${labId}/nodes/${tab.nodeId}/recording?console=${tab.mode}`
+      );
+      recordingStates = { ...recordingStates, [tab.id]: response.data.recording };
+    } catch {
+      // Status is best-effort; the record toggle surfaces real errors.
+    }
+  }
+
+  async function toggleRecording(tab: ConsoleTab) {
+    const action = recordingStates[tab.id] ? 'stop' : 'start';
+    try {
+      const response = await apiRequest<{ recording: boolean }>(
+        `/labs/${labId}/nodes/${tab.nodeId}/recording`,
+        { method: 'POST', body: { action, console: tab.mode } }
+      );
+      recordingStates = { ...recordingStates, [tab.id]: response.data.recording };
+      toastStore.push(
+        action === 'start'
+          ? `Recording ${tab.nodeName} console — press the red button again to stop.`
+          : `Recording of ${tab.nodeName} stopped and saved.`,
+        'success'
+      );
+    } catch {
+      // apiRequest already raised an error toast.
+    }
   }
 
   function consoleIframe(tabId?: number): HTMLIFrameElement | null {
@@ -804,6 +838,7 @@
       nextWorkspace.zStack = [...nextWorkspace.zStack, nextTab.id];
     }
     consoleWorkspace = nextWorkspace;
+    void refreshRecordingState(nextTab);
     await tick();
     focusGuacamoleWindow(nextTab.id);
   }
@@ -851,6 +886,8 @@
   async function reloadConsole() {
     const activeTab = activeConsoleTab();
     if (!activeTab || !consoleWorkspace) return;
+    // A reload opens a fresh console session, which starts unrecorded.
+    recordingStates = { ...recordingStates, [activeTab.id]: false };
     consoleWorkspace = {
       ...consoleWorkspace,
       minimized: false,
@@ -1291,6 +1328,12 @@
                 </div>
               </div>
               <div class="flex items-center gap-2">
+                {#if activeConsoleTabState && isRecordedTab(activeConsoleTabState)}
+                  <RecordButton
+                    recording={!!recordingStates[activeConsoleTabState.id]}
+                    onToggle={() => activeConsoleTabState && toggleRecording(activeConsoleTabState)}
+                  />
+                {/if}
                 <label class="sr-only" for="console-node-select">Console target</label>
                 <select
                   id="console-node-select"
@@ -1328,10 +1371,10 @@
                       on:pointerdown|stopPropagation
                       on:click={() => selectConsoleTab(tab.id)}
                     >
-                      {#if isRecordedTab(tab)}
+                      {#if recordingStates[tab.id]}
                         <span
                           class="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-red-500 align-middle"
-                          title="This telnet console session is being recorded (asciinema .cast + raw log)"
+                          title="Recording in progress — press the record button in the console window to stop"
                         ></span>
                       {/if}
                       {tab.nodeName}
@@ -1438,6 +1481,12 @@
                   </div>
                 </div>
                 <div class="flex items-center gap-2">
+                  {#if isRecordedTab(tab)}
+                    <RecordButton
+                      recording={!!recordingStates[tab.id]}
+                      onToggle={() => toggleRecording(tab)}
+                    />
+                  {/if}
                   <button
                     type="button"
                     aria-label={`Reload ${tab.nodeName} console`}
