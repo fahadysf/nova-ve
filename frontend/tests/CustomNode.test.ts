@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import { render, screen } from '@testing-library/svelte';
+import { fireEvent, render, screen } from '@testing-library/svelte';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { tick } from 'svelte';
 
@@ -17,12 +17,43 @@ vi.mock('@xyflow/svelte', async () => {
 });
 
 import CustomNode from '$lib/components/canvas/CustomNode.svelte';
+import { nodeIconSources } from '$lib/services/nodeIcons';
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 describe('CustomNode', () => {
+  it('tries the registered node icon, then the template icon, and falls back to a larger glyph', async () => {
+    const assets = new Set(['custom node.png', 'template.png']);
+    const iconSources = nodeIconSources('custom node.png', 'template.png', assets);
+    render(CustomNode, { props: { data: { label: 'edge', iconSources } } });
+    const icon = screen.getByTestId('node-icon-container');
+
+    const overrideImage = icon.querySelector('img')!;
+    expect(overrideImage).toHaveAttribute('src', '/api/list/icons/custom%20node.png');
+    await fireEvent.load(overrideImage);
+    expect(overrideImage).toHaveClass('h-6', 'w-6', 'object-contain');
+    expect(overrideImage).not.toHaveClass('hidden');
+
+    await fireEvent.error(overrideImage);
+    const templateImage = icon.querySelector('img')!;
+    expect(templateImage).toHaveAttribute('src', '/api/list/icons/template.png');
+
+    await fireEvent.error(templateImage);
+    expect(icon.querySelector('img')).toBeNull();
+    expect(icon.querySelector('svg')).toHaveClass('h-6', 'w-6');
+  });
+
+  it('uses the template for inherited or unregistered node icons', () => {
+    const assets = new Set(['template.png']);
+    const expected = ['/api/list/icons/template.png'];
+    expect(nodeIconSources('', 'template.png', assets)).toEqual(expected);
+    expect(nodeIconSources('legacy.png', 'template.png', assets)).toEqual(expected);
+    expect(nodeIconSources('template.png', 'template.png', assets)).toEqual(expected);
+    expect(nodeIconSources('legacy.png', 'missing.png', assets)).toEqual([]);
+  });
+
   it('shows hostname only on the node face without template metadata', () => {
     render(CustomNode, {
       props: {

@@ -319,6 +319,29 @@ ICON_TYPE_TO_FILENAME = {
     "host": "Server.png",
 }
 
+ICON_MEDIA_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+
+
+def _icon_media_type(filename: str) -> str | None:
+    if (
+        not filename
+        or filename.startswith(".")
+        or len(os.fsencode(filename)) > 255
+        or any(c in filename for c in ("/", "\\", "\0"))
+    ):
+        return None
+    return ICON_MEDIA_TYPES.get(Path(filename).suffix.lower())
+
+
+def _custom_icon_filename(icon: Any) -> str | None:
+    return icon if isinstance(icon, str) and _icon_media_type(icon) else None
+
 
 def _icon_filename_for(icon_type: str) -> str:
     return ICON_TYPE_TO_FILENAME.get(icon_type.strip().lower(), "Router.png")
@@ -985,6 +1008,14 @@ class TemplateDefinition:
     # resolving them by key for edit-mode lookups and capability gates.
     paired_parent: str | None = None
 
+    @property
+    def custom_icon(self) -> str | None:
+        return _custom_icon_filename(self.raw.get("icon"))
+
+    @property
+    def icon(self) -> str:
+        return self.custom_icon or _icon_filename_for(self.icon_type)
+
     def as_response(self) -> dict[str, Any]:
         return {
             "id": self.key,
@@ -993,7 +1024,7 @@ class TemplateDefinition:
             "name": self.name,
             "description": self.description,
             "icon_type": self.icon_type,
-            "icon": _icon_filename_for(self.icon_type),
+            "icon": self.icon,
             "cpu": self.cpu,
             "ram": self.ram,
             "ethernet": self.ethernet,
@@ -1131,14 +1162,42 @@ class TemplateService:
             "Server.png",
         }
         for template in self._load_templates():
-            icon = _icon_filename_for(template.icon_type)
-            if icon:
-                icons.add(icon)
+            icons.add(template.icon)
         return sorted(icons)
+
+    def _icon_directory(self) -> Path | None:
+        if self.user_templates_dir is None:
+            return None
+        directory = self.user_templates_dir / "icons"
+        return None if directory.is_symlink() else directory
+
+    def icon_asset(self, filename: str) -> tuple[Path, str] | None:
+        media_type = _icon_media_type(filename)
+        directory = self._icon_directory()
+        if media_type is None or directory is None:
+            return None
+        path = directory / filename
+        if not path.is_symlink() and path.is_file():
+            return path, media_type
+        return None
+
+    def list_icon_assets(self) -> list[str]:
+        try:
+            directory = self._icon_directory()
+            if directory is None:
+                return []
+            return sorted(
+                path.name
+                for path in directory.iterdir()
+                if self.icon_asset(path.name)
+            )
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            return []
 
     def build_node_catalog(self) -> dict[str, Any]:
         templates: list[dict[str, Any]] = []
-        icon_options = self.list_icon_options()
+        icon_assets = self.list_icon_assets()
+        icon_options = sorted(set(self.list_icon_options()) | set(icon_assets))
         for template in self._load_templates():
             images = list(self.list_images(template.type, template.key).values())
             default_image = images[0]["image"] if images else ""
@@ -1155,7 +1214,7 @@ class TemplateService:
                         "template": template.key,
                         "image": default_image,
                         "icon_type": template.icon_type,
-                        "icon": _icon_filename_for(template.icon_type),
+                        "icon": template.icon,
                         "cpu": template.cpu,
                         "ram": template.ram,
                         "ethernet": template.ethernet,
@@ -1179,6 +1238,7 @@ class TemplateService:
             "templates": templates,
             "paired_templates": self._build_paired_catalog(),
             "icon_options": icon_options,
+            "icon_assets": icon_assets,
         }
 
     def _build_paired_catalog(self) -> list[dict[str, Any]]:

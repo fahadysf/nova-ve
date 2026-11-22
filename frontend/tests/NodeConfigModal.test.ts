@@ -389,6 +389,27 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     expect([...select.options].map((option) => option.value)).toEqual(['vnc', 'telnet']);
   });
 
+  it('offers registered icons and clears the persisted override to inherit the template', async () => {
+    const template = makeTemplate();
+    template.defaults.icon = 'template.png';
+    const catalog = { ...makeCatalog(template), icon_assets: ['override.png', 'template.png'] };
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'edit', catalog, node: makeNode({ icon: 'override.png' }) },
+    });
+    await tick();
+
+    const iconSelect = screen.getByRole<HTMLSelectElement>('combobox', { name: 'Icon' });
+    expect(iconSelect.value).toBe('override.png');
+    expect(iconSelect).toHaveTextContent('Use template default (template.png)');
+    await fireEvent.change(iconSelect, { target: { value: '' } });
+    await fireEvent.submit(screen.getByRole('dialog').querySelector('form')!);
+
+    expect(JSON.parse(screen.getByTestId('submit-payload').textContent ?? 'null')).toMatchObject({
+      mode: 'edit',
+      payload: { icon: '' },
+    });
+  });
+
   it('dispatches interface_naming_scheme in create payloads', async () => {
     const catalog = makeCatalog(makeTemplate());
     render(NodeConfigModalHarness, {

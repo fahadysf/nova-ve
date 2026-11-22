@@ -2,11 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/svelte';
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { get } from 'svelte/store';
 import type { DragEndpoint, InterfaceEndpoint, NetworkEndpoint, NodeSlotEndpoint } from '$lib/stores/dragLink';
 import { dragLinkStore } from '$lib/stores/dragLink';
+import { selectedPortInfoStore } from '$lib/stores/portInfo';
 import type { Link, NetworkData, NodeCatalog, NodeData, TemplateCapabilities } from '$lib/types';
 
 vi.mock('@xyflow/svelte', async () => {
@@ -103,7 +103,7 @@ vi.mock('$lib/stores/labWs', () => ({
 import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
 import { apiRequest } from '$lib/api';
 import { labState } from '$lib/stores/labState';
-import { get } from 'svelte/store';
+import { toastStore } from '$lib/stores/toasts';
 import { tick } from 'svelte';
 
 function makeNode(
@@ -215,8 +215,212 @@ function driveConfirm(source: DragEndpoint, target: DragEndpoint) {
 
 afterEach(() => {
   dragLinkStore.cancel();
+  selectedPortInfoStore.set(null);
   labState.reset();
   cleanup();
+});
+
+describe('TopologyCanvas lab controls', () => {
+  const capabilities = { hotplug: true, max_nics: 8, machine: 'q35' };
+  const catalogPath = '/labs/lab-hotplug/node-catalog';
+  const nodesPath = '/labs/lab-hotplug/nodes';
+  const apiMock = vi.mocked(apiRequest);
+
+  beforeEach(() => {
+    apiMock.mockClear();
+  });
+
+  it('starts eligible nodes, blocks duplicate requests, and preserves success on partial failure', async () => {
+    const first = makeNode(1, 'edge-a', 0, capabilities);
+    const second = makeNode(2, 'edge-b', 0, capabilities);
+    const transitioning: NodeData = {
+      ...makeNode(4, 'edge-d', 0, capabilities),
+      transientStatus: 'starting',
+    };
+    renderCanvas({
+      '1': first,
+      '2': second,
+      '3': makeNode(3, 'edge-c', 2, capabilities),
+      '4': transitioning,
+    }, { '9': makeNetwork(9, 'bridge-a') });
+    await waitFor(() => expect(apiMock).toHaveBeenCalledWith(catalogPath, expect.anything()));
+
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+    const start = screen.getByRole('button', { name: 'Start all nodes' });
+    const stop = screen.getByRole('button', { name: 'Stop all nodes' });
+    let finishFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { finishFirst = resolve; });
+    apiMock
+      .mockImplementationOnce(async () => {
+        await firstStarted;
+        return { code: 200, status: 'success', message: '', data: {} };
+      })
+      .mockResolvedValueOnce({
+        code: 200,
+        status: 'success',
+        message: '',
+        data: { ...first, status: 2 },
+      })
+      .mockRejectedValueOnce(new Error('Image unavailable.'));
+
+    try {
+      expect(screen.getByRole('button', { name: 'Restart all nodes' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Open all consoles' })).toBeDisabled();
+      await fireEvent.click(start);
+      expect(start).toBeDisabled();
+      expect(stop).toBeDisabled();
+      expect(screen.getByRole('status')).toHaveTextContent('Starting nodes (0/2)');
+      expect(get(labState).nodes['1'].transientStatus).toBe('starting');
+      await fireEvent.click(start);
+      expect(apiMock.mock.calls.map(([path]) => path)).toEqual([catalogPath, `${nodesPath}/1/start`]);
+
+      // A status response still has the old coordinates if the layout save
+      // is pending when the bulk run finishes.
+      labState.upsertNode(first.id, { ...get(labState).nodes['1'], left: 432 });
+      finishFirst();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(
+        'Started 1 node. Failed to start edge-b. Image unavailable.', 'error',
+      ));
+      expect(apiMock.mock.calls.map(([path]) => path)).toEqual([
+        catalogPath, `${nodesPath}/1/start`, `${nodesPath}/1`, `${nodesPath}/2/start`,
+      ]);
+      expect(get(labState).nodes['1']).toMatchObject({ status: 2, left: 432 });
+      expect(get(labState).nodes['2'].transientStatus).toBeUndefined();
+      expect(get(labState).nodes['4'].transientStatus).toBe('starting');
+      expect(start).toBeEnabled();
+      expect(stop).toBeEnabled();
+    } finally {
+      finishFirst();
+      toast.mockRestore();
+    }
+  });
+
+  it('stops running nodes and disables stop when they have all settled', async () => {
+    const node = makeNode(1, 'edge-a', 2, capabilities);
+    renderCanvas({ '1': node });
+    await waitFor(() => expect(apiMock).toHaveBeenCalledWith(catalogPath, expect.anything()));
+
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+    apiMock.mockResolvedValueOnce({ code: 200, status: 'success', message: '', data: {} });
+    apiMock.mockResolvedValueOnce({ code: 200, status: 'success', message: '', data: { ...node, status: 0 } });
+    try {
+      const start = screen.getByRole('button', { name: 'Start all nodes' });
+      const stop = screen.getByRole('button', { name: 'Stop all nodes' });
+      expect(start).toBeDisabled();
+      await fireEvent.click(stop);
+      await waitFor(() => expect(toast).toHaveBeenCalledWith('Stopped 1 node.', 'success'));
+      expect(apiMock.mock.calls.map(([path]) => path)).toEqual([
+        catalogPath, `${nodesPath}/1/stop`, `${nodesPath}/1`,
+      ]);
+      expect(stop).toBeDisabled();
+      expect(start).toBeEnabled();
+    } finally {
+      toast.mockRestore();
+    }
+  });
+
+  it('reports an accepted lifecycle request that never reaches its requested state', async () => {
+    const node = makeNode(1, 'edge-a', 0, capabilities);
+    renderCanvas({ '1': node });
+    await waitFor(() => expect(apiMock).toHaveBeenCalledWith(catalogPath, expect.anything()));
+
+    vi.useFakeTimers();
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+    apiMock.mockResolvedValueOnce({ code: 200, status: 'success', message: '', data: {} });
+    for (let poll = 0; poll < 5; poll += 1) {
+      apiMock.mockResolvedValueOnce({ code: 200, status: 'success', message: '', data: node });
+    }
+    try {
+      const start = screen.getByRole('button', { name: 'Start all nodes' });
+      await fireEvent.click(start);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(get(labState).nodes['1']).toMatchObject({ status: 0 });
+      expect(get(labState).nodes['1'].transientStatus).toBeUndefined();
+      expect(toast).toHaveBeenCalledWith(
+        'Started 0 nodes. Failed to start edge-a. Node did not reach the requested state.', 'error',
+      );
+      expect(start).toBeEnabled();
+    } finally {
+      toast.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('hides the canvas controls in Zen mode while keeping the same topology mounted', async () => {
+    const view = renderCanvas({ '1': makeNode(1, 'edge-a', 0, capabilities) });
+    selectedPortInfoStore.set({
+      kind: 'interface', nodeId: 1, interfaceIndex: 0, anchorRect: null,
+      interfaceName: 'eth0', plannedMac: null,
+    });
+    const topology = screen.getByTestId('svelte-flow-mock');
+    const nodeSummary = topology.getAttribute('data-flow-nodes');
+    expect(screen.getByRole('group', { name: 'Lab controls' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'zoom in' })).toBeInTheDocument();
+    expect(await screen.findByRole('dialog', { name: 'Port info for eth0' })).toBeVisible();
+
+    await view.rerender({ zenMode: true });
+    expect(screen.queryByRole('group', { name: 'Lab controls' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'zoom in' })).toBeNull();
+    expect(screen.queryByTestId('port-info-popover')).toBeNull();
+    expect(screen.getByTestId('svelte-flow-mock')).toBe(topology);
+    expect(topology).toHaveAttribute('data-flow-nodes', nodeSummary);
+
+    await view.rerender({ zenMode: false });
+    expect(screen.getByRole('group', { name: 'Lab controls' })).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Port info for eth0' })).toBeVisible();
+    expect(screen.getByTestId('svelte-flow-mock')).toBe(topology);
+  });
+
+  it('leaves Zen shortcuts available and preserves a pending link', async () => {
+    const view = renderCanvas({
+      '1': makeNode(1, 'edge-a', 0, capabilities, 2),
+      '2': makeNode(2, 'edge-b', 0, capabilities, 2),
+    });
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), nodeSlotEndpoint(2, 'edge-b'));
+    const dialog = await screen.findByTestId('link-confirm-modal');
+    const source = screen.getByTestId('link-source-interface-select');
+    await fireEvent.change(source, { target: { value: '1' } });
+    const style = screen.getByRole('radio', { name: 'bezier' });
+    await fireEvent.click(style);
+
+    await view.rerender({ zenMode: true });
+    for (const key of ['Enter', ' ', 'Escape']) {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      await fireEvent(document.body, event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(dialog).not.toBeVisible();
+    expect(get(dragLinkStore).state).toBe('confirming');
+    expect(get(labState).links).toHaveLength(0);
+
+    await view.rerender({ zenMode: false });
+    expect(dialog).toBeVisible();
+    expect(source).toHaveValue('1');
+    expect(style).toBeChecked();
+  });
+
+  it('leaves Zen shortcuts available and preserves a network draft', async () => {
+    const view = renderCanvas({});
+    await fireEvent.click(screen.getByRole('button', { name: 'Open add element menu' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /network container type/i }));
+    await fireEvent.click(screen.getByRole('button', { name: /bridge network/i }));
+    const dialog = screen.getByTestId('network-config-modal');
+    const name = screen.getByTestId('network-name-input');
+    await fireEvent.input(name, { target: { value: 'bridge-draft' } });
+
+    await view.rerender({ zenMode: true });
+    for (const key of ['Enter', ' ', 'Escape']) {
+      const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true });
+      await fireEvent(document.body, event);
+      expect(event.defaultPrevented).toBe(false);
+    }
+    expect(dialog).not.toBeVisible();
+    expect(apiMock).not.toHaveBeenCalledWith('/labs/lab-hotplug/networks', expect.anything());
+
+    await view.rerender({ zenMode: false });
+    expect(dialog).toBeVisible();
+    expect(name).toHaveValue('bridge-draft');
+  });
 });
 
 describe('TopologyCanvas hotplug gate', () => {

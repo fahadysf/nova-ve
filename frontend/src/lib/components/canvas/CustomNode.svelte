@@ -13,7 +13,7 @@
 
   export let data: {
     label: string;
-    icon?: string;
+    iconSources?: string[];
     status?: number;
     transientStatus?: 'starting' | 'stopping';
     type?: string;
@@ -48,6 +48,16 @@
   // no type/template text on the node face.
   const typeIcons = { docker: Container, iol: Router, dynamips: Router } as const;
   $: typeIcon = (data.type && typeIcons[data.type as keyof typeof typeIcons]) || Server;
+
+  let failedIconSources = new Set<string>();
+  let loadedIconSource: string | undefined;
+  $: iconSource = data.iconSources?.find((source) => !failedIconSources.has(source));
+
+  function onIconError(event: Event) {
+    const image = event.currentTarget as HTMLImageElement;
+    const source = image.getAttribute('src');
+    if (source) failedIconSources = new Set([...failedIconSources, source]);
+  }
 
   $: running = data.status === 2;
   $: transitioning = data.transientStatus === 'starting' || data.transientStatus === 'stopping';
@@ -86,7 +96,22 @@
       data-testid="node-icon-container"
       class={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)] ${iconStateRing}`}
     >
-      <svelte:component this={typeIcon} class="h-5 w-5" />
+      {#if iconSource}
+        {#key iconSource}
+          <img
+            src={iconSource}
+            alt=""
+            draggable="false"
+            class="h-6 w-6 select-none object-contain"
+            class:hidden={loadedIconSource !== iconSource}
+            on:load={() => (loadedIconSource = iconSource)}
+            on:error={onIconError}
+          />
+        {/key}
+      {/if}
+      {#if !iconSource || loadedIconSource !== iconSource}
+        <svelte:component this={typeIcon} class="h-6 w-6" />
+      {/if}
     </div>
     <div class="flex min-w-0 flex-col justify-center leading-tight">
       <div class="flex items-center gap-1.5" title={data.label}>

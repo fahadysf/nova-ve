@@ -9,6 +9,7 @@
     Activity,
     ChevronDown,
     ChevronRight,
+    ChevronUp,
     ChevronsLeft,
     ChevronsRight,
     Cpu,
@@ -45,6 +46,7 @@
   let rootLabs: LabListItem[] = [];
   let loading = true;
   let error = '';
+  let zenMode = false;
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
   type FloatingWindowState = ConsoleBounds & {
     maximized: boolean;
@@ -231,8 +233,14 @@
     const routeKey = isLabIndexRoute ? 'labs-index' : `lab:${labId}`;
     if ($authStore.authenticated && routeKey !== lastLoadedRoute) {
       lastLoadedRoute = routeKey;
+      zenMode = false;
       void (isLabIndexRoute ? loadLabIndex() : loadLab());
     }
+  }
+
+  function toggleZenMode(event: MouseEvent & { currentTarget: HTMLButtonElement }) {
+    zenMode = !zenMode;
+    event.currentTarget.focus();
   }
 
   async function loadLabIndex() {
@@ -524,6 +532,8 @@
   }
 
   function focusGuacamoleWindow(tabId?: number, attempts = 4) {
+    if (zenMode) return;
+
     const iframe = consoleIframe(tabId);
     if (!iframe) {
       if (attempts > 0) {
@@ -1024,7 +1034,7 @@
       <div class="text-sm text-gray-400">{rootLabs.length} labs</div>
     </header>
   {:else}
-    <header class="shrink-0 px-3 pt-2">
+    <header id="lab-editor-top-bar" hidden={zenMode} class="shrink-0 px-3 pt-2">
       <div class="flex items-start justify-between gap-3 rounded-2xl border border-gray-800 bg-gray-900/95 px-4 py-1">
         <div class="min-w-0 flex items-start gap-3">
           <button
@@ -1122,6 +1132,24 @@
         </div>
       </div>
     </header>
+    <div class="flex shrink-0 justify-center">
+      <button
+        type="button"
+        class="flex h-5 w-9 items-center justify-center rounded text-gray-400 hover:bg-gray-800 hover:text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-blue-400"
+        aria-label={zenMode ? 'Exit Zen mode' : 'Enter Zen mode'}
+        aria-controls="lab-editor-top-bar"
+        aria-expanded={!zenMode}
+        title={zenMode ? 'Exit Zen mode' : 'Enter Zen mode'}
+        on:mousedown={(event) => event.stopPropagation()}
+        on:click={toggleZenMode}
+      >
+        {#if zenMode}
+          <ChevronDown class="h-4 w-4" aria-hidden="true" />
+        {:else}
+          <ChevronUp class="h-4 w-4" aria-hidden="true" />
+        {/if}
+      </button>
+    </div>
   {/if}
 
   {#if loading}
@@ -1165,13 +1193,16 @@
       {/if}
     </div>
   {:else}
-    <div class="relative flex flex-1 overflow-hidden p-3">
-      <InfoPanelStack nodesById={$labState.nodes} networksById={$labState.networks} />
+    <div class="relative flex flex-1 overflow-hidden px-3 pb-3">
+      <div hidden={zenMode} class:contents={!zenMode}>
+        <InfoPanelStack nodesById={$labState.nodes} networksById={$labState.networks} />
+      </div>
       <div bind:this={canvasContainerEl} class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
         <SvelteFlowProvider>
           <TopologyCanvas
             bind:this={canvasRef}
             labId={labId}
+            {zenMode}
             {consoleSelectorWindows}
             {consoleMinimizedWindows}
             on:console={(event) => openConsole(event.detail.node, event.detail.mode ?? 'primary')}
@@ -1197,6 +1228,8 @@
           aria-label="Console workspace"
           class="pointer-events-auto fixed overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
           style={`left: ${consoleWorkspace.x}px; top: ${consoleWorkspace.y}px; width: ${consoleWorkspace.width}px; height: ${consoleWorkspace.height}px; z-index: 50; display: ${consoleWorkspace.minimized ? 'none' : 'flex'};`}
+          style:visibility={zenMode ? 'hidden' : null}
+          inert={zenMode}
           on:pointerdown={focusConsoleWorkspace}
         >
           <div class="flex h-full w-full flex-col">
@@ -1333,6 +1366,8 @@
             aria-label={`Console window for ${tab.nodeName}`}
             class="pointer-events-auto fixed overflow-hidden rounded-2xl border border-gray-700 bg-gray-900/95 shadow-2xl"
             style={`left: ${tab.floating.x}px; top: ${tab.floating.y}px; width: ${tab.floating.width}px; height: ${tab.floating.height}px; z-index: ${zIndex}; display: ${tab.floating.minimized ? 'none' : 'flex'};`}
+            style:visibility={zenMode ? 'hidden' : null}
+            inert={zenMode}
             on:pointerdown={() => {
               bringFloatingWindowToFront(tab.id);
               setTimeout(() => focusGuacamoleWindow(tab.id), 0);

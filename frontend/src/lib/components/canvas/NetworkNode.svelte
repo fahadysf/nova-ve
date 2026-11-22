@@ -89,7 +89,7 @@
       <div
         class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
       >
-        <Waypoints class="h-4 w-4" />
+        <Waypoints class="h-5 w-5" />
       </div>
       <div class="flex min-w-0 flex-col justify-center leading-tight">
         <div

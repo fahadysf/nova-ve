@@ -1,8 +1,7 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysuf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-// Lab editor page tests (#269): the top-bar external-console toggle and the
-// external launch / in-browser fallback behavior of console actions.
+// Lab editor page tests for the external-console toggle (#269) and Zen mode (#280).
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -12,6 +11,7 @@ import { ApiError } from '$lib/api';
 import { authStore } from '$lib/stores/session';
 import { toastStore } from '$lib/stores/toasts';
 import { externalConsoleStore } from '$lib/stores/externalConsole';
+import { infoPanels } from '$lib/stores/infoPanels';
 import { setPagePathname, setPageParams } from './mocks/appStores';
 
 const apiRequest = vi.fn();
@@ -86,7 +86,7 @@ function captureToasts() {
   return { messages, unsubscribe };
 }
 
-describe('lab editor external console toggle (#269)', () => {
+describe('lab editor controls', () => {
   let clickedHrefs: string[];
   let clickSpy: ReturnType<typeof vi.spyOn> | null = null;
 
@@ -120,7 +120,63 @@ describe('lab editor external console toggle (#269)', () => {
     clickSpy = null;
     plantNode(undefined);
     externalConsoleStore.setMode('off');
+    infoPanels.reset();
   });
+
+  it.each(['tabbed', 'floating'])(
+    'Zen mode hides the chrome and preserves the canvas and %s console',
+    async (consoleMode) => {
+      document.cookie = `novaVeConsoleMode=${consoleMode}; path=/`;
+      const { container } = render(LabEditorPage);
+      const canvas = await screen.findByTestId('topology-canvas-stub');
+      infoPanels.open('node', 1);
+      const panel = await screen.findByTestId('info-panel');
+      plantNode(NODES['1']);
+      await fireEvent.click(screen.getByTestId('canvas-console-button'));
+      const iframe = await screen.findByTitle('Guacamole console for router-1');
+      const dialog = iframe.closest<HTMLElement>('[role="dialog"]');
+      const toggle = screen.getByRole('button', { name: 'Enter Zen mode' });
+      const header = container.querySelector('header');
+      const originalSrc = iframe.getAttribute('src');
+
+      expect(header).toBeVisible();
+      expect(dialog).toBeVisible();
+      expect(dialog).toHaveAccessibleName(
+        consoleMode === 'tabbed' ? 'Console workspace' : 'Console window for router-1'
+      );
+      expect(panel).toBeVisible();
+      expect(canvas).toHaveAttribute('data-zen-mode', 'false');
+      apiRequest.mockClear();
+
+      await fireEvent.click(toggle);
+
+      expect(toggle).toHaveFocus();
+      expect(screen.getByRole('button', { name: 'Exit Zen mode' })).toBe(toggle);
+      expect(toggle).toHaveAttribute('aria-expanded', 'false');
+      expect(header).not.toBeVisible();
+      expect(panel).not.toBeVisible();
+      expect(dialog).not.toBeVisible();
+      expect(dialog?.inert).toBe(true);
+      expect(iframe).toBeInTheDocument();
+      expect(screen.getByTestId('topology-canvas-stub')).toBe(canvas);
+      expect(canvas).toHaveAttribute('data-zen-mode', 'true');
+
+      await fireEvent.click(toggle);
+
+      expect(toggle).toHaveFocus();
+      expect(screen.getByRole('button', { name: 'Enter Zen mode' })).toBe(toggle);
+      expect(toggle).toHaveAttribute('aria-expanded', 'true');
+      expect(header).toBeVisible();
+      expect(panel).toBeVisible();
+      expect(dialog).toBeVisible();
+      expect(dialog?.inert).toBe(false);
+      expect(screen.getByTitle('Guacamole console for router-1')).toBe(iframe);
+      expect(iframe).toHaveAttribute('src', originalSrc);
+      expect(screen.getByTestId('topology-canvas-stub')).toBe(canvas);
+      expect(canvas).toHaveAttribute('data-zen-mode', 'false');
+      expect(apiRequest).not.toHaveBeenCalled();
+    }
+  );
 
   it('toggle lives in the top bar, presses, and persists the choice', async () => {
     render(LabEditorPage);
