@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.lab import LabMeta
 from app.services import host_net
+from app.services.console_recording import RECORDINGS_FOLDER
 from app.services.cloud_inventory_service import (
     assert_no_external_nat_cloud_references_for_scope,
 )
@@ -38,6 +39,8 @@ def _normalize_relative_lab_path(raw_path: str) -> str:
     parts = [part for part in candidate.split("/") if part not in {"", "."}]
     if not parts or any(part == ".." for part in parts):
         raise ValueError("Invalid lab path: directory traversal detected")
+    if RECORDINGS_FOLDER in parts:
+        raise ValueError("The console recordings directory is reserved.")
     return Path(*parts).as_posix()
 
 

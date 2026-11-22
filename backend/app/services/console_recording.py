@@ -8,7 +8,7 @@ per-session proxy: a telnet server toward guacd and a telnet client toward
 the node's real console port. Recording is ON DEMAND — the proxy relays
 without writing anything until the user presses record, and each
 start/stop cycle produces one asciinema cast v2 file plus a raw output log
-under ``RECORDINGS_DIR/<lab-id>/<node-id>/``.
+under the lab's adjacent ``.recordings`` directory.
 
 Each recording carries its start and stop timestamps: the cast header
 holds ``timestamp`` (start) and ``duration`` (until stop was pressed), and
@@ -22,12 +22,16 @@ read access is gated by the lab's scoped permissions (see routers/recordings).
 """
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+import tempfile
 import time
 import uuid
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -40,10 +44,40 @@ _logger = logging.getLogger(__name__)
 CAST_WIDTH = 120
 CAST_HEIGHT = 30
 PENDING_ATTACH_TIMEOUT = 120.0
+RECORDINGS_FOLDER = ".recordings"
 
 
 def _slug(text: object) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", str(text)).strip("-") or "lab"
+
+
+def lab_recordings_sidecar(lab_file: Path) -> Path:
+    """Storage that moves with a lab JSON without mixing adjacent labs."""
+    sidecar = lab_file.parent / RECORDINGS_FOLDER / lab_file.name
+    if sidecar.resolve() != sidecar:
+        raise ValueError("Invalid lab recordings directory.")
+    return sidecar
+
+
+def lab_recordings_dir(lab_file: Path, lab_id: str) -> Path:
+    # The stable ID prevents a new lab reusing the same filename from
+    # inheriting the deleted lab's recording history.
+    if re.fullmatch(r"[A-Za-z0-9_-]{1,80}", lab_id):
+        identity = lab_id
+    else:
+        identity = "." + hashlib.sha256(lab_id.encode()).hexdigest()
+    directory = lab_recordings_sidecar(lab_file) / identity
+    if directory.resolve() != directory:
+        raise ValueError("Invalid lab recordings directory.")
+    return directory
+
+
+def recording_lab_id(lab_file: Path, data: dict) -> str:
+    return str(data.get("id") or lab_file.name)
+
+
+def _private_file(path: str, flags: int) -> int:
+    return os.open(path, flags, 0o600)
 
 
 class RecordingSession:
@@ -54,6 +88,7 @@ class RecordingSession:
         service: "ConsoleRecordingService",
         *,
         lab_id: str,
+        lab_file: Path,
         lab_name: str,
         node_id: int,
         node_name: str,
@@ -64,6 +99,7 @@ class RecordingSession:
     ) -> None:
         self.service = service
         self.lab_id = lab_id
+        self.lab_file = lab_file
         self.lab_name = lab_name
         self.node_id = node_id
         self.node_name = node_name
@@ -111,32 +147,56 @@ class RecordingSession:
             raise ValueError("Console session has ended.")
         if self._recording:
             return self.status()
-        self._cycle += 1
+        cycle = self._cycle + 1
         started = datetime.now(UTC)
-        base = f"{started.strftime('%Y%m%d-%H%M%S')}-{self.session_id}-{self._cycle}"
-        directory = Path(get_settings().RECORDINGS_DIR) / _slug(self.lab_id) / str(self.node_id)
-        directory.mkdir(parents=True, exist_ok=True)
-        self._cast_path = directory / f"{base}.cast"
-        self._cycle_started = started
-        self._t0 = time.monotonic()
-        self._cast_file = self._cast_path.open("w", encoding="utf-8")
-        self._cast_file.write(
-            json.dumps(
-                {
-                    "version": 2,
-                    "width": CAST_WIDTH,
-                    "height": CAST_HEIGHT,
-                    "timestamp": int(started.timestamp()),
-                    "title": f"{self.lab_name} / {self.node_name}",
-                    "env": {"TERM": "xterm"},
-                }
+        t0 = time.monotonic()
+        node_slug = _slug(self.node_name).strip(".")[:100] or "node"
+        base = f"{node_slug}-{started:%Y%m%dT%H%M%SZ}-{self.session_id}-{cycle}"
+        directory = lab_recordings_dir(self.lab_file, self.lab_id) / str(self.node_id)
+        if directory.resolve() != directory or not self.lab_file.is_file():
+            raise ValueError("The lab recording location is unavailable.")
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        cast_path = directory / f"{base}.cast"
+        log_path = directory / f"{base}.log"
+        cast_file = log_file = None
+        try:
+            cast_file = open(cast_path, "x", encoding="utf-8", opener=_private_file)
+            log_file = open(log_path, "x", encoding="utf-8", opener=_private_file)
+            cast_file.write(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "width": CAST_WIDTH,
+                        "height": CAST_HEIGHT,
+                        "timestamp": int(started.timestamp()),
+                        "title": f"{self.lab_name} / {self.node_name}",
+                        "env": {"TERM": "xterm"},
+                        "nova": {
+                            "node_name": self.node_name,
+                            "username": self.username,
+                            "console": self.mode,
+                            "started_at": started.isoformat(),
+                        },
+                    }
+                ) + "\n"
             )
-            + "\n"
-        )
-        self._cast_file.flush()
-        self._log_file = self._cast_path.with_suffix(".log").open("w", encoding="utf-8")
-        self._log_file.write(f"# Recording started {started.isoformat()} by {self.username}\n")
-        self._log_file.flush()
+            cast_file.flush()
+            log_file.write(f"# Recording started {started.isoformat()} by {self.username}\n")
+            log_file.flush()
+        except OSError:
+            for handle, path in ((cast_file, cast_path), (log_file, log_path)):
+                if handle is not None:
+                    with suppress(OSError):
+                        handle.close()
+                    with suppress(OSError):
+                        path.unlink(missing_ok=True)
+            raise
+        self._cycle = cycle
+        self._cast_path = cast_path
+        self._cycle_started = started
+        self._t0 = t0
+        self._cast_file = cast_file
+        self._log_file = log_file
         self._recording = True
         _logger.info("recording %s cycle %d started by %s", self.session_id, self._cycle, self.username)
         return self.status()
@@ -148,37 +208,51 @@ class RecordingSession:
         self._recording = False
         stopped = datetime.now(UTC)
         elapsed = time.monotonic() - self._t0
-        if self._log_file is not None:
-            self._log_file.write(f"# Recording stopped {stopped.isoformat()} (duration {elapsed:.1f}s)\n")
-            self._log_file.close()
-            self._log_file = None
-        if self._cast_file is not None:
-            self._cast_file.close()
-            self._cast_file = None
-            self._finalize_cast_header(elapsed)
+        log_file, cast_file = self._log_file, self._cast_file
+        self._log_file = self._cast_file = None
+        try:
+            if log_file is not None:
+                with log_file:
+                    log_file.write(f"# Recording stopped {stopped.isoformat()} (duration {elapsed:.1f}s)\n")
+        finally:
+            if cast_file is not None:
+                cast_file.close()
+                self._finalize_cast_header(elapsed, stopped)
         _logger.info("recording %s cycle %d stopped (%.1fs)", self.session_id, self._cycle, elapsed)
         return self.status()
 
-    def _finalize_cast_header(self, elapsed: float) -> None:
+    def _finalize_cast_header(self, elapsed: float, stopped: datetime) -> None:
         """Stamp ``duration`` into the cast header once stop is pressed."""
         if self._cast_path is None:
             return
-        tmp_path = self._cast_path.with_suffix(".cast.tmp")
+        tmp_path = None
         try:
-            with self._cast_path.open("r", encoding="utf-8") as src, tmp_path.open("w", encoding="utf-8") as dst:
+            with (
+                self._cast_path.open("r", encoding="utf-8") as src,
+                tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=self._cast_path.parent, delete=False
+                ) as dst,
+            ):
+                tmp_path = Path(dst.name)
                 header = json.loads(src.readline())
                 header["duration"] = round(elapsed, 3)
+                header["nova"]["stopped_at"] = stopped.isoformat()
                 dst.write(json.dumps(header, ensure_ascii=False) + "\n")
                 shutil.copyfileobj(src, dst)
             tmp_path.replace(self._cast_path)
         except (OSError, ValueError) as exc:
             _logger.warning("could not finalize cast header %s: %s", self._cast_path, exc)
-            tmp_path.unlink(missing_ok=True)
+            if tmp_path is not None:
+                with suppress(OSError):
+                    tmp_path.unlink(missing_ok=True)
 
     async def close(self) -> None:
         """Stop any active cycle, close the listener and files (idempotent)."""
         if self._recording:
-            self.stop_recording()
+            try:
+                self.stop_recording()
+            except OSError:
+                _logger.exception("Could not stop console recording %s cleanly.", self.session_id)
         self._closed = True
         if self._pending_task is not None:
             self._pending_task.cancel()
@@ -267,16 +341,17 @@ class ConsoleRecordingService:
 
     def __init__(self) -> None:
         self._sessions: dict[str, RecordingSession] = {}
-        self._by_key: dict[str, RecordingSession] = {}
+        self._by_key: dict[tuple[Path, str, int, str, str], RecordingSession] = {}
 
     @staticmethod
-    def _key(lab_id: str, node_id: int, mode: str, username: str) -> str:
-        return f"{lab_id}:{node_id}:{mode}:{username}"
+    def _key(session: RecordingSession) -> tuple[Path, str, int, str, str]:
+        return (session.lab_file, session.lab_id, session.node_id, session.mode, session.username)
 
     async def start_session(
         self,
         *,
         lab_id: str,
+        lab_file: Path,
         lab_name: str,
         node_id: int,
         node_name: str,
@@ -292,6 +367,7 @@ class ConsoleRecordingService:
         session = RecordingSession(
             self,
             lab_id=lab_id,
+            lab_file=lab_file,
             lab_name=lab_name,
             node_id=node_id,
             node_name=node_name,
@@ -300,31 +376,58 @@ class ConsoleRecordingService:
             username=username,
             mode=mode,
         )
+        # Track the relay while the listener binds so a concurrent lab move
+        # can update its storage location before it becomes controllable.
+        self._sessions[session.session_id] = session
         try:
             await session.start(listen_host=listen_host)
+        except asyncio.CancelledError:
+            await session.close()
+            raise
         except Exception as exc:
             _logger.warning("console recording proxy failed to start, using direct console: %s", exc)
             await session.close()
             return None
-        self._sessions[session.session_id] = session
-        self._by_key[self._key(lab_id, node_id, mode, username)] = session
+        self._by_key[self._key(session)] = session
         _logger.info(
             "console proxy %s: %s/%s port %d -> %s:%d",
             session.session_id, lab_name, node_name, session.listen_port, target_host, target_port,
         )
         return session
 
-    def find(self, lab_id: str, node_id: int, mode: str, username: str) -> RecordingSession | None:
+    def find(self, lab_file: Path, lab_id: str, node_id: int, mode: str, username: str) -> RecordingSession | None:
         """Latest open console session for a user/node, if any."""
-        session = self._by_key.get(self._key(lab_id, node_id, mode, username))
+        session = self._by_key.get((lab_file, lab_id, node_id, mode, username))
         return session if session is not None and not session._closed else None
 
     def is_active(self, cast_path: Path) -> bool:
         return any(s._recording and s._cast_path == cast_path for s in self._sessions.values())
 
+    def relocate_lab(self, source: Path, target: Path) -> None:
+        """Update open relays after a lab JSON and its sidecar move."""
+        source_sidecar = lab_recordings_sidecar(source)
+        target_sidecar = lab_recordings_sidecar(target)
+        for session in self._sessions.values():
+            if session.lab_file == source:
+                key = self._key(session)
+                was_current = self._by_key.get(key) is session
+                if was_current:
+                    self._by_key.pop(key)
+                session.lab_file = target
+                if was_current:
+                    self._by_key[self._key(session)] = session
+                if session._cast_path is not None:
+                    session._cast_path = target_sidecar / session._cast_path.relative_to(source_sidecar)
+
+    def relocate_folder(self, source: Path, target: Path) -> None:
+        """Update open relays after a containing folder is renamed."""
+        labs = {session.lab_file for session in self._sessions.values() if session.lab_file.is_relative_to(source)}
+        for lab_file in labs:
+            self.relocate_lab(lab_file, target / lab_file.relative_to(source))
+
     def _forget(self, session: RecordingSession) -> None:
         self._sessions.pop(session.session_id, None)
-        key = self._key(session.lab_id, session.node_id, session.mode, session.username)
+        key = self._key(session)
         if self._by_key.get(key) is session:
             self._by_key.pop(key, None)
 

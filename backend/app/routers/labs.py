@@ -3,9 +3,11 @@
 
 import asyncio
 import copy
+import json
 import logging
 import shutil
 import uuid
+from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Body, Depends, Request
@@ -29,7 +31,7 @@ from app.schemas.node import (
 )
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
-from app.services.console_recording import get_console_recorder
+from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
@@ -168,6 +170,14 @@ def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: b
         raise PermissionError("Access denied.")
 
     return f"{root}/{normalized}"
+
+
+def _recording_lab_file(scoped_path: str) -> Path:
+    lab_file = _lab_file_path(scoped_path)
+    expected = get_settings().LABS_DIR.resolve() / _normalize_relative_lab_path(scoped_path)
+    if lab_file != expected:
+        raise PermissionError("Access denied.")
+    return lab_file
 
 
 def _default_interfaces(
@@ -2088,7 +2098,8 @@ async def node_html5(
         }
 
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
         console_info = NodeRuntimeService().console_info(data, node_id, mode=console)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
@@ -2116,20 +2127,22 @@ async def node_html5(
         console_host = console_info["host"]
         console_port = int(console_info["port"])
         if console_info["console"] == "telnet":
-            # #291: relay in-built telnet consoles through a recording proxy
-            # (asciinema cast + raw log under RECORDINGS_DIR/<lab-id>/).
-            # None means recording is disabled or the proxy failed to start —
-            # fall back to the direct, unrecorded console in that case.
-            recording = await get_console_recorder().start_session(
-                lab_id=str(data.get("id") or lab_path),
-                lab_name=str(data.get("name") or lab_path),
-                node_id=node_id,
-                node_name=console_info["name"],
-                target_host=console_host,
-                target_port=console_port,
-                username=current_user.username,
-                mode=console,
-            )
+            try:
+                lab_file = _recording_lab_file(scoped_path)
+            except (PermissionError, ValueError):
+                recording = None
+            else:
+                recording = await get_console_recorder().start_session(
+                    lab_id=recording_lab_id(lab_file, data),
+                    lab_file=lab_file,
+                    lab_name=str((data.get("meta") or {}).get("name") or lab_path),
+                    node_id=node_id,
+                    node_name=(data.get("nodes", {}).get(str(node_id)) or {}).get("name") or console_info["name"],
+                    target_host=console_host,
+                    target_port=console_port,
+                    username=current_user.username,
+                    mode=console,
+                )
             if recording is not None:
                 console_port = recording.listen_port
         if settings.GUACAMOLE_DATABASE_URL.strip():
@@ -2992,27 +3005,61 @@ async def move_lab(
             "message": f"Lab already exists at target: /{new_relative} (60039).",
         }
 
-    # Lazy-create the target folder (including LABS_DIR/Shared on first use).
     with lab_lock(scoped_path, settings.LABS_DIR):
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(source), str(target))
         lab = await lab_service.get_lab_by_filename(scoped_path)
-        if lab is not None:
-            lab.filename = new_relative
-            lab.path = f"/{new_relative}"
-            try:
+        if not source.is_file():
+            return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+        try:
+            with source.open(encoding="utf-8") as lab_json:
+                data = json.load(lab_json)
+        except (OSError, ValueError):
+            data = None
+        try:
+            lab_id = recording_lab_id(source, data if isinstance(data, dict) else {})
+            source_recordings = lab_recordings_dir(source, lab_id)
+            target_recordings = lab_recordings_dir(target, lab_id)
+        except ValueError as e:
+            return {"code": 400, "status": "fail", "message": str(e)}
+        if target.exists() or target_recordings.exists():
+            return {
+                "code": 409,
+                "status": "fail",
+                "message": "A lab or recordings folder already exists at the destination (60039).",
+            }
+        lab_moved = relays_relocated = False
+        recorder = get_console_recorder()
+        try:
+            # Lazy-create the target folder, including Shared on first use.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(source), str(target))
+            lab_moved = True
+            if source_recordings.exists():
+                target_recordings.parent.mkdir(parents=True, exist_ok=True)
+                source_recordings.rename(target_recordings)
+            recorder.relocate_lab(source, target)
+            relays_relocated = True
+            if lab is not None:
+                lab.filename = new_relative
+                lab.path = f"/{new_relative}"
                 await db.commit()
-            except Exception:
+        except (Exception, asyncio.CancelledError) as exc:
+            # A previously idle console can start a recording while the DB
+            # commits. Move any directory it created back with the lab.
+            if lab_moved and target_recordings.exists():
+                source_recordings.parent.mkdir(parents=True, exist_ok=True)
+                target_recordings.rename(source_recordings)
+            if lab_moved:
                 shutil.move(str(target), str(source))
-                _logger.exception(
-                    "move_lab: DB update failed; rolled file back to %s",
-                    source,
-                )
-                return {
-                    "code": 500,
-                    "status": "fail",
-                    "message": "Lab move failed: could not update the lab record (60039).",
-                }
+            if relays_relocated:
+                recorder.relocate_lab(target, source)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            _logger.exception("move_lab: could not move %s to %s", source, target)
+            return {
+                "code": 500,
+                "status": "fail",
+                "message": "Lab move failed (60039).",
+            }
 
     return {
         "code": 200,
