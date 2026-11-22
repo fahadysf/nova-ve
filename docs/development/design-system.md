@@ -105,7 +105,7 @@ Token and base layer:
 
 Route surfaces:
 - `frontend/src/routes/login/+page.svelte`
-- `frontend/src/routes/labs/+page.svelte`
+- `frontend/src/routes/(shell)/labs/+page.svelte`
 - `frontend/src/routes/labs/[...id]/+page.svelte`
 
 Canvas and component surfaces:

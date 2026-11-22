@@ -5,7 +5,7 @@ Every non-`--dry-run` invocation writes a structured JSON manifest to the path p
 | Field | Contents |
 |---|---|
 | `imported` | one entry per file landed at the destination, with `src` / `dst` / `sha256` / `bytes` / `mode` |
-| `templates` | one entry per emitted template, with `name` / `status` (one of `ok`, `needs-manual-review`) and on `needs-manual-review` a `reason` |
+| `templates` | one entry per emitted template, with `name` / `status` (one of `generated`, `converted`, `skipped`, `needs-manual-review`) and on `needs-manual-review` a `reason` |
 | `skipped` | one entry per destination skipped because it was already migrated (idempotency) |
 | `errors` | one entry per failure that did not abort the run; each has `path` and `error` |
 
@@ -15,7 +15,7 @@ The shared IOL `iourc` license is always copy-based even in the default mode, so
 
 ## Handling `needs-manual-review` templates
 
-When a vendor adapter cannot fully convert an EVE-NG template (e.g. the PHP file's `qemu_options` references an unrecognised `-device` tree, or an IOL template lacks its `iourc` license file), the importer flags the template with `status: "needs-manual-review"` and stores the parsed-but-unconverted EVE-NG fields under `_eveng_raw` for human inspection.
+When a vendor adapter cannot fully convert an EVE-NG template (e.g. the source config references an unrecognised hardware shape, or an IOL template lacks its `iourc` license file), the importer flags the template with `status: "needs-manual-review"` and a human-readable `reason` on the manifest entry.
 
 Workflow:
 
@@ -24,10 +24,11 @@ Workflow:
    jq '.templates[] | select(.status == "needs-manual-review")' \
      /var/lib/nova-ve/import-manifest.json
    ```
-2. For each: read the `reason` field, inspect `_eveng_raw`, and either:
+2. For each: read the `reason` field, then either:
     - hand-author a nova-ve template JSON under `/var/lib/nova-ve/templates/<vendor>/<key>.json`, or
     - open a follow-up issue if the importer should support that vendor pattern natively.
-3. Re-run the importer. The previously-flagged template stays flagged — the importer never overwrites a template you have customised; the check is content-aware sha256, not a marker comment.
+
+Note: re-running the importer **regenerates adapter-emitted templates** from the source tree — hand-edits made directly to a generated template file are overwritten on the next run. Keep customisations in differently-named template files.
 
 ## Rollback
 

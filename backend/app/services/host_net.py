@@ -5,7 +5,7 @@ host_net — Linux bridge / TAP name helpers, instance-ID provisioning, and
 thin Python wrappers around the privileged ``nova-ve-net.py`` helper.
 
 Bridge name format : nove{lab_hash:04x}n{network_id}   (≤14 chars, network_id ≤ 99999)
-TAP name format    : nve{lab_hash:04x}d{node_id}i{iface}  (≤13 chars, node_id ≤ 999, iface ≤ 99)
+TAP name format    : nve{lab_hash:04x}d{node_id}i{iface}  (≤14 chars, node_id ≤ 999, iface ≤ 99)
 
 lab_hash is a 16-bit value derived from blake2b(instance_id + ":" + lab_id).
 Using blake2b (not Python's built-in hash()) because hash() is salted per-process since Python 3.3.

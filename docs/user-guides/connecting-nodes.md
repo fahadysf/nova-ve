@@ -25,7 +25,7 @@ In the canvas, networks are rendered as blue pill-shaped nodes with a connection
 3. Drop on:
     - a free port on another node — produces a peer link.
     - the open slot on a network — produces a node-to-network link.
-4. The canvas commits the link to the lab JSON and (if the node is running) hot-attaches the interface at runtime.
+4. The canvas commits the link to the lab JSON and — for Docker and QEMU nodes that are running — hot-attaches the interface at runtime. Dynamips and IOL nodes pick up new links at their next start (a restart-required banner appears when the change can't be applied live).
 
 ## Pinned port labels
 

@@ -46,7 +46,7 @@ sudo bash /var/lib/nova-ve/nova-ve-git/deploy/scripts/smoke-check.sh
 ## Lab JSON files
 
 ```bash
-# Read a lab JSON (service-user-owned, mode 0600):
+# Read a lab JSON (owned by the nova-ve service user):
 sudo cat /var/lib/nova-ve/labs/<lab-name>.json | jq .
 
 # Show every node in a lab:

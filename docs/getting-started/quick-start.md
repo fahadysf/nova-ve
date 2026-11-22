@@ -14,10 +14,11 @@ That single command:
 4. Builds the FastAPI backend (Python venv + Alembic migrations + initial seed).
 5. Builds the SvelteKit frontend (`npm ci` + `vite build`) into `/var/lib/nova-ve/www`.
 6. Installs the privileged network helper at `/opt/nova-ve/bin/` plus its `visudo`-validated sudoers fragment, including NAT-Cloud DHCP, NAT, and forwarding verbs.
-7. Drops systemd units (`nova-ve-backend`, `caddy`) and starts them.
-8. Reconciles existing NAT-Cloud bridge state on upgraded hosts.
-9. Runs the in-tree smoke check.
-10. Writes `nova-ve-install-summary.md` (mode `0600`) into the directory you launched the installer from. It contains the bootstrapped admin password, the location of every critical config file, and a map of the env vars in `/etc/nova-ve/backend.env`.
+7. Optionally installs the side-by-side QEMU version pack (`/opt/nova-ve/qemu/<version>`) from the `nova-ve-qemu` companion repo — enables per-node QEMU version selection; disable with `NOVA_VE_QEMU_PKGS=0`.
+8. Drops systemd units (`nova-ve-backend`, `caddy`) and starts them.
+9. Reconciles existing NAT-Cloud bridge state on upgraded hosts.
+10. Runs the in-tree smoke check.
+11. Writes `nova-ve-install-summary.md` (mode `0600`) into the directory you launched the installer from. It contains the bootstrapped admin password, the location of every critical config file, and a map of the env vars in `/etc/nova-ve/backend.env`.
 
 The script is idempotent: re-running it fast-forwards the repo, reapplies templates, reinstalls the helper, reconciles NAT-Cloud runtime state for existing bridges, and restarts services without rotating existing secrets.
 
@@ -32,7 +33,10 @@ Set any of these as env vars before piping into `sudo bash`:
 | `NOVA_VE_REPO_DIR` | `/var/lib/nova-ve/nova-ve-git` | Clone destination; legacy `~${SUDO_USER}/nova-ve-git` checkouts are reused during migration when present |
 | `NOVA_VE_SERVICE_USER` | `nova-ve` | Dedicated UNIX service user that owns runtime state and runs the backend |
 | `NOVA_VE_OWNER` | (unset) | Compatibility alias for `NOVA_VE_SERVICE_USER` |
-| `NOVA_VE_SKIP_DEMO_IMAGES` | (unset) | Set to `1` to skip building the bundled `nova-ve/alpine-telnet:latest` demo image |
+| `NOVA_VE_SKIP_DEMO_IMAGES` | (unset) | Set to `1` to skip building the bundled demo images (`alpine:3.22` pull, `nova-ve/alpine-telnet`, `nova-ve/alpine-vnc`) |
+| `NOVA_VE_QEMU_PKGS` | `1` | Install the side-by-side QEMU version pack (per-node QEMU version selection) |
+| `NOVA_VE_QEMU_RELEASE` | `v1.0.0` | `nova-ve-qemu` GitHub Release tag to pull the pack from |
+| `NOVA_VE_QEMU_VERSIONS` | `2.12.1 4.1.0 5.2.0 11.1.3` | QEMU versions to install side-by-side under `/opt/nova-ve/qemu/` |
 
 ## After install
 

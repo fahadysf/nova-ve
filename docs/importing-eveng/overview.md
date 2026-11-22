@@ -100,7 +100,7 @@ sudo ./deploy/scripts/import-eveng-templates.sh --delete-source
 
 ### Step 4 — instantiate a node from a migrated template
 
-After the importer finishes, every priority-vendor template that produced a clean conversion lands in `/var/lib/nova-ve/templates/`. Operators see them in the existing `GET /api/list/templates/{template_type}` listing. The picker UI in nova-ve's "Add node" modal iterates types and lists the templates; click "From template" → pick → confirm.
+After the importer finishes, every priority-vendor template that produced a clean conversion lands in `/var/lib/nova-ve/templates/`. Operators see them in the existing `GET /api/list/templates/{template_type}` listing. In the lab editor, click the round **+** button → **Node** to open the "Add node" modal, pick the type tab, and choose the migrated template from the dropdown.
 
 The importer does not migrate saved EVE-NG lab topology files. It imports reusable images and templates; build nova-ve labs from those templates after the import.
 

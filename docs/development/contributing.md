@@ -21,7 +21,7 @@ Fork → branch → push → PR against `main`. Direct pushes to `main` are rese
     python -m venv .venv
     source .venv/bin/activate
     pip install -r requirements.txt
-    PYTHONPATH=. .venv/bin/pytest
+    .venv/bin/python -m pytest tests/
     ```
 
 === "Frontend"
@@ -30,6 +30,7 @@ Fork → branch → push → PR against `main`. Direct pushes to `main` are rese
     cd frontend
     npm install
     npm run check
+    npm test
     npm run build
     ```
 
@@ -37,7 +38,7 @@ Fork → branch → push → PR against `main`. Direct pushes to `main` are rese
 
 - Explain *what* and *why*; reference the related issue.
 - Mention design tradeoffs.
-- Include verification evidence: backend test output, `npm run check`, `npm run build`, and manual test notes for un-automated behavior.
+- Include verification evidence: backend test output, `npm run check`, `npm test`, `npm run build`, and manual test notes for un-automated behavior.
 
 ## Commit style
 

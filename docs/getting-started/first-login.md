@@ -7,7 +7,7 @@ When `install.sh` finishes it prints the bootstrapped admin credentials and the 
 ```bash
 # In the directory where you ran install.sh:
 ls -la nova-ve-install-summary.md
-sudo cat nova-ve-install-summary.md | grep -A 1 'Admin'
+sudo grep -A 4 'Bootstrapped admin credentials' nova-ve-install-summary.md
 ```
 
 The file is owned by root with mode `0600`, so `sudo` is required to read it. The bootstrapped password sits in plain text inside — rotate it after first login if the host is shared.
@@ -16,7 +16,7 @@ The file is owned by root with mode `0600`, so `sudo` is required to read it. Th
 
 1. Point your browser at `http://<host-ip>/` (or `https://<host-ip>/` if you have wired Caddy with a TLS cert).
 2. Use the admin username + password from the install summary.
-3. The session lands on the labs index. Click "New lab" to start, or import an existing lab JSON.
+3. The session lands on the labs index. Click "New Lab" to create your first lab.
 
 If the UI does not load, jump straight to [Troubleshooting](../operations/troubleshooting.md) — the most common cause is the backend not coming up cleanly.
 
@@ -28,7 +28,7 @@ If the UI does not load, jump straight to [Troubleshooting](../operations/troubl
 - **Critical config files** — `/etc/nova-ve/backend.env`, sudoers fragments, Caddy site config, systemd units.
 - **Service map** — what systemd unit runs what, and how to restart each.
 - **Demo images** — status of the bundled `nova-ve/alpine-telnet:latest` build.
-- **Env var reference** — every variable in `/etc/nova-ve/backend.env` with its purpose.
+- **Env var reference** — the critical variables in `/etc/nova-ve/backend.env` with their purpose.
 
 Treat this file as a runbook. If you ever forget where something lives, the summary almost certainly tells you.
 

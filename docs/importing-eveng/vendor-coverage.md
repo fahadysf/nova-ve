@@ -23,14 +23,18 @@ Anything outside this set still has its image copied — only the *template* lay
 
 Juniper vMX and vQFX ship as **paired VMs** — a routing-engine (RE) image and a packet-forwarding (PFE) image that must be launched together with a private bridge between them. The dedicated adapters emit a multi-node template that the "Add node" picker presents as a single entry; instantiating it produces the RE + PFE pair correctly wired up. See [#188](https://github.com/fahadysf/nova-ve/issues/188) for the paired-template flow.
 
+## QEMU version selection
+
+QEMU adapters carry each template's `qemu_version` through to node `extras`. At node start the runtime resolves it against the side-by-side QEMU builds installed under `/opt/nova-ve/qemu/<version>/` (installed by `install.sh` from the `nova-ve-qemu` companion release pack; see the `NOVA_VE_QEMU_*` knobs in the [Quick start](../getting-started/quick-start.md) table). Templates without a pinned version use the host default QEMU.
+
 ## Adding a new adapter
 
-Each adapter inherits from `adapters/base.py` and implements `convert(eveng_template) -> NovaTemplate`. To add a new vendor:
+Each adapter inherits from `adapters/base.py` and implements `match(raw)` plus `convert(raw, image_dir)` — the latter returning a template dict validated by `template_schema.validate_template()`. To add a new vendor:
 
 1. Drop a Python file at `backend/scripts/import_eveng/adapters/<vendor>.py`.
-2. Implement `convert()` — return a `NovaTemplate` matching the result schema in `template_schema.py`.
+2. Implement `match()` and `convert()`.
 3. Register the adapter in `adapters/__init__.py`.
-4. Add a unit test under `backend/tests/import_eveng/` exercising a representative EVE-NG fixture.
+4. Add a unit test under `backend/tests/scripts/test_import_eveng/` exercising a representative EVE-NG fixture.
 5. Re-run the importer on a host that has the EVE-NG source tree.
 
 See [Development → Backend](../development/backend.md) for the broader Python module layout.

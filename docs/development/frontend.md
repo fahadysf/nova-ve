@@ -8,13 +8,15 @@ SvelteKit 2 app on Svelte 5 (runes-friendly), bundled with Vite, styled with Tai
 frontend/
 ├── src/
 │   ├── routes/
-│   │   └── labs/[...id]/+page.svelte    # The lab editor — top bar, canvas, console workspace
+│   │   ├── labs/[...id]/+page.svelte    # The lab editor — top bar, canvas, console workspace
+│   │   └── (shell)/                     # Shell-group routes: labs index, profile, admin, library, system settings
 │   └── lib/
 │       ├── api.ts                       # Typed wrappers over the backend REST API
 │       ├── components/
 │       │   ├── ToastStack.svelte        # Top-level toast renderer
+│       │   ├── NodeConfigModal.svelte   # Add/edit node modal (see canvas/)
 │       │   └── canvas/                  # Every editor component (see below)
-│       ├── stores/                      # Svelte writables (auth, ws, info panels, drag state, toasts)
+│       ├── stores/                      # Svelte writables (auth/session, labState, ws, info panels, drag state, toasts)
 │       ├── services/                    # Pure-TS helpers (port layout, edge routing, naming, etc.)
 │       └── types/                       # Hand-rolled TS types mirroring backend Pydantic models
 ├── tests/                               # Vitest unit tests for components + stores
@@ -38,7 +40,8 @@ The canvas lives entirely under `src/lib/components/canvas/`. Key files:
 | `LinkConfirmModal.svelte` | Modal that surfaces metric / style / label config for a link. |
 | `PortTooltip.svelte` | Floating hover tooltip with planned + live MAC. |
 | `PortInfoPopover.svelte` | Per-port info popover (single-click on a port). |
-| `NodeConfigModal.svelte` | Add / edit a node — template picker, image picker, NIC count, interface naming. |
+| `NodeConfigModal.svelte` | Add / edit a node — type tabs, template picker, image picker, NIC count, interface naming, extras (NIC model, QEMU version, …). |
+| `NetworkConfigModal.svelte` | Add / edit a network — type (bridge / NAT-Cloud), display name, CIDR / DHCP fields for NAT-Cloud. |
 | `InfoPanel.svelte` | One floating draggable info panel. Pointer-capture drag + viewport clamp. |
 | `InfoPanelStack.svelte` | Renders the up-to-4 open info panels in a stack. |
 
@@ -46,8 +49,10 @@ The canvas lives entirely under `src/lib/components/canvas/`. Key files:
 
 | Store | Lives in | Purpose |
 |---|---|---|
-| `auth` | `src/lib/stores/auth.ts` | Current-user + role state. |
-| `session` | `src/lib/stores/session.ts` | Per-session UI prefs (console layout, etc.). |
+| `authStore` | `src/lib/stores/session.ts` (re-exported by `auth.ts`) | Current-user + role/session state. |
+| `labState` | `src/lib/stores/labState.ts` | Single owner of lab editor state (nodes/networks/topology/links + revision If-Match guard) — the canvas and lab page both read it (#245). |
+| `canvasPrefs` | `src/lib/stores/canvasPrefs.ts` | Per-browser canvas preferences (minimap expanded state), persisted to localStorage. |
+| `externalConsoleStore` | `src/lib/stores/externalConsole.ts` | Per-browser external-console toggle (emit `telnet://` / `vnc://` / `rdp://` links vs in-browser console). |
 | `labWs` | `src/lib/stores/labWs.ts` | WebSocket subscription to the backend runtime feed. |
 | `dragLink` | `src/lib/stores/dragLink.ts` | Active link-drag state machine. |
 | `portInfo` | `src/lib/stores/portInfo.ts` | Per-port popover state. |
@@ -68,8 +73,8 @@ npm run build
 ## Type checking & tests
 
 ```bash
-npx svelte-check --tsconfig ./tsconfig.json --fail-on-warnings
-npx vitest run
+npm run check    # svelte-kit sync + svelte-check (what CI runs)
+npm test         # vitest suite
 ```
 
 Vitest tests render components with `@testing-library/svelte` against the JSDOM environment. End-to-end tests under `tests/e2e/` run with Playwright and need a live backend.

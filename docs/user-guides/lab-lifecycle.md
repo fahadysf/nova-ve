@@ -43,18 +43,16 @@ From the **Labs** index:
 
 Deleting:
 
-- Stops every running node in the lab.
 - Removes the lab JSON.
-- Removes the lab's per-node runtime state directory.
-- Tears down host bridges that no other lab references.
+- Tears down host bridges that no other lab references. Running node processes are not stopped by the delete itself — they lose their lab binding and are reconciled away by the runtime registry.
 
 ## Files and ownership
 
-| Path | Owner | Mode | Purpose |
-|---|---|---|---|
-| `/var/lib/nova-ve/labs/<name>.json` | `nova-ve` service user | 0600 | Lab topology |
-| `/var/lib/nova-ve/labs/<name>/` | `nova-ve` service user | 0700 | Per-node runtime state (qcow2 overlays, logs) |
-| `/var/lib/nova-ve/labs/<name>.json.lock` | `nova-ve` service user | 0600 | Cooperative write lock used by the backend |
+| Path | Owner | Purpose |
+|---|---|---|
+| `/var/lib/nova-ve/labs/<name>.json` | `nova-ve` service user | Lab topology |
+| `/var/lib/nova-ve/labs/<name>/` | `nova-ve` service user | Per-node runtime state (qcow2 overlays, logs) |
+| `/var/lib/nova-ve/labs/<name>.json.lock` | `nova-ve` service user | Cooperative write lock used by the backend |
 
 If you need to inspect a lab JSON from the host, `sudo cat /var/lib/nova-ve/labs/<name>.json | jq` is the canonical recipe.
 
