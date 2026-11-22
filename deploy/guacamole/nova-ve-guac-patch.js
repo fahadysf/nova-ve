@@ -4,6 +4,16 @@
  */
 
 (function () {
+  /* Terminal font families shipped by nova-ve (deploy/guacamole/fonts,
+   * installed into guacd). Offered as suggestions on the client menu's
+   * "Font name" field so operators get a dropdown instead of guessing. */
+  var NOVA_VE_TERMINAL_FONTS = [
+    'Roboto Mono',
+    'JetBrainsMono Nerd Font Mono',
+    'FiraCode Nerd Font Mono',
+    'MesloLGS Nerd Font Mono'
+  ];
+
   function suppressKnownClientNoise() {
     var knownMessage = "Cannot read properties of undefined (reading 'bind')";
     if (window.__novaVeConsolePatched) return;
@@ -69,9 +79,40 @@
     return true;
   }
 
+  function installFontNameSuggestions() {
+    var datalist = document.getElementById('nova-ve-terminal-fonts');
+    if (!datalist) {
+      datalist = document.createElement('datalist');
+      datalist.id = 'nova-ve-terminal-fonts';
+      NOVA_VE_TERMINAL_FONTS.forEach(function (name) {
+        var option = document.createElement('option');
+        option.value = name;
+        datalist.appendChild(option);
+      });
+      document.body.appendChild(datalist);
+    }
+
+    var inputs = document.querySelectorAll('.labeled-field-font-name input[type=text]');
+    for (var i = 0; i < inputs.length; i += 1) {
+      if (inputs[i].getAttribute('list')) continue;
+      inputs[i].setAttribute('list', 'nova-ve-terminal-fonts');
+      inputs[i].setAttribute('autocomplete', 'off');
+    }
+  }
+
+  function startFontSuggestionWatch() {
+    // The client menu renders/re-renders after connect; keep attaching
+    // the font suggestions as the menu DOM appears. Idempotent guard so
+    // the retry loop below can never double-install it.
+    if (window.__novaVeFontWatch) return;
+    window.__novaVeFontWatch = window.setInterval(installFontNameSuggestions, 2000);
+  }
+
   function installPatchLoop() {
     suppressKnownClientNoise();
     stripDeprecatedViewportKey();
+    installFontNameSuggestions();
+    startFontSuggestionWatch();
 
     if (patchTunnelService()) return;
 

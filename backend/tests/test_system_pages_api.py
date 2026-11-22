@@ -339,3 +339,54 @@ async def test_docker_record_with_missing_stdout_file_still_lists(client, sys_se
     logs = listing.json()["data"]["logs"]
     assert len(logs) == 1
     assert logs[0]["path"] == "docker://arc-id/4"
+
+
+# ---------------------------------------------------------------------------
+# Terminal font setting (#283)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_settings_get_reports_terminal_font_options(client, sys_settings):
+    _as("admin")
+
+    response = await client.get("/api/system/settings")
+
+    assert response.status_code == 200
+    console = response.json()["data"]["console"]
+    # The shipped Nerd Fonts + the legacy default drive the UI dropdown.
+    assert console["terminal_font_options"] == [
+        "Roboto Mono",
+        "JetBrainsMono Nerd Font Mono",
+        "FiraCode Nerd Font Mono",
+        "MesloLGS Nerd Font Mono",
+    ]
+    assert "terminal_font_name" in console
+    assert "terminal_font_name_effective" in console
+
+
+@pytest.mark.asyncio
+async def test_settings_put_persists_terminal_font(client, sys_settings):
+    _as("admin")
+
+    response = await client.put(
+        "/api/system/settings",
+        json={"GUACAMOLE_TERMINAL_FONT_NAME": "JetBrainsMono Nerd Font Mono"},
+    )
+
+    assert response.status_code == 200
+    data = (
+        await client.get("/api/system/settings")
+    ).json()["data"]
+    assert data["console"]["terminal_font_name"] == "JetBrainsMono Nerd Font Mono"
+    assert "GUACAMOLE_TERMINAL_FONT_NAME" in data["overrides"]
+
+
+@pytest.mark.asyncio
+async def test_settings_put_rejects_absurd_terminal_font(client, sys_settings):
+    _as("admin")
+
+    response = await client.put(
+        "/api/system/settings",
+        json={"GUACAMOLE_TERMINAL_FONT_NAME": "x" * 65},
+    )
+
+    assert response.status_code == 422

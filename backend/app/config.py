@@ -325,6 +325,18 @@ EDITABLE_SETTING_KEYS = (
     "NAT_CLOUD_POOL",
     "SESSION_MAX_AGE",
     "EXTERNAL_CONSOLE_HOST",
+    "GUACAMOLE_TERMINAL_FONT_NAME",
+)
+
+# Terminal font families shipped with nova-ve (deploy/guacamole/fonts,
+# installed into guacd by run-guacamole.sh) plus the legacy default.
+# Single source for the settings UI dropdown (#283); free-form values
+# remain valid for operators who add their own fonts to guacd.
+CONSOLE_TERMINAL_FONT_OPTIONS = (
+    "Roboto Mono",
+    "JetBrainsMono Nerd Font Mono",
+    "FiraCode Nerd Font Mono",
+    "MesloLGS Nerd Font Mono",
 )
 
 

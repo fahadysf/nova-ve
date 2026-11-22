@@ -387,7 +387,12 @@ class GuacamoleDatabaseService:
         params["disable-auth"] = "true"
 
         if protocol == "telnet":
-            params["font-name"] = self.settings.GUACAMOLE_TERMINAL_FONT_NAME
+            # #283: the default terminal font is operator-configurable;
+            # omit the parameter when unset so guacd uses its own default
+            # instead of an empty (invalid) font name.
+            font_name = str(self.settings.GUACAMOLE_TERMINAL_FONT_NAME).strip()
+            if font_name:
+                params["font-name"] = font_name
             params["font-size"] = str(self.settings.GUACAMOLE_TERMINAL_FONT_SIZE)
 
         return params

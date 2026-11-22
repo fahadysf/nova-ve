@@ -14,6 +14,13 @@ With an externally reachable console host configured (System → Settings → Ne
 
 Every running node's console also listens directly on the nova-ve host in a fixed per-protocol port range — telnet/serial 15000–20000, VNC 25000–30000, RDP 35000–40000 — so you can dial a console by hand from any client. The advertised links use whatever reachable host name/IP you configured.
 
+## Terminal fonts
+
+nova-ve ships three Nerd Font families for in-browser console sessions (plus Roboto Mono): **JetBrainsMono Nerd Font Mono**, **FiraCode Nerd Font Mono**, and **MesloLGS Nerd Font Mono**. Terminal text is rendered server-side by guacd, so these fonts work in any browser.
+
+- **Default**: pick one in System → Settings → *Terminal font* — applies to new console sessions after the backend restarts.
+- **Per session**: open the Guacamole client menu (Ctrl+Shift+Alt) → Terminal behavior → **Font name** — the field offers the shipped fonts as dropdown suggestions, and accepts any font family installed in guacd.
+
 ## Layout modes
 
 The top bar has a **Console layout** selector with two modes:

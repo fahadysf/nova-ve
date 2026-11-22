@@ -21,7 +21,7 @@ import psutil
 
 from pydantic import BaseModel
 
-from app.config import EDITABLE_SETTING_KEYS, get_settings
+from app.config import CONSOLE_TERMINAL_FONT_OPTIONS, EDITABLE_SETTING_KEYS, get_settings
 
 router = APIRouter(prefix="/api", tags=["system"], responses=COMMON_RESPONSES)
 
@@ -79,6 +79,18 @@ def _validate_override(key: str, value) -> object:
                 "(no scheme, port, path, or credentials)."
             )
         return text_value
+    if key == "GUACAMOLE_TERMINAL_FONT_NAME":
+        # #283: default terminal font for in-browser console sessions.
+        # Free-form (fontconfig family name resolved inside guacd); the
+        # shipped options list only drives the UI dropdown. Empty = use
+        # guacd's own default.
+        font_value = str(value).strip()
+        if len(font_value) > 64 or any(ord(char) < 32 for char in font_value):
+            raise ValueError(
+                "GUACAMOLE_TERMINAL_FONT_NAME must be a font family name "
+                "(64 characters max, no control characters)."
+            )
+        return font_value
     raise ValueError(f"Unsupported setting: {key}")
 
 
@@ -209,7 +221,13 @@ async def get_settings_route(
             },
             "console": {
                 "guacamole_public_path": settings.GUACAMOLE_PUBLIC_PATH,
-                "terminal_font_name": settings.GUACAMOLE_TERMINAL_FONT_NAME,
+                "terminal_font_name": overrides.get(
+                    "GUACAMOLE_TERMINAL_FONT_NAME", settings.GUACAMOLE_TERMINAL_FONT_NAME
+                ),
+                "terminal_font_name_effective": settings.GUACAMOLE_TERMINAL_FONT_NAME,
+                # Font families shipped with nova-ve (#283); the dropdown's
+                # option list. Free-form values stay valid for custom fonts.
+                "terminal_font_options": list(CONSOLE_TERMINAL_FONT_OPTIONS),
                 "terminal_font_size": settings.GUACAMOLE_TERMINAL_FONT_SIZE,
             },
             "paths": {
@@ -229,6 +247,7 @@ class SettingsUpdateBody(BaseModel):
     NAT_CLOUD_POOL: str | None = None
     SESSION_MAX_AGE: int | None = None
     EXTERNAL_CONSOLE_HOST: str | None = None
+    GUACAMOLE_TERMINAL_FONT_NAME: str | None = None
 
 
 @router.put("/system/settings")

@@ -3485,3 +3485,26 @@ async def test_external_console_endpoint_scopes_access_and_missing_lab(
         current_user=SimpleNamespace(username="admin", role="admin", html5=True, folder="/"),
     )
     assert response["code"] == 404
+
+
+@pytest.mark.asyncio
+async def test_guacamole_telnet_font_params_follow_settings(runtime_settings):
+    """#283: font-name rides the operator-configurable default; an empty
+    setting omits the parameter entirely instead of sending an invalid
+    empty font name to guacd."""
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+
+    configured = SimpleNamespace(**{**vars(runtime_settings), "GUACAMOLE_TERMINAL_FONT_NAME": "JetBrainsMono Nerd Font Mono", "GUACAMOLE_TERMINAL_FONT_SIZE": 12})
+    service.settings = configured
+    params = service._connection_parameters(host="h", port=1, protocol="telnet")
+    assert params["font-name"] == "JetBrainsMono Nerd Font Mono"
+    assert params["font-size"] == "12"
+
+    unset = SimpleNamespace(**{**vars(runtime_settings), "GUACAMOLE_TERMINAL_FONT_NAME": "", "GUACAMOLE_TERMINAL_FONT_SIZE": 12})
+    service.settings = unset
+    params = service._connection_parameters(host="h", port=1, protocol="telnet")
+    assert "font-name" not in params
+
+    # Non-terminal protocols never carry font parameters.
+    params = service._connection_parameters(host="h", port=1, protocol="vnc")
+    assert "font-name" not in params
