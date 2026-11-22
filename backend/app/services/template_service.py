@@ -488,6 +488,19 @@ def _qemu_extras_schema() -> list[dict[str, Any]]:
             "runtime": True,
         },
         {
+            "key": "disk_bus",
+            "label": "Disk bus",
+            "type": "select",
+            "options": [
+                {"value": "virtio", "label": "VirtIO (virtioa)"},
+                {"value": "sata", "label": "SATA / AHCI (sataa)"},
+                {"value": "ide", "label": "IDE (hda)"},
+            ],
+            "default": "virtio",
+            "stoppedOnly": True,
+            "runtime": True,
+        },
+        {
             "key": "qemu_version",
             "label": "QEMU version",
             "type": "select",
