@@ -22,6 +22,13 @@ Every path nova-ve writes to or reads from, in one table.
 | `/var/lib/nova-ve/www/` | `nova-ve` service user | 0755 | SvelteKit static build, served by Caddy. |
 | `/var/lib/nova-ve/import-manifest.json` | root | 0644 | Last EVE-NG importer run summary. |
 
+## Console terminal fonts
+
+| Path | Purpose |
+|---|---|
+| `<repo>/deploy/guacamole/fonts/` | Vendored terminal fonts (Roboto Mono + three Nerd Fonts, SIL OFL 1.1). |
+| guacd container `/usr/local/share/fonts/nova-ve/` | Where `run-guacamole.sh` installs them (docker cp + fc-cache) for the server-side terminal renderer. |
+
 ## Configuration
 
 | Path | Owner | Mode | Purpose |

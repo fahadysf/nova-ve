@@ -28,7 +28,13 @@
       external_console_host_effective: string;
     };
     reconciliation: { discovery_cadence_seconds: number; discovery_cadence_seconds_effective: number };
-    console: { guacamole_public_path: string; terminal_font_name: string; terminal_font_size: number };
+    console: {
+      guacamole_public_path: string;
+      terminal_font_name: string;
+      terminal_font_name_effective: string;
+      terminal_font_options: string[];
+      terminal_font_size: number;
+    };
     paths: Record<string, string>;
     overrides: string[];
     restart_required: boolean;
@@ -39,6 +45,7 @@
   let natPool = '';
   let sessionMaxAge = 14400;
   let externalConsoleHost = '';
+  let terminalFont = '';
   let saving = false;
 
   function readOnlyGroups(data: SettingsData): { title: string; rows: [string, string][] }[] {
@@ -55,7 +62,7 @@
         title: 'Console',
         rows: [
           ['Gateway path', data.console.guacamole_public_path],
-          ['Terminal font', data.console.terminal_font_name],
+          ['Terminal font (running)', data.console.terminal_font_name_effective],
           ['Terminal size', String(data.console.terminal_font_size)]
         ]
       },
@@ -73,6 +80,7 @@
     natPool = data.data.networking.nat_cloud_pool;
     sessionMaxAge = data.data.auth.session_max_age;
     externalConsoleHost = data.data.networking.external_console_host;
+    terminalFont = data.data.console.terminal_font_name;
   }
 
   async function save() {
@@ -84,7 +92,8 @@
           DISCOVERY_CADENCE_SECONDS: discoveryCadence,
           NAT_CLOUD_POOL: natPool,
           SESSION_MAX_AGE: sessionMaxAge,
-          EXTERNAL_CONSOLE_HOST: externalConsoleHost
+          EXTERNAL_CONSOLE_HOST: externalConsoleHost,
+          GUACAMOLE_TERMINAL_FONT_NAME: terminalFont
         }
       });
       toastStore.push('Settings persisted. Restart the backend to apply.', 'success');
@@ -158,6 +167,24 @@
                 them with a firewall.
               </p>
             </div>
+            <label class="block text-[11px] uppercase tracking-[0.05em] text-gray-500">
+              Terminal font (in-browser consoles)
+              <select
+                class="mt-1 w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm text-gray-100 focus:border-blue-500 focus:outline-none"
+                bind:value={terminalFont}
+                data-testid="settings-terminal-font"
+              >
+                {#each settings.console.terminal_font_options as font (font)}
+                  <option value={font}>{font}</option>
+                {/each}
+              </select>
+            </label>
+            <p class="mt-1 text-[10px] leading-relaxed text-gray-500">
+              Default font for new in-browser console sessions. The bundled
+              Nerd Fonts ship glyph-rich terminal faces; the per-session
+              override lives in the Guacamole client menu
+              (Ctrl+Shift+Alt → Terminal behavior → Font name).
+            </p>
             <label class="block text-[11px] uppercase tracking-[0.05em] text-gray-500">
               Session lifetime (seconds, min 300)
               <input
