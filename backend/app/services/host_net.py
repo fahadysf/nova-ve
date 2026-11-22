@@ -217,6 +217,62 @@ def veth_peer_name(lab_id: str, node_id: int, iface: int) -> str:
     return name
 
 
+def mgmt_bridge_name(lab_id: str) -> str:
+    """Return the per-lab management bridge name (#287).
+
+    Format: ``nove{lab_hash:04x}mg`` — the ``mg`` suffix separates it from
+    network bridges (``nove{h}n{id}``) while still matching the lab-hash
+    orphan-bridge sweep.  Max length: 4 + 4 + 2 = 10 chars (IFNAMSIZ: 15).
+    """
+    instance_id = get_instance_id()
+    h = _lab_hash(lab_id, instance_id)
+    name = f"nove{h:04x}mg"
+    assert len(name) <= 14, f"mgmt_bridge_name overflow: {name!r} ({len(name)} chars)"
+    return name
+
+
+def mgmt_veth_host_name(lab_id: str, node_id: int) -> str:
+    """Return the host-side veth name for a container's ``mgmt0`` NIC (#287).
+
+    Format: ``nve{lab_hash:04x}d{node_id}mth`` — the ``mt`` marker keeps it
+    out of the lab-interface namespace (``i<iface>``) while still matching
+    the node orphan sweep.  Valid for node_id ≤ 999 (IFNAMSIZ guard below).
+    """
+    instance_id = get_instance_id()
+    h = _lab_hash(lab_id, instance_id)
+    name = f"nve{h:04x}d{node_id}mth"
+    assert len(name) <= 14, f"mgmt_veth_host_name overflow: {name!r} ({len(name)} chars)"
+    return name
+
+
+def mgmt_veth_peer_name(lab_id: str, node_id: int) -> str:
+    """Return the container-peer veth name (pre-rename) for ``mgmt0`` (#287).
+
+    Format: ``nve{lab_hash:04x}d{node_id}mtp``.  Renamed to ``mgmt0`` inside
+    the container netns after ``link_netns``.
+    """
+    instance_id = get_instance_id()
+    h = _lab_hash(lab_id, instance_id)
+    name = f"nve{h:04x}d{node_id}mtp"
+    assert len(name) <= 14, f"mgmt_veth_peer_name overflow: {name!r} ({len(name)} chars)"
+    return name
+
+
+def mgmt_subnet_candidates(lab_id: str, count: int = 8) -> list[int]:
+    """Deterministic, collision-ordered mgmt /24 third octets for a lab (#287).
+
+    Seeds from ``blake2b("{instance_id}:{lab_id}:mgmt")`` and returns
+    ``count`` candidates advancing by one octet so the caller can skip /24s
+    already owned by other host interfaces.
+    """
+    instance_id = get_instance_id()
+    raw = hashlib.blake2b(
+        f"{instance_id}:{lab_id}:mgmt".encode("utf-8"), digest_size=1
+    ).hexdigest()
+    x0 = int(raw, 16)
+    return [(x0 + k) % 256 for k in range(count)]
+
+
 # ---------------------------------------------------------------------------
 # Privileged helper invocation (US-201 wrapper)
 # ---------------------------------------------------------------------------
@@ -664,6 +720,17 @@ def addr_up_in_netns(pid: int, iface: str) -> None:
     _invoke_helper("addr-up-in-netns", str(int(pid)), iface)
 
 
+def addr_add_in_netns(pid: int, iface: str, cidr: str) -> None:
+    """Assign ``cidr`` to ``iface`` inside ``pid``'s netns (#287).
+
+    Wraps the helper's ``addr-add-in-netns`` verb (``nsenter -t <pid> -n
+    ip addr add <cidr> dev <iface>``) — used for the host-assigned static
+    address on a container's ``mgmt0`` interface.  The verb and its CIDR
+    validation already existed for NAT-Cloud config paths.
+    """
+    _invoke_helper("addr-add-in-netns", str(int(pid)), iface, cidr)
+
+
 def read_iface_mac(pid: int, iface: str) -> str:
     """Return the MAC of ``iface`` inside ``pid``'s netns (US-205b).
 
@@ -675,6 +742,22 @@ def read_iface_mac(pid: int, iface: str) -> str:
     """
     proc = _invoke_helper("read-iface-mac", str(int(pid)), iface)
     return (proc.stdout or "").strip()
+
+
+def list_ipv4_addrs() -> list[tuple[str, str]]:
+    """Return ``(iface, cidr)`` for every IPv4 address on the host (#287).
+
+    Wraps the helper's ``list-ipv4-addrs`` verb.  Used by the docker mgmt
+    attachment to avoid handing two labs the same /24 and to reuse an
+    existing mgmt bridge's already-assigned gateway.
+    """
+    proc = _invoke_helper("list-ipv4-addrs")
+    pairs: list[tuple[str, str]] = []
+    for line in (proc.stdout or "").splitlines():
+        fields = line.split()
+        if len(fields) == 2:
+            pairs.append((fields[0], fields[1]))
+    return pairs
 
 
 def tap_exists(name: str) -> bool:
@@ -800,9 +883,9 @@ import re as _re
 
 # Patterns that match nova-ve-owned kernel objects.
 # Bridges: nove<4-hex>n<network_id>
-_RE_BRIDGE = _re.compile(r"^nove[0-9a-f]{4}n\d{1,5}$")
+_RE_BRIDGE = _re.compile(r"^nove[0-9a-f]{4}(n\d{1,5}|mg)$")
 # TAPs / veth host-ends: nve<4-hex>d<node_id>i<iface>[h|p]?
-_RE_NVE_IFACE = _re.compile(r"^nve[0-9a-f]{4}d\d{1,3}i\d{1,2}[hp]?$")
+_RE_NVE_IFACE = _re.compile(r"^nve[0-9a-f]{4}d\d{1,3}(i\d{1,2}[hp]?|mt[hp])$")
 
 
 def _list_host_ifaces_prefixed(prefix: str) -> list[str]:

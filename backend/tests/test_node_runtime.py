@@ -228,7 +228,12 @@ def _us203_instance_id(monkeypatch, tmp_path):
     return "test-instance-203"
 
 
-def _us203_helper_mock(monkeypatch, *, present_bridges: set[str] | None = None):
+def _us203_helper_mock(
+    monkeypatch,
+    *,
+    present_bridges: set[str] | None = None,
+    ipv4_addrs: "list[tuple[str, str]] | None" = None,
+):
     """Capture every privileged-helper call. Returns the calls dict.
 
     All US-203 tests MUST mock the helper — never spawn a real
@@ -238,14 +243,20 @@ def _us203_helper_mock(monkeypatch, *, present_bridges: set[str] | None = None):
 
     if present_bridges is None:
         present_bridges = set()
+    if ipv4_addrs is None:
+        ipv4_addrs = []
 
     calls: dict[str, list] = {
         "bridge_exists": [],
+        "bridge_add": [],
+        "bridge_addr_add": [],
+        "list_ipv4_addrs": [],
         "veth_pair_add": [],
         "link_master": [],
         "link_up": [],
         "link_netns": [],
         "link_set_name_in_netns": [],
+        "addr_add_in_netns": [],
         "addr_up_in_netns": [],
         "link_del": [],
     }
@@ -253,6 +264,16 @@ def _us203_helper_mock(monkeypatch, *, present_bridges: set[str] | None = None):
     def fake_bridge_exists(name: str) -> bool:
         calls["bridge_exists"].append(name)
         return name in present_bridges
+
+    def fake_bridge_add(name: str) -> None:
+        calls["bridge_add"].append(name)
+
+    def fake_bridge_addr_add(name: str, cidr: str) -> None:
+        calls["bridge_addr_add"].append((name, cidr))
+
+    def fake_list_ipv4_addrs() -> "list[tuple[str, str]]":
+        calls["list_ipv4_addrs"].append(True)
+        return list(ipv4_addrs)
 
     def fake_veth_pair_add(host_end: str, peer_end: str) -> None:
         calls["veth_pair_add"].append((host_end, peer_end))
@@ -269,6 +290,9 @@ def _us203_helper_mock(monkeypatch, *, present_bridges: set[str] | None = None):
     def fake_link_set_name_in_netns(pid: int, oldname: str, newname: str) -> None:
         calls["link_set_name_in_netns"].append((pid, oldname, newname))
 
+    def fake_addr_add_in_netns(pid: int, iface: str, cidr: str) -> None:
+        calls["addr_add_in_netns"].append((pid, iface, cidr))
+
     def fake_addr_up_in_netns(pid: int, iface: str) -> None:
         calls["addr_up_in_netns"].append((pid, iface))
 
@@ -279,11 +303,15 @@ def _us203_helper_mock(monkeypatch, *, present_bridges: set[str] | None = None):
         calls["link_del"].append({"fn": "try_link_del", "name": name})
 
     monkeypatch.setattr(host_net, "bridge_exists", fake_bridge_exists)
+    monkeypatch.setattr(host_net, "bridge_add", fake_bridge_add)
+    monkeypatch.setattr(host_net, "bridge_addr_add", fake_bridge_addr_add)
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", fake_list_ipv4_addrs)
     monkeypatch.setattr(host_net, "veth_pair_add", fake_veth_pair_add)
     monkeypatch.setattr(host_net, "link_master", fake_link_master)
     monkeypatch.setattr(host_net, "link_up", fake_link_up)
     monkeypatch.setattr(host_net, "link_netns", fake_link_netns)
     monkeypatch.setattr(host_net, "link_set_name_in_netns", fake_link_set_name_in_netns)
+    monkeypatch.setattr(host_net, "addr_add_in_netns", fake_addr_add_in_netns)
     monkeypatch.setattr(host_net, "addr_up_in_netns", fake_addr_up_in_netns)
     monkeypatch.setattr(host_net, "link_del", fake_link_del)
     monkeypatch.setattr(host_net, "try_link_del", fake_try_link_del)
@@ -2029,6 +2057,239 @@ def test_docker_start_reconciles_running_same_name_container(
     assert runtime["console_proxy_pid"] == 8123
     assert runtime["reconciled_from_host"] is True
     assert NodeRuntimeService().start_node(lab, 1)["container_name"] == container_name
+
+
+# ---------------------------------------------------------------------------
+# US-287: opt-in per-lab management attachment (mgmt0)
+# ---------------------------------------------------------------------------
+
+
+def _us287_mgmt_lab() -> dict:
+    """``_us204_lab_data`` with ``mgmt_access`` opted in on alpine-a."""
+    lab = _us204_lab_data()
+    lab["nodes"]["1"]["extras"] = {"mgmt_access": "true"}
+    return lab
+
+
+def _us287_start(
+    monkeypatch,
+    patched_settings,
+    *,
+    lab: dict,
+    present_bridges: set[str],
+    ipv4_addrs: "list[tuple[str, str]] | None" = None,
+    containers: "dict[str, dict[str, object]] | None" = None,
+) -> "tuple[dict, dict, dict[str, dict[str, object]]]":
+    """Boot alpine-a via the US-203 path with the shared helper mock.
+
+    Returns ``(runtime, helper_calls, containers)``.
+    """
+    containers = containers if containers is not None else {}
+    helper_calls = _us203_helper_mock(
+        monkeypatch,
+        present_bridges=present_bridges,
+        ipv4_addrs=ipv4_addrs,
+    )
+    _mock_runtime_binaries(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.sweep_node_host_ifaces",
+        lambda _lab_id, _node_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start",
+        lambda **_kwargs: 8123,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _us204_docker_run_factory(containers),
+    )
+
+    runtime = NodeRuntimeService().start_node(lab, 1)
+    return runtime, helper_calls, containers
+
+
+def test_docker_start_mgmt_access_off_by_default(
+    monkeypatch,
+    patched_settings,
+    _us203_instance_id,
+):
+    """Without ``mgmt_access`` the start path is byte-identical to US-203:
+    no mgmt bridge, no extra veth, no runtime-record mgmt block."""
+    from app.services import host_net as host_net_module
+
+    lab = _us204_lab_data()
+    bridge_one = lab["networks"]["1"]["runtime"]["bridge_name"]
+
+    runtime, helper_calls, _containers = _us287_start(
+        monkeypatch,
+        patched_settings,
+        lab=lab,
+        present_bridges={bridge_one},
+        ipv4_addrs=[("eth0", "10.0.0.15/24")],
+    )
+
+    assert runtime["mgmt"] is None
+    assert helper_calls["bridge_add"] == []
+    assert helper_calls["bridge_addr_add"] == []
+    assert helper_calls["addr_add_in_netns"] == []
+    mgmt_host_end = host_net_module.mgmt_veth_host_name("lab-204", 1)
+    assert mgmt_host_end not in runtime["veth_host_ends"]
+
+
+def test_docker_start_mgmt_access_attaches_mgmt0(
+    monkeypatch,
+    patched_settings,
+    _us203_instance_id,
+):
+    """Opt-in: per-lab mgmt bridge created + addressed, mgmt0 attached with
+    a host-assigned static IP, and the runtime record carries the block."""
+    from app.services import host_net as host_net_module
+
+    lab = _us287_mgmt_lab()
+    bridge_one = lab["networks"]["1"]["runtime"]["bridge_name"]
+    mgmt_bridge = host_net_module.mgmt_bridge_name("lab-204")
+    host_end = host_net_module.mgmt_veth_host_name("lab-204", 1)
+    peer_end = host_net_module.mgmt_veth_peer_name("lab-204", 1)
+    subnet_octet = host_net_module.mgmt_subnet_candidates("lab-204")[0]
+
+    runtime, helper_calls, _containers = _us287_start(
+        monkeypatch,
+        patched_settings,
+        lab=lab,
+        present_bridges={bridge_one},
+        ipv4_addrs=[("eth0", "10.0.0.15/24")],
+    )
+
+    assert helper_calls["bridge_add"] == [mgmt_bridge]
+    assert helper_calls["bridge_addr_add"] == [
+        (mgmt_bridge, f"172.16.{subnet_octet}.1/24")
+    ]
+    assert (host_end, peer_end) in helper_calls["veth_pair_add"]
+    assert (host_end, mgmt_bridge) in helper_calls["link_master"]
+    assert (runtime["pid"], peer_end, "mgmt0") in helper_calls["link_set_name_in_netns"]
+    assert (runtime["pid"], "mgmt0", f"172.16.{subnet_octet}.2/24") in helper_calls["addr_add_in_netns"]
+    assert (runtime["pid"], "mgmt0") in helper_calls["addr_up_in_netns"]
+    assert runtime["mgmt"] == {
+        "iface": "mgmt0",
+        "bridge_name": mgmt_bridge,
+        "gateway_cidr": f"172.16.{subnet_octet}.1/24",
+        "container_ip": f"172.16.{subnet_octet}.2/24",
+        "host_end": host_end,
+    }
+    assert host_end in runtime["veth_host_ends"]
+    # Lab interface naming is untouched: eth0 stays interface slot 0.
+    eth0_end = host_net_module.veth_host_name("lab-204", 1, 0)
+    assert eth0_end in runtime["veth_host_ends"]
+
+
+def test_docker_start_mgmt_bridge_reuses_existing_subnet(
+    monkeypatch,
+    patched_settings,
+    _us203_instance_id,
+):
+    """An existing mgmt bridge keeps its already-assigned gateway — subnet
+    stays stable across restarts, no bridge_add/addr churn."""
+    from app.services import host_net as host_net_module
+
+    lab = _us287_mgmt_lab()
+    bridge_one = lab["networks"]["1"]["runtime"]["bridge_name"]
+    mgmt_bridge = host_net_module.mgmt_bridge_name("lab-204")
+
+    runtime, helper_calls, _containers = _us287_start(
+        monkeypatch,
+        patched_settings,
+        lab=lab,
+        present_bridges={bridge_one, mgmt_bridge},
+        ipv4_addrs=[("eth0", "10.0.0.15/24"), (mgmt_bridge, "172.16.9.1/24")],
+    )
+
+    assert helper_calls["bridge_add"] == []
+    assert helper_calls["bridge_addr_add"] == []
+    assert runtime["mgmt"]["gateway_cidr"] == "172.16.9.1/24"
+    assert runtime["mgmt"]["container_ip"] == "172.16.9.2/24"
+
+
+def test_docker_start_mgmt_subnet_collision_picks_next_candidate(
+    monkeypatch,
+    patched_settings,
+    _us203_instance_id,
+):
+    """If another host interface already owns the derived /24, the next
+    candidate octet is used instead."""
+    from app.services import host_net as host_net_module
+
+    lab = _us287_mgmt_lab()
+    bridge_one = lab["networks"]["1"]["runtime"]["bridge_name"]
+    mgmt_bridge = host_net_module.mgmt_bridge_name("lab-204")
+    subnet_octet = host_net_module.mgmt_subnet_candidates("lab-204")[0]
+    clash_cidr = f"172.16.{subnet_octet}.77/24"
+
+    runtime, helper_calls, _containers = _us287_start(
+        monkeypatch,
+        patched_settings,
+        lab=lab,
+        present_bridges={bridge_one},
+        ipv4_addrs=[("eth0", "10.0.0.15/24"), ("br-host", clash_cidr)],
+    )
+
+    assert helper_calls["bridge_addr_add"] == [
+        (mgmt_bridge, f"172.16.{(subnet_octet + 1) % 256}.1/24")
+    ]
+    assert runtime["mgmt"]["gateway_cidr"] == f"172.16.{(subnet_octet + 1) % 256}.1/24"
+    assert runtime["mgmt"]["container_ip"] == f"172.16.{(subnet_octet + 1) % 256}.2/24"
+
+
+def test_docker_start_mgmt_attach_failure_rolls_back(
+    monkeypatch,
+    patched_settings,
+    _us203_instance_id,
+):
+    """A failure mid-mgmt-attach rolls back exactly like a lab-interface
+    failure: container removed, mgmt host end swept."""
+    from app.services import host_net as host_net_module
+
+    lab = _us287_mgmt_lab()
+    bridge_one = lab["networks"]["1"]["runtime"]["bridge_name"]
+    mgmt_bridge = host_net_module.mgmt_bridge_name("lab-204")
+    host_end = host_net_module.mgmt_veth_host_name("lab-204", 1)
+    container_name = "nova-ve-lab204-1"
+
+    def failing_addr_add(_pid: int, _iface: str, _cidr: str) -> None:
+        raise host_net_module.HostNetError("addr-add-in-netns failed")
+
+    containers: dict[str, dict[str, object]] = {}
+    helper_calls = _us203_helper_mock(
+        monkeypatch,
+        present_bridges={bridge_one},
+        ipv4_addrs=[("eth0", "10.0.0.15/24")],
+    )
+    _mock_runtime_binaries(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.sweep_node_host_ifaces",
+        lambda _lab_id, _node_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.addr_add_in_netns",
+        failing_addr_add,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start",
+        lambda **_kwargs: 8123,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run",
+        _us204_docker_run_factory(containers),
+    )
+
+    with pytest.raises(host_net_module.HostNetError):
+        NodeRuntimeService().start_node(lab, 1)
+
+    # Container torn down and the mgmt host end swept by the rollback path.
+    assert container_name not in containers
+    swept = {call["name"] for call in helper_calls["link_del"]}
+    assert host_end in swept
+    # The mgmt bridge (created in step 1b) intentionally survives so the
+    # next start reuses its subnet — same lifecycle as network bridges.
 
 
 def _us204_start_alpine_a(

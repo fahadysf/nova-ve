@@ -88,7 +88,8 @@ RE_TAP_NAME = re.compile(r"^nve[a-f0-9]{4}d[0-9]{1,3}i[0-9]{1,2}$")
 RE_VETH_NAME = re.compile(r"^nve[a-f0-9]{4}d[0-9]{1,3}i[0-9]{1,2}[hp]$")
 
 # Container netns interface name: ethN where N is 0-99
-RE_NETNS_IFACE = re.compile(r"^eth[0-9]{1,2}$")
+# ``ethN`` slots plus the #287 management interface (``mgmt0``).
+RE_NETNS_IFACE = re.compile(r"^(eth[0-9]{1,2}|mgmt0)$")
 
 # Pid: 1-7 digits.  Additional runtime checks reject pid<10 and pid==1.
 RE_PID = re.compile(r"^[0-9]{1,7}$")
@@ -837,6 +838,25 @@ def cmd_addr_up_in_netns(args: argparse.Namespace) -> int:
     return _nsenter_ip_netns(pid, "link", "set", iface, "up")
 
 
+def cmd_list_ipv4_addrs(args: argparse.Namespace) -> int:
+    """Print every host IPv4 address as ``<iface> <cidr>`` lines (#287).
+
+    Used by the docker mgmt attachment to skip /24 subnets already owned
+    by other host interfaces and to reuse an existing bridge's gateway.
+    """
+    out = _run_capture(["ip", "-o", "-4", "addr", "show"])
+    if out.returncode != 0:
+        sys.stderr.write(out.stderr or "ip -o -4 addr show failed\n")
+        return 1
+    for line in (out.stdout or "").splitlines():
+        # ``ip -o -4 addr show`` rows look like:
+        #   2: eth0    inet 10.0.0.5/24 scope global eth0\ ...
+        parts = line.split()
+        if len(parts) >= 4 and parts[2] == "inet":
+            print(f"{parts[1]} {parts[3]}")
+    return 0
+
+
 def cmd_read_iface_mac(args: argparse.Namespace) -> int:
     pid = authorize_pid(args.pid)
     iface = validate_netns_iface(args.iface)
@@ -1043,6 +1063,7 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "link-set-name-in-netns": cmd_link_set_name_in_netns,
     "addr-add-in-netns": cmd_addr_add_in_netns,
     "addr-up-in-netns": cmd_addr_up_in_netns,
+    "list-ipv4-addrs": cmd_list_ipv4_addrs,
     "read-iface-mac": cmd_read_iface_mac,
     "console-proxy-start": cmd_console_proxy_start,
     "console-proxy-stop": cmd_console_proxy_stop,
@@ -1167,6 +1188,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p.add_argument("pid")
     p.add_argument("iface")
+
+    p = sub.add_parser(
+        "list-ipv4-addrs",
+        help="print every host IPv4 address as '<iface> <cidr>' lines",
+    )
 
     p = sub.add_parser(
         "console-proxy-start",
