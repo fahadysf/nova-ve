@@ -29,6 +29,7 @@ from app.schemas.node import (
 )
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
+from app.services.console_recording import get_console_recorder
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
@@ -2112,6 +2113,25 @@ async def node_html5(
 
     try:
         settings = get_settings()
+        console_host = console_info["host"]
+        console_port = int(console_info["port"])
+        if console_info["console"] == "telnet":
+            # #291: relay in-built telnet consoles through a recording proxy
+            # (asciinema cast + raw log under RECORDINGS_DIR/<lab-id>/).
+            # None means recording is disabled or the proxy failed to start —
+            # fall back to the direct, unrecorded console in that case.
+            recording = await get_console_recorder().start_session(
+                lab_id=str(data.get("id") or lab_path),
+                lab_name=str(data.get("name") or lab_path),
+                node_id=node_id,
+                node_name=console_info["name"],
+                target_host=console_host,
+                target_port=console_port,
+                username=current_user.username,
+                mode=console,
+            )
+            if recording is not None:
+                console_port = recording.listen_port
         if settings.GUACAMOLE_DATABASE_URL.strip():
             # The secondary session gets its own stable connection key so the
             # two consoles of one node never share a Guacamole connection.
@@ -2120,8 +2140,8 @@ async def node_html5(
                 connection_key = f"{data.get('id', lab_path)}:{node_id}:second:{console_info['console']}"
             html5_url = await GuacamoleDatabaseService().create_console_url(
                 current_user,
-                host=console_info["host"],
-                port=console_info["port"],
+                host=console_host,
+                port=console_port,
                 protocol=console_info["console"],
                 connection_name=console_info["name"],
                 connection_key=connection_key,
@@ -2129,8 +2149,8 @@ async def node_html5(
         else:
             html5_url = await Html5SessionService().create_console_url(
                 current_user,
-                host=console_info["host"],
-                port=console_info["port"],
+                host=console_host,
+                port=console_port,
                 protocol=console_info["console"],
                 connection_name=console_info["name"],
             )

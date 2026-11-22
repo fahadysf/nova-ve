@@ -1,0 +1,17 @@
+# Platform container #288 (nova-ve-mgmt-server) — Python dependency floors.
+#
+# Quality bar: builds always install the LATEST versions satisfying these
+# floors so the image stays current; the floors only guard against a
+# broken/ancient resolve. Bump the floors deliberately when new major
+# releases are validated (see deploy/platform-images/verify.sh which
+# asserts them inside a started container).
+#
+#   ansible  — 2.18 is the oldest core line still widely used with
+#              current collections; latest lands 2.19+.
+#   napalm   — 5.x is the current major line (2.x/4.x are EOL).
+#   netmiko  — 4.4+ tracks current upstream; 3.x is EOL.
+#   paramiko — transport under napalm/netmiko; 3.4+ is current.
+ansible>=2.18
+napalm>=5.0
+netmiko>=4.4
+paramiko>=3.4
