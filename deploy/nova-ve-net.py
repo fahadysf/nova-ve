@@ -74,7 +74,9 @@ IP_FORWARD_PATH = Path(os.environ.get("NOVA_VE_IP_FORWARD_PATH", "/proc/sys/net/
 # advertised length so overflow is impossible even if the regex is reused.
 
 # Bridge: nove<lab_hash:04x>n<network_id 1-5 digits>     max 14
-RE_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}n[0-9]{1,5}$")
+# Lab bridges: nove<lab_hash:04x>n<net 1-5 digits>, plus the per-lab
+# management bridge (#287): nove<lab_hash:04x>mg
+RE_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}(n[0-9]{1,5}|mg)$")
 
 # Host-owned bridges created by the provision script for Bridge-Cloud
 # networks.  Lab-side verbs MUST NOT accept these; only the dedicated
@@ -85,7 +87,8 @@ RE_HOST_BRIDGE_NAME = re.compile(r"^br-eth[0-9]+$")
 RE_TAP_NAME = re.compile(r"^nve[a-f0-9]{4}d[0-9]{1,3}i[0-9]{1,2}$")
 
 # Veth host/peer: same as TAP plus h/p suffix                max 14
-RE_VETH_NAME = re.compile(r"^nve[a-f0-9]{4}d[0-9]{1,3}i[0-9]{1,2}[hp]$")
+# (#287) mgmt veths use the `mt` marker instead of `i<iface>`: mth / mtp.
+RE_VETH_NAME = re.compile(r"^nve[a-f0-9]{4}d[0-9]{1,3}(i[0-9]{1,2}|mt)[hp]$")
 
 # Container netns interface name: ethN where N is 0-99
 # ``ethN`` slots plus the #287 management interface (``mgmt0``).
