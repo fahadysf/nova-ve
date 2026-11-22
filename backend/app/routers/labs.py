@@ -147,6 +147,10 @@ def _user_root(current_user: UserRead) -> str:
 
 def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: bool) -> str:
     normalized = raw_path.strip().replace("\\", "/").strip("/")
+    # #285: /Shared is a real read-write space for every authenticated user,
+    # resolved at the labs root — never prefixed into a scoped user's root.
+    if normalized == "Shared" or normalized.startswith("Shared/"):
+        return normalized
     root = _user_root(current_user)
     if not root:
         return normalized
