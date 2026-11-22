@@ -1143,6 +1143,13 @@ class TemplateService:
         images: dict[str, dict[str, Any]] = {}
 
         if template_type == "docker":
+            # Platform container templates (#288) declare their image in the
+            # YAML ``image:`` key — pin the template to it so the catalog's
+            # ``defaults.image`` and node-request validation resolve to the
+            # platform image instead of whichever marked image sorts first.
+            declared = str(template.raw.get("image") or "").strip()
+            if declared:
+                return {declared: {"image": declared, "source": "template-declared"}}
             # Docker images live in the docker daemon, not the filesystem --
             # the marker-tag catalog is authoritative for the picker. Skip the
             # ``/var/lib/nova-ve/images/docker/`` walk entirely so legacy
