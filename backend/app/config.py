@@ -153,6 +153,26 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CONSOLE_PORT_RANGE_RDP", "NOVA_VE_CONSOLE_PORT_RANGE_RDP"),
     )
 
+    # Console session recording (#291). Every in-built (HTML5/Guacamole)
+    # telnet console session is relayed through a recording proxy that
+    # writes an asciinema cast v2 file plus the raw output log. Recordings
+    # live under RECORDINGS_DIR/<lab-id>/<node-id>/ so each lab owns a
+    # folder of sessions. External (OS scheme-handler) consoles bypass the
+    # proxy and are never recorded. Disable globally with
+    # NOVA_VE_RECORDINGS_ENABLED=false.
+    #
+    # SECURITY: recordings capture everything shown and typed, including
+    # echoed passwords — access is gated by the same scoped-lab permissions
+    # as the lab itself.
+    RECORDINGS_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("RECORDINGS_ENABLED", "NOVA_VE_RECORDINGS_ENABLED"),
+    )
+    RECORDINGS_DIR: str = Field(
+        default="/var/lib/nova-ve/recordings",
+        validation_alias=AliasChoices("RECORDINGS_DIR", "NOVA_VE_RECORDINGS_DIR"),
+    )
+
     @field_validator("DATABASE_URL")
     @classmethod
     def _validate_database_url(cls, value: str) -> str:

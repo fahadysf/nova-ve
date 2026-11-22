@@ -15,6 +15,7 @@ from app.routers import (
     listing,
     manage,
     networks,
+    recordings,
     system,
     users,
     ws,
@@ -85,6 +86,8 @@ app.include_router(folders.router)
 # precedence on shared verbs (POST /networks, GET /networks, DELETE /networks).
 app.include_router(links.router)
 app.include_router(networks.router)
+# #291: /recordings suffix routes must precede the labs catch-all.
+app.include_router(recordings.router)
 app.include_router(labs.router)
 app.include_router(listing.router)
 app.include_router(library.router)
@@ -209,6 +212,9 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
+    from app.services.console_recording import get_console_recorder
+
+    await get_console_recorder().close_all()
     await engine.dispose()
 
 

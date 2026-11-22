@@ -14,6 +14,7 @@
     ChevronsRight,
     Cpu,
     ExternalLink,
+    ListVideo,
     Monitor,
     Network as NetworkIcon,
     RefreshCw,
@@ -25,6 +26,7 @@
   import { buildExternalConsoleUrl, externalConsoleStore } from '$lib/stores/externalConsole';
   import { SvelteFlowProvider } from '@xyflow/svelte';
   import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
+  import RecordingsPanel from '$lib/components/canvas/RecordingsPanel.svelte';
   import InfoPanelStack from '$lib/components/canvas/InfoPanelStack.svelte';
   import { infoPanels } from '$lib/stores/infoPanels';
   import type {
@@ -47,6 +49,7 @@
   let loading = true;
   let error = '';
   let zenMode = false;
+  let showRecordings = false;
   let showConsolesInZen = false;
   $: hideConsoles = zenMode && !showConsolesInZen;
   type ConsoleBounds = { x: number; y: number; width: number; height: number };
@@ -528,6 +531,13 @@
     if (!consoleWorkspace || consoleWorkspace.activeTabId == null) return null;
     const activeTabId = consoleWorkspace.activeTabId;
     return consoleWorkspace.tabs.find((tab) => tab.id === activeTabId) ?? null;
+  }
+
+  function isRecordedTab(tab: ConsoleTab): boolean {
+    // #291: in-built telnet consoles are recorded; vnc/rdp are not.
+    const node = $labState.nodes?.[tab.nodeId];
+    const mode = tab.mode === 'second' ? node?.secondConsole : node?.console;
+    return (mode ?? 'telnet') === 'telnet';
   }
 
   function consoleIframe(tabId?: number): HTMLIFrameElement | null {
@@ -1093,6 +1103,19 @@
 
         <div class="hidden shrink-0 items-center gap-2 md:flex">
           <div class="flex flex-col gap-1 rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
+            <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Session recordings</div>
+            <button
+              type="button"
+              data-testid="open-recordings"
+              title="Browse recorded telnet console sessions: view logs with find/regex search, download asciinema replays (.cast) or raw logs."
+              class="inline-flex items-center justify-center gap-1.5 rounded-md border border-gray-800 bg-gray-900/80 px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-gray-400 transition hover:border-red-500/50 hover:text-white"
+              on:click={() => (showRecordings = true)}
+            >
+              <ListVideo class="h-3 w-3" aria-hidden="true" />
+              Recordings
+            </button>
+          </div>
+          <div class="flex flex-col gap-1 rounded-xl border border-gray-800 bg-gray-950/70 px-3 py-2">
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">External console</div>
             <button
               type="button"
@@ -1305,6 +1328,12 @@
                       on:pointerdown|stopPropagation
                       on:click={() => selectConsoleTab(tab.id)}
                     >
+                      {#if isRecordedTab(tab)}
+                        <span
+                          class="mr-1 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-red-500 align-middle"
+                          title="This telnet console session is being recorded (asciinema .cast + raw log)"
+                        ></span>
+                      {/if}
                       {tab.nodeName}
                     </button>
                     <button
@@ -1449,6 +1478,10 @@
     </div>
   {/if}
 </div>
+
+{#if showRecordings}
+  <RecordingsPanel {labId} onClose={() => (showRecordings = false)} />
+{/if}
 
 <style>
   .console-rail-label {
