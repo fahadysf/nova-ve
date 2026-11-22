@@ -1,0 +1,4 @@
+#!/bin/sh
+# Telnet console entry for nova-ve-browser (#288) — the template's telnet
+# second console lands here for a debug shell into the browser station.
+exec script -qfc "/bin/bash -li" /dev/null

@@ -1,0 +1,18 @@
+type: docker
+name: Browser
+description: >-
+  Firefox browser station (EVE eve-firefox analog) for reaching node web
+  UIs from inside the lab: current-stable Firefox in a minimal openbox
+  desktop, VNC console via Guacamole, telnet second console for a debug
+  shell. Requires the platform image nova-ve/browser:latest — build it with
+  deploy/scripts/build-platform-images.sh.
+cpulimit: 1
+icon_type: server
+cpu: 1
+ram: 1024
+ethernet: 1
+console_type: vnc
+second_console: telnet
+image: nova-ve/browser:latest
+extras:
+  mgmt_access: "true"

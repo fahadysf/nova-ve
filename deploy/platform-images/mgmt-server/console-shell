@@ -1,0 +1,5 @@
+#!/bin/sh
+# Telnet console entry for nova-ve-mgmt-server (#288). Mirrors the
+# alpine-telnet demo image: hand the telnet session a real login shell on a
+# pty so readline/ncurses tools (ansible, tcpdump) behave.
+exec script -qfc "/bin/bash -li" /dev/null
