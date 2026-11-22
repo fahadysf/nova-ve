@@ -2,12 +2,16 @@ type: qemu
 name: Cisco Nexus 9000v
 description: Cisco Nexus 9000v
 icon_type: switch
-cpu: 2
-ram: 8192
+cpulimit: 1
+cpu: 4
+ram: 12288
 ethernet: 8
 console_type: telnet
-cpulimit: 0
-qemu_options: -machine type=pc,accel=kvm -enable-kvm
+architecture: x86_64
+qemu_nic: e1000
+qemu_version: "4.1.0"
+disk_bus: sata
+qemu_options: -machine type=pc,accel=kvm -cpu host,vmx=off,svm=off -bios /opt/nova-ve/qemu/4.1.0/share/qemu/OVMF-sata.fd
 capabilities:
   machine: pc
   hotplug: false

@@ -1902,6 +1902,8 @@ class NodeRuntimeService:
         node_interfaces = node.get("interfaces") or []
         iso_path = self._resolve_qemu_iso(node)
 
+        disk_bus = (_extra_str(extras, "disk_bus") or "virtio").lower()
+
         cmd: list[str] = [
             qemu_binary,
             "-display", "none",
@@ -1910,8 +1912,17 @@ class NodeRuntimeService:
             "-m", str(node.get("ram", 1024)),
             "-name", str(node.get("name", f"node-{node_id}")),
             "-uuid", str(node.get("uuid") or extras.get("uuid") or f"{lab_id}-{node_id}"),
-            "-drive", f"file={overlay_path},if=virtio,cache=writeback,format=qcow2",
         ]
+        if disk_bus == "sata":
+            cmd += [
+                "-device", "ahci,id=ahci0,bus=pci.0,addr=0x10",
+                "-drive", f"file={overlay_path},if=none,id=drive-sata-disk0,format=qcow2,cache=writeback",
+                "-device", "ide-hd,bus=ahci0.0,drive=drive-sata-disk0,id=drive-sata-disk0,bootindex=1",
+            ]
+        elif disk_bus == "ide":
+            cmd += ["-drive", f"file={overlay_path},if=ide,cache=writeback,format=qcow2"]
+        else:
+            cmd += ["-drive", f"file={overlay_path},if=virtio,cache=writeback,format=qcow2"]
         # Issue #249: vEOS-class guests run their own hypervisor (KVM-in-KVM).
         # With extras.nested_virt set, expose the host virt flags instead of
         # masking vmx/svm off — otherwise the guest data plane never starts
