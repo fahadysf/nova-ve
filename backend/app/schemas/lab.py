@@ -44,3 +44,7 @@ class LabMetaUpdate(BaseModel):
     linkwidth: Optional[str] = None
     grid: Optional[bool] = None
     lock: Optional[bool] = None
+
+
+class LabMoveRequest(BaseModel):
+    target_folder: str = Field(..., min_length=1)
