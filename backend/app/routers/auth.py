@@ -1,10 +1,12 @@
 from datetime import timedelta
+import asyncio
 from fastapi import APIRouter, Depends, Request, Response, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.schemas.auth import LoginRequest
 from app.schemas.user import UserRead, UserCreate
 from app.services.auth_service import AuthService
+from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.dependencies import get_current_user, get_optional_user
 from app.config import get_settings
 from app.core.security import create_access_token
@@ -40,6 +42,15 @@ async def login(
         data={"sub": user.username, "role": user.role},
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+
+    # #282: pre-warm the user's Guacamole auth token off the login path,
+    # so the first in-browser console open doesn't pay the cold token
+    # request (~0.5s+ against an idle webapp). Fire-and-forget; warm-up
+    # swallows its own failures.
+    try:
+        asyncio.create_task(GuacamoleDatabaseService().warm_auth_token(user.username))
+    except GuacamoleDatabaseError:
+        pass  # database auth not configured — nothing to warm
 
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,

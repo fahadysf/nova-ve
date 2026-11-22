@@ -3,7 +3,9 @@
 
 import asyncio
 import hashlib
+import logging
 import secrets
+import time
 from functools import lru_cache
 
 import asyncpg
@@ -17,7 +19,57 @@ class GuacamoleDatabaseError(Exception):
     pass
 
 
+logger = logging.getLogger("nova-ve.guacamole")
+
 _AUTH_TOKEN_CACHE: dict[tuple[str, str], str] = {}
+# #282: last successful use per cache key — drives the keepalive loop so
+# only recently-active users stay warm.
+_AUTH_TOKEN_LAST_USE: dict[tuple[str, str], float] = {}
+
+# Refresh cached tokens every 10 minutes; entries untouched for 2 hours
+# drop out of the keepalive set (a fresh login re-warms them).
+_TOKEN_KEEPALIVE_INTERVAL_S = 600
+_TOKEN_KEEPALIVE_ACTIVE_WINDOW_S = 7200
+
+
+async def _token_keepalive_loop() -> None:
+    """#282: keep recently-used Guacamole tokens warm.
+
+    Guacamole invalidates API tokens after its idle timeout, so a cached
+    token goes stale during long UI-idle periods and the next console
+    launch pays the cold path again (validation miss + fresh request
+    against a possibly-idle webapp). This loop re-validates/re-requests
+    tokens for users active within the last 2 hours, keeping the
+    console-open path at its warm cost.
+    """
+    while True:
+        await asyncio.sleep(_TOKEN_KEEPALIVE_INTERVAL_S)
+        try:
+            service = GuacamoleDatabaseService()
+        except GuacamoleDatabaseError:
+            continue  # not configured — nothing to keep warm
+        now = time.monotonic()
+        for cache_key, last_use in list(_AUTH_TOKEN_LAST_USE.items()):
+            if now - last_use > _TOKEN_KEEPALIVE_ACTIVE_WINDOW_S:
+                continue
+            _internal_url, username = cache_key
+            await service.warm_auth_token(username)
+
+
+_token_keepalive_task: asyncio.Task | None = None
+
+
+def start_token_keepalive() -> None:
+    """Start the keepalive loop once per process (app startup)."""
+    global _token_keepalive_task
+    if _token_keepalive_task is not None and not _token_keepalive_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    _token_keepalive_task = loop.create_task(_token_keepalive_loop())
+
 
 class GuacamoleDatabaseService:
     ROOT_GROUP_NAME = "nova-ve"
@@ -382,11 +434,38 @@ class GuacamoleDatabaseService:
         cache_key = (self.settings.GUACAMOLE_INTERNAL_URL.strip(), username)
         cached = _AUTH_TOKEN_CACHE.get(cache_key)
         if cached and await self._token_is_valid(cached):
+            _AUTH_TOKEN_LAST_USE[cache_key] = time.monotonic()
             return cached
 
         auth_token = await self._request_auth_token(username, password)
         _AUTH_TOKEN_CACHE[cache_key] = auth_token
+        _AUTH_TOKEN_LAST_USE[cache_key] = time.monotonic()
         return auth_token
+
+    async def warm_auth_token(self, username: str) -> None:
+        """Populate the token cache for *username* off the critical path (#282).
+
+        The fresh-token request against an idle Guacamole webapp costs
+        ~0.5s+ (Java/Tomcat + DB-auth warmup), which is exactly the stall
+        users saw on the first console launch after login. Fire-and-forget
+        safe: every failure is swallowed — the console path re-requests on
+        its own if the cache is still empty.
+        """
+        if not self.database_url:
+            return
+        try:
+            password = self._token_password_for(username)
+            await self._auth_token(username, password)
+            logger.debug("guacamole token pre-warmed for %s", username)
+        except Exception:  # noqa: BLE001 — best-effort warm-up
+            logger.debug("guacamole token pre-warm failed for %s", username, exc_info=True)
+
+    def _token_password_for(self, username: str) -> str:
+        # _guacamole_password takes the full UserRead; derive the same
+        # material directly so warm-up needs only the username.
+        normalized = str(username).strip() or "user"
+        material = f"{self.settings.SECRET_KEY}:{normalized}".encode("utf-8")
+        return hashlib.sha256(material).hexdigest()
 
     async def _disconnect_active_for_connection(self, auth_token: str, connection_id: int) -> None:
         # Telnet `,server,nowait` accepts multiple TCP clients but routes serial I/O to one;
