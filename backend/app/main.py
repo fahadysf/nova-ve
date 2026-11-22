@@ -139,6 +139,24 @@ async def startup():
             )
     except Exception:
         _logger.exception("startup reconcile: orphan-QEMU sweep failed (non-fatal)")
+
+    # #284: converge the labs table with LABS_DIR — drop DB rows whose
+    # backing lab JSON was removed out-of-band, so the labs index stops
+    # listing ghosts. Best-effort — never blocks startup, never raises.
+    try:
+        from app.database import async_session_maker
+        from app.services.lab_service import LabService
+
+        async with async_session_maker() as session:
+            removed = await LabService(session).reconcile_missing_lab_files()
+        if removed:
+            _logger.info(
+                "startup reconcile: removed %d ghost lab row(s): %s",
+                len(removed), ", ".join(removed),
+            )
+    except Exception:
+        _logger.exception("startup reconcile: ghost-lab sweep failed (non-fatal)")
+
     NodeRuntimeService.start_heartbeat()
     # US-402: periodic kernel-side bridge discovery.  Reads cadence from
     # settings on every iteration so live ``NOVA_VE_DISCOVERY_CADENCE_SECONDS``

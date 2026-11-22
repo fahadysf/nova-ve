@@ -444,6 +444,43 @@ class LabService:
         result = await self.db.execute(select(LabMeta))
         return list(result.scalars().all())
 
+    @staticmethod
+    def file_exists(filename: str) -> bool:
+        """True when the lab JSON for *filename* exists under LABS_DIR (#284).
+
+        Traversal-guarded via :func:`_lab_file_path`; used by the labs
+        listing and the ghost-row reconciliation so DB rows whose backing
+        file was removed out-of-band can be detected.
+        """
+        try:
+            return _lab_file_path(filename).exists()
+        except ValueError:
+            # Malformed/stored-attacker filename: treat as missing.
+            return False
+
+    async def reconcile_missing_lab_files(self) -> list[str]:
+        """Drop DB lab rows whose backing JSON file is gone (#284).
+
+        The labs index merges the filesystem scan with the ``labs`` table;
+        a row whose file was removed out-of-band (manual cleanup, crashed
+        delete) keeps appearing as a ghost entry forever. This sweep
+        converges the two sides — the same philosophy as the startup
+        orphan-QEMU sweep (#225). Returns the removed filenames.
+        """
+        removed: list[str] = []
+        for lab in await self.list_labs():
+            if LabService.file_exists(lab.filename):
+                continue
+            logger.warning(
+                "reconcile: lab row has no backing file — removing DB row (filename=%s)",
+                lab.filename,
+            )
+            await self.db.delete(lab)
+            removed.append(lab.filename)
+        if removed:
+            await self.db.commit()
+        return removed
+
     async def create_lab(
         self,
         owner: str,
