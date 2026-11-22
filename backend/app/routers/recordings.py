@@ -15,11 +15,13 @@ the same scoped-lab permissions as the lab itself.
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from app.config import get_settings
 from app.dependencies import get_current_user
@@ -35,6 +37,11 @@ router = APIRouter(prefix="/api/labs", tags=["labs"])
 CONTENT_TAIL_BYTES = 512 * 1024
 _FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(cast|log)$")
 _ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
+
+
+class RecordingControl(BaseModel):
+    action: Literal["start", "stop"]
+    console: Literal["primary", "second"] = "primary"
 
 
 def _lab_id_for(current_user: UserRead, lab_path: str) -> str:
@@ -66,28 +73,37 @@ def _cast_duration(path: Path) -> float:
 
 
 def _entry_for(cast_path: Path, node_id: int) -> dict:
-    started_at = None
+    started_dt = None
     title = ""
+    header_duration = None
     try:
         with cast_path.open("r", encoding="utf-8") as fh:
             header = json.loads(fh.readline())
-        started_at = datetime.fromtimestamp(int(header.get("timestamp", 0)), tz=UTC).isoformat()
+        started_dt = datetime.fromtimestamp(int(header.get("timestamp", 0)), tz=UTC)
         title = str(header.get("title") or "")
+        if header.get("duration") is not None:
+            header_duration = float(header["duration"])
     except (OSError, ValueError):
         pass
-    if not started_at:
-        started_at = datetime.fromtimestamp(cast_path.stat().st_mtime, tz=UTC).isoformat()
+    if started_dt is None:
+        started_dt = datetime.fromtimestamp(cast_path.stat().st_mtime, tz=UTC)
+    in_progress = get_console_recorder().is_active(cast_path)
+    # Stopped recordings carry the exact stop-press duration in the header;
+    # live ones approximate with the last recorded event.
+    duration = header_duration if header_duration is not None else _cast_duration(cast_path)
+    stopped_at = None if in_progress else (started_dt + timedelta(seconds=duration)).isoformat()
     log_path = cast_path.with_suffix(".log")
     return {
         "id": f"{node_id}--{cast_path.name}",
         "node_id": node_id,
         "filename": cast_path.name,
         "title": title,
-        "started_at": started_at,
-        "duration": _cast_duration(cast_path),
+        "started_at": started_dt.isoformat(),
+        "stopped_at": stopped_at,
+        "duration": duration,
         "cast_size": cast_path.stat().st_size,
         "log_size": log_path.stat().st_size if log_path.exists() else 0,
-        "in_progress": get_console_recorder().is_active(cast_path),
+        "in_progress": in_progress,
     }
 
 
@@ -189,4 +205,59 @@ async def recording_content(
         "status": "success",
         "message": "OK",
         "data": {"text": text, "truncated": truncated},
+    }
+
+
+def _session_for(current_user: UserRead, lab_path: str, node_id: int, console: str):
+    lab_id = _lab_id_for(current_user, lab_path)
+    return get_console_recorder().find(lab_id, node_id, console, current_user.username)
+
+
+@router.get("/{lab_path:path}/nodes/{node_id}/recording")
+async def node_recording_status(
+    lab_path: str,
+    node_id: int,
+    console: str = "primary",
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Recording state of the caller's live console session for this node."""
+    try:
+        session = _session_for(current_user, lab_path, node_id, console)
+    except PermissionError as exc:
+        return {"code": 403, "status": "fail", "message": str(exc)}
+    except FileNotFoundError:
+        return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+    data = session.status() if session is not None else {"console_active": False, "recording": False}
+    return {"code": 200, "status": "success", "message": "OK", "data": data}
+
+
+@router.post("/{lab_path:path}/nodes/{node_id}/recording")
+async def node_recording_control(
+    lab_path: str,
+    node_id: int,
+    body: RecordingControl,
+    current_user: UserRead = Depends(get_current_user),
+):
+    """On-demand record button (#291): start/stop a recording cycle."""
+    try:
+        session = _session_for(current_user, lab_path, node_id, body.console)
+    except PermissionError as exc:
+        return {"code": 403, "status": "fail", "message": str(exc)}
+    except FileNotFoundError:
+        return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+    if session is None:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "No active console session for this node. Open the console first.",
+        }
+    try:
+        data = session.start_recording() if body.action == "start" else session.stop_recording()
+    except ValueError as exc:
+        return {"code": 400, "status": "fail", "message": str(exc)}
+    return {
+        "code": 200,
+        "status": "success",
+        "message": f"Recording {body.action}ed.",
+        "data": data,
     }
