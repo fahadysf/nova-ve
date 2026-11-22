@@ -316,6 +316,10 @@
   let networkModalDefaultName = '';
   let networkModalDefaultType: NetworkType = 'linux_bridge';
   let pendingNetworkPosition: { x: number; y: number } | null = null;
+  let zenDialog: 'node' | 'network' | null = null;
+  $: if (!zenMode) zenDialog = null;
+  $: hideNodeModal = zenMode && zenDialog !== 'node';
+  $: hideNetworkModal = zenMode && zenDialog !== 'network';
   let nodeActionSequence = 0;
   const nodeActionTokens = new Map<number, number>();
   const nodeActionPollSchedule = [0, 250, 500, 1000, 2000];
@@ -1029,6 +1033,7 @@
     nodeModalMode = 'create';
     nodeModalNode = null;
     nodeModalOpen = true;
+    if (zenMode) zenDialog = 'node';
   }
 
   function openEditNodeModal(targetId: string) {
@@ -1046,6 +1051,7 @@
     nodeModalMode = 'edit';
     nodeModalNode = deepClone(node);
     nodeModalOpen = true;
+    if (zenMode) zenDialog = 'node';
   }
 
   function openAddKind(kind: 'node' | 'network') {
@@ -1673,6 +1679,7 @@
       networkModalDefaultName = nextAvailableNetworkName();
       networkModalDefaultType = item.networkType;
       networkModalOpen = true;
+      if (zenMode) zenDialog = 'network';
       closeAddMenu();
       return;
     }
@@ -2153,7 +2160,6 @@
     }}
     on:nodecontextmenu={(event: CustomEvent<{ node: Node; event: MouseEvent | TouchEvent }>) => {
       event.detail.event.preventDefault();
-      if (zenMode) return;
       const point = eventPoint(event.detail.event);
       closeAddMenu();
       menu = {
@@ -2180,7 +2186,6 @@
     }}
   >
     <Background patternColor="#374151" gap={20} />
-    {#if !zenMode}
     <!-- #273: the minimap starts collapsed to a small floating box (same
          style as the top-right legend). Expanding swaps the minimap INTO
          that corner spot — the box is replaced by the minimap itself,
@@ -2506,7 +2511,6 @@
         {/if}
       </div>
     </Panel>
-    {/if}
   </SvelteFlow>
 
   {#if !zenMode && selectedEdgeId}
@@ -2527,7 +2531,7 @@
     </div>
   {/if}
 
-  {#if !zenMode && menu}
+  {#if menu && (!zenMode || menu.targetType === 'node' || menu.targetType === 'network')}
     <div
       role="menu"
       tabindex="-1"
@@ -2670,22 +2674,25 @@
   {/if}
 
   <div hidden={zenMode} inert={zenMode}>
-  <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
-  <LinkConfirmModal
-    suspended={zenMode}
-    nodes={$labState.nodes}
-    links={$labState.links}
-    on:confirm={handleLinkConfirm}
-    on:cancel={handleLinkConfirmCancel}
-  />
-  <NetworkConfigModal
-    suspended={zenMode}
-    open={networkModalOpen}
-    defaultName={networkModalDefaultName}
-    defaultType={networkModalDefaultType}
-    on:confirm={onNetworkModalConfirm}
-    on:cancel={onNetworkModalCancel}
-  />
+    <LinkPreview sourceAnchor={dragLinkSourceAnchor} />
+    <LinkConfirmModal
+      suspended={zenMode}
+      nodes={$labState.nodes}
+      links={$labState.links}
+      on:confirm={handleLinkConfirm}
+      on:cancel={handleLinkConfirmCancel}
+    />
+  </div>
+  <div hidden={hideNetworkModal} inert={hideNetworkModal}>
+    <NetworkConfigModal
+      suspended={hideNetworkModal}
+      open={networkModalOpen}
+      defaultName={networkModalDefaultName}
+      defaultType={networkModalDefaultType}
+      on:confirm={onNetworkModalConfirm}
+      on:cancel={onNetworkModalCancel}
+    />
+  </div>
 
   {#if !zenMode && selectedPortInfo}
     {#if selectedPortInfo.kind === 'interface'}
@@ -2725,19 +2732,20 @@
     {/if}
   {/if}
 
-  <NodeConfigModal
-    open={nodeModalOpen}
-    mode={nodeModalMode}
-    catalog={nodeCatalog}
-    node={nodeModalNode}
-    submitting={nodeModalSubmitting}
-    labPath={labId}
-    on:cancel={() => {
-      nodeModalOpen = false;
-      nodeModalNode = null;
-    }}
-    on:submit={handleNodeModalSubmit}
-  />
+  <div hidden={hideNodeModal} inert={hideNodeModal}>
+    <NodeConfigModal
+      open={nodeModalOpen}
+      mode={nodeModalMode}
+      catalog={nodeCatalog}
+      node={nodeModalNode}
+      submitting={nodeModalSubmitting}
+      labPath={labId}
+      on:cancel={() => {
+        nodeModalOpen = false;
+        nodeModalNode = null;
+      }}
+      on:submit={handleNodeModalSubmit}
+    />
   </div>
 </div>
 
