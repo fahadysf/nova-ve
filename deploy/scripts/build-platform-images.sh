@@ -31,13 +31,17 @@
 # Container storage/bandwidth on GHCR is currently free, so fresh deploys
 # can pull instead of building. Honoured env vars:
 #   NOVA_VE_SKIP_PLATFORM_IMAGES=1  Skip every build/pull cleanly.
-#   NOVA_VE_PLATFORM_PULL=1        Pull the GHCR images instead of building
-#                                  (no pip/git fetches; needs docker login to
-#                                  ghcr.io only if the packages are private —
-#                                  anonymous pull works once they are public).
-#   GHCR_PUSH=1                    Also tag+push the built images to GHCR
-#                                  (requires docker login ghcr.io with
-#                                  write:packages).
+#   NOVA_VE_PLATFORM_MODE=auto|pull|build
+#                                   auto: GHCR-first with local-build fallback
+#                                   (what the provisioner uses — offline hosts
+#                                   still get images); pull: GHCR only, strict
+#                                   (no pip/git fetches; anonymous pull works —
+#                                   the packages are public); build: build from
+#                                   the checkout (default, dev semantics).
+#   NOVA_VE_PLATFORM_PULL=1         Legacy alias for MODE=pull.
+#   GHCR_PUSH=1                     Also tag+push the images to GHCR
+#                                   (requires docker login ghcr.io with
+#                                   write:packages).
 #
 # Idempotency: images rebuild from the checked-out repo so stale local tags
 # do not mask fixes; marker tags refresh when the source image id changes.
@@ -119,20 +123,46 @@ IMAGES=(
   "nova-ve/browser:latest|nova-ve-browser|${PLATFORM_DIR}/browser"
 )
 
+# Mode: build (default — dev semantics, always build from the checkout),
+# pull (GHCR only, strict), auto (GHCR-first with local-build fallback —
+# what the provisioner uses so offline hosts still get images).
+MODE="${NOVA_VE_PLATFORM_MODE:-build}"
 if [[ "${NOVA_VE_PLATFORM_PULL:-0}" == "1" ]]; then
-  for pair in "${IMAGES[@]}"; do
-    IFS='|' read -r local_tag ghcr_name _context <<< "$pair"
-    pull_platform_image "$local_tag" "$ghcr_name"
-  done
-else
-  for pair in "${IMAGES[@]}"; do
-    IFS='|' read -r local_tag _ghcr_name context <<< "$pair"
-    build_platform_image "$local_tag" "$context"
-  done
+  MODE="pull"
 fi
 
+ensure_platform_image() {
+  local local_tag="$1"
+  local ghcr_name="$2"
+  local context="$3"
+  case "$MODE" in
+    pull)
+      pull_platform_image "$local_tag" "$ghcr_name"
+      ;;
+    build)
+      build_platform_image "$local_tag" "$context"
+      ;;
+    auto)
+      # GHCR-first: the published images are the distribution source of
+      # truth; if the registry is unreachable (offline / air-gapped host,
+      # transient failure) fall back to building from the checked-out repo
+      # so installs still succeed.
+      if pull_platform_image "$local_tag" "$ghcr_name"; then
+        return 0
+      fi
+      echo "build-platform-images: pull failed for ${local_tag}; falling back to local build" >&2
+      build_platform_image "$local_tag" "$context"
+      ;;
+    *)
+      echo "build-platform-images: invalid NOVA_VE_PLATFORM_MODE '${MODE}' (auto|pull|build)" >&2
+      exit 2
+      ;;
+  esac
+}
+
 for pair in "${IMAGES[@]}"; do
-  IFS='|' read -r local_tag ghcr_name _context <<< "$pair"
+  IFS='|' read -r local_tag ghcr_name context <<< "$pair"
+  ensure_platform_image "$local_tag" "$ghcr_name" "$context"
   mark_for_lab "$local_tag"
   if [[ "${GHCR_PUSH:-0}" == "1" ]]; then
     push_ghcr "$local_tag" "$ghcr_name"
