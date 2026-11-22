@@ -54,7 +54,7 @@ async def _wait_closed(session, timeout=5.0):
 
 
 @pytest.mark.asyncio
-async def test_proxy_relays_and_records_cast_and_raw_log(recordings_dir):
+async def test_proxy_records_only_between_start_and_stop(recordings_dir):
     node = FakeNodeConsole()
     node_server = await telnetlib3.create_server(
         host="127.0.0.1", port=0, shell=node.shell, term="xterm"
@@ -79,33 +79,53 @@ async def test_proxy_relays_and_records_cast_and_raw_log(recordings_dir):
     )
     banner = await asyncio.wait_for(reader.read(1024), timeout=5)
     assert "Welcome to fake-node" in banner
+    assert not session.status()["recording"]
+    assert list(recordings_dir.rglob("*.cast")) == []  # nothing recorded on demand-less relay
+
+    session.start_recording()
+    assert session.status()["recording"] is True
 
     writer.write("show version\r")
     await writer.drain()
     echoed = await asyncio.wait_for(reader.read(1024), timeout=5)
     assert "echo:ok" in echoed
 
-    writer.close()
-    await _wait_closed(session)
+    status = session.stop_recording()
+    assert status["recording"] is False
+    cast_path = session._cast_path
+    log_path = cast_path.with_suffix(".log")
 
-    lines = session.cast_path.read_text(encoding="utf-8").strip().splitlines()
+    lines = cast_path.read_text(encoding="utf-8").strip().splitlines()
     header = json.loads(lines[0])
     assert header["version"] == 2
     assert header["title"] == "Test Lab / r1"
+    assert header["timestamp"] > 0
+    assert header["duration"] >= 0  # stamped when stop was pressed
     events = [json.loads(line) for line in lines[1:]]
     output = "".join(e[2] for e in events if e[1] == "o")
     keystrokes = "".join(e[2] for e in events if e[1] == "i")
-    assert "Welcome to fake-node" in output
     assert "echo:ok" in output
+    assert "Welcome to fake-node" not in output  # banner predates record press
     assert "show version" in keystrokes
-    assert all(isinstance(e[0], float) for e in events)
 
-    log_text = session.log_path.read_text(encoding="utf-8")
-    assert "Welcome to fake-node" in log_text
+    log_text = log_path.read_text(encoding="utf-8")
+    assert log_text.startswith("# Recording started ")
+    assert "# Recording stopped " in log_text
     assert "echo:ok" in log_text
     assert "show version" not in log_text  # raw log is output-only
-    assert not service.is_active(session.cast_path)
+    assert not service.is_active(cast_path)
 
+    # A second start/stop cycle produces a separate file pair.
+    session.start_recording()
+    writer.write("second cycle\r")
+    await writer.drain()
+    await asyncio.wait_for(reader.read(1024), timeout=5)
+    session.stop_recording()
+    assert session._cast_path != cast_path
+    assert len(list(recordings_dir.rglob("*.cast"))) == 2
+
+    writer.close()
+    await _wait_closed(session)
     node_server.close()
 
 
@@ -169,6 +189,7 @@ async def test_list_recordings(api_client):
     assert entry["duration"] == 5.0
     assert entry["title"] == "Test Lab / r1"
     assert entry["started_at"].startswith("2025-11-22T")
+    assert entry["stopped_at"].startswith("2025-11-22T14:40:05")
     assert entry["cast_size"] > 0 and entry["log_size"] > 0
     assert entry["in_progress"] is False
 
@@ -227,5 +248,66 @@ async def test_permission_denied(monkeypatch, recordings_dir):
         ) as client:
             response = await client.get("/api/labs/test-lab/recordings")
         assert response.json()["code"] == 403
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_recording_control_api_start_stop(monkeypatch, recordings_dir):
+    service = ConsoleRecordingService()
+    session = await service.start_session(
+        lab_id="lab-uuid-1", lab_name="Test Lab", node_id=3, node_name="r1",
+        target_host="127.0.0.1", target_port=1, username="admin", listen_host="127.0.0.1",
+    )
+    assert session is not None
+    monkeypatch.setattr("app.routers.recordings.get_console_recorder", lambda: service)
+    monkeypatch.setattr("app.routers.recordings._lab_id_for", lambda user, path: "lab-uuid-1")
+    _override_auth()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            status = await client.get("/api/labs/test-lab/nodes/3/recording")
+            assert status.json()["data"]["console_active"] is True
+            assert status.json()["data"]["recording"] is False
+
+            started = await client.post(
+                "/api/labs/test-lab/nodes/3/recording", json={"action": "start"}
+            )
+            assert started.json()["data"]["recording"] is True
+            assert started.json()["data"]["recording_id"].startswith("3--")
+            assert started.json()["data"]["started_at"] is not None
+
+            stopped = await client.post(
+                "/api/labs/test-lab/nodes/3/recording", json={"action": "stop"}
+            )
+            assert stopped.json()["data"]["recording"] is False
+
+        casts = list(recordings_dir.rglob("*.cast"))
+        assert len(casts) == 1
+        header = json.loads(casts[0].read_text(encoding="utf-8").splitlines()[0])
+        assert "duration" in header and "timestamp" in header
+        log = casts[0].with_suffix(".log").read_text(encoding="utf-8")
+        assert "# Recording started " in log
+        assert "# Recording stopped " in log
+    finally:
+        app.dependency_overrides.clear()
+        await service.close_all()
+
+
+@pytest.mark.asyncio
+async def test_recording_control_without_console_returns_404(monkeypatch, recordings_dir):
+    service = ConsoleRecordingService()
+    monkeypatch.setattr("app.routers.recordings.get_console_recorder", lambda: service)
+    monkeypatch.setattr("app.routers.recordings._lab_id_for", lambda user, path: "lab-uuid-1")
+    _override_auth()
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://testserver"
+        ) as client:
+            response = await client.post(
+                "/api/labs/test-lab/nodes/3/recording", json={"action": "start"}
+            )
+        assert response.json()["code"] == 404
     finally:
         app.dependency_overrides.clear()

@@ -3,15 +3,19 @@
 
 """Console session recording (#291).
 
-Every in-built (HTML5/Guacamole) telnet console session is relayed through a
+In-built (HTML5/Guacamole) telnet console sessions are relayed through a
 per-session proxy: a telnet server toward guacd and a telnet client toward
-the node's real console port. While relaying, the proxy writes an asciinema
-cast v2 file (https://docs.asciinema.org/manual/asciicast/v2/) plus the raw
-output log under ``RECORDINGS_DIR/<lab-id>/<node-id>/``.
+the node's real console port. Recording is ON DEMAND — the proxy relays
+without writing anything until the user presses record, and each
+start/stop cycle produces one asciinema cast v2 file plus a raw output log
+under ``RECORDINGS_DIR/<lab-id>/<node-id>/``.
 
-Cast ``"o"`` events carry the raw terminal byte stream, so any asciinema
-player renders exactly what the user saw — no terminal emulation needed
-here. ``"i"`` events capture keystrokes.
+Each recording carries its start and stop timestamps: the cast header
+holds ``timestamp`` (start) and ``duration`` (until stop was pressed), and
+the raw log gets explicit ``# Recording started/stopped ...`` marker
+lines. Cast ``"o"`` events carry the raw terminal byte stream, so any
+asciinema player renders exactly what the user saw; ``"i"`` events capture
+keystrokes.
 
 Recordings capture everything shown and typed, including echoed passwords;
 read access is gated by the lab's scoped permissions (see routers/recordings).
@@ -21,6 +25,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 import time
 import uuid
 from datetime import UTC, datetime
@@ -42,7 +47,7 @@ def _slug(text: object) -> str:
 
 
 class RecordingSession:
-    """One guacd<->node telnet relay writing a cast file and a raw log."""
+    """One guacd<->node telnet relay with on-demand cast/log recording."""
 
     def __init__(
         self,
@@ -67,18 +72,17 @@ class RecordingSession:
         self.username = username
         self.mode = mode
         self.session_id = uuid.uuid4().hex[:8]
-        started = datetime.now(UTC)
-        base = f"{started.strftime('%Y%m%d-%H%M%S')}-{self.session_id}"
-        directory = Path(get_settings().RECORDINGS_DIR) / _slug(lab_id) / str(node_id)
-        self.cast_path = directory / f"{base}.cast"
-        self.log_path = directory / f"{base}.log"
         self.listen_port = 0
         self._server: asyncio.AbstractServer | None = None
         self._pending_task: asyncio.Task | None = None
         self._attached = False
+        self._recording = False
+        self._cycle = 0
+        self._cast_path: Path | None = None
         self._cast_file = None
         self._log_file = None
         self._t0 = 0.0
+        self._cycle_started: datetime | None = None
         self._closed = False
 
     async def start(self, listen_host: str = "0.0.0.0") -> None:
@@ -91,32 +95,108 @@ class RecordingSession:
         self.listen_port = self._server.sockets[0].getsockname()[1]
         self._pending_task = asyncio.create_task(self._expire_if_unattached())
 
+    def status(self) -> dict:
+        return {
+            "console_active": not self._closed,
+            "recording": self._recording,
+            "recording_id": (
+                f"{self.node_id}--{self._cast_path.name}" if self._recording and self._cast_path else None
+            ),
+            "started_at": self._cycle_started.isoformat() if self._recording and self._cycle_started else None,
+        }
+
+    def start_recording(self) -> dict:
+        """Begin a new recording cycle (one file pair per start/stop)."""
+        if self._closed:
+            raise ValueError("Console session has ended.")
+        if self._recording:
+            return self.status()
+        self._cycle += 1
+        started = datetime.now(UTC)
+        base = f"{started.strftime('%Y%m%d-%H%M%S')}-{self.session_id}-{self._cycle}"
+        directory = Path(get_settings().RECORDINGS_DIR) / _slug(self.lab_id) / str(self.node_id)
+        directory.mkdir(parents=True, exist_ok=True)
+        self._cast_path = directory / f"{base}.cast"
+        self._cycle_started = started
+        self._t0 = time.monotonic()
+        self._cast_file = self._cast_path.open("w", encoding="utf-8")
+        self._cast_file.write(
+            json.dumps(
+                {
+                    "version": 2,
+                    "width": CAST_WIDTH,
+                    "height": CAST_HEIGHT,
+                    "timestamp": int(started.timestamp()),
+                    "title": f"{self.lab_name} / {self.node_name}",
+                    "env": {"TERM": "xterm"},
+                }
+            )
+            + "\n"
+        )
+        self._cast_file.flush()
+        self._log_file = self._cast_path.with_suffix(".log").open("w", encoding="utf-8")
+        self._log_file.write(f"# Recording started {started.isoformat()} by {self.username}\n")
+        self._log_file.flush()
+        self._recording = True
+        _logger.info("recording %s cycle %d started by %s", self.session_id, self._cycle, self.username)
+        return self.status()
+
+    def stop_recording(self) -> dict:
+        """Stop the current cycle and stamp stop time into both files."""
+        if not self._recording:
+            return self.status()
+        self._recording = False
+        stopped = datetime.now(UTC)
+        elapsed = time.monotonic() - self._t0
+        if self._log_file is not None:
+            self._log_file.write(f"# Recording stopped {stopped.isoformat()} (duration {elapsed:.1f}s)\n")
+            self._log_file.close()
+            self._log_file = None
+        if self._cast_file is not None:
+            self._cast_file.close()
+            self._cast_file = None
+            self._finalize_cast_header(elapsed)
+        _logger.info("recording %s cycle %d stopped (%.1fs)", self.session_id, self._cycle, elapsed)
+        return self.status()
+
+    def _finalize_cast_header(self, elapsed: float) -> None:
+        """Stamp ``duration`` into the cast header once stop is pressed."""
+        if self._cast_path is None:
+            return
+        tmp_path = self._cast_path.with_suffix(".cast.tmp")
+        try:
+            with self._cast_path.open("r", encoding="utf-8") as src, tmp_path.open("w", encoding="utf-8") as dst:
+                header = json.loads(src.readline())
+                header["duration"] = round(elapsed, 3)
+                dst.write(json.dumps(header, ensure_ascii=False) + "\n")
+                shutil.copyfileobj(src, dst)
+            tmp_path.replace(self._cast_path)
+        except (OSError, ValueError) as exc:
+            _logger.warning("could not finalize cast header %s: %s", self._cast_path, exc)
+            tmp_path.unlink(missing_ok=True)
+
     async def close(self) -> None:
-        """Close the listener and any open files (idempotent)."""
+        """Stop any active cycle, close the listener and files (idempotent)."""
+        if self._recording:
+            self.stop_recording()
         self._closed = True
         if self._pending_task is not None:
             self._pending_task.cancel()
         if self._server is not None:
             self._server.close()
-        for handle in (self._cast_file, self._log_file):
-            if handle is not None:
-                try:
-                    handle.close()
-                except Exception:
-                    pass
         self.service._forget(self)
 
     async def _expire_if_unattached(self) -> None:
         await asyncio.sleep(PENDING_ATTACH_TIMEOUT)
         if not self._attached:
-            _logger.warning("recording %s: no console attached, expiring", self.session_id)
+            _logger.warning("recording proxy %s: no console attached, expiring", self.session_id)
             await self.close()
 
     async def _shell(self, reader, writer) -> None:
         # One relay per proxy: the node console (QEMU telnet chardev) serves a
         # single client, so a second guacd attachment cannot be multiplexed.
         if self._attached:
-            writer.write("\r\nConsole recording session already attached.\r\n")
+            writer.write("\r\nConsole session already attached.\r\n")
             writer.close()
             return
         self._attached = True
@@ -130,29 +210,11 @@ class RecordingSession:
                 term="xterm",
             )
         except Exception as exc:
-            _logger.warning("recording %s: upstream connect failed: %s", self.session_id, exc)
+            _logger.warning("proxy %s: upstream connect failed: %s", self.session_id, exc)
             writer.write(f"\r\nConsole is not reachable: {exc}\r\n")
             writer.close()
             await self.close()
             return
-
-        self.cast_path.parent.mkdir(parents=True, exist_ok=True)
-        self._t0 = time.monotonic()
-        self._cast_file = self.cast_path.open("w", encoding="utf-8")
-        self._cast_file.write(
-            json.dumps(
-                {
-                    "version": 2,
-                    "width": CAST_WIDTH,
-                    "height": CAST_HEIGHT,
-                    "timestamp": int(time.time()),
-                    "title": f"{self.lab_name} / {self.node_name}",
-                    "env": {"TERM": "xterm"},
-                }
-            )
-            + "\n"
-        )
-        self._log_file = self.log_path.open("w", encoding="utf-8")
 
         pumps = [
             asyncio.create_task(self._pump_output(up_reader, writer)),
@@ -177,8 +239,6 @@ class RecordingSession:
             if not data:
                 return
             self._record("o", data)
-            self._log_file.write(data)
-            self._log_file.flush()
             down_writer.write(data)
             await down_writer.drain()
 
@@ -192,18 +252,26 @@ class RecordingSession:
             await up_writer.drain()
 
     def _record(self, kind: str, data: str) -> None:
-        if self._cast_file is None:
+        if not self._recording or self._cast_file is None:
             return
         dt = round(time.monotonic() - self._t0, 6)
         self._cast_file.write(json.dumps([dt, kind, data], ensure_ascii=False) + "\n")
         self._cast_file.flush()
+        if kind == "o" and self._log_file is not None:
+            self._log_file.write(data)
+            self._log_file.flush()
 
 
 class ConsoleRecordingService:
-    """Registry of active recording proxies; one per HTML5 console session."""
+    """Registry of active console proxies; recording toggled per session."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, RecordingSession] = {}
+        self._by_key: dict[str, RecordingSession] = {}
+
+    @staticmethod
+    def _key(lab_id: str, node_id: int, mode: str, username: str) -> str:
+        return f"{lab_id}:{node_id}:{mode}:{username}"
 
     async def start_session(
         self,
@@ -218,7 +286,7 @@ class ConsoleRecordingService:
         mode: str = "primary",
         listen_host: str = "0.0.0.0",
     ) -> RecordingSession | None:
-        """Start a recording proxy; None means "connect directly, unrecorded"."""
+        """Start the console relay (recording off until explicitly started)."""
         if not get_settings().RECORDINGS_ENABLED:
             return None
         session = RecordingSession(
@@ -239,17 +307,26 @@ class ConsoleRecordingService:
             await session.close()
             return None
         self._sessions[session.session_id] = session
+        self._by_key[self._key(lab_id, node_id, mode, username)] = session
         _logger.info(
-            "recording %s: %s/%s port %d -> %s:%d",
+            "console proxy %s: %s/%s port %d -> %s:%d",
             session.session_id, lab_name, node_name, session.listen_port, target_host, target_port,
         )
         return session
 
+    def find(self, lab_id: str, node_id: int, mode: str, username: str) -> RecordingSession | None:
+        """Latest open console session for a user/node, if any."""
+        session = self._by_key.get(self._key(lab_id, node_id, mode, username))
+        return session if session is not None and not session._closed else None
+
     def is_active(self, cast_path: Path) -> bool:
-        return any(s.cast_path == cast_path and not s._closed for s in self._sessions.values())
+        return any(s._recording and s._cast_path == cast_path for s in self._sessions.values())
 
     def _forget(self, session: RecordingSession) -> None:
         self._sessions.pop(session.session_id, None)
+        key = self._key(session.lab_id, session.node_id, session.mode, session.username)
+        if self._by_key.get(key) is session:
+            self._by_key.pop(key, None)
 
     async def close_all(self) -> None:
         for session in list(self._sessions.values()):
