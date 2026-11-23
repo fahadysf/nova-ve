@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/svelte';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { get, writable } from 'svelte/store';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DragEndpoint, InterfaceEndpoint, NetworkEndpoint, NodeSlotEndpoint } from '$lib/stores/dragLink';
@@ -687,6 +689,22 @@ describe('TopologyCanvas minimap collapse (#273)', () => {
 
 describe('TopologyCanvas hover focus (#275)', () => {
   const caps = { hotplug: false, max_nics: 8, machine: 'pc' } as TemplateCapabilities;
+
+  it('pulses only the outer card from white to half-brightness over two seconds', () => {
+    const source = readFileSync(
+      resolve(process.cwd(), 'src/lib/components/canvas/TopologyCanvas.svelte'),
+      'utf8'
+    );
+    const pulseStyles = source.slice(
+      source.indexOf('@keyframes nv-focus-pulse'),
+      source.indexOf('.canvas-minimap svg', source.indexOf('@keyframes nv-focus-pulse'))
+    );
+
+    expect(pulseStyles).toContain('outline-color: #c0c0c0');
+    expect(pulseStyles).toContain('outline-color: #606060');
+    expect(pulseStyles).toContain('animation: nv-focus-pulse 2s ease-in-out infinite');
+    expect(pulseStyles).not.toContain("[data-testid='node-icon-container']");
+  });
 
   function link(id: string, nodeId: number, networkId: number): Link {
     return {
