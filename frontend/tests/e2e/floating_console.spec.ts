@@ -135,7 +135,11 @@ test('the floating window stays inside the viewport when the browser shrinks', a
     return bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= 600 &&
       bounds.y + bounds.height <= 440;
   }).toBe(true);
+  const maximized = await visibleBounds(window);
   await restore(window).click();
+  const restored = await visibleBounds(window);
+  expect(restored.width).toBeLessThan(maximized.width);
+  expect(restored.height).toBeLessThan(maximized.height);
   await expect(window.getByRole('button', { name: `Resize ${nodeName} console from bottom right` })).toBeInViewport();
   await expect(input).toHaveValue('show version');
 });

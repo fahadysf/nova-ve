@@ -690,8 +690,16 @@
   }
 
   function defaultFloatingWindowBounds(offsetIndex: number): FloatingWindowState {
+    const area = floatingConsoleArea();
+    const opening = defaultConsoleBounds(offsetIndex);
+    // Leave room around the opening size when the standard dimensions exceed the viewport.
+    const bounds = {
+      ...opening,
+      width: opening.width >= area.width ? Math.floor(area.width * 0.9) : opening.width,
+      height: opening.height >= area.height ? Math.floor(area.height * 0.9) : opening.height
+    };
     return {
-      ...fitFloatingBounds(defaultConsoleBounds(offsetIndex), floatingConsoleArea()),
+      ...fitFloatingBounds(bounds, area),
       maximized: false,
       minimized: false,
       openingOffset: offsetIndex
