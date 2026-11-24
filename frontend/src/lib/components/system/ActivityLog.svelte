@@ -232,6 +232,7 @@
   <div class="flex flex-wrap items-center gap-2">
     <input
       class="w-64 rounded-lg border border-gray-700 bg-gray-950 px-3 py-1.5 text-[12px] text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+      aria-label="Search activity log"
       placeholder="Search user, node, lab, address…"
       bind:value={search}
       on:input={queueSearch}
@@ -240,19 +241,39 @@
       }}
       data-testid="activity-search"
     />
-    <select class={controlClass} bind:value={category} on:change={setCategory} data-testid="activity-category">
+    <!-- Each control names itself: the visible layout gives these three no
+         text label, so without one a screen reader hears "combobox" x3. -->
+    <select
+      class={controlClass}
+      aria-label="Area"
+      bind:value={category}
+      on:change={setCategory}
+      data-testid="activity-category"
+    >
       <option value="">All areas</option>
       {#each ACTIVITY_CATEGORIES as option (option.value)}
         <option value={option.value}>{option.label}</option>
       {/each}
     </select>
-    <select class={controlClass} bind:value={action} on:change={setAction} data-testid="activity-action">
+    <select
+      class={controlClass}
+      aria-label="Action"
+      bind:value={action}
+      on:change={setAction}
+      data-testid="activity-action"
+    >
       <option value="">All actions</option>
       {#each ACTIVITY_ACTIONS as option (option.value)}
         <option value={option.value}>{option.label}</option>
       {/each}
     </select>
-    <select class={controlClass} bind:value={actor} on:change={setActor} data-testid="activity-actor">
+    <select
+      class={controlClass}
+      aria-label="User"
+      bind:value={actor}
+      on:change={setActor}
+      data-testid="activity-actor"
+    >
       <option value="">All users</option>
       {#each actors as name (name)}
         <option value={name}>{name}</option>
