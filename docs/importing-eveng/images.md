@@ -73,4 +73,4 @@ jq '.templates[] | select(.status == "needs-manual-review")' \
   /var/lib/nova-ve/import-manifest.json
 ```
 
-Re-running the importer is idempotent: a source path that is already a symlink to its destination lands in `manifest.skipped[]` with `reason: "already migrated: source is a symlink to the destination"`, and any destination that already matches the source sha256 is skipped too. Use `--force` to overwrite mismatched destinations.
+On reruns, the importer skips source paths already linked to their destinations. For other existing destinations, the importer checks the file size and compares the first and last 64 KiB. When those match, it records a skip in the manifest without hashing the full file. Otherwise, it compares SHA-256 digests. Use `--force` to bypass sampling and overwrite destinations whose full SHA-256 differs.

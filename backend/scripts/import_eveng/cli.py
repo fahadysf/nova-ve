@@ -243,7 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     if args.dry_run:
-        _emit_dry_run_plan(items, mode, manifest, reporter=reporter)
+        _emit_dry_run_plan(items, mode, manifest, reporter=reporter, force=args.force)
     else:
         try:
             owner = resolve_app_owner()
@@ -304,10 +304,12 @@ def _emit_dry_run_plan(
     mode: CopyMode,
     manifest: ImportManifest,
     reporter: StepReporter | None = None,
+    *,
+    force: bool = False,
 ) -> None:
     """Populate ``manifest`` with would-imported / would-skipped entries.
 
-    Walks every item's planned files and runs the sha256 idempotency check;
+    Walks every item's planned files and checks for existing matches;
     items with no source files (e.g. ``docker`` build contexts) emit a single
     ``imported`` entry pointing at the planned image marker. Each planned
     action renders one ``would ...`` step line (#271).
@@ -340,7 +342,7 @@ def _emit_dry_run_plan(
             with reporter.step(
                 f"{item.kind}/{item.image_key} — would be {verb} {src.name}{size}"
             ) as step:
-                decision = evaluate(src, dst)
+                decision = evaluate(src, dst, verify_full=force)
                 if decision.skip:
                     manifest.skipped.append(
                         SkippedEntry(src=str(src), dst=str(dst), reason=decision.reason)

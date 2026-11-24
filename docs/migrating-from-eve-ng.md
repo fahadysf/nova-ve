@@ -67,7 +67,7 @@ The run prints one human-readable step per file so you can see exactly what is h
 
 Every run also appends its steps and the final summary to `/var/log/eve-ng-importer.log` (override with `--log-file`; rotation is size-capped). Scripts that want the old machine-readable event stream can pass `--json`.
 
-By default, image files are moved and symlinked back as described above; if the source and destination are on different filesystems, those files fall back to copy + sha256 verify + symlink. Re-running the same command is idempotent: a source path that is already a symlink to its destination is skipped and recorded in the manifest, and so is any file whose destination already matches by sha256.
+By default, image files are moved and symlinked back as described above. If the source and destination are on different filesystems, the importer copies the file, verifies its SHA-256, and creates the symlink. On reruns, the importer skips source paths already linked to their destinations. For other existing destinations, equal file sizes and matching first and last 64 KiB skip a full SHA-256 comparison. Changes confined to the middle of a large file can pass this check.
 
 ## Conservative Opt-Out
 

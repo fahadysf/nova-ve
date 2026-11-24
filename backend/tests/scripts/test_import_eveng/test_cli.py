@@ -174,16 +174,39 @@ def test_sha256_file_distinguishes_changed_bytes(tmp_path: Path) -> None:
 # --- idempotency primitive ----------------------------------------------
 
 
-def test_idempotency_skip_when_dst_exists_and_sha_matches(tmp_path: Path) -> None:
+@pytest.mark.parametrize("size", [0, 17, 64 * 1024, 64 * 1024 + 1, 3 * 64 * 1024])
+def test_idempotency_skips_matching_boundaries_without_hashing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, size: int
+) -> None:
     src = tmp_path / "src"
     dst = tmp_path / "dst"
-    src.write_bytes(b"identical")
-    dst.write_bytes(b"identical")
+    contents = b"x" * size
+    src.write_bytes(contents)
+    dst.write_bytes(contents)
+    monkeypatch.setattr(
+        "scripts.import_eveng.idempotency.sha256_file",
+        lambda path: pytest.fail(f"unexpected full hash for {path}"),
+    )
 
     decision = evaluate(src, dst)
     assert decision.skip is True
-    assert decision.reason == "exists, sha256 match"
-    assert decision.src_sha256 == decision.dst_sha256
+    assert decision.reason == "exists, size and boundary bytes match"
+    assert decision.src_sha256 is None
+    assert decision.dst_sha256 is None
+
+
+def test_idempotency_samples_only_the_boundaries_of_large_files(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    dst = tmp_path / "dst"
+    head = b"h" * (64 * 1024)
+    tail = b"t" * (64 * 1024)
+    src.write_bytes(head + b"abc" + tail)
+    dst.write_bytes(head + b"xyz" + tail)
+
+    decision = evaluate(src, dst)
+    assert decision.skip is True
+    assert decision.src_sha256 is None
+    assert decision.dst_sha256 is None
 
 
 def test_idempotency_no_skip_when_dst_missing(tmp_path: Path) -> None:
@@ -195,15 +218,26 @@ def test_idempotency_no_skip_when_dst_missing(tmp_path: Path) -> None:
     assert "destination missing" in decision.reason
 
 
-def test_idempotency_no_skip_on_sha_mismatch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("difference", ["head", "tail", "size"])
+def test_idempotency_hashes_when_boundary_check_fails(tmp_path: Path, difference: str) -> None:
     src = tmp_path / "src"
     dst = tmp_path / "dst"
-    src.write_bytes(b"old")
-    dst.write_bytes(b"new")
+    head = b"h" * (64 * 1024)
+    tail = b"t" * (64 * 1024)
+    contents = head + b"abc" + tail
+    changed = {
+        "head": b"H" + contents[1:],
+        "tail": contents[:-1] + b"T",
+        "size": head + b"abcd" + tail,
+    }
+    src.write_bytes(contents)
+    dst.write_bytes(changed[difference])
     decision = evaluate(src, dst)
     assert decision.skip is False
     assert "sha256 mismatch" in decision.reason
     assert "--force" in decision.reason
+    assert decision.src_sha256 == sha256_file(src)
+    assert decision.dst_sha256 == sha256_file(dst)
 
 
 # --- main() integration: --dry-run is a no-op against empty source ------

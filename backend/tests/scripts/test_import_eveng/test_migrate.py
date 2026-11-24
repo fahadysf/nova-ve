@@ -117,7 +117,7 @@ def test_idempotent_rerun_records_skipped(tmp_path: Path) -> None:
     run_migration(items2, options=MigrateOptions(), manifest=m2)
     assert len(m2.imported) == 0
     assert len(m2.skipped) == 1
-    assert m2.skipped[0].reason == "exists, sha256 match"
+    assert m2.skipped[0].reason == "exists, size and boundary bytes match"
 
 
 def test_perm_fixup_applied_to_dest_tree(tmp_path: Path) -> None:
