@@ -1,5 +1,10 @@
 type: qemu
 name: Cisco Catalyst 9000v
+image_aliases:
+  - "cat9kv-*"
+  - "cat9kvq200-*"
+  - "cat9kvuadp-*"
+  - "cat9000v-*"
 description: Cisco Catalyst 9000v
 icon_type: switch
 cpu: 4

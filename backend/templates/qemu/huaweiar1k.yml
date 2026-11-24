@@ -1,5 +1,7 @@
 type: qemu
 name: Huawei AR1000V
+image_aliases:
+  - "huaweiar1k-*"
 description: Huawei AR1000V
 icon_type: router
 cpu: 1

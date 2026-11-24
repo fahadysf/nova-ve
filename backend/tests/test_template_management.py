@@ -271,7 +271,11 @@ def test_builtin_fortinet_template_matches_fgt_image_aliases(
 
     image_names = [
         "fortinet-FGT-v7.4.3",
+        "fortinet-5.2",
+        "FortiGate-VM64-KVM-7.4",
         "vendor-FGT-v7.2.8",
+        "fortinet-FMG-v7.4",
+        "fortinet-FAZ-v7.4",
         "paloalto-10.1.1",
     ]
     for image_name in image_names:
@@ -284,10 +288,8 @@ def test_builtin_fortinet_template_matches_fgt_image_aliases(
     images = service.list_images("qemu", "fortinet")
 
     assert fortinet["name"] == "Fortinet FortiGate"
-    assert fortinet["image_aliases"] == ["fortinet-", "-fgt-"]
-    assert "fortinet-FGT-v7.4.3" in images
-    assert "vendor-FGT-v7.2.8" in images
-    assert "paloalto-10.1.1" not in images
+    assert "fortinet-fgt-*" in fortinet["image_aliases"]
+    assert set(images) == set(image_names[:4])
 
 
 def test_builtin_iol_template_matches_imported_i86bi_linux_folders(
@@ -301,6 +303,8 @@ def test_builtin_iol_template_matches_imported_i86bi_linux_folders(
     image_names = [
         "i86bi_Linux-L3-AdvEnterpriseK9-M2-157-18-May-2018",
         "i86bi-linux-l2-adventerprisek9-15.2",
+        "L2-ADVENTERPRISEK9-M-15.2-20150703",
+        "L3-ADVENTERPRISEK9-M-15.4-2T",
         "c7200-adventerprisek9",
     ]
     for image_name in image_names:
@@ -313,10 +317,33 @@ def test_builtin_iol_template_matches_imported_i86bi_linux_folders(
     images = service.list_images("iol", "iol")
 
     assert iol["name"] == "IOL"
-    assert iol["image_aliases"] == ["i86bi_linux", "i86bi-linux"]
-    assert "i86bi_Linux-L3-AdvEnterpriseK9-M2-157-18-May-2018" in images
-    assert "i86bi-linux-l2-adventerprisek9-15.2" in images
-    assert "c7200-adventerprisek9" not in images
+    assert "l2-adventerprisek9-*" in iol["image_aliases"]
+    assert set(images) == set(image_names[:-1])
+
+
+@pytest.mark.parametrize(
+    ("template_key", "matching", "other"),
+    [
+        ("winserver", ["WinServer-2019"], ["win-11-x64", "backup-winserver-2019"]),
+        ("win", ["win-11-x64", "Win10-rs5-ltsc"], ["winserver-2019"]),
+        ("vios", ["iosv-159-3", "vios-15.5"], ["iosvl2-2020", "viosl2-15.2"]),
+        ("viosl2", ["iosvl2-2020", "viosl2-15.2"], ["iosv-159-3", "vios-15.5"]),
+        ("xrv9k", ["iosxrv9000-7-11-1", "xrv9k-24.3"], ["xrv-6.1"]),
+        ("xrv", ["xrv-6.1"], ["iosxrv9000-7-11-1", "xrv9k-24.3"]),
+        ("csr1000vng", ["csr1000vng-universalk9.16.12"], ["csr1000v-universalk9-15.4"]),
+        ("fmc7", ["fmc7-7.7.0"], ["ftd7-FTD-7.7.0", "firepower6-FMC-7.0.0"]),
+        ("aruba", ["aruba-VMC_8.4.0"], ["arubacx-10.14", "arubamm-8.12.0"]),
+    ],
+)
+def test_builtin_qemu_image_patterns_match_the_appliance_family(
+    monkeypatch, template_settings, template_key, matching, other
+):
+    template_settings.TEMPLATES_DIR = REPO_ROOT / "backend" / "templates"
+    monkeypatch.setattr("app.services.template_service.get_settings", lambda: template_settings)
+    for image_name in [*matching, *other]:
+        _write_text(template_settings.IMAGES_DIR / "qemu" / image_name / "virtioa.qcow2", "image")
+
+    assert set(TemplateService().list_images("qemu", template_key)) == set(matching)
 
 
 @pytest.mark.asyncio
@@ -355,6 +382,24 @@ async def test_create_node_uses_template_defaults_and_validates_image(prepared_t
     )
     assert missing_image_response["code"] == 400
     assert "not available" in missing_image_response["message"]
+
+
+@pytest.mark.asyncio
+async def test_create_node_applies_template_explicit_interface_names(prepared_template_data):
+    template_path = prepared_template_data.TEMPLATES_DIR / "qemu" / "csr.yml"
+    with template_path.open("a") as template_file:
+        template_file.write("interface_naming:\n  explicit: [management, uplink]\n")
+
+    response = await labs.create_node(
+        "demo.json",
+        NodeCreate(name="csr", type="qemu", template="csr", image="csr1000v"),
+        current_user=SimpleNamespace(username="admin", role="admin"),
+    )
+
+    assert response["code"] == 200
+    assert [port["name"] for port in response["data"]["interfaces"]] == [
+        "management", "uplink", "Gi3", "Gi4"
+    ]
 
 
 @pytest.mark.asyncio

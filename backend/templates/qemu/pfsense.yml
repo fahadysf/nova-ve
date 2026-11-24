@@ -1,5 +1,7 @@
 type: qemu
 name: pfSense CE
+image_aliases:
+  - "pfsense-*"
 description: pfSense CE
 icon_type: firewall
 cpu: 2

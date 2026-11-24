@@ -1,5 +1,7 @@
 type: qemu
 name: OPNsense
+image_aliases:
+  - "opnsense-*"
 description: OPNsense
 icon_type: firewall
 cpu: 2

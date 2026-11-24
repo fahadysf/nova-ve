@@ -25,7 +25,19 @@ const TEMPLATES: LibraryTemplate[] = [
     ethernet: 4,
     console_type: 'telnet',
     cpulimit: 1,
-    image_aliases: ['veos'],
+    image_aliases: ['veos', 'arista-lab-*'],
+    interface_naming: { format: 'Ethernet{port}' },
+    capabilities: { machine: 'q35', hotplug: true, max_nics: 16 },
+    extras: { qemu_nic: 'virtio-net-pci', qemu_version: '5.2.0' },
+    extras_schema: [
+      { key: 'qemu_nic', label: 'NIC model', type: 'select', default: 'e1000', options: [
+        { value: 'e1000' }, { value: 'virtio-net-pci' },
+      ] },
+      { key: 'qemu_version', label: 'QEMU version', type: 'select', default: '', options: [
+        { value: '', label: 'Host default' },
+      ] },
+      { key: 'qemu_options', label: 'Extra QEMU arguments', type: 'textarea', default: '' },
+    ],
     images: [
       { name: 'veos', filename: 'veos-4.31.3F.qcow2', state: 'available', size: 1298568192 },
     ],
@@ -80,10 +92,10 @@ const IMAGES: LibraryImage[] = [
   },
 ];
 
-function mockApi() {
+function mockApi(templates = TEMPLATES) {
   apiRequest.mockImplementation(async (path: string) => {
     if (path === '/library/templates') {
-      return { code: 200, status: 'success', message: '', data: { templates: TEMPLATES } };
+      return { code: 200, status: 'success', message: '', data: { templates } };
     }
     if (path === '/library/images') {
       return { code: 200, status: 'success', message: '', data: { images: IMAGES } };
@@ -167,6 +179,17 @@ describe('Images & Templates library page (#264, live)', () => {
     expect(screen.queryByText('veos-4.31.3F.qcow2')).toBeNull();
   });
 
+  it('filters templates by an image alias', async () => {
+    render(LibraryPage);
+    await waitFor(() => screen.getByTestId('template-card-vqfx'));
+
+    await fireEvent.input(screen.getByTestId('images-search'), {
+      target: { value: 'ARISTA-LAB' },
+    });
+    expect(screen.getByTestId('template-card-veos')).toBeInTheDocument();
+    expect(screen.queryByTestId('template-card-vqfx')).not.toBeInTheDocument();
+  });
+
   it('edits a template through the dialog and PATCHes the backend', async () => {
     render(LibraryPage);
     await waitFor(() => screen.getByTestId('template-card-veos'));
@@ -187,7 +210,130 @@ describe('Images & Templates library page (#264, live)', () => {
       );
       expect(patchCall).toBeTruthy();
       const body = (patchCall![1] as { body: Record<string, unknown> }).body;
-      expect(body.ram).toBe(4096);
+      expect(body).toEqual({ ram: 4096 });
+    });
+  });
+
+  it.each([
+    { value: '  veos-*\n\n arista-lab-*, custom-veos  ', aliases: ['veos-*', 'arista-lab-*', 'custom-veos'] },
+    { value: '', aliases: [] },
+  ])('saves the edited image alias list $aliases', async ({ value, aliases }) => {
+    render(LibraryPage);
+    await fireEvent.click(await screen.findByTestId('template-edit-veos'));
+
+    const editor = screen.getByRole('textbox', { name: 'Image aliases' });
+    expect(editor).toHaveValue('veos\narista-lab-*');
+    await fireEvent.input(editor, { target: { value } });
+    await fireEvent.click(screen.getByTestId('template-dialog-save'));
+
+    await waitFor(() => {
+      expect(apiRequest).toHaveBeenCalledWith('/library/templates/qemu/veos', {
+        method: 'PATCH',
+        body: { image_aliases: aliases },
+        suppressToast: true,
+      });
+    });
+  });
+
+  it('loads the configured defaults and sends only the changed template settings', async () => {
+    render(LibraryPage);
+    await fireEvent.click(await screen.findByTestId('template-edit-veos'));
+
+    const save = screen.getByTestId('template-dialog-save');
+    expect(save).toBeDisabled();
+    expect(screen.getByLabelText('Interface name format')).toHaveValue('Ethernet{port}');
+    expect(screen.getByLabelText('NIC model')).toHaveValue('virtio-net-pci');
+    expect(screen.getByLabelText('QEMU version')).toHaveValue('5.2.0');
+    expect(screen.getByLabelText('Allow NIC hotplug')).toBeChecked();
+
+    await fireEvent.input(screen.getByLabelText('Description'), { target: { value: '' } });
+    await fireEvent.change(screen.getByLabelText('Icon category'), { target: { value: 'switch' } });
+    await fireEvent.input(screen.getByLabelText('CPU limit'), { target: { value: '0' } });
+    await fireEvent.change(screen.getByLabelText('Primary console'), { target: { value: 'vnc' } });
+    await fireEvent.change(screen.getByLabelText('Second console'), { target: { value: 'telnet' } });
+    await fireEvent.change(screen.getByLabelText('Interface naming'), { target: { value: 'explicit' } });
+    await fireEvent.input(screen.getByRole('textbox', { name: /^Explicit interface names/ }), {
+      target: { value: 'Management1\nEthernet1,Ethernet2' },
+    });
+    await fireEvent.change(screen.getByLabelText('QEMU machine'), { target: { value: 'pc' } });
+    expect(screen.getByLabelText('Allow NIC hotplug')).not.toBeChecked();
+    expect(screen.getByLabelText('Allow NIC hotplug')).toBeDisabled();
+    await fireEvent.input(screen.getByLabelText('Maximum NICs'), { target: { value: '8' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Use default for NIC model' }));
+    expect(screen.getByLabelText('NIC model')).toHaveValue('e1000');
+    await fireEvent.input(screen.getByLabelText('Extra QEMU arguments'), {
+      target: { value: '-nographic' },
+    });
+    await fireEvent.click(save);
+
+    expect(apiRequest).toHaveBeenCalledWith('/library/templates/qemu/veos', {
+      method: 'PATCH',
+      suppressToast: true,
+      body: {
+        description: '',
+        icon_type: 'switch',
+        cpulimit: 0,
+        console_type: 'vnc',
+        second_console: 'telnet',
+        interface_naming: { explicit: ['Management1', 'Ethernet1', 'Ethernet2'] },
+        capabilities: { machine: 'pc', hotplug: false, max_nics: 8 },
+        extras: { qemu_nic: null, qemu_options: '-nographic' },
+      },
+    });
+  });
+
+  it('keeps edits and displays the server error when saving fails', async () => {
+    render(LibraryPage);
+    await fireEvent.click(await screen.findByTestId('template-edit-veos'));
+
+    await fireEvent.input(screen.getByLabelText('Description'), { target: { value: 'Arista switch' } });
+    await fireEvent.change(screen.getByLabelText('Interface naming'), { target: { value: 'automatic' } });
+    apiRequest.mockRejectedValueOnce(new Error('Template validation failed.'));
+    await fireEvent.click(screen.getByTestId('template-dialog-save'));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Template validation failed.');
+    expect(screen.getByLabelText('Description')).toHaveValue('Arista switch');
+    expect(screen.getByLabelText('Interface naming')).toHaveValue('automatic');
+    expect(screen.getByTestId('template-dialog-save')).toBeEnabled();
+
+    await fireEvent.click(screen.getByTestId('template-dialog-save'));
+    await waitFor(() => expect(screen.queryByTestId('template-dialog')).not.toBeInTheDocument());
+    expect(apiRequest).toHaveBeenCalledWith('/library/templates/qemu/veos', {
+      method: 'PATCH',
+      suppressToast: true,
+      body: { description: 'Arista switch', interface_naming: null },
+    });
+  });
+
+  it('edits Docker environment variables without changing engine defaults', async () => {
+    mockApi([{
+      ...TEMPLATES[0],
+      type: 'docker',
+      key: 'docker',
+      interface_naming: null,
+      capabilities: { machine: null, hotplug: true, max_nics: 16 },
+      extras: { environment: [{ key: 'LANG', value: 'C' }] },
+      extras_schema: [
+        { key: 'environment', label: 'Environment variables', type: 'env', default: [] },
+        { key: 'vnc_port', label: 'VNC port', type: 'number', default: 5900 },
+      ],
+    }]);
+    render(LibraryPage);
+    await fireEvent.click(await screen.findByTestId('template-edit-docker'));
+
+    expect(screen.queryByLabelText('QEMU machine')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('VNC port')).toHaveValue(5900);
+    expect(screen.getByLabelText('Variable name 1')).toHaveValue('LANG');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add variable' }));
+    await fireEvent.input(screen.getByLabelText('Variable name 2'), { target: { value: 'TZ' } });
+    await fireEvent.input(screen.getByLabelText('Variable value 2'), { target: { value: 'UTC' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Remove variable 1' }));
+    await fireEvent.click(screen.getByTestId('template-dialog-save'));
+
+    expect(apiRequest).toHaveBeenCalledWith('/library/templates/docker/docker', {
+      method: 'PATCH',
+      suppressToast: true,
+      body: { extras: { environment: [{ key: 'TZ', value: 'UTC' }] } },
     });
   });
 });

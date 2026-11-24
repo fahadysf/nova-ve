@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vSRX NextGen
+image_aliases:
+  - "vsrxng-*"
 description: Juniper vSRX NextGen
 icon_type: firewall
 cpu: 2

@@ -1,5 +1,8 @@
 type: qemu
 name: SonicWall NSv
+image_aliases:
+  - "sonicwall-nsv*"
+  - "sonicwall-snv*"
 description: SonicWall NSv
 icon_type: firewall
 cpu: 4

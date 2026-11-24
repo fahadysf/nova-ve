@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco SD-WAN vBond
+image_aliases:
+  - "vtbond-*"
 description: Cisco SD-WAN vBond
 icon_type: router
 cpu: 2

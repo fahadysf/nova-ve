@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco FTD 7
+image_aliases:
+  - "ftd7-*"
 description: Cisco FTD 7
 icon_type: firewall
 cpu: 4

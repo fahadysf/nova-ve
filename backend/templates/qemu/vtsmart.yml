@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco SD-WAN vSmart
+image_aliases:
+  - "vtsmart-*"
 description: Cisco SD-WAN vSmart
 icon_type: router
 cpu: 2

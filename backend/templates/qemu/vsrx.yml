@@ -1,5 +1,8 @@
 type: qemu
 name: Juniper vSRX
+image_aliases:
+  - "vsrx-*"
+  - "junos firefly"
 description: Juniper vSRX
 icon_type: firewall
 cpu: 2

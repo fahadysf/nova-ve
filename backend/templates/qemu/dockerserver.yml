@@ -1,5 +1,7 @@
 type: qemu
 name: Docker Server
+image_aliases:
+  - "dockerserver-*"
 description: Docker Server
 icon_type: server
 cpu: 2

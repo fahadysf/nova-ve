@@ -1,5 +1,8 @@
 type: qemu
 name: Linux
+image_aliases:
+  - "linux-*"
+  - "alpine-*"
 description: Linux
 icon_type: server
 cpu: 2

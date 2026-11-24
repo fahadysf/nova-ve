@@ -1,5 +1,7 @@
 type: qemu
 name: VMware SD-WAN Orchestrator
+image_aliases:
+  - "veloorch-*"
 description: VMware SD-WAN Orchestrator
 icon_type: server
 cpu: 4

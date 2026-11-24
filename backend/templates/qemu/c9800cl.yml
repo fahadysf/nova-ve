@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco Catalyst 9800-CL
+image_aliases:
+  - "c9800cl-*"
 description: Cisco Catalyst 9800-CL
 icon_type: router
 cpu: 4

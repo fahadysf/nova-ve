@@ -1,5 +1,7 @@
 type: qemu
 name: VMware SD-WAN Gateway
+image_aliases:
+  - "velogw-*"
 description: VMware SD-WAN Gateway
 icon_type: router
 cpu: 4

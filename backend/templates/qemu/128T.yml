@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper Session Smart Router
+image_aliases:
+  - "128t-*"
 description: Juniper Session Smart Router
 icon_type: router
 cpu: 4

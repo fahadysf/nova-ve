@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco vWLC
+image_aliases:
+  - "vwlc-*"
 description: Cisco vWLC
 icon_type: router
 cpu: 1

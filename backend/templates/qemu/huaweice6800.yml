@@ -1,5 +1,8 @@
 type: qemu
 name: Huawei CloudEngine 6800V
+image_aliases:
+  - "ce6800*"
+  - "huaweice6800-*"
 description: Huawei CloudEngine 6800V
 icon_type: switch
 cpu: 2

@@ -26,6 +26,8 @@
   let copiedSha: string | null = null;
   let deleteTarget: LibraryImage | null = null;
   let dialogTemplate: LibraryTemplate | null = null;
+  let savingTemplate = false;
+  let templateSaveError = '';
 
   const TYPE_OPTIONS = ['qemu', 'docker', 'iol', 'dynamips'];
 
@@ -141,13 +143,24 @@
 
   async function handleTemplateSave(event: CustomEvent<{ template: LibraryTemplate; edit: LibraryTemplateEdit }>) {
     const { template, edit } = event.detail;
+    if (savingTemplate || !Object.keys(edit).length) return;
+    savingTemplate = true;
+    templateSaveError = '';
     try {
       await apiRequest(`/library/templates/${template.type}/${encodeURIComponent(template.key)}`, {
         method: 'PATCH',
-        body: edit
+        body: edit,
+        suppressToast: true
       });
       toastStore.push(`Template ${template.key} updated.`, 'success');
       dialogTemplate = null;
+    } catch (error) {
+      templateSaveError = error instanceof Error ? error.message : 'Unable to save the template.';
+      return;
+    } finally {
+      savingTemplate = false;
+    }
+    try {
       await refresh();
     } catch {
       /* toasted */
@@ -233,7 +246,10 @@
                     </div>
                     <button
                       class="shrink-0 rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
-                      on:click={() => (dialogTemplate = template)}
+                      on:click={() => {
+                        templateSaveError = '';
+                        dialogTemplate = template;
+                      }}
                       data-testid={`template-edit-${template.key}`}
                     >
                       <Pencil class="mr-1 inline h-3 w-3" />
@@ -383,6 +399,8 @@
 {#if dialogTemplate}
   <TemplateDialog
     template={dialogTemplate}
+    saving={savingTemplate}
+    saveError={templateSaveError}
     on:save={handleTemplateSave}
     on:close={() => (dialogTemplate = null)}
   />

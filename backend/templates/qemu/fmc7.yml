@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco FMC 7
+image_aliases:
+  - "fmc7-*"
 description: Cisco Firepower Management Center 7
 icon_type: server
 cpu: 4

@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco SD-WAN vEdge
+image_aliases:
+  - "vtedge-*"
 description: Cisco SD-WAN vEdge
 icon_type: router
 cpu: 1

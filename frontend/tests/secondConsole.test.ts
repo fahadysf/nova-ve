@@ -423,17 +423,17 @@ function makeLibraryTemplate(overrides: Partial<LibraryTemplate> = {}): LibraryT
 
 describe('TemplateDialog second console field', () => {
   it('submits the declared secondary console', async () => {
-    render(TemplateDialogHarness, { props: { template: makeLibraryTemplate({ second_console: 'vnc' }) } });
+    render(TemplateDialogHarness, { props: { template: makeLibraryTemplate() } });
     await tick();
 
     const select = screen.getByTestId('template-dialog-second-console') as HTMLSelectElement;
-    expect(select.value).toBe('vnc');
+    await fireEvent.change(select, { target: { value: 'vnc' } });
     await fireEvent.click(screen.getByTestId('template-dialog-save'));
     await tick();
 
     const edit = JSON.parse(screen.getByTestId('saved-edit').textContent ?? 'null');
     expect(edit.second_console).toBe('vnc');
-    expect(edit.console_type).toBe('telnet');
+    expect(edit).not.toHaveProperty('console_type');
   });
 
   it('clears the secondary console with the none option', async () => {
@@ -456,6 +456,6 @@ describe('TemplateDialog second console field', () => {
 
     const select = screen.getByTestId('template-dialog-second-console') as HTMLSelectElement;
     expect(select.value).toBe('');
-    expect([...select.options].map((option) => option.value)).toEqual(['', 'telnet', 'vnc', 'rdp']);
+    expect([...select.options].map((option) => option.value)).toEqual(['', 'vnc']);
   });
 });

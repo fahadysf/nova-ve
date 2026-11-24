@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco ISE
+image_aliases:
+  - "ise-*"
 description: Cisco Identity Services Engine
 icon_type: server
 cpu: 4

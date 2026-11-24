@@ -76,16 +76,13 @@ class TestDefaultInterfaces:
         )
         assert [i["name"] for i in ifaces] == ["Gi1", "Gi2", "Gi3"]
 
-    def test_template_explicit_not_used_for_generation(self):
-        # template_interface_naming with 'explicit' (not 'format') should not
-        # be applied by _default_interfaces; it falls back to the type default.
+    def test_template_explicit_names_fall_back_for_extra_ports(self):
         ifaces = _default_interfaces(
             "qemu",
-            2,
-            interface_naming_scheme=None,
+            3,
             template_interface_naming={"explicit": ["fa0/0", "fa0/1"]},
         )
-        assert [i["name"] for i in ifaces] == ["Gi1", "Gi2"]
+        assert [i["name"] for i in ifaces] == ["fa0/0", "fa0/1", "Gi3"]
 
     def test_interface_structure(self):
         ifaces = _default_interfaces("docker", 1)

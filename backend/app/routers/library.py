@@ -20,7 +20,7 @@ import time
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Any, Literal
 
 from app.dependencies import get_current_admin
 from app.openapi import COMMON_RESPONSES
@@ -32,6 +32,7 @@ from app.services.image_library_service import (
     ImageNotFound,
     ImageReferenced,
     TemplateUpdateInvalid,
+    editable_template_extras_schema,
 )
 from app.services.template_service import TemplateError, TemplateService
 
@@ -66,6 +67,7 @@ def _template_fields(template_type: str, template_key: str, fields) -> dict:
 
 class TemplateEditBody(BaseModel):
     name: str | None = Field(default=None, min_length=1)
+    description: str | None = None
     icon_type: str | None = None
     cpu: int | None = Field(default=None, ge=1)
     ram: int | None = Field(default=None, ge=1)
@@ -74,8 +76,11 @@ class TemplateEditBody(BaseModel):
     # Explicit null clears the secondary console; the edit service re-runs
     # the primary/secondary combination check on save.
     second_console: Literal["telnet", "vnc", "rdp"] | None = None
-    cpulimit: int | None = Field(default=None, ge=1)
+    cpulimit: int | None = Field(default=None, ge=0)
     image_aliases: list[str] | None = None
+    interface_naming: dict[str, Any] | None = None
+    capabilities: dict[str, Any] | None = None
+    extras: dict[str, Any] | None = None
 
 
 @router.get("/templates")
@@ -86,6 +91,8 @@ async def list_library_templates(
     inventory = service.inventory()
     templates = []
     for template in inventory["templates"]:
+        extras = template["extras"]
+        extras_schema = editable_template_extras_schema(template["type"], extras)
         templates.append(
             {
                 "type": template["type"],
@@ -101,6 +108,9 @@ async def list_library_templates(
                 "cpulimit": template["cpulimit"],
                 "image_aliases": template["image_aliases"],
                 "capabilities": template["capabilities"],
+                "interface_naming": template["interface_naming"],
+                "extras": {field["key"]: extras[field["key"]] for field in extras_schema if field["key"] in extras},
+                "extras_schema": extras_schema,
                 "paired_parent": template.get("paired_parent"),
                 "images": template["images"],
             }
@@ -219,11 +229,19 @@ async def edit_library_template(
     # nothing differs, the edit was a no-op and is not an event; when a
     # read did not succeed, name the fields that were submitted instead.
     compared = bool(before) and bool(after)
-    changes = audit_service.field_changes(before, after) if compared else {}
-    if changes or not compared:
+    changes = audit_service.field_changes(before, after, skip=("extras",)) if compared else {}
+    # Engine settings can contain credentials in command arguments or env
+    # values. Audit which settings changed without copying their values.
+    engine_keys = sorted(
+        key for key in (updates.get("extras") or {})
+        if before.get("extras", {}).get(key) != after.get("extras", {}).get(key)
+    ) if compared else []
+    if changes or engine_keys or not compared:
         detail = {"template_type": template_type}
         if compared:
             detail["changes"] = changes
+            if engine_keys:
+                detail["changed_engine_options"] = engine_keys
         else:
             detail["submitted"] = sorted(updates)
         await audit_service.record(

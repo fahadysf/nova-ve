@@ -1,5 +1,7 @@
 type: qemu
 name: Aruba ClearPass
+image_aliases:
+  - "clearpass-*"
 description: Aruba ClearPass
 icon_type: server
 cpu: 2

@@ -91,6 +91,8 @@ export interface LibraryTemplateImage {
   size: number | null;
 }
 
+export type TemplateInterfaceNaming = { format: string } | { explicit: string[] };
+
 export interface LibraryTemplate {
   type: string;
   key: string;
@@ -104,18 +106,28 @@ export interface LibraryTemplate {
   second_console?: string | null;
   cpulimit: number;
   image_aliases: string[];
+  interface_naming?: TemplateInterfaceNaming | null;
+  capabilities?: TemplateCapabilities;
+  extras?: Record<string, unknown>;
+  extras_schema?: NodeCatalogExtraField[];
   paired_parent?: string | null;
   images: LibraryTemplateImage[];
 }
 
 export type LibraryTemplateEdit = {
   name?: string;
+  description?: string;
+  icon_type?: string;
   cpu?: number;
   ram?: number;
   ethernet?: number;
+  cpulimit?: number;
   console_type?: string;
   second_console?: string | null;
   image_aliases?: string[];
+  interface_naming?: TemplateInterfaceNaming | null;
+  capabilities?: Partial<TemplateCapabilities>;
+  extras?: Record<string, unknown>;
 };
 
 export interface FolderEntry {

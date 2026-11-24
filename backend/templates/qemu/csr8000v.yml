@@ -1,5 +1,8 @@
 type: qemu
 name: Cisco Catalyst 8000V
+image_aliases:
+  - "csr8000v-*"
+  - "cat8000v-*"
 description: Cisco Catalyst 8000V
 icon_type: router
 cpu: 2

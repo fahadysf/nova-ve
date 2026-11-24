@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vRR
+image_aliases:
+  - "junipervrr-*"
 description: Juniper vRR
 icon_type: router
 cpu: 1

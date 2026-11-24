@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco ISRv
+image_aliases:
+  - "isrv-*"
 description: Cisco ISRv
 icon_type: router
 cpu: 2

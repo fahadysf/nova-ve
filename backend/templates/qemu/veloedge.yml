@@ -1,5 +1,7 @@
 type: qemu
 name: VMware SD-WAN Edge
+image_aliases:
+  - "veloedge-*"
 description: VMware SD-WAN Edge
 icon_type: router
 cpu: 2

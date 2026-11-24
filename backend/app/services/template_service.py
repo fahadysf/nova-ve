@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from fnmatch import fnmatchcase
 from pathlib import Path
 import logging
 import os
@@ -878,16 +879,19 @@ def _matches_template_image_name(template: "TemplateDefinition", image_name: str
     if not image_match:
         return False
 
-    candidates = [
-        candidate
-        for candidate in [template.name.strip().lower(), *template.image_aliases]
-        if candidate
-    ]
-    if not candidates:
+    display_name = template.name.strip().lower()
+    if not display_name and not template.image_aliases:
         return True
+    if display_name and (display_name in image_match or image_match in display_name):
+        return True
+
+    # Plain aliases retain the legacy containment check. A wildcard alias
+    # matches the whole normalized name, so win-* and winserver-* stay distinct.
     return any(
-        candidate in image_match or image_match in candidate
-        for candidate in candidates
+        fnmatchcase(image_match, alias)
+        if "*" in alias
+        else alias in image_match or image_match in alias
+        for alias in template.image_aliases
     )
 
 
@@ -1020,6 +1024,8 @@ class TemplateDefinition:
     interface_naming: dict[str, Any] | None = None
     capabilities: dict[str, Any] = field(default_factory=dict)
     image_aliases: list[str] = field(default_factory=list)
+    inherited_image_aliases: list[str] = field(default_factory=list)
+    user_template_path: Path | None = None
     # #206 — when this entry was synthesized from a paired-template child block
     # (vs loaded from a per-type YAML), ``paired_parent`` is the originating
     # paired template key. Surfaced in the catalog response so the frontend can
@@ -1052,6 +1058,7 @@ class TemplateDefinition:
             "cpulimit": self.cpulimit,
             "extras": dict(self.extras),
             "capabilities": dict(self.capabilities),
+            "interface_naming": self.interface_naming,
             "image_aliases": list(self.image_aliases),
         }
 
@@ -1411,6 +1418,59 @@ class TemplateService:
                 paths.append((p, "user"))
         return paths
 
+    def _definition_from_payload(
+        self,
+        payload: dict[str, Any],
+        path: Path,
+        template_type: str,
+        *,
+        user: bool,
+        inherited_image_aliases: list[str] | None = None,
+    ) -> TemplateDefinition:
+        source = str(path)
+        yaml_extras = payload.get("extras")
+        yaml_extras = dict(yaml_extras) if isinstance(yaml_extras, dict) else {}
+        for schema_field in _extras_schema_for(template_type, yaml_extras):
+            schema_key = schema_field["key"]
+            if schema_key in payload and schema_key not in yaml_extras:
+                yaml_extras[schema_key] = payload[schema_key]
+        interface_naming = payload.get("interface_naming")
+        if interface_naming is not None:
+            interface_naming = _validate_interface_naming(interface_naming, source=source)
+        resolved_console_type = str(
+            payload.get("console_type") or self._default_console_type(template_type)
+        )
+        inherited = list(inherited_image_aliases or [])
+        aliases = (
+            _validate_image_aliases(payload["image_aliases"], source=source)
+            if "image_aliases" in payload
+            else list(inherited)
+        )
+        return TemplateDefinition(
+            key=path.stem,
+            type=template_type,
+            name=str(payload.get("name") or path.stem),
+            description=str(payload.get("description") or ""),
+            icon_type=str(payload.get("icon_type") or self._default_icon_type(template_type)),
+            cpu=int(payload.get("cpu", 1)),
+            ram=int(payload.get("ram", 1024)),
+            ethernet=int(payload.get("ethernet", 1)),
+            console_type=resolved_console_type,
+            second_console=_validate_second_console(
+                payload.get("second_console"), template_type, resolved_console_type, source=source
+            ),
+            cpulimit=int(payload.get("cpulimit", 1)),
+            extras=yaml_extras,
+            raw=payload,
+            interface_naming=interface_naming,
+            capabilities=_validate_capabilities(
+                payload.get("capabilities"), template_type, source=source
+            ),
+            image_aliases=aliases,
+            inherited_image_aliases=inherited,
+            user_template_path=path if user else None,
+        )
+
     def _load_templates(self) -> list[TemplateDefinition]:
         if not self.templates_dir.exists() and (
             self.user_templates_dir is None or not self.user_templates_dir.exists()
@@ -1419,6 +1479,7 @@ class TemplateService:
 
         # Track keys we've already loaded so we can detect shadowing.
         seen_keys_by_type: dict[tuple[str, str], str] = {}  # (type, key) -> source
+        builtin_aliases: dict[tuple[str, str], list[str]] = {}
 
         templates: list[TemplateDefinition] = []
         for template_path, source in self._iter_template_paths():
@@ -1445,54 +1506,16 @@ class TemplateService:
                     t for t in templates if not (t.type == template_type and t.key == key)
                 ]
             seen_keys_by_type[type_key] = source
-            yaml_extras = payload.get("extras") or {}
-            if not isinstance(yaml_extras, dict):
-                yaml_extras = {}
-            yaml_extras = dict(yaml_extras)
-            for schema_field in _extras_schema_for(template_type, yaml_extras):
-                schema_key = schema_field["key"]
-                if schema_key in payload and schema_key not in yaml_extras:
-                    yaml_extras[schema_key] = payload[schema_key]
-            interface_naming = payload.get("interface_naming")
-            if interface_naming is not None:
-                interface_naming = _validate_interface_naming(
-                    interface_naming, source=str(template_path)
-                )
-            capabilities = _validate_capabilities(
-                payload.get("capabilities"), template_type, source=str(template_path)
-            )
-            image_aliases = _validate_image_aliases(
-                payload.get("image_aliases"), source=str(template_path)
-            )
-            resolved_console_type = str(
-                payload.get("console_type") or self._default_console_type(template_type)
-            )
-            second_console = _validate_second_console(
-                payload.get("second_console"),
+            template = self._definition_from_payload(
+                payload,
+                template_path,
                 template_type,
-                resolved_console_type,
-                source=str(template_path),
+                user=source == "user",
+                inherited_image_aliases=builtin_aliases.get(type_key) if source == "user" else None,
             )
-            templates.append(
-                TemplateDefinition(
-                    key=key,
-                    type=template_type,
-                    name=str(payload.get("name") or key),
-                    description=str(payload.get("description") or ""),
-                    icon_type=str(payload.get("icon_type") or self._default_icon_type(template_type)),
-                    cpu=int(payload.get("cpu", 1)),
-                    ram=int(payload.get("ram", 1024)),
-                    ethernet=int(payload.get("ethernet", 1)),
-                    console_type=resolved_console_type,
-                    second_console=second_console,
-                    cpulimit=int(payload.get("cpulimit", 1)),
-                    extras=yaml_extras,
-                    raw=payload,
-                    interface_naming=interface_naming,
-                    capabilities=capabilities,
-                    image_aliases=image_aliases,
-                )
-            )
+            if source == "builtin":
+                builtin_aliases[type_key] = template.image_aliases
+            templates.append(template)
 
         # #206 — append synthetic per-child entries for every paired template so
         # node.template lookups (edit, capability gates, image validation) resolve

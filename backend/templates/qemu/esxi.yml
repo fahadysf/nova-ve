@@ -1,5 +1,7 @@
 type: qemu
 name: VMware ESXi
+image_aliases:
+  - "esxi-*"
 description: VMware ESXi
 icon_type: server
 cpu: 2

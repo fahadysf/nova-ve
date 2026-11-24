@@ -18,6 +18,7 @@ from httpx import ASGITransport, AsyncClient
 from app.main import app
 from app.dependencies import get_current_admin
 from app.services.audit_service import AuditEvent
+from app.services.template_service import TemplateService
 
 
 @pytest.fixture()
@@ -281,6 +282,140 @@ async def test_patch_builtin_template_writes_shadow(client, lib_settings, audit_
         "ram": {"from": 2048, "to": 8192},
         "image_aliases": {"from": ["veos"], "to": ["veos", "arista"]},
     }
+
+
+@pytest.mark.asyncio
+async def test_patch_template_round_trips_runtime_settings(client, lib_settings, audit_events):
+    template_path = lib_settings.USER_TEMPLATES_DIR / "qemu" / "appliance.json"
+    template_path.parent.mkdir()
+    template_path.write_text(json.dumps({
+        "name": "Appliance",
+        "description": "Original description",
+        "ethernet": 2,
+        "qemu_nic": "rtl8139",
+        "extras": {"qemu_nic": "e1000", "custom_value": "preserve"},
+        "capabilities": {"machine": "q35", "hotplug": True, "max_nics": 8},
+    }))
+    endpoint = "/api/library/templates/qemu/appliance"
+    response = await client.patch(endpoint, json={
+        "description": "Updated appliance",
+        "icon_type": "switch",
+        "cpulimit": 0,
+        "ethernet": 3,
+        "interface_naming": {"explicit": ["management", "uplink", "downlink"]},
+        "capabilities": {"max_nics": 12},
+        "extras": {"qemu_nic": "virtio-net-pci", "disk_bus": "sata"},
+    })
+
+    assert response.json()["code"] == 200
+    info = (await client.get("/api/library/templates")).json()["data"]["templates"][0]
+    assert info["description"] == "Updated appliance"
+    assert info["icon_type"] == "switch"
+    assert info["cpulimit"] == 0
+    assert info["interface_naming"] == {"explicit": ["management", "uplink", "downlink"]}
+    assert info["extras"] == {"disk_bus": "sata", "qemu_nic": "virtio-net-pci"}
+    assert "qemu_nic" in {field["key"] for field in info["extras_schema"]}
+
+    service = TemplateService()
+    defaults = service.build_node_catalog()["templates"][0]
+    assert defaults["capabilities"] == {"machine": "q35", "hotplug": True, "max_nics": 12}
+    assert defaults["defaults"]["icon"] == "Switch.png"
+    assert defaults["defaults"]["ethernet"] == 3
+    assert defaults["defaults"]["cpulimit"] == 0
+    assert defaults["defaults"]["extras"]["qemu_nic"] == "virtio-net-pci"
+    assert defaults["defaults"]["extras"]["custom_value"] == "preserve"
+    (updated,) = _audited(audit_events, "template.update")
+    assert updated.detail["changed_engine_options"] == ["disk_bus", "qemu_nic"]
+    assert "extras" not in updated.detail["changes"]
+
+    before_invalid = template_path.read_bytes()
+    invalid = await client.patch(endpoint, json={"ram": 4096, "capabilities": {"machine": "pc"}})
+    assert invalid.json()["code"] == 422
+    assert template_path.read_bytes() == before_invalid
+
+    cleared = await client.patch(endpoint, json={
+        "description": "",
+        "interface_naming": None,
+        "extras": {"qemu_nic": None},
+    })
+    assert cleared.json()["code"] == 200
+    on_disk = json.loads(template_path.read_text())
+    assert "qemu_nic" not in on_disk
+    assert on_disk["extras"] == {"disk_bus": "sata", "custom_value": "preserve"}
+    assert sorted(lib_settings.USER_TEMPLATES_DIR.rglob("*.yml")) == []
+    assert service.template_extras("qemu", "appliance")["qemu_nic"] == "e1000"
+    assert service.interface_naming("qemu", "appliance") == {}
+
+
+@pytest.mark.asyncio
+async def test_patch_qemu_machine_agrees_with_versioned_runtime_args(client, lib_settings):
+    _seed_veos(lib_settings)
+    builtin = lib_settings.TEMPLATES_DIR / "qemu" / "veos.yml"
+    with builtin.open("a") as stream:
+        stream.write("capabilities:\n  machine: pc\n  hotplug: false\nqemu_options: -machine type=pc-i440fx-8.2,accel=kvm -cpu host\n")
+    endpoint = "/api/library/templates/qemu/veos"
+
+    invalid = await client.patch(endpoint, json={"capabilities": {"machine": "q35"}})
+    assert invalid.json()["code"] == 422
+    assert "Extra QEMU args" in invalid.json()["message"]
+    assert not (lib_settings.USER_TEMPLATES_DIR / "veos.yml").exists()
+
+    valid = await client.patch(endpoint, json={
+        "capabilities": {"machine": "q35", "hotplug": True},
+        "extras": {"qemu_options": "-machine pc-q35-8.2,accel=kvm -cpu host"},
+    })
+    assert valid.json()["code"] == 200
+    template = TemplateService().get_template("qemu", "veos")
+    assert template.capabilities["machine"] == "q35"
+    assert template.extras["qemu_options"] == "-machine pc-q35-8.2,accel=kvm -cpu host"
+
+
+@pytest.mark.asyncio
+async def test_patch_image_wildcard_filters_picker_and_library_until_cleared(client, lib_settings):
+    _seed_veos(lib_settings)
+    for name in ("EDGE-1", "other-edge-1"):
+        image = lib_settings.IMAGES_DIR / "qemu" / name
+        image.mkdir()
+        (image / "disk.qcow2").touch()
+    endpoint = "/api/library/templates/qemu/veos"
+
+    for aliases, expected in [(["edge-*"], {"EDGE-1", "veos"}), ([], {"veos"})]:
+        saved = await client.patch(endpoint, json={"image_aliases": aliases})
+        assert saved.json()["data"]["image_aliases"] == aliases
+        listed = (await client.get("/api/library/templates")).json()["data"]["templates"]
+        veos = next(template for template in listed if template["key"] == "veos")
+        assert {image["name"] for image in veos["images"]} == expected
+        assert set(TemplateService().list_images("qemu", "veos")) == expected
+
+
+@pytest.mark.asyncio
+async def test_user_template_inherits_builtin_aliases_until_explicitly_replaced(client, lib_settings):
+    _seed_veos(lib_settings)
+    shadow = lib_settings.USER_TEMPLATES_DIR / "qemu" / "veos.yml"
+    shadow.parent.mkdir()
+    shadow.write_text("name: Operator appliance\nram: 4096\n")
+    endpoint = "/api/library/templates/qemu/veos"
+    service = TemplateService()
+
+    assert set(service.list_images("qemu", "veos")) == {"veos"}
+    saved = await client.patch(endpoint, json={"description": "Operator settings"})
+    assert saved.json()["data"]["image_aliases"] == ["veos"]
+    assert "image_aliases" not in shadow.read_text()
+
+    cleared = await client.patch(endpoint, json={"image_aliases": []})
+    assert cleared.json()["data"]["image_aliases"] == []
+    assert "image_aliases: []" in shadow.read_text()
+    assert service.list_images("qemu", "veos") == {}
+
+
+@pytest.mark.asyncio
+async def test_builtin_edit_leaves_aliases_inherited_when_omitted(client, lib_settings):
+    _seed_veos(lib_settings)
+    endpoint = "/api/library/templates/qemu/veos"
+    saved = await client.patch(endpoint, json={"name": "Operator appliance"})
+    assert saved.json()["data"]["image_aliases"] == ["veos"]
+    assert "image_aliases" not in (lib_settings.USER_TEMPLATES_DIR / "veos.yml").read_text()
+    assert set(TemplateService().list_images("qemu", "veos")) == {"veos"}
 
 
 @pytest.mark.asyncio

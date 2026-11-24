@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vMX VCP
+image_aliases:
+  - "vmxvcp-*"
 description: Juniper vMX VCP
 icon_type: router
 cpu: 1

@@ -1,5 +1,7 @@
 type: dynamips
 name: C7200
+image_aliases:
+  - "c7200-*"
 cpulimit: 1
 icon_type: router
 cpu: 1

@@ -1,5 +1,8 @@
 type: qemu
 name: F5 BIG-IP VE
+image_aliases:
+  - "bigip-*"
+  - "bigip[0-9]*"
 description: F5 BIG-IP VE
 icon_type: firewall
 cpu: 2

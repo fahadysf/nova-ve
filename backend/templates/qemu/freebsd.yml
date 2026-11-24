@@ -1,5 +1,7 @@
 type: qemu
 name: FreeBSD
+image_aliases:
+  - "freebsd-*"
 description: FreeBSD
 icon_type: server
 cpu: 2

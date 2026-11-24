@@ -1,5 +1,8 @@
 type: qemu
 name: Juniper Olive
+image_aliases:
+  - "junos-olive-*"
+  - "olive-*"
 description: Juniper Olive
 icon_type: router
 cpu: 1

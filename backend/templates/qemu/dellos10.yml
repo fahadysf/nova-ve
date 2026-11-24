@@ -1,5 +1,7 @@
 type: qemu
 name: Dell SmartFabric OS10
+image_aliases:
+  - "dellos10-*"
 description: Dell SmartFabric OS10
 icon_type: switch
 cpu: 4
