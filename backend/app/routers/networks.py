@@ -21,6 +21,7 @@ from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.user import UserRead
+from app.services import audit_service
 from app.services.host_net import HostNetBridgeOwnershipError
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
 from app.services.network_service import NetworkServiceError, network_service
@@ -106,6 +107,12 @@ async def create_network(
         }
         body.update(exc.extra)
         return JSONResponse(status_code=exc.code, content=body)
+    # #297: the lab was read before the network existed — pass its record.
+    await audit_service.record(
+        "network.create",
+        actor=current_user.username,
+        **audit_service.network_context(data, payload, lab_path),
+    )
     return JSONResponse(
         status_code=201,
         content={
@@ -139,6 +146,13 @@ async def delete_network(
         }
         body.update(exc.extra)
         return JSONResponse(status_code=exc.code, content=body)
+
+    # #297: describe the network while it is still in the pre-delete read.
+    await audit_service.record(
+        "network.delete",
+        actor=current_user.username,
+        **audit_service.network_context(data, network_id, lab_path),
+    )
 
     return {
         "code": 200,
@@ -174,6 +188,21 @@ async def patch_network(
         }
         body.update(exc.extra)
         return JSONResponse(status_code=exc.code, content=body)
+
+    # #297: ``data`` still holds the pre-patch network record. A patch that
+    # changed nothing is not an event worth a row. The event describes the
+    # network as it is now, so the payload is layered over the old record.
+    previous = data.get("networks", {}).get(str(network_id)) or {}
+    payload = payload if isinstance(payload, dict) else {}
+    changes = audit_service.field_changes(dict(previous), payload)
+    if changes:
+        await audit_service.record(
+            "network.update",
+            actor=current_user.username,
+            **audit_service.network_context(
+                data, {**previous, **payload}, lab_path, detail={"changes": changes}
+            ),
+        )
 
     return {
         "code": 200,

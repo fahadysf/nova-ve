@@ -6,6 +6,7 @@ from app.dependencies import get_current_user, get_current_admin
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead, UserCreate, UserUpdate
 from app.services.auth_service import AuthService
+from app.services import audit_service
 from app.models.user import User
 
 router = APIRouter(prefix="/api/users", tags=["users"], responses=COMMON_RESPONSES)
@@ -66,6 +67,14 @@ async def create_user(
         folder=request.folder,
         pod=request.pod,
     )
+    await audit_service.record(
+        "user.create",
+        actor=current_user.username,
+        target_type="user",
+        target_id=user.username,
+        target_name=user.name,
+        detail={"role": user.role},
+    )
     return {
         "code": 200,
         "status": "success",
@@ -123,6 +132,12 @@ async def update_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
+    # #297: snapshot the fields about to change for the audit trail. The
+    # password itself never leaves this handler — only the fact that it
+    # changed does.
+    before = {field: getattr(user, field) for field in update_data if hasattr(user, field)}
+    password_changed = bool(update_data.get("password"))
+
     if "password" in update_data and update_data["password"]:
         from app.core.security import hash_password
         user.password_hash = hash_password(update_data.pop("password"))
@@ -133,6 +148,17 @@ async def update_user(
 
     await db.commit()
     await db.refresh(user)
+    # A save that changed nothing is not an event worth a row.
+    changes = audit_service.field_changes(before, {field: getattr(user, field) for field in before})
+    if changes or password_changed:
+        await audit_service.record(
+            "user.update",
+            actor=current_user.username,
+            target_type="user",
+            target_id=user.username,
+            target_name=user.name,
+            detail={"changes": changes, "password_changed": password_changed},
+        )
     return {
         "code": 200,
         "status": "success",
@@ -155,8 +181,19 @@ async def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
+    # #297: describe the account before it disappears — the trail has no
+    # foreign key to users and must stand on its own afterwards.
+    deleted_role, deleted_name = user.role, user.name
     await db.delete(user)
     await db.commit()
+    await audit_service.record(
+        "user.delete",
+        actor=current_user.username,
+        target_type="user",
+        target_id=username,
+        target_name=deleted_name,
+        detail={"role": deleted_role},
+    )
     return {
         "code": 200,
         "status": "success",

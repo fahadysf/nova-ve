@@ -68,3 +68,23 @@ def _redirect_bridge_fingerprints(tmp_path_factory, monkeypatch):
     fingerprint_dir = tmp_path_factory.mktemp("bridge-fingerprints-default")
     monkeypatch.setenv("NOVA_VE_BRIDGE_FINGERPRINT_ROOT", str(fingerprint_dir))
     yield
+
+
+@pytest.fixture(autouse=True)
+def audit_events(monkeypatch):
+    """Capture audit events in memory — the suite runs without a database (#297).
+
+    Every audited action in every test lands in the returned list, so no
+    test can reach for a real Postgres through the audit writer. Tests that
+    care about the trail take ``audit_events`` and assert on it; the
+    entries are ``audit_service.AuditEvent`` instances.
+    """
+    from app.services import audit_service
+
+    events: list = []
+
+    async def _capture(entries):
+        events.extend(entries)
+
+    monkeypatch.setattr(audit_service, "record_batch", _capture)
+    return events

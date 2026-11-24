@@ -3,8 +3,8 @@
 
 <!--
   User management (#261): admin view over every account — role, quotas,
-  tenant (pod) assignment, lifecycle dates — with create/edit/delete.
-  Self-service profile editing lives at /profile.
+  tenant (pod) assignment, lifecycle dates, last sign-in — with
+  create/edit/delete. Self-service profile editing lives at /profile.
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
@@ -33,6 +33,17 @@
   function fmtDate(epochSeconds: number | undefined | null): string {
     if (!epochSeconds || epochSeconds < 0) return '—';
     return new Date(epochSeconds * 1000).toISOString().slice(0, 10);
+  }
+
+  /** #297: when an account last signed in, in the admin's local time
+   *  (unlike the lifecycle dates above, a sign-in time is read against
+   *  "now", so UTC would mislead). Accounts that never have show
+   *  "never" — not a blank that could be mistaken for a failed load. */
+  function fmtLastLogin(epochSeconds: number | undefined | null): string {
+    if (!epochSeconds || epochSeconds <= 0) return 'never';
+    const date = new Date(epochSeconds * 1000);
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
   }
 
   function fmtQuota(value: number | undefined): string {
@@ -147,6 +158,7 @@
             <tr class="border-b border-gray-800 text-[10px] uppercase tracking-[0.05em] text-gray-500">
               <th class="px-5 py-2.5">User</th>
               <th class="px-3 py-2.5">Status</th>
+              <th class="px-3 py-2.5">Last login</th>
               <th class="px-3 py-2.5">Auth</th>
               <th class="px-3 py-2.5">Role</th>
               <th class="px-3 py-2.5">Tenant</th>
@@ -169,6 +181,19 @@
                     <span class={`h-1.5 w-1.5 rounded-full ${isOnline(user) ? 'bg-emerald-400' : 'bg-gray-600'}`}></span>
                     <span class={isOnline(user) ? 'text-gray-300' : 'text-gray-500'}>{isOnline(user) ? 'online' : 'offline'}</span>
                   </span>
+                </td>
+                <td
+                  class="px-3 py-3 text-[12px] text-gray-400"
+                  data-testid={`users-last-login-${user.username}`}
+                >
+                  {#if user.last_login}
+                    <div class="font-mono text-gray-300">{fmtLastLogin(user.last_login)}</div>
+                    {#if user.ip}
+                      <div class="text-[11px] text-gray-600">from {user.ip}</div>
+                    {/if}
+                  {:else}
+                    <span class="text-gray-600">never</span>
+                  {/if}
                 </td>
                 <td class="px-3 py-3 text-[12px] text-gray-400">{user.extauth || 'internal'}</td>
                 <td class="px-3 py-3">

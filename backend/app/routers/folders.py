@@ -14,6 +14,7 @@ from app.services.cloud_inventory_service import (
     assert_no_external_nat_cloud_references_for_scope,
 )
 from app.services.folder_service import FolderService
+from app.services import audit_service
 from app.services.lab_service import LabService
 
 logger = logging.getLogger("nova-ve.folders")
@@ -194,11 +195,19 @@ async def create_folder(
     target_path = "/".join(
         part for part in [scoped_path.strip("/"), (request.name or "").strip("/")] if part
     )
+    created_path = f"/{target_path}" if target_path else "/"
+    await audit_service.record(
+        "folder.create",
+        actor=current_user.username,
+        target_type="folder",
+        target_id=created_path,
+        target_name=request.name or created_path,
+    )
     return {
         "code": 200,
         "status": "success",
         "message": "Folder created successfully.",
-        "data": {"path": f"/{target_path}" if target_path else "/"},
+        "data": {"path": created_path},
     }
 
 
@@ -250,6 +259,13 @@ async def rename_folder(
 
     await db.commit()
 
+    await audit_service.record(
+        "folder.rename",
+        actor=current_user.username,
+        target_type="folder",
+        target_id=f"/{old_prefix}",
+        detail={"from": f"/{old_prefix}", "to": f"/{new_prefix}" if new_prefix else "/"},
+    )
     return {
         "code": 200,
         "status": "success",
@@ -308,6 +324,12 @@ async def delete_folder(
 
     await db.commit()
 
+    await audit_service.record(
+        "folder.delete",
+        actor=current_user.username,
+        target_type="folder",
+        target_id=f"/{folder_prefix}",
+    )
     return {
         "code": 200,
         "status": "success",

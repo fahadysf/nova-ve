@@ -28,6 +28,7 @@ from app.openapi import (
     LICENSE_INFO,
     OPENAPI_TAGS,
 )
+from app.request_context import RequestContextMiddleware
 from app.services.lab_lock import LabLockTimeout
 from app.services.host_net import HostNetInstanceIdMissing, get_instance_id
 
@@ -77,6 +78,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# #297: expose the request scope (client address) to the audit writer.
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(auth.router)
 app.include_router(docker_images.router)

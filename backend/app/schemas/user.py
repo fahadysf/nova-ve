@@ -26,6 +26,10 @@ class UserRead(UserBase):
     session: Optional[int] = Field(default=None)
     pexpiration: Optional[int] = Field(default=-1)
     datestart: Optional[int] = Field(default=-1)
+    # #297: epoch seconds of the last successful sign-in; null = never.
+    # Read-only on purpose — it lives here rather than on UserBase so the
+    # create/update payloads cannot set it.
+    last_login: Optional[int] = None
 
     class Config:
         from_attributes = True

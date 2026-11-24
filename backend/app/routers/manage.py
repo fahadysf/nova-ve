@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
+from app.services import audit_service
 from app.services.lab_lock import LabLockTimeout, lab_lock
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeService
@@ -219,11 +220,36 @@ def _stop_or_wipe(lab_path: str, wipe: bool) -> dict:
         "Lab wiped." if wipe else "Lab stopped.",
         {
             "lab": f"/{lab_file.relative_to(labs_dir).as_posix()}",
+            "name": (data.get("meta") or {}).get("name"),
             "stopped": stopped,
             "wiped": wiped,
             "failed": failed,
         },
     )
+
+
+async def _audit_lab_action(event: str, result: dict, current_user: UserRead) -> dict:
+    """#297: record a lab-wide stop/wipe once — and only once — it succeeded.
+
+    Stopping a lab with nothing running touches no node, so it is not an
+    event worth a row; a node that *refused* still is (it is in ``failed``).
+    """
+    outcome = result.get("data") or {}
+    acted_on = any(outcome.get(key) for key in ("stopped", "wiped", "failed"))
+    if result.get("code") == 200 and acted_on:
+        await audit_service.record(
+            event,
+            actor=current_user.username,
+            target_type="lab",
+            target_id=outcome.get("lab"),
+            target_name=outcome.get("name"),
+            lab_path=outcome.get("lab"),
+            lab_name=outcome.get("name"),
+            detail={
+                key: outcome.get(key) for key in ("stopped", "wiped", "failed")
+            },
+        )
+    return result
 
 
 @router.post("/{lab_path:path}/stop")
@@ -233,7 +259,7 @@ async def stop_lab(
 ):
     if current_user.role != "admin":
         return _fail("Admin role required.", code=403)
-    return _stop_or_wipe(lab_path, wipe=False)
+    return await _audit_lab_action("lab.stop", _stop_or_wipe(lab_path, wipe=False), current_user)
 
 
 @router.post("/{lab_path:path}/wipe")
@@ -243,7 +269,7 @@ async def wipe_lab(
 ):
     if current_user.role != "admin":
         return _fail("Admin role required.", code=403)
-    return _stop_or_wipe(lab_path, wipe=True)
+    return await _audit_lab_action("lab.wipe", _stop_or_wipe(lab_path, wipe=True), current_user)
 
 
 # ----------------------------------------------------------------------

@@ -7,7 +7,9 @@ from app.schemas.auth import LoginRequest
 from app.schemas.user import UserRead, UserCreate
 from app.services.auth_service import AuthService
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
+from app.services import audit_service
 from app.dependencies import get_current_user, get_optional_user
+from app.request_context import client_ip
 from app.config import get_settings
 from app.core.security import create_access_token
 from app.core.constants import UserRole
@@ -31,13 +33,21 @@ async def login(
     auth_service = AuthService(db)
     user = await auth_service.authenticate(request.username, request.password)
     if not user:
+        # #297: the response stays the same whether or not the account
+        # exists, but the admin's activity log must still show the probe.
+        await audit_service.record(
+            "auth.login_failed",
+            outcome="failure",
+            target_type="user",
+            target_id=request.username,
+        )
         return {
             "code": 401,
             "status": "unauthorized",
             "message": "Invalid credentials (90001).",
         }
 
-    token = await auth_service.create_session(user)
+    token = await auth_service.create_session(user, ip=client_ip())
     access_token = create_access_token(
         data={"sub": user.username, "role": user.role},
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
@@ -71,6 +81,7 @@ async def login(
         max_age=_session_cookie_max_age(),
     )
 
+    await audit_service.record("auth.login", actor=user.username)
     return {
         "code": 200,
         "status": "success",
@@ -122,6 +133,15 @@ async def register(
         email=request.email,
         name=request.name,
         role=role,
+    )
+    await audit_service.record(
+        "user.create",
+        # No actor for the first-user bootstrap: nobody is signed in yet.
+        actor=current_user.username if current_user else None,
+        target_type="user",
+        target_id=user.username,
+        target_name=user.name,
+        detail={"role": role, "bootstrap": user_count == 0},
     )
 
     return {
@@ -175,6 +195,9 @@ async def _logout(
         user_model = await auth_service.validate_session(session_cookie, user_cookie)
         if user_model:
             await auth_service.destroy_session(user_model)
+            # #297: only a session that actually ended is a logout; a stale
+            # or missing cookie leaves no trace.
+            await audit_service.record("auth.logout", actor=user_model.username)
 
     response.delete_cookie(key=settings.SESSION_COOKIE_NAME, path="/")
     response.delete_cookie(key=settings.SESSION_USER_COOKIE, path="/")

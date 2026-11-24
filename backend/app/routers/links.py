@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
-from app.services import host_net
+from app.services import audit_service, host_net
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
 from app.services.link_service import (
     DuplicateLinkError,
@@ -171,6 +171,15 @@ async def create_link(
             },
         )
 
+    if not replayed:
+        # #297: an idempotent replay created nothing, so it earns no entry.
+        # ``data`` predates the link, but its endpoints are older objects.
+        await audit_service.record(
+            "link.create",
+            actor=current_user.username,
+            **audit_service.link_context(data, link_payload, lab_path),
+        )
+
     response: Dict[str, Any] = {
         "code": 200 if replayed else 201,
         "status": "success",
@@ -230,6 +239,17 @@ async def delete_link(
             "message": "Link not found; treated as already deleted.",
         }
 
+    # #297: ``data`` is the pre-delete read, so the link record is still
+    # there to describe what was just removed.
+    removed = next(
+        (link for link in pre_links if str(link.get("id")) == str(link_id)), None
+    )
+    await audit_service.record(
+        "link.delete",
+        actor=current_user.username,
+        **audit_service.link_context(data, removed, lab_path),
+    )
+
     return {
         "code": 200,
         "status": "success",
@@ -269,6 +289,26 @@ async def patch_link(
                 "status": "fail",
                 "message": "Link does not exist.",
             },
+        )
+
+    # #297: ``data`` is the pre-patch read; compare it with the new payload.
+    # A patch that changed nothing is not an event worth a row.
+    previous = next(
+        (
+            link
+            for link in (data.get("links", []) or [])
+            if str(link.get("id")) == str(link_id)
+        ),
+        None,
+    )
+    changes = audit_service.field_changes(dict(previous or {}), updated)
+    if changes:
+        await audit_service.record(
+            "link.update",
+            actor=current_user.username,
+            **audit_service.link_context(
+                data, updated, lab_path, detail={"changes": changes}
+            ),
         )
 
     return {

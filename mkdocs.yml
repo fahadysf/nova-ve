@@ -101,6 +101,7 @@ nav:
       - Backups: operations/backups.md
       - Upgrading: operations/upgrading.md
       - Troubleshooting: operations/troubleshooting.md
+      - Activity log: operations/activity-log.md
   - Reference:
       - reference/index.md
       - CLI — import-eveng-templates: reference/cli-import-eveng.md
