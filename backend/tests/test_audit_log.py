@@ -2070,8 +2070,12 @@ class TestRecordingEvents:
         recording_env.recorder.session = _RecordingConsole()
         url = f"/api/labs/{LAB_FILE}/nodes/1/recording"
 
-        await client.post(url, json={"action": "start"})
-        await client.post(url, json={"action": "stop"})
+        started = await client.post(url, json={"action": "start"})
+        stopped = await client.post(url, json={"action": "stop"})
+
+        # "stopped" is spelled out — appending "ed" to the action read "stoped".
+        assert started.json()["message"] == "Recording started."
+        assert stopped.json()["message"] == "Recording stopped."
 
         assert [(e.event, e.detail["console_mode"]) for e in audit_events] == [
             ("recording.start", "primary"),
