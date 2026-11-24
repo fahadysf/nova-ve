@@ -25,6 +25,7 @@ from typing import Literal
 from app.dependencies import get_current_admin
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
+from app.services import audit_service
 from app.services.image_library_service import (
     ImageLibraryError,
     ImageLibraryService,
@@ -32,7 +33,7 @@ from app.services.image_library_service import (
     ImageReferenced,
     TemplateUpdateInvalid,
 )
-from app.services.template_service import TemplateError
+from app.services.template_service import TemplateError, TemplateService
 
 router = APIRouter(
     prefix="/api/library",
@@ -47,6 +48,20 @@ def _ok(message: str, data) -> dict:
 
 def _fail(message: str, *, code: int = 400, data=None) -> dict:
     return {"code": code, "status": "fail", "message": message, "data": data}
+
+
+def _template_fields(template_type: str, template_key: str, fields) -> dict:
+    """Current values of a template's editable ``fields`` (#300).
+
+    Read to give the audit trail a before → after. Best-effort: it runs
+    around an edit that must succeed or fail on its own terms, never on
+    whether the trail could be written — an empty dict means "unknown".
+    """
+    try:
+        template = TemplateService().get_template(template_type, template_key)
+    except Exception:  # noqa: BLE001 — the audit entry must not fail the edit
+        return {}
+    return {field: getattr(template, field) for field in fields if hasattr(template, field)}
 
 
 class TemplateEditBody(BaseModel):
@@ -164,6 +179,15 @@ async def delete_library_image(
         return _fail(str(exc), code=409, data={"references": exc.references})
     except ImageLibraryError as exc:
         return _fail(str(exc))
+    # #300: the file is already gone — describe it from what was deleted.
+    await audit_service.record(
+        "image.delete",
+        actor=current_user.username,
+        target_type="image",
+        target_id=f"{image_type}/{image_name}",
+        target_name=image_name,
+        detail={"image_type": image_type},
+    )
     return _ok("Image deleted.", result)
 
 
@@ -177,7 +201,12 @@ async def edit_library_template(
     service = ImageLibraryService()
     updates = body.model_dump(exclude_unset=True)
     try:
+        # The name is read too, so the entry can name the template even
+        # when the edit left it alone.
+        fields = (*updates, "name")
+        before = _template_fields(template_type, template_key, fields)
         updated = service.update_template(template_type, template_key, updates)
+        after = _template_fields(template_type, template_key, fields)
     except TemplateUpdateInvalid as exc:
         return _fail(str(exc), code=422)
     except ImageLibraryError as exc:
@@ -186,4 +215,23 @@ async def edit_library_template(
         # update_template's get_template lookup raises TemplateError on a
         # missing template — surface as 404.
         return _fail(str(exc), code=404)
+    # #300: report what the edit changed. When both reads succeeded and
+    # nothing differs, the edit was a no-op and is not an event; when a
+    # read did not succeed, name the fields that were submitted instead.
+    compared = bool(before) and bool(after)
+    changes = audit_service.field_changes(before, after) if compared else {}
+    if changes or not compared:
+        detail = {"template_type": template_type}
+        if compared:
+            detail["changes"] = changes
+        else:
+            detail["submitted"] = sorted(updates)
+        await audit_service.record(
+            "template.update",
+            actor=current_user.username,
+            target_type="template",
+            target_id=f"{template_type}/{template_key}",
+            target_name=after.get("name") or updates.get("name") or template_key,
+            detail=detail,
+        )
     return _ok("Template updated.", updated)

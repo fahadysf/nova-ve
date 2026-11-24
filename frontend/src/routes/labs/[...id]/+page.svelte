@@ -2,7 +2,7 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import {
@@ -44,6 +44,7 @@
   // no independent nodes/networks/topology/links/defaults copies — it reads
   // $labState and writes through the store mutators.
   import { labState } from '$lib/stores/labState';
+  import { createConsoleSessionTracker, type ConsoleSession } from '$lib/services/consoleSessions';
 
   let labId = '';
   let rootLabs: LabListItem[] = [];
@@ -229,6 +230,37 @@
       activeConsoleTabState = workspace.tabs.find((tab) => tab.id === workspace.activeTabId) ?? null;
     }
   }
+
+  // #300: the server sees a console open but has no other way to learn that
+  // one closed — closing a tab only unloads an iframe. Track every console
+  // the page holds and report each one that ends, however it ends.
+  const consoleSessions = createConsoleSessionTracker(reportConsoleClosed);
+  $: consoleSessions.sync(consoleWorkspace?.tabs ?? [], labId);
+
+  function reportConsoleClosed(session: ConsoleSession) {
+    // keepalive: the report must still go out while the page is unloading.
+    // It is deliberately not an apiRequest — this must neither show a
+    // toast nor bounce to the sign-in page if the session just expired.
+    void fetch(
+      `/api/labs/${session.labId}/nodes/${session.nodeId}/console/close?console=${session.mode}`,
+      { method: 'POST', credentials: 'include', keepalive: true }
+    ).catch(() => {
+      // A report that does not arrive only costs a "closed" row in the activity log.
+    });
+  }
+
+  function reportOpenConsolesClosed() {
+    consoleSessions.reportAll();
+  }
+
+  onMount(() => {
+    // Closing the tab or window, reloading, or leaving the site.
+    window.addEventListener('pagehide', reportOpenConsolesClosed);
+    return () => window.removeEventListener('pagehide', reportOpenConsolesClosed);
+  });
+  // Moving to another page inside the app destroys this component instead
+  // of unloading the page.
+  onDestroy(reportOpenConsolesClosed);
 
   onMount(async () => {
     consoleMode = readConsoleModeCookie();
