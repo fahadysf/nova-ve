@@ -471,6 +471,6 @@ async def node_recording_control(
     return {
         "code": 200,
         "status": "success",
-        "message": f"Recording {body.action}ed.",
+        "message": "Recording started." if body.action == "start" else "Recording stopped.",
         "data": data,
     }
