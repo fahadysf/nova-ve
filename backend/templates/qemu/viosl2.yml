@@ -1,5 +1,8 @@
 type: qemu
 name: Cisco IOSvL2
+image_aliases:
+  - "viosl2-*"
+  - "iosvl2-*"
 description: Cisco IOSvL2
 icon_type: switch
 cpu: 1

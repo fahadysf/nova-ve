@@ -1,5 +1,7 @@
 type: qemu
 name: NVIDIA Cumulus VX
+image_aliases:
+  - "cumulus-vx-*"
 description: NVIDIA Cumulus VX
 icon_type: switch
 cpu: 1

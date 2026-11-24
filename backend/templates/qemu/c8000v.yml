@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco C8000V
+image_aliases:
+  - "c8000v-*"
 description: Cisco C8000V
 icon_type: router
 cpu: 2

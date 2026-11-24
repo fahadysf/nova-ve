@@ -1,5 +1,8 @@
 type: qemu
 name: Kali Linux
+image_aliases:
+  - "kali-*"
+  - "linux-kali-*"
 description: Kali Linux
 icon_type: server
 cpu: 2

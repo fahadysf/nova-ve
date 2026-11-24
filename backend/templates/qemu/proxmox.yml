@@ -1,5 +1,7 @@
 type: qemu
 name: Proxmox VE
+image_aliases:
+  - "proxmox-*"
 description: Proxmox VE
 icon_type: server
 cpu: 4

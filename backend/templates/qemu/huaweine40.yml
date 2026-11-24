@@ -1,5 +1,8 @@
 type: qemu
 name: Huawei NE40
+image_aliases:
+  - "huaweine40-*"
+  - "ne40e*"
 description: Huawei NE40
 icon_type: router
 cpu: 2

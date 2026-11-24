@@ -1,5 +1,7 @@
 type: qemu
 name: Huawei USG6000V
+image_aliases:
+  - "huaweiusg6kv-*"
 description: Huawei USG6000V
 icon_type: firewall
 cpu: 2

@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco IOS XRv
+image_aliases:
+  - "xrv-*"
 description: Cisco IOS XRv
 icon_type: router
 cpu: 1

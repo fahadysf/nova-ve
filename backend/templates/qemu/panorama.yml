@@ -1,5 +1,7 @@
 type: qemu
 name: Palo Alto Panorama
+image_aliases:
+  - "panorama-*"
 description: Palo Alto Panorama
 icon_type: server
 cpu: 4

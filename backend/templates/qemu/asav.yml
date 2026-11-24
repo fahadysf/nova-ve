@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco ASAv
+image_aliases:
+  - "asav-*"
 description: Cisco ASAv
 icon_type: firewall
 cpu: 1

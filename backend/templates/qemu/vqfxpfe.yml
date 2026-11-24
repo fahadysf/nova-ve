@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vQFX PFE
+image_aliases:
+  - "vqfxpfe-*"
 description: Juniper vQFX PFE
 icon_type: switch
 cpu: 2

@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vSRX 3.0
+image_aliases:
+  - "vsrx30-*"
 description: Juniper vSRX 3.0
 icon_type: firewall
 cpu: 2

@@ -1,5 +1,7 @@
 type: qemu
 name: Sophos Firewall
+image_aliases:
+  - "sophosxg-*"
 description: Sophos Firewall
 icon_type: firewall
 cpu: 2

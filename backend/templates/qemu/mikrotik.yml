@@ -1,5 +1,7 @@
 type: qemu
 name: MikroTik CHR
+image_aliases:
+  - "mikrotik-*"
 description: MikroTik Cloud Hosted Router
 icon_type: router
 cpu: 1

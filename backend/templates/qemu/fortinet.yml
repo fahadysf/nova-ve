@@ -3,7 +3,9 @@ name: Fortinet FortiGate
 description: Fortinet FortiGate
 icon_type: firewall
 image_aliases:
-  - "fortinet-"
+  - "fortinet-fgt-*"
+  - "fortinet-[0-9]*"
+  - "fortigate-*"
   - "-fgt-"
 cpu: 1
 ram: 2048

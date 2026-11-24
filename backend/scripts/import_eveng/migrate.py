@@ -50,6 +50,11 @@ from .manifest import (
     TemplateEntry,
 )
 from .permissions import fixup, fixup_tree
+from .template_match import (
+    DEFAULT_BUILTIN_TEMPLATES_DIR,
+    load_template_candidates,
+    select_existing_template,
+)
 from .walker import (
     KIND_DOCKER,
     KIND_DYNAMIPS,
@@ -89,7 +94,9 @@ DockerBuildFn = Callable[[Path, str], None]
 
 def _write_template_yaml(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(payload, sort_keys=False))
+    content = yaml.safe_dump(payload, sort_keys=False)
+    with path.open("x") as output:
+        output.write(content)
 
 
 def _record_imported_files(
@@ -273,6 +280,7 @@ def _generate_template_for_item(
     item: MigrationItem,
     *,
     templates_dir: Path,
+    template_keys: set[tuple[str, str]],
     manifest: ImportManifest,
 ) -> str:
     """Run the EVE-NG vendor-adapter pipeline on one migrated item.
@@ -328,25 +336,55 @@ def _generate_template_for_item(
         return f"needs-manual-review: {exc}"
 
     template_type = str(template_payload.get("kind") or item.kind)
-    dest = templates_dir / template_type / f"{item.image_key}.yml"
+    key = item.image_key
+    suffix = 1
+    while (template_type, key) in template_keys:
+        label = "imported" if suffix == 1 else f"imported-{suffix}"
+        key = f"{item.image_key}-{label}"
+        suffix += 1
+    dest = templates_dir / template_type / f"{key}.yml"
     # ``type`` is required by the template loader; write it alongside
     # ``kind`` to satisfy both the loader and the legacy schema.
     template_payload.setdefault("type", template_type)
-    _write_template_yaml(dest, template_payload)
+    try:
+        _write_template_yaml(dest, template_payload)
+    except FileExistsError:
+        if _yaml_equivalent(dest, template_payload):
+            return _record_reused_template(item, template_type, dest.stem, manifest)
+        reason = f"template {template_type}/{dest.stem} already exists with different content"
+        manifest.templates.append(TemplateEntry(name=item.image_key, status="skipped", reason=reason))
+        return f"skipped: {reason}"
     manifest.templates.append(
         TemplateEntry(
             name=item.image_key,
             status="generated",
             reason=f"adapter={adapter.name}",
+            template_key=dest.stem,
+            template_type=template_type,
         )
     )
     return f"adapter={adapter.name} -> {dest}"
 
 
+def _record_reused_template(
+    item: MigrationItem, template_type: str, template_key: str, manifest: ImportManifest
+) -> str:
+    reason = f"reused {template_type}/{template_key}"
+    manifest.templates.append(
+        TemplateEntry(
+            name=item.image_key,
+            status="reused",
+            template_key=template_key,
+            template_type=template_type,
+        )
+    )
+    return reason
+
+
 def _yaml_equivalent(path: Path, payload: dict[str, object]) -> bool:
     try:
         existing = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeError, yaml.YAMLError):
         return False
     return existing == payload
 
@@ -431,6 +469,7 @@ def run_migration(
     docker_build: DockerBuildFn | None = None,
     dest_root: Path | None = None,
     templates_dir: Path | None = None,
+    builtin_templates_dir: Path = DEFAULT_BUILTIN_TEMPLATES_DIR,
     reporter: StepReporter | NullStepReporter | None = None,
 ) -> None:
     """Migrate every item; record outcomes on ``manifest``.
@@ -439,9 +478,9 @@ def run_migration(
     fixup applied. If ``dest_root`` is provided, the entire dest tree is
     re-walked for fixup at the end (catches the pre-existing root-owned
     ``<dest>/qemu/`` parent dir bug). If ``templates_dir`` is provided,
-    pre-existing imported template JSON files are converted to YAML, and every
-    migrated item runs through the vendor-adapter registry to produce a nova-ve
-    template YAML under that path; if it is ``None``, template generation and
+    pre-existing imported template JSON files are converted to YAML. Images
+    reuse matching builtin or user templates. The vendor adapters generate YAML
+    for the remaining images; if it is ``None``, template generation and
     conversion are skipped entirely (legacy mode — the importer only copies
     images and lets the operator hand-author templates).
 
@@ -450,8 +489,12 @@ def run_migration(
     """
     reporter = reporter or NULL_REPORTER
     docker_build = docker_build or _default_docker_build
+    candidates = []
+    template_keys = set()
     if templates_dir is not None:
         _convert_existing_template_json_to_yaml(templates_dir, manifest=manifest)
+        candidates = load_template_candidates(builtin_templates_dir, templates_dir)
+        template_keys = {(candidate.type, candidate.key) for candidate in candidates}
 
     for item in items:
         if item.kind == KIND_QEMU:
@@ -470,11 +513,23 @@ def run_migration(
 
         if templates_dir is not None:
             with reporter.step(
-                f"{item.kind}/{item.image_key} — generating template YAML"
+                f"{item.kind}/{item.image_key} — resolving template"
             ) as step:
-                detail = _generate_template_for_item(
-                    item, templates_dir=templates_dir, manifest=manifest
+                candidate = select_existing_template(
+                    candidates,
+                    item.kind,
+                    item.image_key,
+                    docker_tag=str(item.meta.get("image_tag", f"nova-ve-{item.image_key}:latest")),
                 )
+                if candidate is not None:
+                    detail = _record_reused_template(item, candidate.type, candidate.key, manifest)
+                else:
+                    detail = _generate_template_for_item(
+                        item,
+                        templates_dir=templates_dir,
+                        template_keys=template_keys,
+                        manifest=manifest,
+                    )
                 step.finish(detail)
 
     if owner is not None:

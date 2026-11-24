@@ -1,5 +1,8 @@
 type: qemu
 name: Cisco SD-WAN vManage
+image_aliases:
+  - "vtmgmt-*"
+  - "vtmanage-*"
 description: Cisco SD-WAN vManage
 icon_type: server
 cpu: 4

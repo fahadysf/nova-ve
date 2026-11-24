@@ -1,5 +1,8 @@
 type: qemu
 name: Cisco Nexus 9000v
+image_aliases:
+  - "nxosv9k-*"
+  - "nxosv9300-*"
 description: Cisco Nexus 9000v
 icon_type: switch
 cpulimit: 1

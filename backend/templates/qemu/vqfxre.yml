@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vQFX RE
+image_aliases:
+  - "vqfxre-*"
 description: Juniper vQFX RE
 icon_type: switch
 cpu: 2

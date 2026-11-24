@@ -1,5 +1,7 @@
 type: qemu
 name: Arista vEOS
+image_aliases:
+  - "veos-*"
 description: Arista vEOS
 icon_type: switch
 cpu: 1

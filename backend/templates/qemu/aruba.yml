@@ -1,5 +1,8 @@
 type: qemu
 name: Aruba Virtual Mobility Controller
+image_aliases:
+  - "aruba-vmc-*"
+  - "aruba-vmc_*"
 description: Aruba Virtual Mobility Controller
 icon_type: router
 cpu: 3

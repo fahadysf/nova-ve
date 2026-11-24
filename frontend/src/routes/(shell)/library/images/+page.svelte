@@ -9,37 +9,50 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Check, Copy, Pencil, RefreshCw, ShieldAlert, Trash2 } from 'lucide-svelte';
+  import { Check, Copy, Pencil, Plus, RefreshCw, ShieldAlert, Trash2, Upload } from 'lucide-svelte';
   import PageHeader from '$lib/components/shell/PageHeader.svelte';
+  import TemplateActionDialog from '$lib/components/manage/TemplateActionDialog.svelte';
   import TemplateDialog from '$lib/components/manage/TemplateDialog.svelte';
   import { apiRequest } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
-  import type { LibraryImage, LibraryTemplate, LibraryTemplateEdit } from '$lib/types';
+  import type { LibraryImage, LibraryTemplate, LibraryTemplateCreate, LibraryTemplateEdit, LibraryTemplateType } from '$lib/types';
 
   let tab: 'templates' | 'images' = 'templates';
   let templates: LibraryTemplate[] = [];
   let images: LibraryImage[] = [];
   let loading = false;
   let search = '';
+  let templateImageFilter: 'all' | 'with-images' = 'all';
   let typeFilter = '';
   let verifying: string | null = null;
   let copiedSha: string | null = null;
   let deleteTarget: LibraryImage | null = null;
   let dialogTemplate: LibraryTemplate | null = null;
+  type TemplateAction = { kind: 'create' | 'upload' } | { kind: 'remove'; template: LibraryTemplate };
+  let templateAction: TemplateAction | null = null;
+  let savingTemplate = false;
+  let templateSaveError = '';
+  let refreshGeneration = 0;
 
-  const TYPE_OPTIONS = ['qemu', 'docker', 'iol', 'dynamips'];
+  const TYPE_OPTIONS: readonly LibraryTemplateType[] = ['qemu', 'docker', 'iol', 'dynamips'];
+
+  $: templateGroups = groupByType(filteredTemplates(templates, search, typeFilter, templateImageFilter));
+  $: visibleImages = filteredImages(images, search, typeFilter);
 
   async function refresh() {
+    const generation = ++refreshGeneration;
     loading = true;
     try {
       const [templateData, imageData] = await Promise.all([
         apiRequest<{ templates: LibraryTemplate[] }>('/library/templates'),
         apiRequest<{ images: LibraryImage[] }>('/library/images')
       ]);
-      templates = templateData.data.templates;
-      images = imageData.data.images;
+      if (generation === refreshGeneration) {
+        templates = templateData.data.templates;
+        images = imageData.data.images;
+      }
     } finally {
-      loading = false;
+      if (generation === refreshGeneration) loading = false;
     }
   }
 
@@ -55,11 +68,19 @@
     return `${sha.slice(0, 12)}…${sha.slice(-6)}`;
   }
 
-  function filteredTemplates(list: LibraryTemplate[]): LibraryTemplate[] {
+  function filteredTemplates(
+    list: LibraryTemplate[],
+    query: string,
+    type: string,
+    imageFilter: typeof templateImageFilter
+  ): LibraryTemplate[] {
+    const needle = query.trim().toLowerCase();
     return list.filter((template) => {
       if (template.paired_parent) return false;
-      if (typeFilter && template.type !== typeFilter) return false;
-      const needle = search.trim().toLowerCase();
+      if (type && template.type !== type) return false;
+      if (imageFilter === 'with-images' && !template.images.some((image) => image.state === 'available')) {
+        return false;
+      }
       if (!needle) return true;
       return (
         template.name.toLowerCase().includes(needle) ||
@@ -69,10 +90,10 @@
     });
   }
 
-  function filteredImages(list: LibraryImage[]): LibraryImage[] {
+  function filteredImages(list: LibraryImage[], query: string, type: string): LibraryImage[] {
+    const needle = query.trim().toLowerCase();
     return list.filter((image) => {
-      if (typeFilter && image.type !== typeFilter) return false;
-      const needle = search.trim().toLowerCase();
+      if (type && image.type !== type) return false;
       if (!needle) return true;
       return (
         image.name.toLowerCase().includes(needle) ||
@@ -85,7 +106,7 @@
   function groupByType(list: LibraryTemplate[]): { type: string; items: LibraryTemplate[] }[] {
     return TYPE_OPTIONS.map((type) => ({
       type,
-      items: filteredTemplates(list).filter((template) => template.type === type)
+      items: list.filter((template) => template.type === type)
     })).filter((group) => group.items.length > 0);
   }
 
@@ -139,19 +160,73 @@
     }
   }
 
-  async function handleTemplateSave(event: CustomEvent<{ template: LibraryTemplate; edit: LibraryTemplateEdit }>) {
-    const { template, edit } = event.detail;
+  function openTemplateAction(action: TemplateAction) {
+    templateSaveError = '';
+    templateAction = action;
+  }
+
+  async function mutateTemplate(
+    path: string,
+    method: 'POST' | 'PATCH' | 'DELETE',
+    successMessage: string,
+    body?: LibraryTemplateEdit | LibraryTemplateCreate | FormData,
+  ) {
+    if (savingTemplate) return;
+    savingTemplate = true;
+    templateSaveError = '';
     try {
-      await apiRequest(`/library/templates/${template.type}/${encodeURIComponent(template.key)}`, {
-        method: 'PATCH',
-        body: edit
+      await apiRequest(path, {
+        method,
+        ...(body === undefined ? {} : { body }),
+        suppressToast: true,
       });
-      toastStore.push(`Template ${template.key} updated.`, 'success');
+      toastStore.push(successMessage, 'success');
       dialogTemplate = null;
+      templateAction = null;
+      if (method === 'POST') {
+        search = '';
+        typeFilter = '';
+      }
+    } catch (error) {
+      templateSaveError = error instanceof Error ? error.message : 'Unable to complete the template action.';
+      return;
+    } finally {
+      savingTemplate = false;
+    }
+    try {
       await refresh();
     } catch {
       /* toasted */
     }
+  }
+
+  function templatePath(template: LibraryTemplate): string {
+    return `/library/templates/${template.type}/${encodeURIComponent(template.key)}`;
+  }
+
+  function handleTemplateSave(event: CustomEvent<{ template: LibraryTemplate; edit: LibraryTemplateEdit }>) {
+    const { template, edit } = event.detail;
+    if (Object.keys(edit).length) {
+      void mutateTemplate(templatePath(template), 'PATCH', `Template ${template.key} updated.`, edit);
+    }
+  }
+
+  function handleTemplateCreate(event: CustomEvent<LibraryTemplateCreate>) {
+    void mutateTemplate('/library/templates', 'POST', `Template ${event.detail.key} created.`, event.detail);
+  }
+
+  function handleTemplateUpload(event: CustomEvent<File>) {
+    const body = new FormData();
+    body.append('file', event.detail);
+    void mutateTemplate('/library/templates/upload', 'POST', 'Template uploaded.', body);
+  }
+
+  function handleTemplateRemove(event: CustomEvent<LibraryTemplate>) {
+    const template = event.detail;
+    const message = template.source === 'override'
+      ? `Override for template ${template.key} removed.`
+      : `Template ${template.key} deleted.`;
+    void mutateTemplate(templatePath(template), 'DELETE', message);
   }
 
   onMount(() => {
@@ -166,7 +241,23 @@
         Library
       </span>
       <span slot="title">Images &amp; Templates</span>
-      <span slot="actions">
+      <span slot="actions" class="flex flex-wrap gap-2">
+        {#if tab === 'templates'}
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.05em] text-white transition hover:bg-blue-500"
+            on:click={() => openTemplateAction({ kind: 'create' })}
+          >
+            <Plus class="h-3 w-3" />
+            Add template
+          </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+            on:click={() => openTemplateAction({ kind: 'upload' })}
+          >
+            <Upload class="h-3 w-3" />
+            Upload YAML
+          </button>
+        {/if}
         <button
           class="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
           on:click={() => void refresh()}
@@ -191,13 +282,23 @@
           data-testid="images-tab-images"
         >Images ({images.length})</button>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <input
-          class="w-56 rounded-lg border border-gray-700 bg-gray-950 px-3 py-1.5 text-[12px] text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+          class="w-56 max-w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-1.5 text-[12px] text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
           placeholder="Search…"
           bind:value={search}
           data-testid="images-search"
         />
+        {#if tab === 'templates'}
+          <select
+            class="rounded-lg border border-gray-700 bg-gray-950 px-2 py-1.5 text-[12px] text-gray-300 focus:border-blue-500 focus:outline-none"
+            bind:value={templateImageFilter}
+            aria-label="Filter templates by image availability"
+          >
+            <option value="all">All</option>
+            <option value="with-images">With images</option>
+          </select>
+        {/if}
         <select
           class="rounded-lg border border-gray-700 bg-gray-950 px-2 py-1.5 text-[12px] text-gray-300 focus:border-blue-500 focus:outline-none"
           bind:value={typeFilter}
@@ -217,7 +318,7 @@
       </div>
     {:else if tab === 'templates'}
       <div class="space-y-6" data-testid="templates-panel">
-        {#each groupByType(templates) as group (group.type)}
+        {#each templateGroups as group (group.type)}
           <section>
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">{group.type}</div>
             <div class="mt-2 grid grid-cols-1 gap-3 xl:grid-cols-2">
@@ -231,14 +332,28 @@
                       </div>
                       <div class="mt-0.5 truncate text-[11px] text-gray-500">{template.description || '—'}</div>
                     </div>
-                    <button
-                      class="shrink-0 rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
-                      on:click={() => (dialogTemplate = template)}
-                      data-testid={`template-edit-${template.key}`}
-                    >
-                      <Pencil class="mr-1 inline h-3 w-3" />
-                      Edit
-                    </button>
+                    <div class="flex shrink-0 flex-wrap justify-end gap-2 max-sm:max-w-36">
+                      <button
+                        class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+                        on:click={() => {
+                          templateSaveError = '';
+                          dialogTemplate = template;
+                        }}
+                        data-testid={`template-edit-${template.key}`}
+                      >
+                        <Pencil class="mr-1 inline h-3 w-3" />
+                        Edit
+                      </button>
+                      {#if template.source === 'user' || template.source === 'override'}
+                        <button
+                          class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-400 transition hover:border-red-500 hover:text-red-300"
+                          on:click={() => openTemplateAction({ kind: 'remove', template })}
+                          aria-label={`${template.source === 'override' ? 'Revert' : 'Delete'} ${template.name}`}
+                        >
+                          {template.source === 'override' ? 'Revert' : 'Delete'}
+                        </button>
+                      {/if}
+                    </div>
                   </div>
                   <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-500">
                     <span>RAM <span class="text-gray-300">{template.ram} MB</span></span>
@@ -274,6 +389,10 @@
               {/each}
             </div>
           </section>
+        {:else}
+          <div class="rounded-2xl border border-gray-800 bg-gray-900/95 px-5 py-10 text-center text-sm text-gray-500">
+            No templates match your filters.
+          </div>
         {/each}
       </div>
     {:else}
@@ -291,7 +410,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each filteredImages(images) as image (image.path)}
+            {#each visibleImages as image (image.path)}
               <tr class="border-b border-gray-800/60 align-top last:border-0 hover:bg-gray-800/40" data-testid={`image-row-${image.name}`}>
                 <td class="px-5 py-3">
                   <div class="font-medium text-gray-100">{image.filename}</div>
@@ -383,8 +502,23 @@
 {#if dialogTemplate}
   <TemplateDialog
     template={dialogTemplate}
+    saving={savingTemplate}
+    saveError={templateSaveError}
     on:save={handleTemplateSave}
     on:close={() => (dialogTemplate = null)}
+  />
+{/if}
+
+{#if templateAction}
+  <TemplateActionDialog
+    action={templateAction}
+    templateTypes={TYPE_OPTIONS}
+    busy={savingTemplate}
+    error={templateSaveError}
+    on:create={handleTemplateCreate}
+    on:upload={handleTemplateUpload}
+    on:remove={handleTemplateRemove}
+    on:close={() => (templateAction = null)}
   />
 {/if}
 

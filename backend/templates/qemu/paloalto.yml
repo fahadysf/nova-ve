@@ -1,5 +1,7 @@
 type: qemu
 name: PaloAlto
+image_aliases:
+  - "paloalto-*"
 description: >
   Palo Alto Networks VM-Series firewall. Based on EVE-NG/PNETLab paloalto-*
   images using virtioa.qcow2, telnet console, and a modern PAN-OS 9.x+

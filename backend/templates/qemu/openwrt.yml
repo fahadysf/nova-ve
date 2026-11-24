@@ -1,5 +1,7 @@
 type: qemu
 name: OpenWrt
+image_aliases:
+  - "openwrt-*"
 description: OpenWrt
 icon_type: router
 cpu: 1

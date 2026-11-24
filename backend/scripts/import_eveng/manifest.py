@@ -68,13 +68,15 @@ class ImportedEntry:
 
 @dataclass
 class TemplateEntry:
-    """One template emitted or flagged for manual review."""
+    """One template reused, emitted or flagged for manual review."""
 
     name: str
-    status: str  # "ok" | "needs-manual-review"
+    status: str
     json: str | None = None
     reason: str | None = None
     eveng_raw: dict[str, Any] | None = None
+    template_key: str | None = None
+    template_type: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {"name": self.name, "status": self.status}
@@ -84,6 +86,10 @@ class TemplateEntry:
             out["reason"] = self.reason
         if self.eveng_raw is not None:
             out["_eveng_raw"] = self.eveng_raw
+        if self.template_key is not None:
+            out["template_key"] = self.template_key
+        if self.template_type is not None:
+            out["template_type"] = self.template_type
         return out
 
     @classmethod
@@ -94,6 +100,8 @@ class TemplateEntry:
             json=str(data["json"]) if data.get("json") is not None else None,
             reason=str(data["reason"]) if data.get("reason") is not None else None,
             eveng_raw=dict(data["_eveng_raw"]) if data.get("_eveng_raw") is not None else None,
+            template_key=str(data["template_key"]) if data.get("template_key") is not None else None,
+            template_type=str(data["template_type"]) if data.get("template_type") is not None else None,
         )
 
 

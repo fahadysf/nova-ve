@@ -1,5 +1,8 @@
 type: qemu
 name: Cisco IOSv
+image_aliases:
+  - "vios-*"
+  - "iosv-*"
 description: Cisco IOSv
 icon_type: router
 cpu: 1

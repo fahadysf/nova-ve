@@ -1,5 +1,8 @@
 type: qemu
 name: CSR1000v
+image_aliases:
+  - "csr1000v-*"
+  - "csr1000vng-*"
 cpulimit: 1
 icon_type: router
 cpu: 2

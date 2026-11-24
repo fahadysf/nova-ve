@@ -1,5 +1,7 @@
 type: qemu
 name: Sophos UTM
+image_aliases:
+  - "sophosutm-*"
 description: Sophos UTM
 icon_type: firewall
 cpu: 2

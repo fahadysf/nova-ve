@@ -20,17 +20,27 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
+import re
+import shlex
 from pathlib import Path
+from stat import S_IMODE
+from tempfile import NamedTemporaryFile
+from threading import Lock
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
 from app.config import get_settings
+from app.schemas.node import validate_console_mode_for_type
 from app.services.template_service import (
-    SECOND_CONSOLE_MODES,
+    ICON_TYPE_TO_FILENAME,
+    TemplateDefinition,
     TemplateError,
     TemplateService,
+    _extras_schema_for,
     _matches_template_image_name,
 )
 
@@ -40,6 +50,7 @@ _HASH_CHUNK_BYTES = 8 * 1024 * 1024
 
 TEMPLATE_EDITABLE_FIELDS = {
     "name",
+    "description",
     "icon_type",
     "cpu",
     "ram",
@@ -48,9 +59,17 @@ TEMPLATE_EDITABLE_FIELDS = {
     "second_console",
     "cpulimit",
     "image_aliases",
+    "interface_naming",
+    "capabilities",
+    "extras",
 }
 
 _TEMPLATE_INT_FIELDS = {"cpu", "ram", "ethernet", "cpulimit"}
+_INSTANCE_EXTRA_FIELDS = {"uuid", "firstmac"}
+_TEMPLATE_CAPABILITY_FIELDS = {"hotplug", "max_nics", "machine"}
+_TEMPLATE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}")
+MAX_TEMPLATE_YAML_BYTES = 256 * 1024
+_template_edit_lock = Lock()
 
 
 class ImageLibraryError(Exception):
@@ -69,6 +88,267 @@ class ImageReferenced(ImageLibraryError):
 
 class TemplateUpdateInvalid(ImageLibraryError):
     pass
+
+
+class TemplateConflict(ImageLibraryError):
+    pass
+
+
+class TemplateReferenced(TemplateConflict):
+    def __init__(self, key: str, references: list[dict[str, Any]]):
+        super().__init__(f"Template {key} is used by {len(references)} lab node(s). Remove or change those nodes first.")
+        self.references = references
+
+
+def editable_template_extras_schema(
+    template_type: str, extras: dict[str, Any]
+) -> list[dict[str, Any]]:
+    # CPU limit already has a top-level field. Dynamips platform identifies
+    # the appliance and determines its slot schema. UUID and MAC are per-node.
+    excluded = _INSTANCE_EXTRA_FIELDS | {"cpulimit", "platform"}
+    return [field for field in _extras_schema_for(template_type, extras) if field["key"] not in excluded]
+
+
+def _validate_engine_value(field: dict[str, Any], value: Any) -> None:
+    key, kind = field["key"], field["type"]
+    if kind == "select":
+        if value not in [option["value"] for option in field["options"]]:
+            raise TemplateUpdateInvalid(f"extras.{key} must be one of the available options.")
+    elif kind == "number":
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise TemplateUpdateInvalid(f"extras.{key} must be a non-negative integer.")
+        if key == "vnc_port" and not 1 <= value <= 65535:
+            raise TemplateUpdateInvalid("extras.vnc_port must be between 1 and 65535.")
+    elif kind == "env":
+        if not isinstance(value, list) or not all(
+            isinstance(entry, dict)
+            and isinstance(entry.get("key"), str)
+            and bool(entry["key"].strip())
+            and "=" not in entry["key"]
+            and "\0" not in entry["key"]
+            and isinstance(entry.get("value"), str)
+            and "\0" not in entry["value"]
+            for entry in value
+        ):
+            raise TemplateUpdateInvalid(f"extras.{key} must contain valid environment names and string values.")
+    elif key == "command" and isinstance(value, list):
+        if not all(isinstance(argument, str) and "\0" not in argument for argument in value):
+            raise TemplateUpdateInvalid("extras.command arguments must be strings.")
+    else:
+        if not isinstance(value, str) or "\0" in value:
+            raise TemplateUpdateInvalid(f"extras.{key} must be a string.")
+        if key in {"qemu_options", "extra_args", "command"}:
+            try:
+                shlex.split(value)
+            except ValueError as exc:
+                raise TemplateUpdateInvalid(f"Invalid extras.{key}: {exc}") from exc
+
+
+def _patch_engine_extras(
+    payload: dict[str, Any], template_type: str, configured_extras: dict[str, Any], edits: Any
+) -> None:
+    if not isinstance(edits, dict):
+        raise TemplateUpdateInvalid("extras must be an object.")
+    schema = {field["key"]: field for field in editable_template_extras_schema(template_type, configured_extras)}
+    raw_extras = payload.get("extras")
+    extras = dict(raw_extras) if isinstance(raw_extras, dict) else {}
+    for key, value in edits.items():
+        if key not in schema:
+            raise TemplateUpdateInvalid(f"extras.{key} cannot be edited for {template_type} templates.")
+        if value is None:
+            # Runtime accepts both nested overrides and legacy top-level keys.
+            extras.pop(key, None)
+            payload.pop(key, None)
+        else:
+            _validate_engine_value(schema[key], value)
+            if key in payload and key not in extras:
+                payload[key] = value
+            else:
+                extras[key] = value
+    if extras or isinstance(raw_extras, dict):
+        payload["extras"] = extras
+
+
+def _write_template_atomically(
+    target: Path, payload: dict[str, Any], *, create: bool = False
+) -> None:
+    content = (
+        json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+        if target.suffix == ".json"
+        else yaml.safe_dump(payload, sort_keys=False)
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if create:
+            os.link(temporary, target)
+        else:
+            if target.exists():
+                temporary.chmod(S_IMODE(target.stat().st_mode))
+            temporary.replace(target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _validate_template_path(target: Path, template_service: TemplateService) -> None:
+    user_dir = template_service.user_templates_dir
+    if user_dir is None:
+        raise ImageLibraryError("USER_TEMPLATES_DIR is not configured.")
+    if (
+        target.is_symlink()
+        or not target.parent.resolve().is_relative_to(user_dir.resolve())
+        or target.resolve().is_relative_to(template_service.templates_dir.resolve())
+    ):
+        raise TemplateUpdateInvalid("The template must be editable inside the user templates directory.")
+
+
+def _read_template_yaml(content: bytes) -> dict[str, Any]:
+    if len(content) > MAX_TEMPLATE_YAML_BYTES:
+        raise TemplateUpdateInvalid("Template YAML files must be 256 KiB or smaller.")
+    try:
+        payload = yaml.safe_load(content)
+    except (yaml.YAMLError, RecursionError, ValueError) as exc:
+        raise TemplateUpdateInvalid("Invalid template YAML. Upload a single YAML document.") from exc
+    if not isinstance(payload, dict):
+        raise TemplateUpdateInvalid("Template YAML must contain a single object.")
+
+    # Library responses include template values as JSON. Bound the expanded
+    # structure as well as the file size, since YAML anchors can share nodes.
+    pending = [(payload, 0)]
+    remaining = 10_000
+    while pending:
+        value, depth = pending.pop()
+        remaining -= 1
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise TemplateUpdateInvalid("Template YAML keys must be strings.")
+            children = value.values()
+        elif isinstance(value, list):
+            children = value
+        else:
+            if (
+                not isinstance(value, (str, int, float, bool, type(None)))
+                or isinstance(value, float) and not math.isfinite(value)
+            ):
+                raise TemplateUpdateInvalid("Template YAML values must be JSON-compatible.")
+            continue
+        if depth >= 32 or len(children) + len(pending) > remaining:
+            raise TemplateUpdateInvalid("Template YAML contains too much nested data.")
+        pending.extend((child, depth + 1) for child in children)
+    return payload
+
+
+def _validate_new_template(
+    service: TemplateService, template_type: str, target: Path, payload: dict[str, Any]
+) -> TemplateDefinition:
+    for field in ("name", "description", "icon_type", "console_type"):
+        if field in payload and not isinstance(payload[field], str):
+            raise TemplateUpdateInvalid(f"{field} must be a string.")
+        if field in payload and field != "description" and not payload[field].strip():
+            raise TemplateUpdateInvalid(f"{field} must not be blank.")
+    if "extras" in payload and not isinstance(payload["extras"], dict):
+        raise TemplateUpdateInvalid("extras must be an object.")
+
+    for field in _TEMPLATE_INT_FIELDS:
+        if field in payload and (
+            isinstance(payload[field], bool) or not isinstance(payload[field], (int, str))
+        ):
+            raise TemplateUpdateInvalid(f"{field} must be an integer.")
+    try:
+        template = service._definition_from_payload(payload, target, template_type, user=True)
+        validate_console_mode_for_type(template_type, template.console_type)
+    except (TemplateError, ValueError, TypeError) as exc:
+        raise TemplateUpdateInvalid(str(exc)) from exc
+
+    for field in _TEMPLATE_INT_FIELDS:
+        minimum = 0 if field == "cpulimit" else 1
+        if getattr(template, field) < minimum:
+            raise TemplateUpdateInvalid(f"{field} must be an integer of at least {minimum}.")
+    return template
+
+
+def _patched_template_payload(
+    template: TemplateDefinition, updates: dict[str, Any]
+) -> dict[str, Any]:
+    updates = {field: value for field, value in updates.items() if field in TEMPLATE_EDITABLE_FIELDS}
+    if not updates:
+        raise TemplateUpdateInvalid("No editable fields supplied.")
+
+    payload = dict(template.raw)
+    for field, value in updates.items():
+        if field == "extras":
+            _patch_engine_extras(payload, template.type, template.extras, value)
+            continue
+        if field == "capabilities":
+            if not isinstance(value, dict) or set(value) - _TEMPLATE_CAPABILITY_FIELDS:
+                raise TemplateUpdateInvalid("capabilities must contain only hotplug, max_nics, or machine.")
+            value = {**(payload.get(field) or {}), **value}
+        elif field in _TEMPLATE_INT_FIELDS:
+            minimum = 0 if field == "cpulimit" else 1
+            if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+                raise TemplateUpdateInvalid(f"{field} must be an integer of at least {minimum}.")
+        elif field == "image_aliases":
+            if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                raise TemplateUpdateInvalid("image_aliases must be a list of strings.")
+            value = [item.strip() for item in value if item.strip()]
+        elif field not in {"second_console", "interface_naming"}:
+            if not isinstance(value, str) or (field != "description" and not value.strip()):
+                raise TemplateUpdateInvalid(f"{field} must be {'a' if field == 'description' else 'a non-empty'} string.")
+            value = value.strip()
+            if field == "console_type":
+                try:
+                    validate_console_mode_for_type(template.type, value)
+                except ValueError as exc:
+                    raise TemplateUpdateInvalid(str(exc)) from exc
+            if field == "icon_type" and value not in ICON_TYPE_TO_FILENAME:
+                raise TemplateUpdateInvalid("icon_type must be an available icon category.")
+        payload[field] = value
+    return payload
+
+
+def _qemu_arg_machines(options: Any) -> set[str]:
+    if not isinstance(options, str):
+        return set()
+    try:
+        tokens = shlex.split(options)
+    except ValueError:
+        # Existing custom templates may have invalid arguments. Changed
+        # arguments have already been checked by the engine value validator.
+        return set()
+    machines = set()
+    for flag, argument in zip(tokens, tokens[1:]):
+        if flag not in {"-machine", "-M"} or argument.startswith("-"):
+            continue
+        head, *modifiers = argument.split(",")
+        machine = next((part[5:] for part in (head, *modifiers) if part.startswith("type=")), head)
+        if "=" in machine:
+            continue
+        if machine == "q35" or machine.startswith(("pc-q35-", "q35-")):
+            machines.add("q35")
+        elif machine == "pc" or machine.startswith("pc-"):
+            machines.add("pc")
+        elif machine:
+            machines.add(machine)
+    return machines
+
+
+def _validate_qemu_machine_edit(before: TemplateDefinition, after: TemplateDefinition) -> None:
+    prior_machine = before.capabilities.get("machine")
+    machine = after.capabilities.get("machine")
+    prior_args = _qemu_arg_machines(before.extras.get("qemu_options"))
+    args = _qemu_arg_machines(after.extras.get("qemu_options"))
+    enabling_hotplug = after.capabilities.get("hotplug") and not before.capabilities.get("hotplug")
+    if (machine != prior_machine or args != prior_args or enabling_hotplug) and args - {machine}:
+        raise TemplateUpdateInvalid(
+            "The machine type in Extra QEMU args conflicts with the template machine. "
+            "Update or remove the -machine argument in the same edit."
+        )
 
 
 def _primary_file(path: Path) -> Path | None:
@@ -226,53 +506,46 @@ class ImageLibraryService:
             )
         return images
 
-    def _scan_references(self) -> dict[str, list[dict[str, Any]]]:
-        """Map image name -> referencing labs (from lab.json nodes)."""
-        references: dict[str, list[dict[str, Any]]] = {}
+    def _iter_lab_nodes(self) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
         if not self.labs_dir.exists():
-            return references
+            return
         for lab_file in sorted(self.labs_dir.rglob("*.json")):
             try:
                 data = json.loads(lab_file.read_text())
-            except (OSError, json.JSONDecodeError):
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
                 continue
             nodes = data.get("nodes")
             if not isinstance(nodes, dict):
                 continue
-            try:
-                lab_path = f"/{lab_file.relative_to(self.labs_dir).as_posix()}"
-            except ValueError:
-                continue
-            lab_name = str((data.get("meta") or {}).get("name") or lab_file.stem)
+            lab_path = f"/{lab_file.relative_to(self.labs_dir).as_posix()}"
+            metadata = data.get("meta")
+            lab_name = metadata.get("name") if isinstance(metadata, dict) else None
             for node in nodes.values():
                 if not isinstance(node, dict):
                     continue
-                image_name = str(node.get("image") or "").strip()
-                if not image_name:
-                    continue
-                references.setdefault(image_name, []).append(
-                    {
-                        "lab_path": lab_path,
-                        "lab": lab_file.name,
-                        "lab_name": lab_name,
-                        "node": str(node.get("name") or node.get("id") or ""),
-                        "template": str(node.get("template") or ""),
-                    }
-                )
+                yield node, {
+                    "lab_path": lab_path,
+                    "lab": lab_file.name,
+                    "lab_name": str(lab_name or lab_file.stem),
+                    "node": str(node.get("name") or node.get("id") or ""),
+                    "template": str(node.get("template") or ""),
+                }
+
+    def _scan_references(self) -> dict[str, list[dict[str, Any]]]:
+        """Map image name to its references in saved labs."""
+        references: dict[str, list[dict[str, Any]]] = {}
+        for node, reference in self._iter_lab_nodes():
+            image_name = str(node.get("image") or "").strip()
+            if image_name:
+                references.setdefault(image_name, []).append(reference)
         return references
 
     @staticmethod
     def _template_matches_image(template: dict[str, Any], image: dict[str, Any]) -> bool:
         if template.get("type") != image["type"]:
             return False
-        if image["type"] == "docker":
-            # Docker templates resolve through the marked catalog by name.
-            candidates = [template.get("name", ""), *template.get("image_aliases", [])]
-            lowered = [c.strip().lower() for c in candidates if c]
-            if not lowered:
-                return True
-            image_name = image["name"].lower()
-            return any(c in image_name or image_name in c for c in lowered)
         # Filesystem types use the same alias/containment rule as the
         # node-creation picker so the library agrees with what actually
         # appears in the Add-node modal.
@@ -287,6 +560,7 @@ class ImageLibraryService:
         templates: list[dict[str, Any]] = []
         for template in template_service._load_templates():
             entry = template.as_response()
+            entry["source"] = template.source
             matched = [image for image in images if self._template_matches_image(entry, image)]
             entry["images"] = [
                 {
@@ -313,97 +587,132 @@ class ImageLibraryService:
         }
 
     # ------------------------------------------------------------------
-    # Template edits
+    # Template management
     # ------------------------------------------------------------------
-    def update_template(
-        self, template_type: str, key: str, updates: dict[str, Any]
+    def create_template(
+        self, template_type: str, key: str, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        """Persist editable template fields.
-
-        User-dir templates are edited in place; builtin templates get a
-        shadow YAML under USER_TEMPLATES_DIR (the loader prefers user-dir
-        entries on key collision, so the edit wins without touching the
-        shipped template files).
-        """
-        template_service = TemplateService()
-        template = template_service.get_template(template_type, key)
-        if template.paired_parent is not None:
+        key = key.strip()
+        if not _TEMPLATE_KEY.fullmatch(key):
             raise TemplateUpdateInvalid(
-                "Paired-template children are managed through their parent template."
+                "Template keys must start with a letter or number and use up to 120 letters, numbers, dots, hyphens or underscores."
             )
-
-        clean: dict[str, Any] = {}
-        for field, value in updates.items():
-            if field not in TEMPLATE_EDITABLE_FIELDS:
-                continue
-            if field in _TEMPLATE_INT_FIELDS:
-                try:
-                    int_value = int(value)
-                except (TypeError, ValueError):
-                    raise TemplateUpdateInvalid(f"{field} must be an integer.")
-                if int_value < 1:
-                    raise TemplateUpdateInvalid(f"{field} must be at least 1.")
-                clean[field] = int_value
-            elif field == "image_aliases":
-                if not isinstance(value, list) or not all(
-                    isinstance(item, str) for item in value
-                ):
-                    raise TemplateUpdateInvalid("image_aliases must be a list of strings.")
-                clean[field] = [item.strip() for item in value if item.strip()]
-            elif field == "second_console":
-                # ``None`` clears the secondary console; otherwise it must be a
-                # supported mode. Combination validity is re-checked by the
-                # reload below, which runs the same rule the loader applies.
-                if value is None:
-                    clean[field] = None
-                elif isinstance(value, str) and value.strip() in SECOND_CONSOLE_MODES:
-                    clean[field] = value.strip()
-                else:
-                    modes = ", ".join(SECOND_CONSOLE_MODES)
-                    raise TemplateUpdateInvalid(
-                        f"second_console must be one of: {modes} (or null to clear)."
-                    )
-            else:
-                if not isinstance(value, str) or not value.strip():
-                    raise TemplateUpdateInvalid(f"{field} must be a non-empty string.")
-                clean[field] = value.strip()
-        if not clean:
-            raise TemplateUpdateInvalid("No editable fields supplied.")
-
+        template_service = TemplateService()
+        try:
+            template_type = template_service._normalize_type(template_type)
+        except TemplateError as exc:
+            raise TemplateUpdateInvalid(str(exc)) from exc
+        if payload.get("kind") == "paired":
+            raise TemplateUpdateInvalid("Upload a standalone QEMU, Docker, IOL or Dynamips template.")
         user_dir = template_service.user_templates_dir
         if user_dir is None:
             raise ImageLibraryError("USER_TEMPLATES_DIR is not configured.")
-        target = user_dir / f"{key}.yml"
+        target = user_dir / template_type / f"{key}.yml"
+        payload = {**payload, "type": template_type}
 
-        if target.exists():
-            # Edit the existing user template in place.
+        with _template_edit_lock:
+            _validate_template_path(target, template_service)
+            if target.exists() or any(
+                template.key == key and template.type == template_type
+                for template in template_service._load_templates()
+            ):
+                raise TemplateConflict(f"Template {key} ({template_type}) already exists.")
+            validated = _validate_new_template(template_service, template_type, target, payload)
             try:
-                payload = yaml.safe_load(target.read_text()) or {}
-            except yaml.YAMLError as exc:
-                raise TemplateUpdateInvalid(f"Existing template YAML is invalid: {exc}")
-            if not isinstance(payload, dict):
-                payload = {}
-        else:
-            # Shadow a builtin: start from its resolved raw payload so all
-            # non-edited fields (type, extras, interface_naming, ...) carry
-            # over verbatim.
-            payload = dict(template.raw)
+                _write_template_atomically(target, payload, create=True)
+            except FileExistsError as exc:
+                raise TemplateConflict(f"Template {key} ({template_type}) already exists.") from exc
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                raise ImageLibraryError("Failed to write the template.") from exc
+            return {**validated.as_response(), "source": validated.source}
 
-        payload.update(clean)
-        payload.setdefault("type", template.type)
+    def upload_template(self, filename: str, content: bytes) -> dict[str, Any]:
+        path = Path(filename)
+        if path.suffix.lower() not in {".yml", ".yaml"} or any(
+            character in filename for character in ("/", "\\", "\0")
+        ):
+            raise TemplateUpdateInvalid("Choose a template file ending in .yml or .yaml.")
+        payload = _read_template_yaml(content)
+        template_type = payload.get("type") or payload.get("kind")
+        if not isinstance(template_type, str) or not template_type.strip():
+            raise TemplateUpdateInvalid("Template YAML must declare a template type.")
+        return self.create_template(template_type, path.stem, payload)
 
-        try:
-            yaml.safe_dump(payload, target.open("w"), sort_keys=False)
-        except OSError as exc:
-            raise ImageLibraryError(f"Failed to write template: {exc}")
+    def update_template(
+        self, template_type: str, key: str, updates: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Validate and save a user template or a shadow of a shipped template."""
+        with _template_edit_lock:
+            template_service = TemplateService()
+            template = template_service.get_template(template_type, key)
+            if template.paired_parent is not None or template.raw.get("kind") == "paired":
+                raise TemplateUpdateInvalid(
+                    "Paired-template children are managed through their parent template."
+                )
 
-        # Re-validate through a fresh load — this runs the same
-        # interface_naming/capabilities validation the runtime applies.
-        try:
-            reloaded = TemplateService().get_template(template_type, key)
-        except TemplateError as exc:
-            raise TemplateUpdateInvalid(f"Edit rejected: {exc}")
-        return reloaded.as_response()
+            user_dir = template_service.user_templates_dir
+            if user_dir is None:
+                raise ImageLibraryError("USER_TEMPLATES_DIR is not configured.")
+            payload = _patched_template_payload(template, updates)
+            if payload == template.raw:
+                return template.as_response()
+
+            target = template.user_template_path
+            inherited_aliases = template.inherited_image_aliases
+            if target is None:
+                target = user_dir / f"{template.key}.yml"
+                if target.exists():
+                    target = user_dir / template.type / target.name
+                if target.exists():
+                    raise TemplateUpdateInvalid("A user template already occupies the override path.")
+                payload.setdefault("type", template.type)
+                inherited_aliases = template.image_aliases
+                if "image_aliases" not in updates:
+                    payload.pop("image_aliases", None)
+            _validate_template_path(target, template_service)
+
+            try:
+                validated = template_service._definition_from_payload(
+                    payload, target, template.type, user=True, inherited_image_aliases=inherited_aliases
+                )
+            except TemplateError as exc:
+                raise TemplateUpdateInvalid(f"Edit rejected: {exc}") from exc
+            if template.type == "qemu":
+                _validate_qemu_machine_edit(template, validated)
+            try:
+                _write_template_atomically(target, payload)
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                raise ImageLibraryError(f"Failed to write template: {exc}") from exc
+            return validated.as_response()
+
+    def delete_template(self, template_type: str, key: str) -> dict[str, Any]:
+        with _template_edit_lock:
+            template_service = TemplateService()
+            template = template_service.get_template(template_type, key)
+            if template.paired_parent is not None or template.raw.get("kind") == "paired":
+                raise TemplateConflict("Paired-template children are managed through their parent template.")
+            target = template.user_template_path
+            if target is None:
+                raise TemplateConflict("Shipped templates cannot be deleted. You can remove a local override.")
+            _validate_template_path(target, template_service)
+            references = [
+                reference
+                for node, reference in self._iter_lab_nodes()
+                if reference["template"] == key
+                and str(node.get("type") or template.type).strip().lower() == template.type
+            ]
+            if references:
+                raise TemplateReferenced(key, references)
+            try:
+                target.unlink()
+            except OSError as exc:
+                raise ImageLibraryError("Failed to remove the template.") from exc
+            return {
+                "type": template.type,
+                "key": key,
+                "name": template.name,
+                "reverted": template.source == "override",
+            }
 
     # ------------------------------------------------------------------
     # Image deletion

@@ -191,15 +191,23 @@ def _default_interfaces(
 
     Priority (highest first):
     1. ``interface_naming_scheme`` — node-level override (US-105)
-    2. ``template_interface_naming["format"]`` — template-level format string
+    2. Template-level format string or explicit names
     3. Hard-coded fallback: ``Gi{port}`` for qemu, ``eth{n}`` for everything else
     """
     interfaces = []
+    template_naming = template_interface_naming or {}
+    explicit_names = template_naming.get("explicit")
     for index in range(ethernet_count):
         if interface_naming_scheme is not None:
             name = render_interface_name(interface_naming_scheme, index)
-        elif template_interface_naming and "format" in template_interface_naming:
-            name = render_interface_name(template_interface_naming["format"], index)
+        elif "format" in template_naming:
+            name = render_interface_name(template_naming["format"], index)
+        elif (
+            isinstance(explicit_names, list)
+            and index < len(explicit_names)
+            and isinstance(explicit_names[index], str)
+        ):
+            name = explicit_names[index]
         elif node_type == "qemu":
             name = f"Gi{index + 1}"
         else:
@@ -1067,12 +1075,6 @@ def _build_paired_child_payload(
         interface_naming_scheme=None,
         template_interface_naming=template_iface_naming,
     )
-
-    explicit_names = (template_iface_naming or {}).get("explicit") if template_iface_naming else None
-    if isinstance(explicit_names, list):
-        for idx, iface in enumerate(interfaces):
-            if idx < len(explicit_names) and isinstance(explicit_names[idx], str):
-                iface["name"] = explicit_names[idx]
 
     from app.services.template_service import synthetic_paired_child_key
 

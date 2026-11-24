@@ -35,6 +35,124 @@ def _seed(path: Path, contents: bytes = b"data") -> None:
     path.write_bytes(contents)
 
 
+def test_reuses_builtin_wildcard_and_generates_for_nonmatching_images(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "images"
+    templates = tmp_path / "templates"
+    for image in ["WinServer-2025", "sample-winserver-2025"]:
+        _seed(source / "addons" / "qemu" / image / "virtioa.qcow2")
+
+    manifest = ImportManifest()
+    items = walk_all(source, destination)
+    run_migration(items, options=MigrateOptions(), manifest=manifest, templates_dir=templates)
+
+    entries = {entry.name: entry for entry in manifest.templates}
+    assert entries["WinServer-2025"].status == "reused"
+    assert entries["WinServer-2025"].template_key == "winserver"
+    assert entries["WinServer-2025"].template_type == "qemu"
+    assert not (templates / "qemu" / "WinServer-2025.yml").exists()
+
+    generated = templates / "qemu" / "sample-winserver-2025.yml"
+    assert entries["sample-winserver-2025"].status == "generated"
+    original_bytes = generated.read_bytes() + b"\n# Operator note\n"
+    generated.write_bytes(original_bytes)
+    assert (destination / "qemu" / "WinServer-2025" / "virtioa.qcow2").is_file()
+
+    retry = ImportManifest()
+    run_migration(items, options=MigrateOptions(), manifest=retry, templates_dir=templates)
+
+    assert [entry.status for entry in retry.templates] == ["reused", "reused"]
+    assert generated.read_bytes() == original_bytes
+    assert ImportManifest.from_dict(retry.to_dict()).templates == retry.templates
+
+
+def test_reuses_specific_same_type_user_template(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "images"
+    builtins = tmp_path / "builtins"
+    templates = tmp_path / "templates"
+    image = "Acme-Edge-7"
+    _seed(source / "addons" / "qemu" / image / "virtioa.qcow2")
+    _seed(builtins / "qemu" / "acme.yml", b'type: qemu\nimage_aliases: ["acme-*"]\n')
+    _seed(templates / "iol" / "exact.yml", b'type: iol\nimage_aliases: ["acme-edge-7"]\n')
+    custom = templates / "operator-router.yml"
+    contents = b'type: qemu\nname: Office edge router\nimage_aliases: ["acme-edge-*"]\n'
+    _seed(custom, contents)
+
+    manifest = ImportManifest()
+    run_migration(
+        walk_all(source, destination),
+        options=MigrateOptions(),
+        manifest=manifest,
+        templates_dir=templates,
+        builtin_templates_dir=builtins,
+    )
+
+    assert manifest.templates[0].status == "reused"
+    assert manifest.templates[0].template_key == "operator-router"
+    assert custom.read_bytes() == contents
+    assert not (templates / "qemu" / f"{image}.yml").exists()
+
+
+def test_unmatched_image_does_not_shadow_builtin_or_reuse_a_name_fragment(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "images"
+    templates = tmp_path / "templates"
+    for image in ("server", "winserver"):
+        _seed(source / "addons" / "qemu" / image / "virtioa.qcow2")
+    items = walk_all(source, destination)
+
+    manifest = ImportManifest()
+    run_migration(items, options=MigrateOptions(), manifest=manifest, templates_dir=templates)
+
+    expected = {"server": "server", "winserver": "winserver-imported"}
+    assert {entry.name: entry.template_key for entry in manifest.templates} == expected
+    assert {entry.status for entry in manifest.templates} == {"generated"}
+    assert not (templates / "qemu" / "winserver.yml").exists()
+
+    retry = ImportManifest()
+    run_migration(items, options=MigrateOptions(), manifest=retry, templates_dir=templates)
+    assert {entry.name: entry.template_key for entry in retry.templates} == expected
+    assert {entry.status for entry in retry.templates} == {"reused"}
+
+
+def test_user_shadow_can_inherit_or_clear_builtin_aliases(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "images"
+    builtins = tmp_path / "builtins"
+    templates = tmp_path / "templates"
+    image = "custom-family-7"
+    _seed(source / "addons" / "qemu" / image / "virtioa.qcow2")
+    _seed(builtins / "qemu" / "router.yml", b'type: qemu\nimage_aliases: ["custom-family-*"]\n')
+    override = templates / "qemu" / "router.yml"
+    contents = b"type: qemu\nname: Office router\n"
+    _seed(override, contents)
+    items = walk_all(source, destination)
+
+    before = ImportManifest()
+    run_migration(
+        items,
+        options=MigrateOptions(),
+        manifest=before,
+        templates_dir=templates,
+        builtin_templates_dir=builtins,
+    )
+    assert before.templates[0].template_key == "router"
+    assert before.templates[0].status == "reused"
+
+    override.write_bytes(contents + b"image_aliases: []\n")
+    after = ImportManifest()
+    run_migration(
+        items,
+        options=MigrateOptions(),
+        manifest=after,
+        templates_dir=templates,
+        builtin_templates_dir=builtins,
+    )
+    assert after.templates[0].template_key == image
+    assert after.templates[0].status == "generated"
+
+
 def test_qemu_migration_creates_cdrom_symlink(tmp_path: Path) -> None:
     src = tmp_path / "src"
     dst = tmp_path / "dst"

@@ -261,18 +261,18 @@ def write_summary(
 ) -> None:
     """Write the human-readable run summary to ``stream`` (stdout by default)."""
     imported = len(manifest_dict.get("imported", []))
-    templates = len(manifest_dict.get("templates", []))
+    statuses = [template.get("status") for template in manifest_dict.get("templates", [])]
     skipped = len(manifest_dict.get("skipped", []))
     errors = len(manifest_dict.get("errors", []))
-    needs_review = sum(
-        1 for t in manifest_dict.get("templates", []) if t.get("status") == "needs-manual-review"
-    )
+    needs_review = statuses.count("needs-manual-review")
+    templates_emitted = sum(status in {"generated", "converted", "ok"} for status in statuses)
 
     lines: tuple[str, ...] = (
         "",
         "=== nova-ve EVE-NG importer — run summary ===",
         f"  imported files     : {imported}",
-        f"  templates emitted  : {templates - needs_review}",
+        f"  templates emitted  : {templates_emitted}",
+        f"  templates reused   : {statuses.count('reused')}",
         f"  needs-manual-review: {needs_review}",
         f"  skipped (idempotent): {skipped}",
         f"  errors             : {errors}",

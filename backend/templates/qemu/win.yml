@@ -1,5 +1,8 @@
 type: qemu
 name: Microsoft Windows
+image_aliases:
+  - "win-*"
+  - "win[0-9]*"
 description: Microsoft Windows
 icon_type: server
 cpu: 4

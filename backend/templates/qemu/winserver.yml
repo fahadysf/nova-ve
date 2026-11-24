@@ -1,5 +1,7 @@
 type: qemu
 name: Microsoft Windows Server
+image_aliases:
+  - "winserver-*"
 description: Microsoft Windows Server
 icon_type: server
 cpu: 4

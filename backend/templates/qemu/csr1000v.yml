@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco CSR 1000V XE 3.x
+image_aliases:
+  - "csr1000v-*"
 description: Cisco CSR 1000V XE 3.x
 icon_type: router
 cpu: 1

@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco NX-OSv Titanium
+image_aliases:
+  - "titanium-*"
 description: Cisco NX-OSv Titanium
 icon_type: switch
 cpu: 1

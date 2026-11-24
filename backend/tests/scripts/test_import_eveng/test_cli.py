@@ -413,7 +413,9 @@ def test_main_default_mode_moves_and_symlinks_back(
     assert "[1/" in out, "numbered step lines expected on stdout"
     assert "moving hda.qcow2" in out
     assert "symlinked back to" in out
-    assert "generating template YAML" in out
+    assert "resolving template" in out
+    assert "reused qemu/vyos" in out
+    assert "templates reused   : 1" in out
     assert f"log                : {log}" in out
 
     log_text = log.read_text()
@@ -425,6 +427,10 @@ def test_main_default_mode_moves_and_symlinks_back(
     assert entry["mode"] == "move-symlink"
     assert entry["symlinked"] is True
     assert "symlinked back to" in entry["note"]
+    assert raw["templates"] == [
+        {"name": "vyos-1.4", "status": "reused", "template_key": "vyos", "template_type": "qemu"}
+    ]
+    assert not (templates / "qemu" / "vyos-1.4.yml").exists()
 
 
 def test_main_copy_only_preserves_sources_as_real_files(

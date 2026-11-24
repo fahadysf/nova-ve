@@ -1,5 +1,7 @@
 type: qemu
 name: Cisco Firepower 6
+image_aliases:
+  - "firepower6-*"
 description: Cisco Firepower 6
 icon_type: firewall
 cpu: 4

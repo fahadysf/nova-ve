@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vMX VFP
+image_aliases:
+  - "vmxvfp-*"
 description: Juniper vMX VFP
 icon_type: router
 cpu: 3

@@ -1,5 +1,8 @@
 type: qemu
 name: Check Point Security Gateway
+image_aliases:
+  - "cpsg-*"
+  - "cpsg2-*"
 description: Check Point Security Gateway
 icon_type: firewall
 cpu: 4

@@ -1,5 +1,7 @@
 type: qemu
 name: Juniper vJunos-switch
+image_aliases:
+  - "vjunosswitch-*"
 description: Juniper vJunos-switch
 icon_type: switch
 cpu: 4

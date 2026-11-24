@@ -1,5 +1,7 @@
 type: qemu
 name: Aruba CX Virtual Switch
+image_aliases:
+  - "arubacx-*"
 description: Aruba CX
 icon_type: switch
 cpu: 2
