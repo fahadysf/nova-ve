@@ -67,57 +67,71 @@ wait_for_postgres() {
 patch_guacamole_war() {
   # The exploded webapp lives in an ephemeral /tmp/catalina-base.* that is
   # regenerated on every container start, so patching it in place is wiped
-  # by any restart. Patch the WAR itself instead: every future explode then
-  # carries the patch script + viewport fix. Idempotent — a WAR that already
-  # contains the patch script is left untouched.
+  # by any restart. Patch the WAR so each deployment includes the client fixes.
   local container_id="$1"
   local war_path="/opt/guacamole/webapp/guacamole.war"
 
-  if docker exec "${container_id}" jar tf "${war_path}" 2>/dev/null | grep -q "nova-ve-guac-patch.js"; then
-    return 0
-  fi
-  # Return codes: 0 = already patched, 3 = repacked (restart needed),
-  # non-zero otherwise (set -e aborts before we get here on hard failure).
-
   local workdir
-  workdir="$(mktemp -d)"
+  workdir="$(mktemp -d)" || return 1
   trap 'rm -rf "${workdir}"' RETURN
 
-  docker cp "${container_id}:${war_path}" "${workdir}/guacamole.war"
+  docker cp "${container_id}:${war_path}" "${workdir}/guacamole.war" || return 1
 
-  python3 - "$workdir" "${GUAC_PATCH_JS}" <<'PYEOF'
-import sys, zipfile
+  local patch_rc=0
+  python3 - "$workdir" "${GUAC_PATCH_JS}" <<'PYEOF' || patch_rc=$?
+import sys
+import zipfile
+from pathlib import Path
 
 workdir, patch_js = sys.argv[1], sys.argv[2]
-war = f"{workdir}/guacamole.war"
+patch_name = "nova-ve-guac-patch.js"
+tunnel_asset = "guacamole-common-js/all.min.js"
+original_socket = b'new WebSocket(b+"?"+f,"guacamole")'
+patched_socket = b'new WebSocket(b+"?"+f)'
 
-patch_source = open(patch_js, "rb").read()
-index_html = None
+with zipfile.ZipFile(f"{workdir}/guacamole.war") as source:
+    index = source.read("index.html")
+    patched_index = index.replace(b",target-densitydpi=medium-dpi", b"")
+    patched_index = patched_index.replace(
+        f'src="{tunnel_asset}"'.encode(),
+        f'src="{tunnel_asset}?v=nova-ve-websocket"'.encode(),
+    )
+    if patch_name.encode() not in patched_index:
+        patched_index = patched_index.replace(
+            b"</body>", f'<script src="{patch_name}"></script></body>'.encode()
+        )
 
-with zipfile.ZipFile(war) as zin:
-    entries = [(item, zin.read(item.filename)) for item in zin.infolist()]
+    # Guacamole accepts the tunnel without subprotocol negotiation. Some
+    # network paths stall when the browser offers the named subprotocol.
+    tunnel_js = source.read(tunnel_asset)
+    if tunnel_js.count(original_socket) == 1:
+        patched_tunnel = tunnel_js.replace(original_socket, patched_socket)
+    elif original_socket not in tunnel_js and tunnel_js.count(patched_socket) == 1:
+        patched_tunnel = tunnel_js
+    else:
+        sys.exit("Unexpected Guacamole WebSocket client in WAR")
 
-for info, data in entries:
-    if info.filename == "index.html":
-        text = data.decode("utf-8")
-        text = text.replace(",target-densitydpi=medium-dpi", "")
-        if "nova-ve-guac-patch.js" not in text:
-            text = text.replace("</body>", '<script src="nova-ve-guac-patch.js"></script></body>')
-        index_html = text.encode("utf-8")
-        break
+    has_patch_script = patch_name in source.namelist()
+    if patched_index == index and patched_tunnel == tunnel_js and has_patch_script:
+        sys.exit(10)
 
-if index_html is None:
-    sys.exit("index.html not found in WAR")
-
-with zipfile.ZipFile(f"{workdir}/guacamole-patched.war", "w", zipfile.ZIP_DEFLATED) as zout:
-    for info, data in entries:
-        if info.filename == "index.html":
-            data = index_html
-        zout.writestr(info.filename, data)
-    zout.writestr("nova-ve-guac-patch.js", patch_source)
+    replacements = {"index.html": patched_index, tunnel_asset: patched_tunnel}
+    with zipfile.ZipFile(f"{workdir}/guacamole-patched.war", "w", zipfile.ZIP_DEFLATED) as output:
+        for entry in source.infolist():
+            name = entry.filename
+            data = replacements[name] if name in replacements else source.read(name)
+            output.writestr(entry, data)
+        if not has_patch_script:
+            output.writestr(patch_name, Path(patch_js).read_bytes())
 PYEOF
+  if [[ "${patch_rc}" -eq 10 ]]; then
+    return 0
+  fi
+  if [[ "${patch_rc}" -ne 0 ]]; then
+    return 1
+  fi
 
-  docker cp "${workdir}/guacamole-patched.war" "${container_id}:${war_path}"
+  docker cp "${workdir}/guacamole-patched.war" "${container_id}:${war_path}" || return 1
   return 3
 }
 
@@ -169,4 +183,7 @@ if [[ "${war_rc}" -eq 3 ]]; then
     fi
     sleep 2
   done
+elif [[ "${war_rc}" -ne 0 ]]; then
+  echo "guacamole: failed to patch the webapp" >&2
+  exit "${war_rc}"
 fi
