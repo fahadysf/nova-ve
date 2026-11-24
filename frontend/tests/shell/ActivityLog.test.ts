@@ -205,6 +205,31 @@ describe('Activity log view (#297)', () => {
     expect(options).toEqual(['All users', 'alice', 'bob']);
   });
 
+  it('names every filter control, so a screen reader does not hear three anonymous boxes', async () => {
+    serve(TRAIL);
+    await rendered();
+
+    for (const [name, testId] of [
+      ['Area', 'activity-category'],
+      ['Action', 'activity-action'],
+      ['User', 'activity-actor']
+    ] as const) {
+      expect(screen.getByRole('combobox', { name }), name).toBe(screen.getByTestId(testId));
+    }
+    for (const [name, testId] of [
+      ['From', 'activity-from'],
+      ['To', 'activity-to']
+    ] as const) {
+      expect(screen.getByLabelText(name), name).toBe(screen.getByTestId(testId));
+    }
+    expect(screen.getByRole('textbox', { name: 'Search activity log' })).toBe(
+      screen.getByTestId('activity-search')
+    );
+    // The view switcher on the page around it.
+    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Clear' })).toBeInTheDocument();
+  });
+
   it('searches once the typing settles, not on every keystroke', async () => {
     serve(TRAIL);
     await rendered();
