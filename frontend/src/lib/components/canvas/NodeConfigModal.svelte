@@ -116,12 +116,12 @@
     { label: '(template default)', value: '' },
     { label: 'Linux — eth{n}', value: 'eth{n}' },
     { label: 'Cisco IOS — Gi{port}', value: 'Gi{port}' },
-    { label: 'Cisco IOS-XE — GigabitEthernet0/0/{n}', value: 'GigabitEthernet0/0/{n}' },
-    { label: 'Arista — Ethernet{port}', value: 'Ethernet{port}' },
+    { label: 'Cisco IOS-XE — Gi0/0/{n}', value: 'Gi0/0/{n}' },
+    { label: 'Arista — Et{port}', value: 'Et{port}' },
     { label: 'Linux + mgmt0 — mgmt0,eth{n}', value: 'mgmt0,eth{n}' },
     { label: 'Juniper vMX — fxp0,ge-0/0/{n}', value: 'fxp0,ge-0/0/{n}' },
-    { label: 'Arista + Management1', value: 'Management1,Ethernet{port}' },
-    { label: 'Cisco IOSv-L2', value: 'Management0/0,GigabitEthernet0/{n}' },
+    { label: 'Arista + Management1 — Ma1,Et{port}', value: 'Ma1,Et{port}' },
+    { label: 'Cisco IOSv-L2 — Ma0/0,Gi0/{n}', value: 'Ma0/0,Gi0/{n}' },
   ];
   const INTERFACE_NAMING_CUSTOM = '__custom__';
 

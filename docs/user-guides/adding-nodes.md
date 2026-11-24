@@ -41,7 +41,33 @@ Hand-authored template JSON files under `/var/lib/nova-ve/templates/<vendor>/<ke
 
 Each node's NICs are named after a naming scheme (e.g. `eth0`, `eth1` for Linux; `Gi0/0`, `Gi0/1` for Cisco IOSv; `ge-0/0/0` for Juniper). The scheme is template-defined; presets plus a **Custom…** entry are available in the node editor.
 
-To use your own scheme, open the node editor → **Interface naming** → choose **Custom…** → enter a comma-separated list (e.g. `mgmt0, lan0, lan1`).
+To use your own scheme, open the node editor → **Interface naming** → choose **Custom…** → enter a comma-separated list (e.g. `mgmt0, lan0, lan1`). A node keeps the scheme it was created with, so a change to a template's labels applies to nodes added afterwards. Custom schemes are used exactly as typed.
+
+### Label abbreviations
+
+A port label carries at most four letters before its first digit, slash or dot, so that it stays readable on a node card. Numbering is never changed — only the words are shortened. Built-in templates use the short form the platform itself prints where there is one, and a chosen short form otherwise:
+
+| Platform | Full interface type | Label |
+|---|---|---|
+| Cisco IOS, IOS-XE | `FastEthernet`, `GigabitEthernet`, `TwoGigabitEthernet`, `FiveGigabitEthernet` | `Fa`, `Gi`, `Tw`, `Fi` |
+| Cisco IOS, IOS-XE | `TenGigabitEthernet`, `TwentyFiveGigE`, `FortyGigabitEthernet`, `FiftyGigabitEthernet` | `Te`, `Twe`, `Fo`, `Fif` |
+| Cisco IOS, IOS-XE | `HundredGigE`, `TwoHundredGigE`, `FourHundredGigE` | `Hu`, `Two`, `Fou` |
+| Cisco IOS, IOS-XE | `Loopback`, `Tunnel`, `Port-channel`, `Vlan`, `Serial`, `Dialer` | `Lo`, `Tu`, `Po`, `Vl`, `Se`, `Di` |
+| Cisco ASAv, FTD | `Management0/0`, `Diagnostic0/0` | `Ma0/0`, `Diag0/0` |
+| Cisco NX-OS | `Ethernet`, `Loopback`, `Port-channel` | `Eth`, `Lo`, `Po` |
+| Cisco IOS-XR | `MgmtEth`, `GigabitEthernet`, `Bundle-Ether` | `Mg`, `Gi`, `BE` |
+| Arista EOS | `Ethernet`, `Management`, `Port-Channel`, `Loopback`, `Vlan`, `Tunnel` | `Et`, `Ma`, `Po`, `Lo`, `Vl`, `Tu` |
+| Palo Alto PAN-OS | `ethernet1/1`, `loopback`, `tunnel`, `vlan` | `e1/1`, `lo`, `tu`, `vl` |
+| Dell OS10 | `ethernet1/1/1` | `eth1/1/1` |
+| Aruba, Huawei, HPE Comware | `GigabitEthernet` | `GE` |
+| Huawei VRP | `LoopBack`, `Vlanif`, `Tunnel` | `Lo`, `Vl`, `Tu` |
+| HPE Comware | `Ten-GigabitEthernet`, `Bridge-Aggregation`, `Route-Aggregation` | `XGE`, `BAGG`, `RAGG` |
+| Windows | `Ethernet` | `Eth` |
+| MikroTik RouterOS | `ether1` | `e1` |
+| VMware ESXi | `vmnic0` | `vmn0` |
+| FreeBSD, pfSense, OPNsense | `vtnet0` | `vtn0` |
+
+Juniper (`ge-0/0/0`), Nokia (`1/1/c1/1`), F5 (`1.1`), Fortinet (`port1`) and the Linux family (`eth0`, `swp1`) are already short and are used unchanged.
 
 ## Where node state lives
 

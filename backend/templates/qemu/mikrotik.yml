@@ -12,4 +12,4 @@ capabilities:
   hotplug: false
   max_nics: 8
 interface_naming:
-  format: ether{port}
+  format: e{port}

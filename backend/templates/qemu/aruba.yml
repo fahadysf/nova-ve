@@ -14,4 +14,4 @@ capabilities:
 interface_naming:
   format:
   - Not in Use
-  - GigabitEthernet0/0/{n}
+  - GE0/0/{n}

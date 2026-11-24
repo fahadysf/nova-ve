@@ -14,4 +14,4 @@ capabilities:
 interface_naming:
   format:
   - mgmt0
-  - Ethernet2/{port}
+  - Eth2/{port}

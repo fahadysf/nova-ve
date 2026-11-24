@@ -14,5 +14,5 @@ capabilities:
   max_nics: 8
 interface_naming:
   format:
-  - Management1
-  - Ethernet1/{port}
+  - Ma1
+  - Et1/{port}

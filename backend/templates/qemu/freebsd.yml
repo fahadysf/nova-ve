@@ -13,4 +13,4 @@ capabilities:
   hotplug: false
   max_nics: 8
 interface_naming:
-  format: vtnet{n}
+  format: vtn{n}

@@ -21,4 +21,4 @@ capabilities:
 interface_naming:
   format:
     - mgmt
-    - "ethernet1/{port}"
+    - e1/{port}
