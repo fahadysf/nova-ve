@@ -192,6 +192,49 @@ describe('Images & Templates library page (#264, live)', () => {
     expect(screen.queryByTestId('template-card-vqfx')).not.toBeInTheDocument();
   });
 
+  it('combines image availability with template search and type', async () => {
+    const [veos, vqfx] = TEMPLATES;
+    mockApi([
+      veos,
+      vqfx,
+      { ...veos, type: 'docker', key: 'docker-router' },
+      {
+        ...vqfx,
+        key: 'vqfx-missing',
+        images: [{ ...veos.images[0], state: 'missing' }],
+      },
+    ]);
+    render(LibraryPage);
+    await screen.findByTestId('template-card-vqfx');
+
+    const availability = screen.getByRole('combobox', { name: 'Filter templates by image availability' });
+    const search = screen.getByTestId('images-search');
+    const type = screen.getByTestId('images-type-filter');
+    expect(search.nextElementSibling).toBe(availability);
+    expect(availability.nextElementSibling).toBe(type);
+    expect(availability).toHaveValue('all');
+    expect(screen.getByTestId('template-card-vqfx-missing')).toBeInTheDocument();
+
+    await fireEvent.change(availability, { target: { value: 'with-images' } });
+    expect(screen.getByTestId('template-card-veos')).toBeInTheDocument();
+    expect(screen.getByTestId('template-card-docker-router')).toBeInTheDocument();
+    expect(screen.queryByTestId('template-card-vqfx')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('template-card-vqfx-missing')).not.toBeInTheDocument();
+
+    await fireEvent.change(type, { target: { value: 'qemu' } });
+    expect(screen.queryByTestId('template-card-docker-router')).not.toBeInTheDocument();
+    expect(screen.getByTestId('template-card-veos')).toBeInTheDocument();
+
+    await fireEvent.input(search, { target: { value: 'vqfx' } });
+    expect(screen.getByText('No templates match your filters.')).toBeInTheDocument();
+    await fireEvent.change(availability, { target: { value: 'all' } });
+    expect(screen.getByTestId('template-card-vqfx')).toBeInTheDocument();
+    expect(screen.queryByTestId('template-card-veos')).not.toBeInTheDocument();
+
+    await fireEvent.click(screen.getByTestId('images-tab-images'));
+    expect(screen.queryByRole('combobox', { name: 'Filter templates by image availability' })).not.toBeInTheDocument();
+  });
+
   it('creates a template and refreshes templates and image associations', async () => {
     const templates = [...TEMPLATES];
     mockApi(templates);

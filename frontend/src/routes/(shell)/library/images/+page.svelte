@@ -22,6 +22,7 @@
   let images: LibraryImage[] = [];
   let loading = false;
   let search = '';
+  let templateImageFilter: 'all' | 'with-images' = 'all';
   let typeFilter = '';
   let verifying: string | null = null;
   let copiedSha: string | null = null;
@@ -34,6 +35,9 @@
   let refreshGeneration = 0;
 
   const TYPE_OPTIONS: readonly LibraryTemplateType[] = ['qemu', 'docker', 'iol', 'dynamips'];
+
+  $: templateGroups = groupByType(filteredTemplates(templates, search, typeFilter, templateImageFilter));
+  $: visibleImages = filteredImages(images, search, typeFilter);
 
   async function refresh() {
     const generation = ++refreshGeneration;
@@ -64,11 +68,19 @@
     return `${sha.slice(0, 12)}…${sha.slice(-6)}`;
   }
 
-  function filteredTemplates(list: LibraryTemplate[]): LibraryTemplate[] {
+  function filteredTemplates(
+    list: LibraryTemplate[],
+    query: string,
+    type: string,
+    imageFilter: typeof templateImageFilter
+  ): LibraryTemplate[] {
+    const needle = query.trim().toLowerCase();
     return list.filter((template) => {
       if (template.paired_parent) return false;
-      if (typeFilter && template.type !== typeFilter) return false;
-      const needle = search.trim().toLowerCase();
+      if (type && template.type !== type) return false;
+      if (imageFilter === 'with-images' && !template.images.some((image) => image.state === 'available')) {
+        return false;
+      }
       if (!needle) return true;
       return (
         template.name.toLowerCase().includes(needle) ||
@@ -78,10 +90,10 @@
     });
   }
 
-  function filteredImages(list: LibraryImage[]): LibraryImage[] {
+  function filteredImages(list: LibraryImage[], query: string, type: string): LibraryImage[] {
+    const needle = query.trim().toLowerCase();
     return list.filter((image) => {
-      if (typeFilter && image.type !== typeFilter) return false;
-      const needle = search.trim().toLowerCase();
+      if (type && image.type !== type) return false;
       if (!needle) return true;
       return (
         image.name.toLowerCase().includes(needle) ||
@@ -94,7 +106,7 @@
   function groupByType(list: LibraryTemplate[]): { type: string; items: LibraryTemplate[] }[] {
     return TYPE_OPTIONS.map((type) => ({
       type,
-      items: filteredTemplates(list).filter((template) => template.type === type)
+      items: list.filter((template) => template.type === type)
     })).filter((group) => group.items.length > 0);
   }
 
@@ -270,13 +282,23 @@
           data-testid="images-tab-images"
         >Images ({images.length})</button>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex flex-wrap items-center gap-2">
         <input
-          class="w-56 rounded-lg border border-gray-700 bg-gray-950 px-3 py-1.5 text-[12px] text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
+          class="w-56 max-w-full rounded-lg border border-gray-700 bg-gray-950 px-3 py-1.5 text-[12px] text-gray-200 placeholder-gray-600 focus:border-blue-500 focus:outline-none"
           placeholder="Search…"
           bind:value={search}
           data-testid="images-search"
         />
+        {#if tab === 'templates'}
+          <select
+            class="rounded-lg border border-gray-700 bg-gray-950 px-2 py-1.5 text-[12px] text-gray-300 focus:border-blue-500 focus:outline-none"
+            bind:value={templateImageFilter}
+            aria-label="Filter templates by image availability"
+          >
+            <option value="all">All</option>
+            <option value="with-images">With images</option>
+          </select>
+        {/if}
         <select
           class="rounded-lg border border-gray-700 bg-gray-950 px-2 py-1.5 text-[12px] text-gray-300 focus:border-blue-500 focus:outline-none"
           bind:value={typeFilter}
@@ -296,7 +318,7 @@
       </div>
     {:else if tab === 'templates'}
       <div class="space-y-6" data-testid="templates-panel">
-        {#each groupByType(templates) as group (group.type)}
+        {#each templateGroups as group (group.type)}
           <section>
             <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">{group.type}</div>
             <div class="mt-2 grid grid-cols-1 gap-3 xl:grid-cols-2">
@@ -367,6 +389,10 @@
               {/each}
             </div>
           </section>
+        {:else}
+          <div class="rounded-2xl border border-gray-800 bg-gray-900/95 px-5 py-10 text-center text-sm text-gray-500">
+            No templates match your filters.
+          </div>
         {/each}
       </div>
     {:else}
@@ -384,7 +410,7 @@
             </tr>
           </thead>
           <tbody>
-            {#each filteredImages(images) as image (image.path)}
+            {#each visibleImages as image (image.path)}
               <tr class="border-b border-gray-800/60 align-top last:border-0 hover:bg-gray-800/40" data-testid={`image-row-${image.name}`}>
                 <td class="px-5 py-3">
                   <div class="font-medium text-gray-100">{image.filename}</div>
