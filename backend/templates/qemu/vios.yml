@@ -15,4 +15,4 @@ capabilities:
   hotplug: false
   max_nics: 8
 interface_naming:
-  format: GigabitEthernet0/{n}
+  format: Gi0/{n}

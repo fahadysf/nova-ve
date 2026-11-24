@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+WALLPAPER=/usr/local/share/nova-ve/wallpaper.png
+xsetroot -solid '#030712'
+xwallpaper --daemon --screen 0 --center "$WALLPAPER" &
+
+openbox &
+wm_pid=$!
+tint2 -c /usr/local/share/nova-ve/tint2rc >/dev/null 2>&1 &
+
+PROFILE="$HOME/.config/nova-ve/firefox"
+mkdir -p "$PROFILE"
+cat > "$PROFILE/user.js" <<'PREFS'
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("browser.aboutConfig.showWarning", false);
+PREFS
+
+# Some lab hosts disable unprivileged user namespaces. The same Firefox
+# settings work in the legacy VNC desktop and the non-root RDP session.
+MOZ_ALLOW_RUN_AS_ROOT=1 \
+MOZ_DISABLE_CONTENT_SANDBOX=1 \
+MOZ_DISABLE_RDD_SANDBOX=1 \
+MOZ_DISABLE_GMP_SANDBOX=1 \
+firefox --no-remote --profile "$PROFILE" >/dev/null 2>&1 &
+xterm -geometry 100x30 -fa Monospace -fs 11 -bg '#101827' -fg '#e5e7eb' -e /bin/bash -li &
+wait "$wm_pid"

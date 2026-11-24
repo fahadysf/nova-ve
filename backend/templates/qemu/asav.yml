@@ -15,5 +15,5 @@ capabilities:
   max_nics: 8
 interface_naming:
   format:
-  - Management0/0
-  - GigabitEthernet0/{n}
+  - Ma0/0
+  - Gi0/{n}

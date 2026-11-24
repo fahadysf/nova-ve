@@ -22,6 +22,7 @@ import { tick } from 'svelte';
 import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
 import NodeConfigModalHarness from './NodeConfigModalHarness.svelte';
 import { apiGetData, apiRequest } from '$lib/api';
+import { formatInterfaceName } from '$lib/services/interfaceNaming';
 import type { NodeCatalog, NodeCatalogTemplate, NodeData, TemplateCapabilities } from '$lib/types';
 
 vi.mock('$lib/api', () => ({
@@ -273,12 +274,19 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     expect([...select.options].map((option) => option.value)).toEqual(['vnc', 'telnet']);
   });
 
-  it('keeps rdp available for docker templates', async () => {
+  it('offers RDP for either console on a Docker node', async () => {
     const catalog = makeCatalog(makeDockerTemplate());
     render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
     await tick();
 
-    expect([...consoleSelect().options].map((option) => option.value)).toEqual(['telnet', 'vnc', 'rdp']);
+    const primary = consoleSelect();
+    expect([...primary.options].map((option) => option.value)).toEqual(['telnet', 'vnc', 'rdp']);
+    expect(primary.querySelector('option[value="rdp"]')?.textContent).toBe('RDP');
+
+    const second = screen.getByTestId('node-second-console');
+    expect(second.querySelector('option[value="rdp"]')?.textContent).toBe('RDP');
+    await fireEvent.change(primary, { target: { value: 'rdp' } });
+    expect(second.querySelector('option[value="rdp"]')).toBeNull();
   });
 
   it('limits iol templates to telnet consoles', async () => {
@@ -505,6 +513,35 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
           interface_naming_scheme: 'mgmt0,eth{n}',
         }),
       }),
+    );
+  });
+
+  it('offers only naming presets whose labels keep to four leading letters', async () => {
+    const catalog = makeCatalog(makeTemplate());
+    render(NodeConfigModalHarness, {
+      props: { open: true, mode: 'create', catalog, node: null },
+    });
+    await tick();
+
+    const select = screen.getByLabelText('Interface naming preset') as HTMLSelectElement;
+    const values = [...select.options].map((option) => option.value);
+    const offences: string[] = [];
+    for (const value of values) {
+      // '' follows the template; '__custom__' is the free-text entry.
+      if (!value || value === '__custom__') continue;
+      const fixed = value.split(',').length - 1;
+      for (let index = 0; index <= fixed + 2; index += 1) {
+        const label = formatInterfaceName(value, index);
+        // Text before the first digit, slash or dot is the part that must stay short.
+        const head = label.split(/[\d/.]/)[0];
+        if (head === label) continue;
+        if (/\s/.test(head) || head.replace(/[^A-Za-z]/g, '').length > 4) offences.push(label);
+      }
+    }
+
+    expect(offences).toEqual([]);
+    expect(values).toEqual(
+      expect.arrayContaining(['Gi0/0/{n}', 'Et{port}', 'Ma1,Et{port}', 'Ma0/0,Gi0/{n}'])
     );
   });
 

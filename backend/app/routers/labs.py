@@ -2294,7 +2294,8 @@ async def node_html5(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
         data = _read_lab_data(scoped_path)
-        console_info = NodeRuntimeService().console_info(data, node_id, mode=console)
+        runtime_service = NodeRuntimeService()
+        console_info = runtime_service.console_info(data, node_id, mode=console)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
     except FileNotFoundError:
@@ -2339,6 +2340,9 @@ async def node_html5(
                 )
             if recording is not None:
                 console_port = recording.listen_port
+        rdp_password = None
+        if console_info["console"] == "rdp":
+            rdp_password = await asyncio.to_thread(runtime_service.platform_rdp_password, data, node_id)
         if settings.GUACAMOLE_DATABASE_URL.strip():
             # The secondary session gets its own stable connection key so the
             # two consoles of one node never share a Guacamole connection.
@@ -2352,6 +2356,7 @@ async def node_html5(
                 protocol=console_info["console"],
                 connection_name=console_info["name"],
                 connection_key=connection_key,
+                rdp_password=rdp_password,
             )
         else:
             html5_url = await Html5SessionService().create_console_url(
@@ -2360,8 +2365,9 @@ async def node_html5(
                 port=console_port,
                 protocol=console_info["console"],
                 connection_name=console_info["name"],
+                rdp_password=rdp_password,
             )
-    except (Html5SessionError, GuacamoleDatabaseError) as exc:
+    except (Html5SessionError, GuacamoleDatabaseError, NodeRuntimeError) as exc:
         return {
             "code": 500,
             "status": "fail",

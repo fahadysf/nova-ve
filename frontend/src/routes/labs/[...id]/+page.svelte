@@ -58,8 +58,15 @@
   type FloatingWindowState = ConsoleBounds & {
     maximized: boolean;
     minimized: boolean;
-    restoreBounds: ConsoleBounds | null;
+    openingOffset: number;
   };
+  type FloatingCorner = 'left' | 'right';
+  type ConsoleResize = {
+    pointerId: number;
+    startX: number;
+    startY: number;
+    bounds: ConsoleBounds;
+  } & ({ windowId: null } | { windowId: number; corner: FloatingCorner });
   type ConsoleTab = {
     id: number;
     nodeId: number;
@@ -102,6 +109,9 @@
   // enough room for 80 cols × 24 rows plus the floating window header.
   const CONSOLE_MIN_WIDTH = 760;
   const CONSOLE_MIN_HEIGHT = 504;
+  const FLOATING_MIN_WIDTH = 320;
+  const FLOATING_MIN_HEIGHT = 240;
+  const FLOATING_CORNERS = ['left', 'right'] as const;
   const CONSOLE_CANVAS_INSET = 16;
   const CONSOLE_MODE_COOKIE = 'novaVeConsoleMode';
   const preferredLabPath = '/alpine-docker-demo.json';
@@ -134,9 +144,7 @@
   let dragState:
     | { startX: number; startY: number; originX: number; originY: number; windowId: number | null }
     | null = null;
-  let resizeState:
-    | { startX: number; startY: number; width: number; height: number; windowId: number | null }
-    | null = null;
+  let resizeState: ConsoleResize | null = null;
   let labRefreshInFlight = false;
 
   const compactIconButtonClass =
@@ -554,6 +562,26 @@
     };
   }
 
+  function floatingConsoleArea(): ConsoleBounds {
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const x = Math.min(16, Math.floor(viewportWidth / 4));
+    const y = Math.min(56, Math.floor(viewportHeight / 4));
+    const bottomInset = Math.min(16, Math.floor(viewportHeight / 4));
+    return { x, y, width: viewportWidth - 2 * x, height: viewportHeight - y - bottomInset };
+  }
+
+  function fitFloatingBounds(bounds: ConsoleBounds, area: ConsoleBounds): ConsoleBounds {
+    const width = Math.min(Math.max(FLOATING_MIN_WIDTH, bounds.width), area.width);
+    const height = Math.min(Math.max(FLOATING_MIN_HEIGHT, bounds.height), area.height);
+    return {
+      width,
+      height,
+      x: Math.min(Math.max(area.x, bounds.x), area.x + area.width - width),
+      y: Math.min(Math.max(area.y, bounds.y), area.y + area.height - height)
+    };
+  }
+
   function replaceConsoleWindow(
     updater: (workspace: ConsoleWorkspaceState) => ConsoleWorkspaceState
   ) {
@@ -662,12 +690,19 @@
   }
 
   function defaultFloatingWindowBounds(offsetIndex: number): FloatingWindowState {
-    const base = defaultConsoleBounds(offsetIndex);
+    const area = floatingConsoleArea();
+    const opening = defaultConsoleBounds(offsetIndex);
+    // Leave room around the opening size when the standard dimensions exceed the viewport.
+    const bounds = {
+      ...opening,
+      width: opening.width >= area.width ? Math.floor(area.width * 0.9) : opening.width,
+      height: opening.height >= area.height ? Math.floor(area.height * 0.9) : opening.height
+    };
     return {
-      ...base,
+      ...fitFloatingBounds(bounds, area),
       maximized: false,
       minimized: false,
-      restoreBounds: base
+      openingOffset: offsetIndex
     };
   }
 
@@ -724,34 +759,19 @@
     const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === tabId);
     if (!tab) return;
     bringFloatingWindowToFront(tabId);
-    if (tab.floating.maximized) {
-      const restored = clampConsoleBounds(tab.floating.restoreBounds ?? defaultConsoleBounds());
-      updateFloatingWindow(tabId, { ...restored, maximized: false, minimized: false, restoreBounds: restored });
-      return;
-    }
-    const currentBounds: ConsoleBounds = {
-      x: tab.floating.x,
-      y: tab.floating.y,
-      width: tab.floating.width,
-      height: tab.floating.height
-    };
-    updateFloatingWindow(tabId, {
-      ...maximizedConsoleBounds(),
-      maximized: true,
-      minimized: false,
-      restoreBounds: currentBounds
-    });
+    updateFloatingWindow(
+      tabId,
+      tab.floating.maximized
+        ? defaultFloatingWindowBounds(tab.floating.openingOffset)
+        : { ...floatingConsoleArea(), maximized: true, minimized: false }
+    );
   }
 
   function toggleFloatingMinimize(tabId: number) {
     if (!consoleWorkspace) return;
     const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === tabId);
     if (!tab) return;
-    const minimized = !tab.floating.minimized;
-    updateFloatingWindow(tabId, {
-      minimized,
-      maximized: minimized ? false : tab.floating.maximized
-    });
+    updateFloatingWindow(tabId, { minimized: !tab.floating.minimized });
   }
 
   function reloadFloatingConsole(tabId: number) {
@@ -997,10 +1017,10 @@
     event.preventDefault();
     focusConsoleWorkspace();
     resizeState = {
+      pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      width: consoleWorkspace.width,
-      height: consoleWorkspace.height,
+      bounds: consoleWorkspace,
       windowId: null
     };
   }
@@ -1024,23 +1044,55 @@
     };
   }
 
-  function beginFloatingResize(event: PointerEvent, tabId: number) {
+  function beginFloatingResize(event: PointerEvent, tabId: number, corner: FloatingCorner) {
     if (!consoleWorkspace) return;
     const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === tabId);
-    if (!tab || tab.floating.maximized || tab.floating.minimized) return;
-    if (event.button !== 0) return;
+    if (!tab || tab.floating.minimized || resizeState || event.button !== 0) return;
     event.stopPropagation();
     const target = event.currentTarget as HTMLElement | null;
     target?.setPointerCapture?.(event.pointerId);
     event.preventDefault();
     bringFloatingWindowToFront(tabId);
     resizeState = {
+      pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
-      width: tab.floating.width,
-      height: tab.floating.height,
-      windowId: tabId
+      bounds: tab.floating,
+      windowId: tabId,
+      corner
     };
+  }
+
+  function resizeFloatingWindow(
+    tabId: number, start: ConsoleBounds, corner: FloatingCorner, dx: number, dy: number
+  ) {
+    const current = consoleWorkspace?.tabs.find((tab) => tab.id === tabId)?.floating;
+    if (!current) return;
+    const area = floatingConsoleArea();
+    const right = start.x + start.width;
+    const fromLeft = corner === 'left';
+    const maxWidth = fromLeft ? right - area.x : area.x + area.width - start.x;
+    const maxHeight = area.y + area.height - start.y;
+    const width = Math.min(Math.max(FLOATING_MIN_WIDTH, start.width + (fromLeft ? -dx : dx)), maxWidth);
+    const height = Math.min(Math.max(FLOATING_MIN_HEIGHT, start.height + dy), maxHeight);
+    if (width === current.width && height === current.height) return;
+    updateFloatingWindow(tabId, {
+      x: fromLeft ? right - width : start.x,
+      y: start.y,
+      width,
+      height,
+      maximized: false
+    });
+  }
+
+  function resizeFloatingWithArrow(event: KeyboardEvent, tab: ConsoleTab, corner: FloatingCorner) {
+    const step = 24;
+    const dx = event.key === 'ArrowLeft' ? -step : event.key === 'ArrowRight' ? step : 0;
+    const dy = event.key === 'ArrowUp' ? -step : event.key === 'ArrowDown' ? step : 0;
+    if (!dx && !dy) return;
+    event.preventDefault();
+    bringFloatingWindowToFront(tab.id);
+    resizeFloatingWindow(tab.id, tab.floating, corner, dx, dy);
   }
 
   function handleWindowPointerMove(event: PointerEvent) {
@@ -1059,47 +1111,56 @@
       } else {
         const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === drag.windowId);
         if (tab) {
-          const next = clampConsoleBounds({
+          const next = fitFloatingBounds({
             x: drag.originX + (event.clientX - drag.startX),
             y: drag.originY + (event.clientY - drag.startY),
             width: tab.floating.width,
             height: tab.floating.height
-          });
+          }, floatingConsoleArea());
           updateFloatingWindow(drag.windowId, next);
         }
       }
     }
 
-    if (resizeState && consoleWorkspace) {
+    if (resizeState && resizeState.pointerId === event.pointerId && consoleWorkspace) {
       const resize = resizeState;
+      const dx = event.clientX - resize.startX;
+      const dy = event.clientY - resize.startY;
       if (resize.windowId == null) {
         consoleWorkspace = {
           ...consoleWorkspace,
           ...clampConsoleBounds({
             x: consoleWorkspace.x,
             y: consoleWorkspace.y,
-            width: resize.width + (event.clientX - resize.startX),
-            height: resize.height + (event.clientY - resize.startY)
+            width: resize.bounds.width + dx,
+            height: resize.bounds.height + dy
           })
         };
       } else {
-        const tab = consoleWorkspace.tabs.find((candidate) => candidate.id === resize.windowId);
-        if (tab) {
-          const next = clampConsoleBounds({
-            x: tab.floating.x,
-            y: tab.floating.y,
-            width: resize.width + (event.clientX - resize.startX),
-            height: resize.height + (event.clientY - resize.startY)
-          });
-          updateFloatingWindow(resize.windowId, next);
-        }
+        resizeFloatingWindow(resize.windowId, resize.bounds, resize.corner, dx, dy);
       }
     }
   }
 
-  function stopWindowPointerTracking() {
+  function stopWindowPointerTracking(event?: PointerEvent) {
     dragState = null;
-    resizeState = null;
+    if (!event || resizeState?.pointerId === event.pointerId) resizeState = null;
+  }
+
+  function fitFloatingWindowsToViewport() {
+    if (!consoleWorkspace) return;
+    if (consoleWorkspace.mode === 'floating') stopWindowPointerTracking();
+    const area = floatingConsoleArea();
+    consoleWorkspace = {
+      ...consoleWorkspace,
+      tabs: consoleWorkspace.tabs.map((tab) => ({
+        ...tab,
+        floating: {
+          ...tab.floating,
+          ...(tab.floating.maximized ? area : fitFloatingBounds(tab.floating, area))
+        }
+      }))
+    };
   }
 
 </script>
@@ -1108,6 +1169,7 @@
   on:pointermove={handleWindowPointerMove}
   on:pointerup={stopWindowPointerTracking}
   on:pointercancel={stopWindowPointerTracking}
+  on:resize={fitFloatingWindowsToViewport}
 />
 
 <div class="flex h-screen flex-1 flex-col overflow-hidden bg-gray-900">
@@ -1497,8 +1559,8 @@
                 class={`flex items-center justify-between gap-3 border-b border-gray-800 bg-gray-900/95 px-3 py-1 backdrop-blur ${tab.floating.maximized ? 'cursor-default' : 'cursor-move'}`}
                 on:pointerdown={(event) => beginFloatingDrag(event, tab.id)}
               >
-                <div class="flex items-center gap-2.5">
-                  <div class="flex items-center gap-2">
+                <div class="flex min-w-0 items-center gap-2.5">
+                  <div class="flex shrink-0 items-center gap-2">
                     <button
                       class="h-3 w-3 rounded-full bg-red-400 transition hover:bg-red-300"
                       aria-label={`Close ${tab.nodeName} console`}
@@ -1512,18 +1574,20 @@
                       on:click={() => toggleFloatingMinimize(tab.id)}
                     ></button>
                     <button
+                      type="button"
                       class="h-3 w-3 rounded-full bg-emerald-400 transition hover:bg-emerald-300"
                       aria-label={tab.floating.maximized ? `Restore ${tab.nodeName} console` : `Maximize ${tab.nodeName} console`}
+                      title={tab.floating.maximized ? 'Restore opening size' : 'Maximize'}
                       on:pointerdown|stopPropagation
                       on:click={() => toggleFloatingMaximize(tab.id)}
                     ></button>
                   </div>
-                  <div class="flex items-baseline gap-2">
-                    <span class="text-[9px] uppercase tracking-[0.05em] text-gray-500">Console</span>
-                    <span class="whitespace-nowrap text-sm font-semibold leading-none text-gray-100">{tab.nodeName}</span>
+                  <div class="flex min-w-0 items-baseline gap-2">
+                    <span class="shrink-0 text-[9px] uppercase tracking-[0.05em] text-gray-500">Console</span>
+                    <span class="truncate text-sm font-semibold leading-none text-gray-100">{tab.nodeName}</span>
                   </div>
                 </div>
-                <div class="flex items-center gap-2">
+                <div class="flex shrink-0 items-center gap-2">
                   {#if isRecordedTab(tab)}
                     <RecordButton
                       recording={!!recordingStates[tab.id]}
@@ -1565,13 +1629,16 @@
                 ></iframe>
               </div>
             </div>
-            {#if !tab.floating.maximized && !tab.floating.minimized}
+            {#each FLOATING_CORNERS as corner (corner)}
               <button
-                class="absolute bottom-0 right-0 h-5 w-5 cursor-nwse-resize bg-transparent"
-                aria-label={`Resize ${tab.nodeName} console`}
-                on:pointerdown={(event) => beginFloatingResize(event, tab.id)}
+                type="button"
+                class={`absolute bottom-0 h-7 w-7 touch-none bg-transparent after:pointer-events-none after:absolute after:bottom-1.5 after:h-2.5 after:w-2.5 after:border-b-2 after:border-gray-500 hover:after:border-gray-200 ${corner === 'left' ? 'left-0 cursor-nesw-resize after:left-1.5 after:border-l-2' : 'right-0 cursor-nwse-resize after:right-1.5 after:border-r-2'}`}
+                aria-label={`Resize ${tab.nodeName} console from bottom ${corner}`}
+                on:pointerdown={(event) => beginFloatingResize(event, tab.id, corner)}
+                on:lostpointercapture={stopWindowPointerTracking}
+                on:keydown={(event) => resizeFloatingWithArrow(event, tab, corner)}
               ></button>
-            {/if}
+            {/each}
           </div>
         {/each}
       {/if}

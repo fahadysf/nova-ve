@@ -30,6 +30,7 @@ class Html5SessionService:
         port: int,
         protocol: str,
         connection_name: str,
+        rdp_password: str | None = None,
     ) -> str:
         encrypted_payload = self._encrypted_payload(
             current_user=current_user,
@@ -37,6 +38,7 @@ class Html5SessionService:
             port=port,
             protocol=protocol,
             connection_name=connection_name,
+            rdp_password=rdp_password,
         )
         auth_token, data_source = await self._request_auth_token(encrypted_payload)
         connection_identifier = await self._connection_identifier(auth_token, data_source, connection_name)
@@ -51,6 +53,7 @@ class Html5SessionService:
         port: int,
         protocol: str,
         connection_name: str,
+        rdp_password: str | None = None,
     ) -> str:
         secret_key = self.settings.GUACAMOLE_JSON_SECRET_KEY.strip().lower()
         if not secret_key:
@@ -66,7 +69,7 @@ class Html5SessionService:
                     connection_name: {
                         "id": self._connection_id(connection_name, host, port, protocol),
                         "protocol": self._guacamole_protocol(protocol),
-                        "parameters": self._connection_parameters(host, port, protocol),
+                        "parameters": self._connection_parameters(host, port, protocol, rdp_password),
                     }
                 },
             },
@@ -191,16 +194,28 @@ class Html5SessionService:
         raise Html5SessionError(f"Unsupported HTML5 console protocol: {protocol}")
 
     @staticmethod
-    def _connection_parameters(host: str, port: int, protocol: str) -> dict[str, str]:
+    def _connection_parameters(
+        host: str, port: int, protocol: str, rdp_password: str | None = None,
+    ) -> dict[str, str]:
         parameters = {
             "hostname": host,
             "port": str(port),
         }
         if protocol == "rdp":
-            parameters["ignore-cert"] = "true"
-            parameters["security"] = "any"
+            parameters.update(rdp_connection_parameters(rdp_password))
         if protocol == "telnet":
             settings = get_settings()
             parameters["font-name"] = settings.GUACAMOLE_TERMINAL_FONT_NAME
             parameters["font-size"] = str(settings.GUACAMOLE_TERMINAL_FONT_SIZE)
         return parameters
+
+
+def rdp_connection_parameters(password: str | None = None) -> dict[str, str]:
+    parameters = {
+        "ignore-cert": "true",
+        "security": "any",
+        "resize-method": "display-update",
+    }
+    if password is not None:
+        parameters.update({"username": "lab", "password": password})
+    return parameters

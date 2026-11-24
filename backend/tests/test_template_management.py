@@ -239,8 +239,11 @@ def test_builtin_paloalto_template_matches_eve_pnetlab_image_layout(
         "max_nics": 25,
         "machine": "q35",
     }
+    # Same port order as the EVE-NG template (management first, then the
+    # data ports numbered from 1); only the label is the four-letter short
+    # form of ``ethernet1/1``.
     assert service.interface_naming("qemu", "paloalto") == {
-        "format": "mgmt,ethernet1/{port}"
+        "format": "mgmt,e1/{port}"
     }
     assert "paloalto-10.1.1" in service.list_images("qemu", "paloalto")
 

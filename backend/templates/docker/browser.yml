@@ -1,12 +1,10 @@
 type: docker
 name: Browser
 description: >-
-  Firefox browser station (EVE eve-firefox analog) for reaching node web
-  UIs from inside the lab: current-stable Firefox in a minimal openbox
-  desktop with a taskbar for switching windows and the nova-ve brand mark
-  as the desktop wallpaper, VNC console via Guacamole, telnet second
-  console for a debug shell. Requires the platform image
-  nova-ve/browser:latest — build it with deploy/scripts/build-platform-images.sh.
+  Firefox station for lab web UIs with a compact Openbox desktop, taskbar,
+  and Nova VE wallpaper. VNC is the default console, with resizable RDP
+  available as a console type and telnet available for a shell.
+  Requires nova-ve/browser:latest.
 cpulimit: 1
 icon_type: server
 cpu: 1

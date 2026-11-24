@@ -1,0 +1,20 @@
+#!/bin/sh
+set -eu
+
+addgroup -S xrdp
+adduser -S -D -H -s /sbin/nologin -G xrdp xrdp
+adduser -D -s /bin/bash lab
+addgroup -S rdp-users
+addgroup lab rdp-users
+
+# Keep just the local Xorg backend and require TLS for the login.
+# Other xrdp sessions are client-side proxies and are unnecessary here.
+sed -i -e '/^\[Xvnc\]/,$d' -e 's/^autorun=.*/autorun=Xorg/' \
+  -e 's/^security_layer=.*/security_layer=tls/' -e 's/^#runtime_/runtime_/' /etc/xrdp/xrdp.ini
+sed -i -e 's/^AllowRootLogin=.*/AllowRootLogin=false/' \
+  -e 's/^TerminalServerUsers=.*/TerminalServerUsers=rdp-users/' \
+  -e 's/^AlwaysGroupCheck=.*/AlwaysGroupCheck=true/' \
+  -e 's/^#SessionSockdirGroup=xrdp/SessionSockdirGroup=xrdp/' /etc/xrdp/sesman.ini
+# These are generated per container. Remove Alpine's post-install keypair
+# before it becomes part of the image layer.
+rm -f /etc/xrdp/cert.pem /etc/xrdp/key.pem

@@ -66,7 +66,7 @@ def test_idempotent_skip_when_dst_matches(tmp_path: Path) -> None:
     for mode in (CopyMode.DEFAULT, CopyMode.DELETE_SOURCE, CopyMode.MOVE):
         outcome = perform_copy(src, dst, mode=mode)
         assert outcome.status == "skipped"
-        assert outcome.reason == "exists, sha256 match"
+        assert outcome.reason == "exists, size and boundary bytes match"
         # Idempotency NEVER deletes the source, even in destructive modes.
         assert src.exists(), f"src deleted on idempotent skip in mode={mode.value}"
 
@@ -85,28 +85,32 @@ def test_dst_exists_with_mismatch_requires_force(tmp_path: Path) -> None:
     assert src.read_bytes() == b"new"
 
 
-def test_force_overwrites_on_mismatch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [CopyMode.DEFAULT, CopyMode.MOVE_SYMLINK])
+def test_force_overwrites_when_only_middle_differs(tmp_path: Path, mode: CopyMode) -> None:
     src = tmp_path / "src.bin"
     dst = tmp_path / "dst.bin"
-    src.write_bytes(b"new content")
-    dst.write_bytes(b"old content")
+    boundary = b"a" * (64 * 1024)
+    updated = boundary + b"new" + boundary
+    src.write_bytes(updated)
+    dst.write_bytes(boundary + b"old" + boundary)
 
-    outcome = perform_copy(src, dst, mode=CopyMode.DEFAULT, force=True)
+    outcome = perform_copy(src, dst, mode=mode, force=True)
     assert outcome.status == "imported"
-    assert dst.read_bytes() == b"new content"
+    assert dst.read_bytes() == updated
 
 
 def test_verify_failure_does_not_delete_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Simulate a sha256 mismatch after copy: source must NOT be deleted."""
     src = tmp_path / "src.bin"
     dst = tmp_path / "dst.bin"
-    src.write_bytes(b"will be tampered")
+    boundary = b"a" * (64 * 1024)
+    src.write_bytes(boundary + b"original" + boundary)
 
     real_copy2 = __import__("shutil").copy2
 
     def tampering_copy2(s, d):
         real_copy2(s, d)
-        Path(d).write_bytes(b"DIFFERENT BYTES")  # tamper post-copy to force verify mismatch
+        Path(d).write_bytes(boundary + b"tampered" + boundary)
 
     monkeypatch.setattr("scripts.import_eveng.copy_engine.shutil.copy2", tampering_copy2)
 

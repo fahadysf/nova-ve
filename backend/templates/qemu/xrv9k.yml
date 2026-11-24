@@ -17,7 +17,7 @@ capabilities:
   max_nics: 8
 interface_naming:
   format:
-  - MgmtEth0/RP0/CPU0/0
-  - Internal use 1
-  - Internal use 2
-  - GigabitEthernet0/0/0/{n}
+  - Mg0/RP0/CPU0/0
+  - int1
+  - int2
+  - Gi0/0/0/{n}

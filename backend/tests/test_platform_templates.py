@@ -1,19 +1,6 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysuf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
-"""Platform container templates (#288): mgmt-server + browser.
-
-These tests read the REAL builtin templates from the repo (mirroring
-``test_builtin_paloalto_template_matches_eve_pnetlab_image_layout``) and
-assert the contract the runtime and the add-node modal rely on:
-
-- the template pins its platform image via the YAML ``image:`` key and
-  ``list_images`` resolves to exactly that image (declared-image
-  short-circuit) so the catalog's ``defaults.image`` pre-fills it;
-- ``mgmt_access`` defaults to ``"true"`` so started nodes get the per-lab
-  mgmt0 attachment (#287) just like EVE's station containers;
-- console modes match what the images actually run (telnet console shell /
-  VNC on 5900) and are valid for docker nodes.
-"""
+"""Built-in platform image, console, and lab management defaults."""
 
 from __future__ import annotations
 
@@ -84,14 +71,12 @@ class TestPlatformTemplateContract:
 
         assert browser["name"] == "Browser"
         assert browser["console_type"] == "vnc"
-        # Telnet second console = debug shell into the station (mirrors EVE
-        # stations being reachable beyond their GUI console).
         assert browser["second_console"] == "telnet"
         assert browser["cpu"] == 1
         assert browser["ram"] == 1024
 
     def test_platform_templates_opt_into_mgmt_access(self, real_templates_service):
-        for key in ("mgmt-server", "browser"):
+        for key in ("mgmt-server", "browser", "desktop"):
             extras = real_templates_service.template_extras("docker", key)
             assert extras["mgmt_access"] == "true", key
 
@@ -133,6 +118,7 @@ class TestPlatformTemplateContract:
         images = real_templates_service.list_images("docker", "docker")
         assert "nova-ve/mgmt-server:latest" in images
         assert "nova-ve/browser:latest" in images
+        assert "nova-ve/desktop:latest" in images
 
     def test_node_catalog_prefills_platform_image(
         self, real_templates_service
@@ -148,6 +134,11 @@ class TestPlatformTemplateContract:
         assert by_key["browser"]["defaults"]["image"] == "nova-ve/browser:latest"
         assert by_key["browser"]["defaults"]["extras"]["mgmt_access"] == "true"
         assert by_key["browser"]["defaults"]["second_console"] == "telnet"
+
+        desktop = by_key["desktop"]["defaults"]
+        assert desktop["image"] == "nova-ve/desktop:latest"
+        assert desktop["console_type"] == "rdp"
+        assert desktop["second_console"] == "telnet"
 
     def test_validate_node_request_accepts_declared_image(
         self, real_templates_service
@@ -169,3 +160,4 @@ class TestSandboxMarkedImages:
 
         assert "nova-ve/mgmt-server:latest" in DockerImageService._SANDBOX_MARKED_IMAGES
         assert "nova-ve/browser:latest" in DockerImageService._SANDBOX_MARKED_IMAGES
+        assert "nova-ve/desktop:latest" in DockerImageService._SANDBOX_MARKED_IMAGES

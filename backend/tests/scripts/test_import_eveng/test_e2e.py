@@ -8,7 +8,7 @@ the GH-spec'd invariants:
 2. Files copied with sha256 verified at destination (every imported entry
    carries a sha256).
 3. Default-mode source tree is byte-identical pre/post-run.
-4. Idempotent re-run lands every file in `skipped` with `reason: "exists, sha256 match"`.
+4. Idempotent re-run records existing file matches in `skipped`.
 5. `--delete-source` removes source after sha256 verification succeeds.
 6. Manifest is shaped JSON (round-trips through ImportManifest.from_dict).
 
@@ -141,7 +141,7 @@ def test_e2e_idempotent_rerun_records_skipped(synthetic_eveng_tree, tmp_path):
     assert len(m2.imported) == 0
     assert len(m2.skipped) == first_imported
     for skip_entry in m2.skipped:
-        assert skip_entry.reason == "exists, sha256 match"
+        assert skip_entry.reason == "exists, size and boundary bytes match"
 
 
 # ---- 5: --delete-source removes source after verify ---------------------

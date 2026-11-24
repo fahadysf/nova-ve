@@ -14,4 +14,4 @@ capabilities:
   hotplug: false
   max_nics: 8
 interface_naming:
-  format: vmnic{n}
+  format: vmn{n}

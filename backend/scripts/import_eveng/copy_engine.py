@@ -17,11 +17,11 @@ The engine-level default stays ``CopyMode.DEFAULT`` (conservative copy) so
 programmatic callers keep the pre-#271 contract; the CLI passes
 ``MOVE_SYMLINK`` unless the operator opts out with ``--copy-only``.
 
-Idempotency: when the destination already exists with a matching sha256, the
-copy is recorded as ``skipped`` and the source is left untouched regardless of
-mode. In ``move-symlink`` mode a source that is already a symlink pointing at
-the destination is the fast-path skip (no hashing at all). This is what lets
-operators re-run the importer freely.
+Idempotency: when an existing destination matches by size and boundary bytes
+or by SHA-256, the copy is recorded as ``skipped`` and the source is left
+untouched regardless of mode. In ``move-symlink`` mode, a source that already
+links to the destination is skipped without comparing the files. ``--force``
+uses full SHA-256 for comparisons between distinct files.
 """
 
 from __future__ import annotations
@@ -128,7 +128,7 @@ def _move_and_symlink(src: Path, dst: Path, *, force: bool) -> CopyOutcome:
         )
 
     if dst.exists():
-        decision = evaluate(src, dst)
+        decision = evaluate(src, dst, verify_full=force)
         if decision.skip:
             # Destination already holds the bytes; leave the source file in
             # place — removing it would be a destructive dedupe the operator
@@ -191,7 +191,7 @@ def perform_copy(
 ) -> CopyOutcome:
     """Copy ``src`` to ``dst`` honouring ``mode`` and ``force``.
 
-    Idempotency runs first: an existing ``dst`` with matching sha256 yields a
+    Idempotency runs first: a matching existing ``dst`` yields a
     ``skipped`` outcome regardless of mode and never deletes the source.
     """
     if not src.is_file():
@@ -200,7 +200,7 @@ def perform_copy(
     if mode is CopyMode.MOVE_SYMLINK:
         return _move_and_symlink(src, dst, force=force)
 
-    decision = evaluate(src, dst)
+    decision = evaluate(src, dst, verify_full=force)
     if decision.skip:
         return CopyOutcome(
             src=str(src),

@@ -144,6 +144,7 @@ class DockerImageService:
         # declared-image templates resolve without a daemon.
         "nova-ve/mgmt-server:latest",
         "nova-ve/browser:latest",
+        "nova-ve/desktop:latest",
     )
 
     def list_all_images(self) -> list[ImageRecord]:

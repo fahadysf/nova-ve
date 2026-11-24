@@ -16,4 +16,4 @@ capabilities:
 interface_naming:
   format:
   - eth0 / mgmt
-  - GigabitEthernet0/{n}
+  - Gi0/{n}

@@ -1,0 +1,28 @@
+[org.mate.background]
+picture-filename='/usr/local/share/nova-ve/wallpaper.png'
+picture-options='centered'
+color-shading-type='solid'
+primary-color='#030712'
+secondary-color='#030712'
+
+[org.mate.interface]
+gtk-theme='BlackMATE'
+icon-theme='Adwaita'
+font-name='DejaVu Sans 10'
+document-font-name='DejaVu Sans 10'
+monospace-font-name='DejaVu Sans Mono 10'
+
+[org.mate.caja.desktop]
+computer-icon-visible=false
+trash-icon-visible=false
+
+[org.mate.Marco.general]
+theme='BlackMATE'
+titlebar-font='DejaVu Sans Bold 10'
+
+[org.mate.screensaver]
+idle-activation-enabled=false
+lock-enabled=false
+
+[org.mate.session]
+idle-delay=0

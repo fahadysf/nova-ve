@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+export PATH="/opt/nova-ve/venv/bin:$PATH"
+export XDG_CURRENT_DESKTOP=MATE
+export XDG_SESSION_DESKTOP=mate
+export XDG_SESSION_TYPE=x11
+export DESKTOP_SESSION=mate
+export XDG_RUNTIME_DIR="/tmp/nova-ve-runtime-$(id -u)"
+install -d -m 0700 "$XDG_RUNTIME_DIR"
+
+# xRDP owns session input and display power. The desktop remains available
+# when an embedded console has been left idle.
+xset s off
+xset -dpms 2>/dev/null || true
+
+exec dbus-run-session -- mate-session

@@ -1,20 +1,17 @@
 name: Platform container images
 
-# #288 — build and publish the platform containers (mgmt-server, browser)
-# to GHCR. Runs when the image sources change on main, or on demand.
-#
-# Billing note: container image storage and bandwidth on ghcr.io are
-# currently free for public AND private images (the classic Packages 500MB
-# quota does not apply to the Container registry), and this repo is public,
-# so Actions minutes for this workflow are free too. See the GitHub Packages
-# billing docs before relying on that long-term.
-
 on:
   push:
     branches:
       - main
     paths:
       - 'deploy/platform-images/**'
+      - 'deploy/scripts/verify-platform-images.sh'
+      - '.github/workflows/build-platform-images.yml'
+  pull_request:
+    paths:
+      - 'deploy/platform-images/**'
+      - 'deploy/scripts/verify-platform-images.sh'
       - '.github/workflows/build-platform-images.yml'
   workflow_dispatch:
 
@@ -28,28 +25,59 @@ jobs:
     strategy:
       matrix:
         include:
-          - name: nova-ve-mgmt-server
+          - kind: mgmt-server
             context: deploy/platform-images/mgmt-server
-          - name: nova-ve-browser
-            context: deploy/platform-images/browser
+            dockerfile: deploy/platform-images/mgmt-server/Dockerfile
+          - kind: browser
+            context: deploy/platform-images
+            dockerfile: deploy/platform-images/browser/Dockerfile
+          - kind: desktop
+            context: deploy/platform-images
+            dockerfile: deploy/platform-images/desktop/Dockerfile
     steps:
       - uses: actions/checkout@v4
 
+      - name: Build ${{ matrix.kind }}
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          load: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/nova-ve-${{ matrix.kind }}:latest
+            ghcr.io/${{ github.repository_owner }}/nova-ve-${{ matrix.kind }}:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=Nova VE ${{ matrix.kind }} platform container
+
+      - name: Boot and verify ${{ matrix.kind }}
+        shell: bash
+        env:
+          KIND: ${{ matrix.kind }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/nova-ve-${{ matrix.kind }}:latest
+        run: |
+          docker run -d --name platform-image "$IMAGE"
+          trap 'docker logs platform-image; docker rm -f platform-image' EXIT
+          for _ in {1..15}; do
+            if deploy/scripts/verify-platform-images.sh "$KIND" platform-image; then
+              exit 0
+            fi
+            sleep 2
+          done
+          exit 1
+
       - name: Log in to GHCR
+        if: github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push ${{ matrix.name }}
-        uses: docker/build-push-action@v6
-        with:
-          context: ${{ matrix.context }}
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:latest
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}:${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=nova-ve platform container (${{ matrix.name }})
+      - name: Publish tested image
+        if: github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/nova-ve-${{ matrix.kind }}
+        run: |
+          docker push "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:latest"

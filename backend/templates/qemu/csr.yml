@@ -15,4 +15,4 @@ capabilities:
   max_nics: 8
   machine: q35
 interface_naming:
-  format: "GigabitEthernet0/0/{n}"
+  format: "Gi0/0/{n}"
