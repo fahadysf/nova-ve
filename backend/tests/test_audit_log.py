@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -39,12 +40,15 @@ from app.request_context import (
 )
 from app.routers import folders, labs, links, manage, networks
 from app.schemas.folder import FolderCreateRequest, FolderRenameRequest
-from app.schemas.lab import LabMetaCreate
+from app.schemas.lab import LabMetaCreate, LabMetaUpdate
 from app.services import audit_service
 from app.services.audit_service import AuditEvent
 from app.services.auth_service import AuthService
 from app.services.cloud_inventory_service import SharedCloudReferenceError
+from app.services.docker_image_service import DockerImageError
+from app.services.html5_service import Html5SessionError
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
+from app.services.template_service import TemplateError
 
 # Captured at import time — before the autouse fixture swaps it out.
 _REAL_RECORD_BATCH = audit_service.record_batch
@@ -978,6 +982,12 @@ def lab_env(tmp_path, monkeypatch):
         QEMU_BINARY="qemu-system-x86_64",
         QEMU_IMG_BINARY="qemu-img",
         DOCKER_HOST="unix:///var/run/docker.sock",
+        # Consoles and recordings (#300): no Guacamole database (the
+        # encrypted-URL path is used), external console launching off.
+        GUACAMOLE_DATABASE_URL="",
+        EXTERNAL_CONSOLE_HOST="",
+        RECORDINGS_ENABLED=True,
+        RECORDINGS_DIR=str(tmp_path / "recordings"),
     )
     for directory in (labs_dir, settings.IMAGES_DIR, settings.TMP_DIR, settings.TEMPLATES_DIR):
         directory.mkdir(parents=True)
@@ -986,6 +996,7 @@ def lab_env(tmp_path, monkeypatch):
         "app.services.template_service",
         "app.services.node_runtime_service",
         "app.routers.labs",
+        "app.routers.recordings",
     ):
         monkeypatch.setattr(f"{module}.get_settings", lambda: settings)
 
@@ -1653,6 +1664,739 @@ class TestFolderEvents:
         response = await folders.delete_folder("Courses", current_user=_admin(), db=_FakeDb())
 
         assert response["code"] == 404
+        assert audit_events == []
+
+
+# ---------------------------------------------------------------------------
+# Consoles (#300)
+# ---------------------------------------------------------------------------
+
+
+class _NoConsoleRelay:
+    """No recording relay: guacd dials the node directly."""
+
+    async def start_session(self, **_kwargs):
+        return None
+
+
+class _Guacamole:
+    """Hands out a console URL without a Guacamole stack."""
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    async def create_console_url(self, *_args, **_kwargs):
+        return "/html5/#/c/abc123"
+
+
+@pytest.fixture()
+def console_env(lab_env, monkeypatch):
+    """A running node whose console can be opened in the browser."""
+    monkeypatch.setattr(
+        NodeRuntimeService,
+        "console_info",
+        lambda self, data, node_id, mode="primary": {
+            "host": "127.0.0.1",
+            "port": 15005,
+            "console": "telnet",
+            "name": "alpine-a",
+        },
+    )
+    monkeypatch.setattr(NodeRuntimeService, "is_node_running", lambda self, lab_id, node_id: True)
+    monkeypatch.setattr("app.routers.labs.get_console_recorder", lambda: _NoConsoleRelay())
+    monkeypatch.setattr("app.routers.labs.Html5SessionService", _Guacamole)
+    # Each test starts with no console known to be open.
+    monkeypatch.setattr(audit_service, "_open_consoles", audit_service._OpenConsoles())
+    return lab_env
+
+
+def _open_console(client, console="primary"):
+    params = {"console": console} if console != "primary" else None
+    return client.get(f"/api/labs/{LAB_FILE}/nodes/1/html5", params=params, follow_redirects=False)
+
+
+def _wind_back(seconds):
+    """Pretend every open console was opened ``seconds`` ago."""
+    for key in audit_service._open_consoles._opened:
+        audit_service._open_consoles._opened[key] -= seconds
+
+
+ALICE_OPEN = dict(
+    target_type="node",
+    target_id=1,
+    target_name="alpine-a",
+    lab_path=f"/{LAB_FILE}",
+    lab_name="Audit Lab",
+)
+ON_ALPINE = {"node_type": "docker", "template": "docker"}
+
+
+class TestOpenConsoles:
+    def test_how_long_a_console_was_open_is_measured_from_its_open(self):
+        clock = audit_service._OpenConsoles()
+        key = ("lab", 1, "primary", "alice")
+        clock.opened(key)
+        clock._opened[key] -= 90
+
+        assert clock.closed(key) == pytest.approx(90, abs=1)
+
+    def test_a_close_with_no_known_open_has_no_duration(self):
+        clock = audit_service._OpenConsoles()
+
+        assert clock.closed(("lab", 1, "primary", "alice")) is None
+
+    def test_a_close_is_answered_once(self):
+        clock = audit_service._OpenConsoles()
+        key = ("lab", 1, "primary", "alice")
+        clock.opened(key)
+
+        assert clock.closed(key) is not None
+        assert clock.closed(key) is None
+
+    def test_each_user_and_each_console_of_a_node_is_timed_separately(self):
+        clock = audit_service._OpenConsoles()
+        clock.opened(("lab", 1, "primary", "alice"))
+        clock._opened[("lab", 1, "primary", "alice")] -= 30
+        clock.opened(("lab", 1, "second", "alice"))
+        clock.opened(("lab", 1, "primary", "bob"))
+        clock._opened[("lab", 1, "primary", "bob")] -= 300
+
+        assert clock.closed(("lab", 1, "second", "alice")) == pytest.approx(0, abs=1)
+        assert clock.closed(("lab", 1, "primary", "alice")) == pytest.approx(30, abs=1)
+        # Bob's console is untouched by Alice's closes.
+        assert clock.closed(("lab", 1, "primary", "bob")) == pytest.approx(300, abs=1)
+
+    def test_reopening_a_console_restarts_the_clock(self):
+        clock = audit_service._OpenConsoles()
+        key = ("lab", 1, "primary", "alice")
+        clock.opened(key)
+        clock.opened(key)
+        clock._opened[key] -= 7
+
+        assert clock.closed(key) == pytest.approx(7, abs=1)
+
+    def test_an_open_never_reported_closed_is_forgotten_after_half_a_day(self):
+        clock = audit_service._OpenConsoles()
+        clock.opened(("lab", 1, "primary", "alice"))
+        clock._opened[("lab", 1, "primary", "alice")] -= audit_service._CONSOLE_OPEN_MAX_AGE + 1
+
+        clock.opened(("lab", 2, "primary", "bob"))
+
+        assert clock.closed(("lab", 1, "primary", "alice")) is None
+
+    def test_the_key_is_the_path_as_shown_the_node_the_console_and_the_user(self):
+        assert audit_service.console_key("lanes/alice/lab.json", "3", "second", "alice") == (
+            "/lanes/alice/lab.json",
+            3,
+            "second",
+            "alice",
+        )
+
+
+class TestConsoleOpenAndClose:
+    async def test_opening_a_console_is_one_entry(self, audit_events, console_env, client):
+        response = await _open_console(client)
+
+        assert response.status_code == 307
+        assert response.headers["location"] == "/html5/#/c/abc123"
+        assert audit_events == [
+            AuditEvent(
+                event="console.open",
+                actor="admin",
+                **ALICE_OPEN,
+                detail={**ON_ALPINE, "console_mode": "primary", "protocol": "telnet", "via": "html5"},
+            )
+        ]
+
+    async def test_closing_it_says_how_long_it_was_open(self, audit_events, console_env, client):
+        await _open_console(client)
+        audit_events.clear()
+        _wind_back(90)
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/console/close")
+
+        assert response.json()["data"] == {"duration": 90}
+        assert audit_events == [
+            AuditEvent(
+                event="console.close",
+                actor="admin",
+                **ALICE_OPEN,
+                detail={**ON_ALPINE, "console_mode": "primary", "duration": 90},
+            )
+        ]
+
+    async def test_the_second_console_of_a_node_is_its_own_session(self, audit_events, console_env, client):
+        await _open_console(client, "second")
+        await _open_console(client, "primary")
+        audit_events.clear()
+        _wind_back(60)
+
+        await client.post(f"/api/labs/{LAB_FILE}/nodes/1/console/close", params={"console": "second"})
+
+        (event,) = audit_events
+        assert event.event == "console.close"
+        assert event.detail["console_mode"] == "second"
+        assert event.detail["duration"] == 60
+        # The first console is still open.
+        assert len(audit_service._open_consoles._opened) == 1
+
+    async def test_a_reload_starts_a_new_session_with_a_fresh_clock(self, audit_events, console_env, client):
+        await _open_console(client)
+        _wind_back(600)
+        await _open_console(client)  # the page reloaded the console
+        audit_events.clear()
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/console/close")
+
+        assert response.json()["data"]["duration"] < 60
+
+    async def test_a_close_the_server_never_saw_opened_is_still_recorded(self, audit_events, console_env, client):
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/console/close")
+
+        assert response.json()["data"] == {"duration": None}
+        (event,) = audit_events
+        assert event.event == "console.close"
+        assert event.detail["duration"] is None
+
+    async def test_the_close_is_recorded_even_after_the_lab_is_gone(self, audit_events, console_env, client):
+        (console_env.labs_dir / LAB_FILE).unlink()
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/console/close")
+
+        assert response.json()["code"] == 200
+        (event,) = audit_events
+        assert event.event == "console.close"
+        assert event.lab_path == f"/{LAB_FILE}"
+        assert event.lab_name is None
+        assert event.target_id == 1
+
+    async def test_a_console_outside_a_users_folder_cannot_be_reported(self, audit_events, console_env, client):
+        alice = SimpleNamespace(username="alice", role="editor", html5=True, folder="/lanes/alice")
+        app.dependency_overrides[get_current_user] = lambda: alice
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/console/close")
+
+        assert response.json()["code"] == 403
+        assert audit_events == []
+
+    async def test_an_unknown_console_mode_is_refused(self, audit_events, console_env, client):
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/console/close", params={"console": "third"})
+
+        assert response.json()["code"] == 400
+        assert audit_events == []
+
+    async def test_a_refused_open_leaves_no_row(self, audit_events, console_env, client, monkeypatch):
+        def as_user(user):
+            app.dependency_overrides[get_current_user] = lambda: user
+
+        scoped = _admin("bob", role="editor")
+        scoped.folder = "/lanes/bob"
+        as_user(scoped)
+        denied = await _open_console(client)  # the lab is outside bob's folder
+
+        as_user(SimpleNamespace(username="carol", role="editor", html5=False, folder="/"))
+        no_html5 = await _open_console(client)
+
+        def _not_running(self, data, node_id, mode="primary"):
+            raise NodeRuntimeError("node is not running")
+
+        as_user(_admin())
+        monkeypatch.setattr(NodeRuntimeService, "console_info", _not_running)
+        not_running = await _open_console(client)
+
+        assert denied.json()["code"] == 403
+        assert no_html5.json()["code"] == 403
+        assert not_running.json()["code"] == 400
+        assert audit_events == []
+
+    async def test_a_console_that_cannot_be_created_leaves_no_row(self, audit_events, console_env, client, monkeypatch):
+        class _BrokenGuacamole(_Guacamole):
+            async def create_console_url(self, *_args, **_kwargs):
+                raise Html5SessionError("guacamole is away")
+
+        monkeypatch.setattr("app.routers.labs.Html5SessionService", _BrokenGuacamole)
+
+        response = await _open_console(client)
+
+        assert response.json()["code"] == 500
+        assert audit_events == []
+
+
+class TestConsoleHandOff:
+    """External and native consoles go to a client the server never sees again."""
+
+    @pytest.fixture()
+    def external_on(self, console_env):
+        console_env.settings.EXTERNAL_CONSOLE_HOST = "console.example.test"
+        return console_env
+
+    async def test_an_external_console_launch_is_an_open(self, audit_events, external_on, client):
+        response = await client.get(f"/api/labs/{LAB_FILE}/nodes/1/external-console")
+
+        assert response.json()["data"]["host"] == "console.example.test"
+        assert audit_events == [
+            AuditEvent(
+                event="console.open",
+                actor="admin",
+                **ALICE_OPEN,
+                detail={**ON_ALPINE, "console_mode": "primary", "protocol": "telnet", "via": "external"},
+            )
+        ]
+        # Nothing to time: this session will never be reported closed.
+        assert audit_service._open_consoles._opened == {}
+
+    async def test_no_launch_when_no_external_host_is_configured(self, audit_events, console_env, client):
+        response = await client.get(f"/api/labs/{LAB_FILE}/nodes/1/external-console")
+
+        assert response.json()["code"] == 400
+        assert audit_events == []
+
+    async def test_a_stopped_node_hands_off_nothing(self, audit_events, external_on, client, monkeypatch):
+        monkeypatch.setattr(NodeRuntimeService, "is_node_running", lambda self, lab_id, node_id: False)
+
+        response = await client.get(f"/api/labs/{LAB_FILE}/nodes/1/external-console")
+
+        assert response.json()["code"] == 400
+        assert audit_events == []
+
+    async def test_a_native_launcher_download_is_an_open(self, audit_events, console_env, client):
+        telnet = await client.get(f"/api/labs/{LAB_FILE}/nodes/1/telnet")
+
+        assert telnet.status_code == 200
+        assert "telnet://127.0.0.1:15005" in telnet.text
+        assert audit_events == [
+            AuditEvent(
+                event="console.open",
+                actor="admin",
+                **ALICE_OPEN,
+                detail={**ON_ALPINE, "console_mode": "primary", "protocol": "telnet", "via": "native"},
+            )
+        ]
+
+    async def test_a_launcher_for_the_wrong_protocol_leaves_no_row(self, audit_events, console_env, client):
+        response = await client.get(f"/api/labs/{LAB_FILE}/nodes/1/rdp")  # the console is telnet
+
+        assert response.json()["code"] == 400
+        assert audit_events == []
+
+
+# ---------------------------------------------------------------------------
+# Recordings (#300)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingConsole:
+    """A console session with a working record button."""
+
+    def __init__(self, recording=False):
+        self.recording = recording
+        self.started_at = None
+        self.failures = 0
+
+    def status(self):
+        return {
+            "console_active": True,
+            "recording": self.recording,
+            "recording_id": "r1" if self.recording else None,
+            "started_at": self.started_at,
+        }
+
+    def start_recording(self):
+        if self.failures:
+            self.failures -= 1
+            raise OSError("disk full")
+        self.recording = True
+        self.started_at = datetime.now(UTC).isoformat()
+        return self.status()
+
+    def stop_recording(self):
+        self.recording = False
+        return self.status()
+
+
+class _Recorder:
+    def __init__(self, session=None):
+        self.session = session
+        self.active = set()
+
+    def find(self, *_args):
+        return self.session
+
+    def is_active(self, cast):
+        return cast in self.active
+
+
+@pytest.fixture()
+def recording_env(lab_env, monkeypatch):
+    recorder = _Recorder()
+    monkeypatch.setattr("app.routers.recordings.get_console_recorder", lambda: recorder)
+    app.dependency_overrides[get_db] = lambda: _FakeDb()
+    lab_env.recorder = recorder
+    yield lab_env
+    app.dependency_overrides.pop(get_db, None)
+
+
+def _write_recording(lab_env, node_id=3, by="bob", console="second", duration=42):
+    """A finished recording as the recorder leaves it on disk."""
+    directory = lab_env.labs_dir / ".recordings" / LAB_FILE / "audit-lab" / str(node_id)
+    directory.mkdir(parents=True)
+    cast = directory / "alpine-c-20261124T110000Z-abc12345-1.cast"
+    cast.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "width": 120,
+                "height": 30,
+                "timestamp": 1_700_000_000,
+                "duration": duration,
+                "title": "Audit Lab / alpine-c",
+                "env": {"TERM": "xterm"},
+                "nova": {
+                    "node_name": "alpine-c",
+                    "username": by,
+                    "console": console,
+                    "started_at": "2026-11-24T11:00:00+00:00",
+                },
+            }
+        )
+        + '\n[1.0, "o", "hello\\n"]\n'
+    )
+    cast.with_suffix(".log").write_text("# Recording started 2026-11-24T11:00:00+00:00 by bob\nhello\n")
+    return cast
+
+
+class TestRecordingEvents:
+    async def test_start_then_stop(self, audit_events, recording_env, client):
+        recording_env.recorder.session = _RecordingConsole()
+        url = f"/api/labs/{LAB_FILE}/nodes/1/recording"
+
+        await client.post(url, json={"action": "start"})
+        await client.post(url, json={"action": "stop"})
+
+        assert [(e.event, e.detail["console_mode"]) for e in audit_events] == [
+            ("recording.start", "primary"),
+            ("recording.stop", "primary"),
+        ]
+        start, stop = audit_events
+        assert start.actor == "admin" and stop.actor == "admin"
+        assert start.target_name == "alpine-a" and stop.target_name == "alpine-a"
+        assert start.lab_name == "Audit Lab"
+        assert start.detail == {**ON_ALPINE, "console_mode": "primary"}
+        # How long the recording ran.
+        assert isinstance(stop.detail["duration"], int)
+
+    async def test_starting_a_recording_that_is_already_running_is_not_an_event(self, audit_events, recording_env, client):
+        recording_env.recorder.session = _RecordingConsole(recording=True)
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/recording", json={"action": "start"})
+
+        assert response.json()["code"] == 200
+        assert audit_events == []
+
+    async def test_stopping_a_recording_that_is_not_running_is_not_an_event(self, audit_events, recording_env, client):
+        recording_env.recorder.session = _RecordingConsole(recording=False)
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/recording", json={"action": "stop"})
+
+        assert response.json()["code"] == 200
+        assert audit_events == []
+
+    async def test_no_console_open_no_recording_no_event(self, audit_events, recording_env, client):
+        recording_env.recorder.session = None
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/recording", json={"action": "start"})
+
+        assert response.json()["code"] == 404
+        assert audit_events == []
+
+    async def test_a_recording_that_could_not_be_written_leaves_no_row(self, audit_events, recording_env, client):
+        recording_env.recorder.session = session = _RecordingConsole()
+        session.failures = 1
+
+        response = await client.post(f"/api/labs/{LAB_FILE}/nodes/1/recording", json={"action": "start"})
+
+        assert response.json()["code"] == 500
+        assert audit_events == []
+
+    async def test_deleting_a_recording_describes_it(self, audit_events, recording_env, client):
+        cast = _write_recording(recording_env)
+
+        response = await client.delete(f"/api/labs/{LAB_FILE}/recordings/3--{cast.name}")
+
+        assert response.json()["code"] == 200
+        assert not cast.exists()
+        assert audit_events == [
+            AuditEvent(
+                event="recording.delete",
+                actor="admin",
+                target_type="recording",
+                target_id=f"3--{cast.name}",
+                target_name="alpine-c",
+                lab_path=f"/{LAB_FILE}",
+                lab_name="Audit Lab",
+                detail={"node_id": 3, "recorded_by": "bob", "console_mode": "second", "duration": 42},
+            )
+        ]
+
+    async def test_a_recording_still_being_made_cannot_be_deleted(self, audit_events, recording_env, client):
+        cast = _write_recording(recording_env)
+        recording_env.recorder.active.add(cast)
+
+        response = await client.delete(f"/api/labs/{LAB_FILE}/recordings/3--{cast.name}")
+
+        assert response.json()["code"] == 409
+        assert cast.exists()
+        assert audit_events == []
+
+    async def test_a_recording_that_is_not_there_leaves_no_row(self, audit_events, recording_env, client):
+        response = await client.delete(f"/api/labs/{LAB_FILE}/recordings/3--nope.cast")
+
+        assert response.json()["code"] == 404
+        assert audit_events == []
+
+
+# ---------------------------------------------------------------------------
+# Lab settings and node interfaces (#300)
+# ---------------------------------------------------------------------------
+
+
+class _SettingsLabService:
+    row = None
+
+    def __init__(self, db):
+        pass
+
+    async def get_lab_by_filename(self, filename):
+        return type(self).row
+
+    async def update_lab(self, lab, **fields):
+        for field, value in fields.items():
+            setattr(lab, field, value)
+        return lab
+
+
+def _training_lab_row():
+    return SimpleNamespace(
+        id="x",
+        filename="training.json",
+        path="/training.json",
+        owner="admin",
+        name="Training",
+        author="",
+        description="",
+        body="",
+        version="0",
+        scripttimeout=300,
+        countdown=0,
+        linkwidth="1",
+        grid=True,
+        lock=False,
+    )
+
+
+class TestLabSettings:
+    @pytest.fixture()
+    def lab_settings(self, monkeypatch):
+        monkeypatch.setattr(labs, "LabService", _SettingsLabService)
+        _SettingsLabService.row = _training_lab_row()
+        return _SettingsLabService.row
+
+    async def test_saving_lab_settings_records_what_changed(self, audit_events, lab_settings):
+        body = "Long text " * 100
+        response = await labs.update_lab(
+            "training.json",
+            LabMetaUpdate(name="Training v2", lock=True, description="A" * 50, body=body),
+            current_user=_admin(),
+            db=None,
+        )
+
+        assert response["code"] == 200
+        (event,) = audit_events
+        assert event.event == "lab.update"
+        assert event.actor == "admin"
+        assert event.target_id == "/training.json"
+        assert event.target_name == "Training v2"
+        assert event.detail["changes"] == {
+            # Free text is reported by length, never stored.
+            "name": {"from": "Training", "to": "Training v2"},
+            "description": {"from": None, "to": "50 characters"},
+            "body": {"from": None, "to": f"{len(body)} characters"},
+            "lock": {"from": False, "to": True},
+        }
+
+    async def test_an_unchanged_save_is_not_an_event(self, audit_events, lab_settings):
+        await labs.update_lab(
+            "training.json", LabMetaUpdate(name="Training", lock=False), current_user=_admin(), db=None
+        )
+
+        assert audit_events == []
+
+
+class TestNodeInterfaceChanges:
+    async def test_a_changed_mac_address_is_an_event(self, audit_events, lab_env, client):
+        response = await client.patch(
+            f"/api/labs/{LAB_FILE}/nodes/1/interfaces/0", json={"planned_mac": "AA:BB:CC:00:00:02"}
+        )
+
+        assert response.json()["code"] == 200
+        assert audit_events == [
+            AuditEvent(
+                event="node.update",
+                actor="admin",
+                target_type="node",
+                target_id=1,
+                target_name="alpine-a",
+                lab_path=f"/{LAB_FILE}",
+                lab_name="Audit Lab",
+                detail={
+                    **ON_ALPINE,
+                    "changes": {"eth0.planned_mac": {"from": None, "to": "aa:bb:cc:00:00:02"}},
+                },
+            )
+        ]
+
+    async def test_setting_the_same_mac_address_again_is_not_an_event(self, audit_events, lab_env, client):
+        await client.patch(f"/api/labs/{LAB_FILE}/nodes/1/interfaces/0", json={"planned_mac": "aa:bb:cc:00:00:02"})
+        audit_events.clear()
+
+        response = await client.patch(
+            f"/api/labs/{LAB_FILE}/nodes/1/interfaces/0", json={"planned_mac": "AA:BB:CC:00:00:02"}
+        )
+
+        assert response.json()["code"] == 200
+        assert audit_events == []
+
+    async def test_a_moved_port_is_layout_and_not_an_event(self, audit_events, lab_env, client):
+        response = await client.patch(
+            f"/api/labs/{LAB_FILE}/nodes/1/interfaces/0", json={"port_position": "left"}
+        )
+
+        assert response.json()["code"] == 200
+        assert audit_events == []
+
+
+# ---------------------------------------------------------------------------
+# Images and system settings (#300)
+# ---------------------------------------------------------------------------
+
+
+class _FakeDockerImages:
+    behavior = {}
+
+    def __init__(self):
+        pass
+
+    def _act(self, name, reference):
+        outcome = type(self).behavior.get(name)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome if outcome is not None else {"reference": reference}
+
+    def mark(self, image):
+        return self._act("mark", image)
+
+    def unmark(self, image):
+        return self._act("unmark", image)
+
+    def pull(self, reference, mark_after=True):
+        return self._act("pull", reference)
+
+
+class _FakeTemplateUpload:
+    reject = False
+
+    def __init__(self):
+        pass
+
+    async def upload_image(self, **kwargs):
+        if type(self).reject:
+            raise TemplateError("Unsupported image type.")
+        return {"image": "csr1000v.qcow2", "path": "/images/qemu/csr/csr1000v.qcow2"}
+
+
+class TestImageAndSystemEvents:
+    async def test_mark_unmark_and_pull(self, audit_events, as_admin, client, monkeypatch):
+        monkeypatch.setattr("app.routers.docker_images.DockerImageService", _FakeDockerImages)
+        _FakeDockerImages.behavior = {}
+        base = "/api/docker/images"
+
+        marked = await client.post(f"{base}/mark", json={"image": "alpine:3.22"})
+        pulled = await client.post(f"{base}/pull", json={"reference": "busybox:latest", "mark": False})
+        unmarked = await client.post(f"{base}/unmark", json={"image": "alpine:3.22"})
+
+        assert marked.json()["code"] == pulled.json()["code"] == unmarked.json()["code"] == 200
+        assert [(e.event, e.target_id, e.detail) for e in audit_events] == [
+            ("image.mark", "alpine:3.22", {"source": "docker"}),
+            ("image.pull", "busybox:latest", {"source": "docker", "marked": False}),
+            ("image.unmark", "alpine:3.22", {"source": "docker"}),
+        ]
+        assert all(e.actor == "admin" and e.target_type == "image" for e in audit_events)
+
+    async def test_a_failed_image_operation_leaves_no_row(self, audit_events, as_admin, client, monkeypatch):
+        monkeypatch.setattr("app.routers.docker_images.DockerImageService", _FakeDockerImages)
+        _FakeDockerImages.behavior = {"pull": DockerImageError("registry unreachable")}
+
+        response = await client.post("/api/docker/images/pull", json={"reference": "busybox:latest"})
+
+        assert response.json()["code"] == 400
+        assert audit_events == []
+
+    async def test_uploading_an_image(self, audit_events, as_admin, client, monkeypatch):
+        monkeypatch.setattr("app.routers.listing.TemplateService", _FakeTemplateUpload)
+        _FakeTemplateUpload.reject = False
+
+        response = await client.post(
+            "/api/list/images/qemu/csr", files={"image": ("csr1000v.qcow2", b"qcow2-data!!", "application/octet-stream")}
+        )
+
+        assert response.json()["code"] == 200
+        assert audit_events == [
+            AuditEvent(
+                event="image.upload",
+                actor="admin",
+                target_type="image",
+                target_id="csr1000v.qcow2",
+                target_name="csr1000v.qcow2",
+                detail={"image_type": "qemu", "template": "csr", "bytes": 12},
+            )
+        ]
+
+    async def test_a_rejected_upload_leaves_no_row(self, audit_events, as_admin, client, monkeypatch):
+        monkeypatch.setattr("app.routers.listing.TemplateService", _FakeTemplateUpload)
+        _FakeTemplateUpload.reject = True
+
+        response = await client.post(
+            "/api/list/images/qemu/csr", files={"image": ("x.txt", b"nope", "text/plain")}
+        )
+
+        assert response.json()["code"] == 400
+        assert audit_events == []
+
+    async def test_a_settings_change_records_which_settings_took_a_new_value(
+        self, audit_events, as_admin, client, monkeypatch, tmp_path
+    ):
+        monkeypatch.setattr("app.routers.system.get_settings", lambda: SimpleNamespace(BASE_DATA_DIR=tmp_path))
+
+        first = await client.put("/api/system/settings", json={"SESSION_MAX_AGE": 28800})
+        # Saving what is already in force is not an event.
+        await client.put("/api/system/settings", json={"SESSION_MAX_AGE": 28800})
+        changed = await client.put("/api/system/settings", json={"SESSION_MAX_AGE": 43200})
+
+        assert first.json()["code"] == 200
+        assert [(e.detail["changes"]) for e in audit_events] == [
+            {"SESSION_MAX_AGE": {"from": None, "to": 28800}},
+            {"SESSION_MAX_AGE": {"from": 28800, "to": 43200}},
+        ]
+        assert audit_events[0].event == "system.settings"
+        assert audit_events[0].actor == "admin"
+        assert audit_events[0].detail["restart_required"] is True
+
+    async def test_a_rejected_settings_change_leaves_no_row(self, audit_events, as_admin, client, monkeypatch, tmp_path):
+        monkeypatch.setattr("app.routers.system.get_settings", lambda: SimpleNamespace(BASE_DATA_DIR=tmp_path))
+
+        response = await client.put("/api/system/settings", json={"SESSION_MAX_AGE": 10})
+
+        assert response.status_code == 422
         assert audit_events == []
 
 

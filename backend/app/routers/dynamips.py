@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
+from app.services import audit_service
 from app.services.runtime.dynamips import (
     DynamipsError,
     DynamipsLauncher,
@@ -111,6 +112,20 @@ async def calibrate(
     except DynamipsError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+    # #300: calibration boots a real VM for about 90 seconds — worth
+    # knowing who asked for it and what it concluded.
+    await audit_service.record(
+        "image.calibrate",
+        actor=current_user.username,
+        target_type="image",
+        target_id=body.image,
+        target_name=body.image,
+        detail={
+            "source": "dynamips",
+            "idle_pc": result["idle_pc"],
+            "seconds": round(result["duration_s"]),
+        },
+    )
     return {
         "code": 200,
         "status": "success",

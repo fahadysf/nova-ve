@@ -5,7 +5,19 @@
 
 /** Activity log wording, change summaries and CSV export (#297). */
 
-export type ActivityCategory = 'auth' | 'user' | 'lab' | 'node' | 'network' | 'link' | 'folder';
+export type ActivityCategory =
+  | 'auth'
+  | 'user'
+  | 'lab'
+  | 'node'
+  | 'network'
+  | 'link'
+  | 'folder'
+  | 'console'
+  | 'recording'
+  | 'image'
+  | 'template'
+  | 'system';
 
 /** One row of the server's activity trail, as `GET /system/logs/activity` returns it. */
 export interface ActivityEntry {
@@ -59,7 +71,12 @@ export const ACTIVITY_CATEGORIES: ReadonlyArray<{ value: string; label: string }
   { value: 'node', label: 'Nodes' },
   { value: 'network', label: 'Networks' },
   { value: 'link', label: 'Links' },
-  { value: 'folder', label: 'Folders' }
+  { value: 'folder', label: 'Folders' },
+  { value: 'console', label: 'Consoles' },
+  { value: 'recording', label: 'Recordings' },
+  { value: 'image', label: 'Images' },
+  { value: 'template', label: 'Templates' },
+  { value: 'system', label: 'System' }
 ];
 
 export const ACTIVITY_ACTIONS: ReadonlyArray<{ value: string; label: string }> = [
@@ -73,7 +90,16 @@ export const ACTIVITY_ACTIONS: ReadonlyArray<{ value: string; label: string }> =
   { value: 'stop', label: 'Stopped' },
   { value: 'wipe', label: 'Wiped' },
   { value: 'move', label: 'Moved' },
-  { value: 'rename', label: 'Renamed' }
+  { value: 'rename', label: 'Renamed' },
+  { value: 'open', label: 'Console opened' },
+  { value: 'close', label: 'Console closed' },
+  { value: 'mark', label: 'Marked' },
+  { value: 'unmark', label: 'Unmarked' },
+  { value: 'pull', label: 'Pulled' },
+  { value: 'upload', label: 'Uploaded' },
+  { value: 'calibrate', label: 'Calibrated' },
+  { value: 'settings', label: 'Settings changed' },
+  { value: 'iourc', label: 'License replaced' }
 ];
 
 function text(value: unknown): string {
@@ -103,6 +129,12 @@ function labOf(entry: ActivityEntry): string {
   return text(entry.lab_name) || text(entry.lab_path);
 }
 
+function fieldLabel(field: string): string {
+  // An interface field arrives as "<interface>.planned_mac".
+  const interfaceField = /^(.*)\.planned_mac$/.exec(field);
+  return interfaceField ? `MAC address of ${interfaceField[1]}` : field;
+}
+
 /** `role: user → admin`, one line per changed field. */
 export function summarizeChanges(changes: unknown): string[] {
   if (!changes || typeof changes !== 'object' || Array.isArray(changes)) return [];
@@ -112,8 +144,43 @@ export function summarizeChanges(changes: unknown): string[] {
       const { from, to } = change as { from: unknown; to: unknown };
       const before = from === null || from === undefined || from === '' ? '—' : text(from);
       const after = to === null || to === undefined || to === '' ? '—' : text(to);
-      return `${field}: ${before} → ${after}`;
+      return `${fieldLabel(field)}: ${before} → ${after}`;
     });
+}
+
+/** A span of seconds in the largest units that fit: `42s`, `14m`, `2h 05m`. */
+export function formatDuration(seconds: unknown): string {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return '';
+  const total = Math.round(seconds);
+  if (total < 60) return `${total}s`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (hours === 0) return `${minutes}m`;
+  return `${hours}h ${String(minutes).padStart(2, '0')}m`;
+}
+
+/** "the console" or "the second console", per the event's console mode. */
+function consoleWords(detail: Record<string, unknown>): string {
+  return detail.console_mode === 'second' ? 'the second console' : 'the console';
+}
+
+function openFor(detail: Record<string, unknown>): string {
+  const duration = formatDuration(detail.duration);
+  return duration ? ` (open ${duration})` : '';
+}
+
+function lasting(detail: Record<string, unknown>): string {
+  const duration = formatDuration(detail.duration);
+  return duration ? ` (${duration})` : '';
+}
+
+function inBrackets(value: unknown): string {
+  const label = text(value);
+  return label ? ` (${label})` : '';
+}
+
+function imageKind(detail: Record<string, unknown>): string {
+  return text(detail.image_type) || text(detail.source) || 'disk';
 }
 
 function joinParts(parts: string[]): string {
@@ -167,6 +234,8 @@ export function activityPredicate(entry: ActivityEntry): string {
 
     case 'lab.create':
       return `created lab ${target}`;
+    case 'lab.update':
+      return `updated lab ${target}${changes.length ? `: ${joinParts(changes)}` : ''}`;
     case 'lab.delete':
       return `deleted lab ${target}${detail.orphan ? ' (a file without a database row)' : ''}`;
     case 'lab.move':
@@ -213,6 +282,57 @@ export function activityPredicate(entry: ActivityEntry): string {
       return `renamed folder ${text(detail.from)} to ${text(detail.to)}`;
     case 'folder.delete':
       return `deleted folder ${text(entry.target_id)}`;
+
+    case 'console.open': {
+      const kind = inBrackets(detail.protocol);
+      if (detail.via === 'external') return `launched an external console for ${target}${kind}${inLab(entry)}`;
+      if (detail.via === 'native') return `downloaded a console launcher for ${target}${kind}${inLab(entry)}`;
+      return `opened ${consoleWords(detail)} of ${target}${kind}${inLab(entry)}`;
+    }
+    case 'console.close':
+      return `closed ${consoleWords(detail)} of ${target}${inLab(entry)}${openFor(detail)}`;
+
+    case 'recording.start':
+      return `started recording ${consoleWords(detail)} of ${target}${inLab(entry)}`;
+    case 'recording.stop':
+      return `stopped recording ${consoleWords(detail)} of ${target}${inLab(entry)}${lasting(detail)}`;
+    case 'recording.delete': {
+      const recordedBy = text(detail.recorded_by);
+      // Who made the recording matters when it is someone other than the
+      // person deleting it.
+      const facts = [
+        formatDuration(detail.duration) ? `lasting ${formatDuration(detail.duration)}` : '',
+        recordedBy && recordedBy !== activityActor(entry) ? `recorded by ${recordedBy}` : ''
+      ].filter(Boolean);
+      return `deleted a console recording of ${target}${inLab(entry)}${facts.length ? ` (${joinParts(facts)})` : ''}`;
+    }
+
+    case 'image.delete':
+      return `deleted the ${imageKind(detail)} image ${target}`;
+    case 'image.upload':
+      return `uploaded the ${imageKind(detail)} image ${target} for the ${text(detail.template)} template`;
+    case 'image.pull':
+      return `pulled the docker image ${target}`;
+    case 'image.mark':
+      return `made the docker image ${target} available to labs`;
+    case 'image.unmark':
+      return `removed the docker image ${target} from lab use`;
+    case 'image.calibrate': {
+      const idlePc = text(detail.idle_pc);
+      const seconds = typeof detail.seconds === 'number' ? `, took ${detail.seconds}s` : '';
+      return `calibrated the Dynamips image ${target}${idlePc ? ` (idle-PC ${idlePc}${seconds})` : ''}`;
+    }
+
+    case 'template.update': {
+      const submitted = Array.isArray(detail.submitted) ? detail.submitted.map(String) : [];
+      const parts = changes.length ? changes : submitted;
+      return `updated the ${text(detail.template_type)} template ${target}${parts.length ? `: ${joinParts(parts)}` : ''}`;
+    }
+
+    case 'system.settings':
+      return `changed system settings${changes.length ? `: ${joinParts(changes)}` : ''}${detail.restart_required ? ' (takes effect after a restart)' : ''}`;
+    case 'system.iourc':
+      return 'replaced the IOL license file';
 
     default:
       return `${entry.action} ${text(entry.target_type)} ${target}`.trim();
