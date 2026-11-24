@@ -20,14 +20,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
+import re
 import shlex
 from pathlib import Path
 from stat import S_IMODE
 from tempfile import NamedTemporaryFile
 from threading import Lock
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -65,6 +67,8 @@ TEMPLATE_EDITABLE_FIELDS = {
 _TEMPLATE_INT_FIELDS = {"cpu", "ram", "ethernet", "cpulimit"}
 _INSTANCE_EXTRA_FIELDS = {"uuid", "firstmac"}
 _TEMPLATE_CAPABILITY_FIELDS = {"hotplug", "max_nics", "machine"}
+_TEMPLATE_KEY = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,119}")
+MAX_TEMPLATE_YAML_BYTES = 256 * 1024
 _template_edit_lock = Lock()
 
 
@@ -84,6 +88,16 @@ class ImageReferenced(ImageLibraryError):
 
 class TemplateUpdateInvalid(ImageLibraryError):
     pass
+
+
+class TemplateConflict(ImageLibraryError):
+    pass
+
+
+class TemplateReferenced(TemplateConflict):
+    def __init__(self, key: str, references: list[dict[str, Any]]):
+        super().__init__(f"Template {key} is used by {len(references)} lab node(s). Remove or change those nodes first.")
+        self.references = references
 
 
 def editable_template_extras_schema(
@@ -155,7 +169,9 @@ def _patch_engine_extras(
         payload["extras"] = extras
 
 
-def _write_template_atomically(target: Path, payload: dict[str, Any]) -> None:
+def _write_template_atomically(
+    target: Path, payload: dict[str, Any], *, create: bool = False
+) -> None:
     content = (
         json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
         if target.suffix == ".json"
@@ -169,12 +185,92 @@ def _write_template_atomically(target: Path, payload: dict[str, Any]) -> None:
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        if target.exists():
-            temporary.chmod(S_IMODE(target.stat().st_mode))
-        temporary.replace(target)
+        if create:
+            os.link(temporary, target)
+        else:
+            if target.exists():
+                temporary.chmod(S_IMODE(target.stat().st_mode))
+            temporary.replace(target)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _validate_template_path(target: Path, template_service: TemplateService) -> None:
+    user_dir = template_service.user_templates_dir
+    if user_dir is None:
+        raise ImageLibraryError("USER_TEMPLATES_DIR is not configured.")
+    if (
+        target.is_symlink()
+        or not target.parent.resolve().is_relative_to(user_dir.resolve())
+        or target.resolve().is_relative_to(template_service.templates_dir.resolve())
+    ):
+        raise TemplateUpdateInvalid("The template must be editable inside the user templates directory.")
+
+
+def _read_template_yaml(content: bytes) -> dict[str, Any]:
+    if len(content) > MAX_TEMPLATE_YAML_BYTES:
+        raise TemplateUpdateInvalid("Template YAML files must be 256 KiB or smaller.")
+    try:
+        payload = yaml.safe_load(content)
+    except (yaml.YAMLError, RecursionError, ValueError) as exc:
+        raise TemplateUpdateInvalid("Invalid template YAML. Upload a single YAML document.") from exc
+    if not isinstance(payload, dict):
+        raise TemplateUpdateInvalid("Template YAML must contain a single object.")
+
+    # Library responses include template values as JSON. Bound the expanded
+    # structure as well as the file size, since YAML anchors can share nodes.
+    pending = [(payload, 0)]
+    remaining = 10_000
+    while pending:
+        value, depth = pending.pop()
+        remaining -= 1
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise TemplateUpdateInvalid("Template YAML keys must be strings.")
+            children = value.values()
+        elif isinstance(value, list):
+            children = value
+        else:
+            if (
+                not isinstance(value, (str, int, float, bool, type(None)))
+                or isinstance(value, float) and not math.isfinite(value)
+            ):
+                raise TemplateUpdateInvalid("Template YAML values must be JSON-compatible.")
+            continue
+        if depth >= 32 or len(children) + len(pending) > remaining:
+            raise TemplateUpdateInvalid("Template YAML contains too much nested data.")
+        pending.extend((child, depth + 1) for child in children)
+    return payload
+
+
+def _validate_new_template(
+    service: TemplateService, template_type: str, target: Path, payload: dict[str, Any]
+) -> TemplateDefinition:
+    for field in ("name", "description", "icon_type", "console_type"):
+        if field in payload and not isinstance(payload[field], str):
+            raise TemplateUpdateInvalid(f"{field} must be a string.")
+        if field in payload and field != "description" and not payload[field].strip():
+            raise TemplateUpdateInvalid(f"{field} must not be blank.")
+    if "extras" in payload and not isinstance(payload["extras"], dict):
+        raise TemplateUpdateInvalid("extras must be an object.")
+
+    for field in _TEMPLATE_INT_FIELDS:
+        if field in payload and (
+            isinstance(payload[field], bool) or not isinstance(payload[field], (int, str))
+        ):
+            raise TemplateUpdateInvalid(f"{field} must be an integer.")
+    try:
+        template = service._definition_from_payload(payload, target, template_type, user=True)
+        validate_console_mode_for_type(template_type, template.console_type)
+    except (TemplateError, ValueError, TypeError) as exc:
+        raise TemplateUpdateInvalid(str(exc)) from exc
+
+    for field in _TEMPLATE_INT_FIELDS:
+        minimum = 0 if field == "cpulimit" else 1
+        if getattr(template, field) < minimum:
+            raise TemplateUpdateInvalid(f"{field} must be an integer of at least {minimum}.")
+    return template
 
 
 def _patched_template_payload(
@@ -410,39 +506,40 @@ class ImageLibraryService:
             )
         return images
 
-    def _scan_references(self) -> dict[str, list[dict[str, Any]]]:
-        """Map image name -> referencing labs (from lab.json nodes)."""
-        references: dict[str, list[dict[str, Any]]] = {}
+    def _iter_lab_nodes(self) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
         if not self.labs_dir.exists():
-            return references
+            return
         for lab_file in sorted(self.labs_dir.rglob("*.json")):
             try:
                 data = json.loads(lab_file.read_text())
-            except (OSError, json.JSONDecodeError):
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict):
                 continue
             nodes = data.get("nodes")
             if not isinstance(nodes, dict):
                 continue
-            try:
-                lab_path = f"/{lab_file.relative_to(self.labs_dir).as_posix()}"
-            except ValueError:
-                continue
-            lab_name = str((data.get("meta") or {}).get("name") or lab_file.stem)
+            lab_path = f"/{lab_file.relative_to(self.labs_dir).as_posix()}"
+            metadata = data.get("meta")
+            lab_name = metadata.get("name") if isinstance(metadata, dict) else None
             for node in nodes.values():
                 if not isinstance(node, dict):
                     continue
-                image_name = str(node.get("image") or "").strip()
-                if not image_name:
-                    continue
-                references.setdefault(image_name, []).append(
-                    {
-                        "lab_path": lab_path,
-                        "lab": lab_file.name,
-                        "lab_name": lab_name,
-                        "node": str(node.get("name") or node.get("id") or ""),
-                        "template": str(node.get("template") or ""),
-                    }
-                )
+                yield node, {
+                    "lab_path": lab_path,
+                    "lab": lab_file.name,
+                    "lab_name": str(lab_name or lab_file.stem),
+                    "node": str(node.get("name") or node.get("id") or ""),
+                    "template": str(node.get("template") or ""),
+                }
+
+    def _scan_references(self) -> dict[str, list[dict[str, Any]]]:
+        """Map image name to its references in saved labs."""
+        references: dict[str, list[dict[str, Any]]] = {}
+        for node, reference in self._iter_lab_nodes():
+            image_name = str(node.get("image") or "").strip()
+            if image_name:
+                references.setdefault(image_name, []).append(reference)
         return references
 
     @staticmethod
@@ -463,6 +560,7 @@ class ImageLibraryService:
         templates: list[dict[str, Any]] = []
         for template in template_service._load_templates():
             entry = template.as_response()
+            entry["source"] = template.source
             matched = [image for image in images if self._template_matches_image(entry, image)]
             entry["images"] = [
                 {
@@ -489,8 +587,57 @@ class ImageLibraryService:
         }
 
     # ------------------------------------------------------------------
-    # Template edits
+    # Template management
     # ------------------------------------------------------------------
+    def create_template(
+        self, template_type: str, key: str, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        key = key.strip()
+        if not _TEMPLATE_KEY.fullmatch(key):
+            raise TemplateUpdateInvalid(
+                "Template keys must start with a letter or number and use up to 120 letters, numbers, dots, hyphens or underscores."
+            )
+        template_service = TemplateService()
+        try:
+            template_type = template_service._normalize_type(template_type)
+        except TemplateError as exc:
+            raise TemplateUpdateInvalid(str(exc)) from exc
+        if payload.get("kind") == "paired":
+            raise TemplateUpdateInvalid("Upload a standalone QEMU, Docker, IOL or Dynamips template.")
+        user_dir = template_service.user_templates_dir
+        if user_dir is None:
+            raise ImageLibraryError("USER_TEMPLATES_DIR is not configured.")
+        target = user_dir / template_type / f"{key}.yml"
+        payload = {**payload, "type": template_type}
+
+        with _template_edit_lock:
+            _validate_template_path(target, template_service)
+            if target.exists() or any(
+                template.key == key and template.type == template_type
+                for template in template_service._load_templates()
+            ):
+                raise TemplateConflict(f"Template {key} ({template_type}) already exists.")
+            validated = _validate_new_template(template_service, template_type, target, payload)
+            try:
+                _write_template_atomically(target, payload, create=True)
+            except FileExistsError as exc:
+                raise TemplateConflict(f"Template {key} ({template_type}) already exists.") from exc
+            except (OSError, ValueError, yaml.YAMLError) as exc:
+                raise ImageLibraryError("Failed to write the template.") from exc
+            return {**validated.as_response(), "source": validated.source}
+
+    def upload_template(self, filename: str, content: bytes) -> dict[str, Any]:
+        path = Path(filename)
+        if path.suffix.lower() not in {".yml", ".yaml"} or any(
+            character in filename for character in ("/", "\\", "\0")
+        ):
+            raise TemplateUpdateInvalid("Choose a template file ending in .yml or .yaml.")
+        payload = _read_template_yaml(content)
+        template_type = payload.get("type") or payload.get("kind")
+        if not isinstance(template_type, str) or not template_type.strip():
+            raise TemplateUpdateInvalid("Template YAML must declare a template type.")
+        return self.create_template(template_type, path.stem, payload)
+
     def update_template(
         self, template_type: str, key: str, updates: dict[str, Any]
     ) -> dict[str, Any]:
@@ -498,7 +645,7 @@ class ImageLibraryService:
         with _template_edit_lock:
             template_service = TemplateService()
             template = template_service.get_template(template_type, key)
-            if template.paired_parent is not None:
+            if template.paired_parent is not None or template.raw.get("kind") == "paired":
                 raise TemplateUpdateInvalid(
                     "Paired-template children are managed through their parent template."
                 )
@@ -522,8 +669,7 @@ class ImageLibraryService:
                 inherited_aliases = template.image_aliases
                 if "image_aliases" not in updates:
                     payload.pop("image_aliases", None)
-            if target.is_symlink() or not target.parent.resolve().is_relative_to(user_dir.resolve()):
-                raise TemplateUpdateInvalid("The template must be editable inside the user templates directory.")
+            _validate_template_path(target, template_service)
 
             try:
                 validated = template_service._definition_from_payload(
@@ -538,6 +684,35 @@ class ImageLibraryService:
             except (OSError, ValueError, yaml.YAMLError) as exc:
                 raise ImageLibraryError(f"Failed to write template: {exc}") from exc
             return validated.as_response()
+
+    def delete_template(self, template_type: str, key: str) -> dict[str, Any]:
+        with _template_edit_lock:
+            template_service = TemplateService()
+            template = template_service.get_template(template_type, key)
+            if template.paired_parent is not None or template.raw.get("kind") == "paired":
+                raise TemplateConflict("Paired-template children are managed through their parent template.")
+            target = template.user_template_path
+            if target is None:
+                raise TemplateConflict("Shipped templates cannot be deleted. You can remove a local override.")
+            _validate_template_path(target, template_service)
+            references = [
+                reference
+                for node, reference in self._iter_lab_nodes()
+                if reference["template"] == key
+                and str(node.get("type") or template.type).strip().lower() == template.type
+            ]
+            if references:
+                raise TemplateReferenced(key, references)
+            try:
+                target.unlink()
+            except OSError as exc:
+                raise ImageLibraryError("Failed to remove the template.") from exc
+            return {
+                "type": template.type,
+                "key": key,
+                "name": template.name,
+                "reverted": template.source == "override",
+            }
 
     # ------------------------------------------------------------------
     # Image deletion

@@ -10,15 +10,18 @@ Admin-gated endpoints behind the Library nav entry:
   sha256, mtime, referencing labs, and the templates resolving to each image.
 * ``POST /api/library/images/{t}/{n}/verify`` — force sha256 recompute.
 * ``DELETE /api/library/images/{t}/{n}``  — guarded by lab references.
-* ``PATCH /api/library/templates/{t}/{k}` — persist editable fields (edits
+* ``PATCH /api/library/templates/{t}/{k}`` — persist editable fields (edits
   to builtin templates are shadowed under USER_TEMPLATES_DIR).
+* ``POST /api/library/templates`` and ``POST /api/library/templates/upload``
+  — create a user template from a form or a YAML file.
+* ``DELETE /api/library/templates/{t}/{k}`` — remove an unused user template.
 """
 
 from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, UploadFile
 from pydantic import BaseModel, Field
 from typing import Any, Literal
 
@@ -27,10 +30,13 @@ from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services import audit_service
 from app.services.image_library_service import (
+    MAX_TEMPLATE_YAML_BYTES,
     ImageLibraryError,
     ImageLibraryService,
     ImageNotFound,
     ImageReferenced,
+    TemplateConflict,
+    TemplateReferenced,
     TemplateUpdateInvalid,
     editable_template_extras_schema,
 )
@@ -83,6 +89,12 @@ class TemplateEditBody(BaseModel):
     extras: dict[str, Any] | None = None
 
 
+class TemplateCreateBody(TemplateEditBody):
+    key: str
+    type: str
+    name: str = Field(min_length=1)
+
+
 @router.get("/templates")
 async def list_library_templates(
     current_user: UserRead = Depends(get_current_admin),
@@ -97,6 +109,7 @@ async def list_library_templates(
             {
                 "type": template["type"],
                 "key": template["id"],
+                "source": template["source"],
                 "name": template["name"],
                 "description": template["description"],
                 "icon_type": template["icon_type"],
@@ -116,6 +129,54 @@ async def list_library_templates(
             }
         )
     return _ok("Library templates listed.", {"templates": templates})
+
+
+async def _template_created(template: dict[str, Any], actor: str, *, via: str) -> dict:
+    await audit_service.record(
+        "template.create",
+        actor=actor,
+        target_type="template",
+        target_id=f"{template['type']}/{template['id']}",
+        target_name=template["name"],
+        detail={"template_type": template["type"], "via": via},
+    )
+    return _ok("Template created.", template)
+
+
+@router.post("/templates")
+async def create_library_template(
+    body: TemplateCreateBody,
+    current_user: UserRead = Depends(get_current_admin),
+):
+    service = ImageLibraryService()
+    payload = body.model_dump(exclude_unset=True, exclude={"type", "key"})
+    try:
+        created = service.create_template(body.type, body.key, payload)
+    except TemplateUpdateInvalid as exc:
+        return _fail(str(exc), code=422)
+    except TemplateConflict as exc:
+        return _fail(str(exc), code=409)
+    except ImageLibraryError as exc:
+        return _fail(str(exc))
+    return await _template_created(created, current_user.username, via="form")
+
+
+@router.post("/templates/upload")
+async def upload_library_template(
+    file: UploadFile = File(...),
+    current_user: UserRead = Depends(get_current_admin),
+):
+    service = ImageLibraryService()
+    try:
+        content = await file.read(MAX_TEMPLATE_YAML_BYTES + 1)
+        created = service.upload_template(file.filename or "", content)
+    except TemplateUpdateInvalid as exc:
+        return _fail(str(exc), code=422)
+    except TemplateConflict as exc:
+        return _fail(str(exc), code=409)
+    except ImageLibraryError as exc:
+        return _fail(str(exc))
+    return await _template_created(created, current_user.username, via="yaml")
 
 
 @router.get("/images")
@@ -253,3 +314,33 @@ async def edit_library_template(
             detail=detail,
         )
     return _ok("Template updated.", updated)
+
+
+@router.delete("/templates/{template_type}/{template_key}")
+async def delete_library_template(
+    template_type: str,
+    template_key: str,
+    current_user: UserRead = Depends(get_current_admin),
+):
+    service = ImageLibraryService()
+    try:
+        removed = service.delete_template(template_type, template_key)
+    except TemplateReferenced as exc:
+        return _fail(str(exc), code=409, data={"references": exc.references})
+    except TemplateConflict as exc:
+        return _fail(str(exc), code=409)
+    except TemplateUpdateInvalid as exc:
+        return _fail(str(exc), code=422)
+    except ImageLibraryError as exc:
+        return _fail(str(exc))
+    except TemplateError as exc:
+        return _fail(str(exc), code=404)
+    await audit_service.record(
+        "template.delete",
+        actor=current_user.username,
+        target_type="template",
+        target_id=f"{removed['type']}/{removed['key']}",
+        target_name=removed["name"],
+        detail={"template_type": removed["type"], "reverted_override": removed["reverted"]},
+    )
+    return _ok("Template override removed." if removed["reverted"] else "Template deleted.", removed)

@@ -446,3 +446,148 @@ async def test_patch_missing_template_returns_404(client, lib_settings):
 
     assert response.status_code == 200
     assert response.json()["code"] == 404
+
+
+@pytest.mark.asyncio
+async def test_create_and_delete_custom_template_without_removing_its_image(
+    client, lib_settings, audit_events
+):
+    image = lib_settings.IMAGES_DIR / "qemu" / "custom-os-1"
+    image.mkdir(parents=True)
+    disk = image / "virtioa.qcow2"
+    disk.touch()
+    payload = {
+        "type": "qemu",
+        "key": "custom.os",
+        "name": "Custom appliance",
+        "cpu": 2,
+        "image_aliases": ["custom-os-*"],
+    }
+    created = (await client.post("/api/library/templates", json=payload)).json()
+    assert created["code"] == 200
+    assert created["data"]["source"] == "user"
+    assert created["data"]["cpu"] == 2
+    assert set(TemplateService().list_images("qemu", "custom.os")) == {"custom-os-1"}
+    path = lib_settings.USER_TEMPLATES_DIR / "qemu" / "custom.os.yml"
+    before_duplicate = path.read_bytes()
+    duplicate = await client.post("/api/library/templates", json={**payload, "name": "Duplicate"})
+    assert duplicate.json()["code"] == 409
+    assert path.read_bytes() == before_duplicate
+
+    endpoint = "/api/library/templates/qemu/custom.os"
+    assert (await client.patch(endpoint, json={"ram": 3072})).json()["code"] == 200
+    listed = (await client.get("/api/library/templates")).json()["data"]["templates"]
+    assert listed[0]["source"] == "user"
+    assert listed[0]["ram"] == 3072
+    assert [entry["name"] for entry in listed[0]["images"]] == ["custom-os-1"]
+
+    assert (await client.delete(endpoint)).json()["code"] == 200
+    assert not path.exists()
+    assert disk.is_file()
+    assert (await client.delete(endpoint)).json()["code"] == 404
+    assert _audited(audit_events, "template.create")[0].detail["via"] == "form"
+    assert _audited(audit_events, "template.delete")[0].target_id == "qemu/custom.os"
+
+
+@pytest.mark.asyncio
+async def test_upload_yaml_reads_type_and_key_and_preserves_custom_settings(
+    client, lib_settings, audit_events
+):
+    yaml_text = (
+        "type: qemu\nname: Upload demo\nram: 2048\n"
+        "image_aliases: [upload-demo-*]\n"
+        "interface_naming: {explicit: [management, uplink]}\n"
+        "extras: {disk_bus: sata, appliance_setting: keep-me}\n"
+    )
+    files = {"file": ("upload-demo.yaml", yaml_text, "application/yaml")}
+    response = (await client.post("/api/library/templates/upload", files=files)).json()
+    assert response["code"] == 200
+    assert response["data"]["id"] == "upload-demo"
+    template = TemplateService().get_template("qemu", "upload-demo")
+    assert template.extras == {"disk_bus": "sata", "appliance_setting": "keep-me"}
+    assert template.interface_naming == {"explicit": ["management", "uplink"]}
+    assert template.image_aliases == ["upload-demo-*"]
+    assert (lib_settings.USER_TEMPLATES_DIR / "qemu" / "upload-demo.yml").is_file()
+    assert (await client.post("/api/library/templates/upload", files=files)).json()["code"] == 409
+    assert _audited(audit_events, "template.create")[0].detail["via"] == "yaml"
+
+
+@pytest.mark.parametrize(
+    ("filename", "yaml_text"),
+    [
+        ("../outside.yml", "type: qemu"),
+        ("wrong.txt", "type: qemu"),
+        ("bad.yml", "type: ["),
+        ("array.yml", "- type: qemu"),
+        ("missing-type.yml", "name: No type"),
+        ("bad-console.yml", "type: iol\nconsole_type: vnc"),
+        ("bad-interfaces.yml", "type: qemu\ninterface_naming: {format: no-placeholder}"),
+        ("recursive.yml", "type: qemu\nextras: &self {loop: *self}"),
+        ("large.yml", "#" * (256 * 1024 + 1)),
+    ],
+)
+@pytest.mark.asyncio
+async def test_rejects_invalid_template_upload_without_writing_files(
+    client, lib_settings, filename, yaml_text
+):
+    response = await client.post(
+        "/api/library/templates/upload",
+        files={"file": (filename, yaml_text, "application/yaml")},
+    )
+    assert response.json()["code"] == 422
+    assert list(lib_settings.USER_TEMPLATES_DIR.rglob("*.yml")) == []
+
+
+@pytest.mark.asyncio
+async def test_create_and_upload_do_not_replace_shipped_templates(client, lib_settings):
+    _seed_veos(lib_settings)
+    endpoint = "/api/library/templates"
+    form = {"type": "qemu", "key": "veos", "name": "Replacement"}
+    files = {"file": ("veos.yml", "type: qemu\nname: Replacement\n")}
+    assert (await client.post(endpoint, json=form)).json()["code"] == 409
+    assert (await client.post(f"{endpoint}/upload", files=files)).json()["code"] == 409
+    assert list(lib_settings.USER_TEMPLATES_DIR.rglob("*.yml")) == []
+    assert TemplateService().get_template("qemu", "veos").name == "vEOS"
+
+
+@pytest.mark.asyncio
+async def test_delete_blocks_a_referenced_custom_template_without_requiring_an_image(
+    client, lib_settings, audit_events
+):
+    path = lib_settings.USER_TEMPLATES_DIR / "custom.yml"
+    path.write_text("type: qemu\nname: Custom\n")
+    nested = lib_settings.LABS_DIR / "nested"
+    nested.mkdir()
+    (nested / "saved.json").write_text(json.dumps({
+        "meta": {"name": "Saved lab"},
+        "nodes": {"1": {"id": 1, "name": "Edge", "type": "qemu", "template": "custom"}},
+    }))
+    response = (await client.delete("/api/library/templates/qemu/custom")).json()
+    assert response["code"] == 409
+    assert response["data"]["references"][0]["lab_path"] == "/nested/saved.json"
+    assert path.exists()
+    assert _audited(audit_events, "template.delete") == []
+
+
+@pytest.mark.asyncio
+async def test_remove_override_reveals_builtin_and_blocks_deleting_shipped_template(
+    client, lib_settings, audit_events
+):
+    _seed_veos(lib_settings)
+    path = lib_settings.USER_TEMPLATES_DIR / "qemu" / "veos.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"name": "Operator settings", "ram": 4096}))
+    endpoint = "/api/library/templates/qemu/veos"
+
+    inventory = (await client.get("/api/library/templates")).json()["data"]["templates"]
+    assert next(row for row in inventory if row["key"] == "veos")["source"] == "override"
+    removed = (await client.delete(endpoint)).json()
+    assert removed["code"] == 200
+    assert removed["data"]["reverted"] is True
+    assert not path.exists()
+    assert (await client.delete(endpoint)).json()["code"] == 409
+    inventory = (await client.get("/api/library/templates")).json()["data"]["templates"]
+    veos = next(row for row in inventory if row["key"] == "veos")
+    assert veos["source"] == "builtin"
+    assert veos["name"] == "vEOS"
+    assert _audited(audit_events, "template.delete")[0].detail["reverted_override"] is True

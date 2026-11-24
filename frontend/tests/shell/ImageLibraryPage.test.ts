@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import LibraryPage from '../../src/routes/(shell)/library/images/+page.svelte';
@@ -17,6 +17,7 @@ const TEMPLATES: LibraryTemplate[] = [
   {
     type: 'qemu',
     key: 'veos',
+    source: 'builtin',
     name: 'vEOS-QEMU',
     description: 'Arista vEOS',
     icon_type: 'router',
@@ -45,6 +46,7 @@ const TEMPLATES: LibraryTemplate[] = [
   {
     type: 'qemu',
     key: 'vqfx',
+    source: 'user',
     name: 'vQFX',
     description: '',
     icon_type: 'router',
@@ -188,6 +190,139 @@ describe('Images & Templates library page (#264, live)', () => {
     });
     expect(screen.getByTestId('template-card-veos')).toBeInTheDocument();
     expect(screen.queryByTestId('template-card-vqfx')).not.toBeInTheDocument();
+  });
+
+  it('creates a template and refreshes templates and image associations', async () => {
+    const templates = [...TEMPLATES];
+    mockApi(templates);
+    const readApi = apiRequest.getMockImplementation()!;
+    apiRequest.mockImplementation(async (path, options) => {
+      if (path === '/library/templates' && options?.method === 'POST') {
+        templates.push({
+          ...TEMPLATES[1],
+          ...options.body,
+          images: [],
+        });
+      }
+      return readApi(path, options);
+    });
+
+    render(LibraryPage);
+    await screen.findByTestId('template-card-veos');
+    await fireEvent.click(screen.getByRole('button', { name: 'Add template' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Create template' }));
+    const create = dialog.getByRole('button', { name: 'Create template' });
+
+    await fireEvent.change(dialog.getByLabelText('Template type'), { target: { value: 'iol' } });
+    await fireEvent.input(dialog.getByLabelText('Display name'), { target: { value: 'Custom IOL' } });
+    await fireEvent.input(dialog.getByLabelText('Template key'), { target: { value: '../custom' } });
+    expect(create).toBeDisabled();
+    await fireEvent.input(dialog.getByLabelText('Template key'), { target: { value: 'custom-iol' } });
+    await fireEvent.input(dialog.getByLabelText('Description'), { target: { value: 'Custom router' } });
+    await fireEvent.input(dialog.getByLabelText('Image aliases'), { target: { value: 'custom-iol-*\n alternate-* ' } });
+    await fireEvent.click(create);
+
+    expect(await screen.findByTestId('template-card-custom-iol')).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(apiRequest).toHaveBeenCalledWith('/library/templates', {
+      method: 'POST',
+      body: {
+        type: 'iol',
+        key: 'custom-iol',
+        name: 'Custom IOL',
+        description: 'Custom router',
+        image_aliases: ['custom-iol-*', 'alternate-*'],
+      },
+      suppressToast: true,
+    });
+    expect(apiRequest.mock.calls.filter(([path]) => path === '/library/images')).toHaveLength(2);
+  });
+
+  it('uploads a YAML file as multipart and keeps the file selected after a validation error', async () => {
+    const readApi = apiRequest.getMockImplementation()!;
+    const upload = vi.fn()
+      .mockRejectedValueOnce(new Error('YAML must define a template type.'))
+      .mockResolvedValueOnce({ code: 200, data: {} });
+    apiRequest.mockImplementation((path, options) =>
+      path === '/library/templates/upload' ? upload(options.body) : readApi(path, options)
+    );
+
+    render(LibraryPage);
+    await screen.findByTestId('template-card-veos');
+    await fireEvent.click(screen.getByRole('button', { name: 'Upload YAML' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Upload YAML' }));
+    const confirm = dialog.getByRole('button', { name: 'Upload YAML' });
+    expect(confirm).toBeDisabled();
+    const file = new File(['type: qemu\nname: Example\n'], 'example.yaml', { type: 'application/yaml' });
+    await fireEvent.change(dialog.getByLabelText('Template YAML file'), { target: { files: [file] } });
+    await fireEvent.click(confirm);
+
+    expect(await dialog.findByRole('alert')).toHaveTextContent('YAML must define a template type.');
+    expect((upload.mock.calls[0][0] as FormData).get('file')).toBe(file);
+    expect(confirm).toBeEnabled();
+    await fireEvent.click(confirm);
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect((upload.mock.calls[1][0] as FormData).get('file')).toBe(file);
+  });
+
+  it('confirms removal of custom templates and respects a blocking lab reference', async () => {
+    const templates = [...TEMPLATES];
+    mockApi(templates);
+    const readApi = apiRequest.getMockImplementation()!;
+    const deletion = vi.fn()
+      .mockRejectedValueOnce(new Error('Template is referenced by a lab node.'))
+      .mockImplementationOnce(async () => {
+        templates.pop();
+        return { code: 200, data: {} };
+      });
+    apiRequest.mockImplementation((path, options) =>
+      path === '/library/templates/qemu/vqfx' && options?.method === 'DELETE'
+        ? deletion()
+        : readApi(path, options)
+    );
+
+    render(LibraryPage);
+    await screen.findByTestId('template-card-veos');
+    expect(screen.queryByRole('button', { name: 'Delete vEOS-QEMU' })).not.toBeInTheDocument();
+
+    const remove = screen.getByRole('button', { name: 'Delete vQFX' });
+    await fireEvent.click(remove);
+    await fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(deletion).not.toHaveBeenCalled();
+
+    await fireEvent.click(remove);
+    const dialog = within(screen.getByRole('dialog', { name: 'Delete template for vQFX?' }));
+    await fireEvent.click(dialog.getByRole('button', { name: 'Delete template' }));
+    expect(await dialog.findByRole('alert')).toHaveTextContent('Template is referenced by a lab node.');
+    expect(screen.getByTestId('template-card-vqfx')).toBeInTheDocument();
+
+    await fireEvent.click(dialog.getByRole('button', { name: 'Delete template' }));
+    await waitFor(() => expect(screen.queryByTestId('template-card-vqfx')).not.toBeInTheDocument());
+    expect(apiRequest).toHaveBeenCalledWith('/library/templates/qemu/vqfx', {
+      method: 'DELETE',
+      suppressToast: true,
+    });
+  });
+
+  it('reverts a built-in override and leaves the shipped template in the library', async () => {
+    const templates: LibraryTemplate[] = [{ ...TEMPLATES[0], source: 'override' }];
+    mockApi(templates);
+    const readApi = apiRequest.getMockImplementation()!;
+    apiRequest.mockImplementation((path, options) => {
+      if (path === '/library/templates/qemu/veos' && options?.method === 'DELETE') {
+        templates[0] = TEMPLATES[0];
+      }
+      return readApi(path, options);
+    });
+
+    render(LibraryPage);
+    await fireEvent.click(await screen.findByRole('button', { name: 'Revert vEOS-QEMU' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Revert override for vEOS-QEMU?' }));
+    expect(dialog.getByText(/restore the shipped template settings/i)).toBeInTheDocument();
+    await fireEvent.click(dialog.getByRole('button', { name: 'Revert override' }));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Revert vEOS-QEMU' })).not.toBeInTheDocument());
+    expect(screen.getByTestId('template-card-veos')).toBeInTheDocument();
   });
 
   it('edits a template through the dialog and PATCHes the backend', async () => {

@@ -1024,7 +1024,7 @@ class TemplateDefinition:
     interface_naming: dict[str, Any] | None = None
     capabilities: dict[str, Any] = field(default_factory=dict)
     image_aliases: list[str] = field(default_factory=list)
-    inherited_image_aliases: list[str] = field(default_factory=list)
+    inherited_image_aliases: list[str] | None = None
     user_template_path: Path | None = None
     # #206 — when this entry was synthesized from a paired-template child block
     # (vs loaded from a per-type YAML), ``paired_parent`` is the originating
@@ -1040,6 +1040,12 @@ class TemplateDefinition:
     @property
     def icon(self) -> str:
         return self.custom_icon or _icon_filename_for(self.icon_type)
+
+    @property
+    def source(self) -> str:
+        if self.user_template_path is None:
+            return "builtin"
+        return "override" if self.inherited_image_aliases is not None else "user"
 
     def as_response(self) -> dict[str, Any]:
         return {
@@ -1060,6 +1066,7 @@ class TemplateDefinition:
             "capabilities": dict(self.capabilities),
             "interface_naming": self.interface_naming,
             "image_aliases": list(self.image_aliases),
+            "paired_parent": self.paired_parent,
         }
 
 
@@ -1440,11 +1447,11 @@ class TemplateService:
         resolved_console_type = str(
             payload.get("console_type") or self._default_console_type(template_type)
         )
-        inherited = list(inherited_image_aliases or [])
+        inherited = list(inherited_image_aliases) if inherited_image_aliases is not None else None
         aliases = (
             _validate_image_aliases(payload["image_aliases"], source=source)
             if "image_aliases" in payload
-            else list(inherited)
+            else list(inherited or [])
         )
         return TemplateDefinition(
             key=path.stem,

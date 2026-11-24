@@ -9,12 +9,13 @@
 -->
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Check, Copy, Pencil, RefreshCw, ShieldAlert, Trash2 } from 'lucide-svelte';
+  import { Check, Copy, Pencil, Plus, RefreshCw, ShieldAlert, Trash2, Upload } from 'lucide-svelte';
   import PageHeader from '$lib/components/shell/PageHeader.svelte';
+  import TemplateActionDialog from '$lib/components/manage/TemplateActionDialog.svelte';
   import TemplateDialog from '$lib/components/manage/TemplateDialog.svelte';
   import { apiRequest } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
-  import type { LibraryImage, LibraryTemplate, LibraryTemplateEdit } from '$lib/types';
+  import type { LibraryImage, LibraryTemplate, LibraryTemplateCreate, LibraryTemplateEdit, LibraryTemplateType } from '$lib/types';
 
   let tab: 'templates' | 'images' = 'templates';
   let templates: LibraryTemplate[] = [];
@@ -26,22 +27,28 @@
   let copiedSha: string | null = null;
   let deleteTarget: LibraryImage | null = null;
   let dialogTemplate: LibraryTemplate | null = null;
+  type TemplateAction = { kind: 'create' | 'upload' } | { kind: 'remove'; template: LibraryTemplate };
+  let templateAction: TemplateAction | null = null;
   let savingTemplate = false;
   let templateSaveError = '';
+  let refreshGeneration = 0;
 
-  const TYPE_OPTIONS = ['qemu', 'docker', 'iol', 'dynamips'];
+  const TYPE_OPTIONS: readonly LibraryTemplateType[] = ['qemu', 'docker', 'iol', 'dynamips'];
 
   async function refresh() {
+    const generation = ++refreshGeneration;
     loading = true;
     try {
       const [templateData, imageData] = await Promise.all([
         apiRequest<{ templates: LibraryTemplate[] }>('/library/templates'),
         apiRequest<{ images: LibraryImage[] }>('/library/images')
       ]);
-      templates = templateData.data.templates;
-      images = imageData.data.images;
+      if (generation === refreshGeneration) {
+        templates = templateData.data.templates;
+        images = imageData.data.images;
+      }
     } finally {
-      loading = false;
+      if (generation === refreshGeneration) loading = false;
     }
   }
 
@@ -141,21 +148,35 @@
     }
   }
 
-  async function handleTemplateSave(event: CustomEvent<{ template: LibraryTemplate; edit: LibraryTemplateEdit }>) {
-    const { template, edit } = event.detail;
-    if (savingTemplate || !Object.keys(edit).length) return;
+  function openTemplateAction(action: TemplateAction) {
+    templateSaveError = '';
+    templateAction = action;
+  }
+
+  async function mutateTemplate(
+    path: string,
+    method: 'POST' | 'PATCH' | 'DELETE',
+    successMessage: string,
+    body?: LibraryTemplateEdit | LibraryTemplateCreate | FormData,
+  ) {
+    if (savingTemplate) return;
     savingTemplate = true;
     templateSaveError = '';
     try {
-      await apiRequest(`/library/templates/${template.type}/${encodeURIComponent(template.key)}`, {
-        method: 'PATCH',
-        body: edit,
-        suppressToast: true
+      await apiRequest(path, {
+        method,
+        ...(body === undefined ? {} : { body }),
+        suppressToast: true,
       });
-      toastStore.push(`Template ${template.key} updated.`, 'success');
+      toastStore.push(successMessage, 'success');
       dialogTemplate = null;
+      templateAction = null;
+      if (method === 'POST') {
+        search = '';
+        typeFilter = '';
+      }
     } catch (error) {
-      templateSaveError = error instanceof Error ? error.message : 'Unable to save the template.';
+      templateSaveError = error instanceof Error ? error.message : 'Unable to complete the template action.';
       return;
     } finally {
       savingTemplate = false;
@@ -165,6 +186,35 @@
     } catch {
       /* toasted */
     }
+  }
+
+  function templatePath(template: LibraryTemplate): string {
+    return `/library/templates/${template.type}/${encodeURIComponent(template.key)}`;
+  }
+
+  function handleTemplateSave(event: CustomEvent<{ template: LibraryTemplate; edit: LibraryTemplateEdit }>) {
+    const { template, edit } = event.detail;
+    if (Object.keys(edit).length) {
+      void mutateTemplate(templatePath(template), 'PATCH', `Template ${template.key} updated.`, edit);
+    }
+  }
+
+  function handleTemplateCreate(event: CustomEvent<LibraryTemplateCreate>) {
+    void mutateTemplate('/library/templates', 'POST', `Template ${event.detail.key} created.`, event.detail);
+  }
+
+  function handleTemplateUpload(event: CustomEvent<File>) {
+    const body = new FormData();
+    body.append('file', event.detail);
+    void mutateTemplate('/library/templates/upload', 'POST', 'Template uploaded.', body);
+  }
+
+  function handleTemplateRemove(event: CustomEvent<LibraryTemplate>) {
+    const template = event.detail;
+    const message = template.source === 'override'
+      ? `Override for template ${template.key} removed.`
+      : `Template ${template.key} deleted.`;
+    void mutateTemplate(templatePath(template), 'DELETE', message);
   }
 
   onMount(() => {
@@ -179,7 +229,23 @@
         Library
       </span>
       <span slot="title">Images &amp; Templates</span>
-      <span slot="actions">
+      <span slot="actions" class="flex flex-wrap gap-2">
+        {#if tab === 'templates'}
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.05em] text-white transition hover:bg-blue-500"
+            on:click={() => openTemplateAction({ kind: 'create' })}
+          >
+            <Plus class="h-3 w-3" />
+            Add template
+          </button>
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+            on:click={() => openTemplateAction({ kind: 'upload' })}
+          >
+            <Upload class="h-3 w-3" />
+            Upload YAML
+          </button>
+        {/if}
         <button
           class="inline-flex items-center gap-1.5 rounded-md border border-gray-700 px-3 py-2 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
           on:click={() => void refresh()}
@@ -244,17 +310,28 @@
                       </div>
                       <div class="mt-0.5 truncate text-[11px] text-gray-500">{template.description || '—'}</div>
                     </div>
-                    <button
-                      class="shrink-0 rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
-                      on:click={() => {
-                        templateSaveError = '';
-                        dialogTemplate = template;
-                      }}
-                      data-testid={`template-edit-${template.key}`}
-                    >
-                      <Pencil class="mr-1 inline h-3 w-3" />
-                      Edit
-                    </button>
+                    <div class="flex shrink-0 flex-wrap justify-end gap-2 max-sm:max-w-36">
+                      <button
+                        class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-300 transition hover:border-blue-500 hover:text-white"
+                        on:click={() => {
+                          templateSaveError = '';
+                          dialogTemplate = template;
+                        }}
+                        data-testid={`template-edit-${template.key}`}
+                      >
+                        <Pencil class="mr-1 inline h-3 w-3" />
+                        Edit
+                      </button>
+                      {#if template.source === 'user' || template.source === 'override'}
+                        <button
+                          class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-400 transition hover:border-red-500 hover:text-red-300"
+                          on:click={() => openTemplateAction({ kind: 'remove', template })}
+                          aria-label={`${template.source === 'override' ? 'Revert' : 'Delete'} ${template.name}`}
+                        >
+                          {template.source === 'override' ? 'Revert' : 'Delete'}
+                        </button>
+                      {/if}
+                    </div>
                   </div>
                   <div class="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-gray-500">
                     <span>RAM <span class="text-gray-300">{template.ram} MB</span></span>
@@ -403,6 +480,19 @@
     saveError={templateSaveError}
     on:save={handleTemplateSave}
     on:close={() => (dialogTemplate = null)}
+  />
+{/if}
+
+{#if templateAction}
+  <TemplateActionDialog
+    action={templateAction}
+    templateTypes={TYPE_OPTIONS}
+    busy={savingTemplate}
+    error={templateSaveError}
+    on:create={handleTemplateCreate}
+    on:upload={handleTemplateUpload}
+    on:remove={handleTemplateRemove}
+    on:close={() => (templateAction = null)}
   />
 {/if}
 

@@ -407,6 +407,7 @@ function makeLibraryTemplate(overrides: Partial<LibraryTemplate> = {}): LibraryT
   return {
     type: 'qemu',
     key: 'veos',
+    source: 'builtin',
     name: 'vEOS-QEMU',
     description: '',
     icon_type: 'router',

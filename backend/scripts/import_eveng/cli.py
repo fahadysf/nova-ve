@@ -38,6 +38,7 @@ from .manifest import (
     SkippedEntry,
 )
 from .migrate import MigrateOptions, effective_file_mode, run_migration
+from .template_match import DEFAULT_BUILTIN_TEMPLATES_DIR
 from .walker import KIND_DOCKER, MigrationItem, walk_all
 
 DEFAULT_SOURCE = Path("/opt/unetlab")
@@ -87,11 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--templates-dir",
         type=Path,
-        default=Path("/var/lib/nova-ve/templates"),
+        default=Path(os.environ.get("USER_TEMPLATES_DIR") or "/var/lib/nova-ve/templates"),
         help=(
-            "Destination for nova-ve template YAML produced by the "
-            "vendor-adapter pipeline. Pass an empty path or '-' to skip "
-            "template generation. Default: /var/lib/nova-ve/templates."
+            "User template directory to search and to write templates for unmatched "
+            "images. Pass '-' to skip template generation. Defaults to "
+            "USER_TEMPLATES_DIR or /var/lib/nova-ve/templates."
         ),
     )
     parser.add_argument(
@@ -268,6 +269,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             owner=owner,
             dest_root=args.dest,
             templates_dir=templates_dir,
+            builtin_templates_dir=Path(os.environ.get("TEMPLATES_DIR") or DEFAULT_BUILTIN_TEMPLATES_DIR),
             reporter=reporter,
         )
 
