@@ -508,7 +508,28 @@ async def update_lab(
             "message": "Access denied.",
         }
 
-    lab = await lab_service.update_lab(lab, **request.model_dump(exclude_unset=True))
+    update_fields = request.model_dump(exclude_unset=True)
+    # #300: snapshot the fields about to change for the audit trail.
+    before = {field: getattr(lab, field) for field in update_fields if hasattr(lab, field)}
+    lab = await lab_service.update_lab(lab, **update_fields)
+    # A save that changed nothing is not an event worth a row. Description
+    # and body are reported by length — that they changed is the fact.
+    changes = audit_service.field_changes(
+        before, {field: getattr(lab, field) for field in before}
+    )
+    if changes:
+        await audit_service.record(
+            "lab.update",
+            actor=current_user.username,
+            target_type="lab",
+            target_id=lab.path,
+            target_name=lab.name,
+            lab_path=lab.path,
+            lab_name=lab.name,
+            detail={
+                "changes": audit_service.text_lengths(changes, ("description", "body"))
+            },
+        )
     return {
         "code": 200,
         "status": "success",
@@ -2008,7 +2029,8 @@ async def node_telnet(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
         console = NodeRuntimeService().console_info(data, node_id)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
@@ -2038,6 +2060,14 @@ async def node_telnet(
             "message": "Node console is not telnet.",
         }
 
+    await audit_service.record_console_open(
+        actor=current_user.username,
+        lab_data=data,
+        node_id=node_id,
+        lab_path=scoped_path,
+        via="native",
+        protocol="telnet",
+    )
     body = f"telnet://{console['host']}:{console['port']}\n"
     response = PlainTextResponse(body, media_type="application/x-telnet")
     response.headers["Content-Disposition"] = f'attachment; filename="node-{node_id}.telnet"'
@@ -2051,7 +2081,8 @@ async def node_rdp(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
         console = NodeRuntimeService().console_info(data, node_id)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
@@ -2081,6 +2112,14 @@ async def node_rdp(
             "message": "Node console is not RDP.",
         }
 
+    await audit_service.record_console_open(
+        actor=current_user.username,
+        lab_data=data,
+        node_id=node_id,
+        lab_path=scoped_path,
+        via="native",
+        protocol="rdp",
+    )
     body = "\n".join(
         [
             f"full address:s:{console['host']}:{console['port']}",
@@ -2202,6 +2241,17 @@ async def node_external_console(
             "message": "Node console port is not available.",
         }
 
+    # #300: the console is being handed to a client that dials the node
+    # directly — this hand-off is the only moment the server sees it.
+    await audit_service.record_console_open(
+        actor=current_user.username,
+        lab_data=data,
+        node_id=node_id,
+        lab_path=scoped_path,
+        console=mode_normalized,
+        via="external",
+        protocol=console_mode,
+    )
     return {
         "code": 200,
         "status": "success",
@@ -2316,7 +2366,68 @@ async def node_html5(
             "message": str(exc),
         }
 
+    # #300: one request here is one console genuinely opened — the page
+    # never restores tabs on load, and re-opening an open console only
+    # focuses it.
+    await audit_service.record_console_open(
+        actor=current_user.username,
+        lab_data=data,
+        node_id=node_id,
+        lab_path=scoped_path,
+        console=console,
+        via="html5",
+        protocol=console_info["console"],
+    )
     return RedirectResponse(url=html5_url, status_code=307)
+
+
+@router.post("/{lab_path:path}/nodes/{node_id}/console/close")
+async def node_console_close(
+    lab_path: str,
+    node_id: int,
+    console: str = "primary",
+    current_user: UserRead = Depends(get_current_user),
+):
+    """The lab page reports that an in-browser console was closed (#300).
+
+    Closing a tab only unloads an iframe, so nothing else tells the server
+    a console session ended. The report is sent with ``keepalive`` and can
+    arrive while the page is being torn down, so it stays cheap: the scope
+    check is enforced, and the lab is read only to name the node — a lab
+    deleted while its console was open still gets its close recorded.
+    """
+    if console not in ("primary", "second"):
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": f"Unknown console mode {console!r}; expected 'primary' or 'second'.",
+        }
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+    try:
+        data = _read_lab_data(scoped_path)
+    except Exception:  # noqa: BLE001 — naming the node is best-effort
+        data = None
+
+    duration = await audit_service.record_console_close(
+        actor=current_user.username,
+        lab_data=data,
+        node_id=node_id,
+        lab_path=scoped_path,
+        console=console,
+    )
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Console close recorded.",
+        "data": {"duration": duration},
+    }
 
 
 @router.get("/{lab_path:path}/networks")
@@ -2630,6 +2741,7 @@ async def patch_node_interface(
         iface = interfaces[interface_index]
         if not isinstance(iface, dict):
             return {"code": 404, "status": "fail", "message": "Interface does not exist."}
+        before_mac = iface.get("planned_mac")
 
         new_mac = body.get("planned_mac")
         if "planned_mac" in body and new_mac:
@@ -2675,6 +2787,27 @@ async def patch_node_interface(
             "network_id": derived_network_id,
             "live_mac": None,
         }
+
+    # #300: a changed MAC address is a node configuration change. A moved
+    # port is layout, like a moved node, and is not an event.
+    if iface.get("planned_mac") != before_mac:
+        await audit_service.record(
+            "node.update",
+            actor=current_user.username,
+            **audit_service.node_context(
+                data,
+                node_id,
+                scoped_path,
+                detail={
+                    "changes": {
+                        f"{iface.get('name') or f'eth{interface_index}'}.planned_mac": {
+                            "from": before_mac,
+                            "to": iface.get("planned_mac"),
+                        }
+                    }
+                },
+            ),
+        )
 
     await ws_hub.publish(
         normalized,

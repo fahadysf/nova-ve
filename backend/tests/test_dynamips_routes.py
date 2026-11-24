@@ -121,7 +121,7 @@ async def test_calibrate_404_when_image_missing(stub_auth, images_root: Path):
 
 @pytest.mark.asyncio
 async def test_calibrate_success(
-    stub_auth, images_root: Path, monkeypatch: pytest.MonkeyPatch
+    stub_auth, images_root: Path, monkeypatch: pytest.MonkeyPatch, audit_events
 ):
     image = images_root / "c3725-real.image"
     image.write_bytes(b"FAKE")
@@ -154,11 +154,24 @@ async def test_calibrate_success(
     assert body["data"]["platform"] == "c3725"
     assert body["data"]["candidates"] == ["0x60c09320", "0x60c0a000"]
     assert calls["image_path"] == image
+    # #300: a calibration boots a real VM — who asked, and what it found.
+    from app.services.audit_service import AuditEvent
+
+    assert [entry for entry in audit_events if entry.event == "image.calibrate"] == [
+        AuditEvent(
+            event="image.calibrate",
+            actor="test",
+            target_type="image",
+            target_id="c3725-real.image",
+            target_name="c3725-real.image",
+            detail={"source": "dynamips", "idle_pc": "0x60c09320", "seconds": 12},
+        )
+    ]
 
 
 @pytest.mark.asyncio
 async def test_calibrate_502_on_dynamips_error(
-    stub_auth, images_root: Path, monkeypatch: pytest.MonkeyPatch
+    stub_auth, images_root: Path, monkeypatch: pytest.MonkeyPatch, audit_events
 ):
     image = images_root / "c3725-broken.image"
     image.write_bytes(b"FAKE")
@@ -177,3 +190,4 @@ async def test_calibrate_502_on_dynamips_error(
         )
     assert resp.status_code == 502
     assert "hypervisor refused" in resp.json()["detail"]
+    assert [entry for entry in audit_events if entry.event == "image.calibrate"] == []

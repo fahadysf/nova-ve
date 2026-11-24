@@ -12,6 +12,7 @@ import {
   csvCell,
   describeActivity,
   formatActivityTime,
+  formatDuration,
   rangeToEpoch,
   summarizeChanges,
   type ActivityEntry
@@ -50,6 +51,12 @@ const ON_LAB = { target_type: 'lab', target_id: '/lab.json', target_name: 'Lab' 
 const ON_LAN = { target_type: 'network', target_id: '5', target_name: 'Lab LAN' };
 const ON_LINK = { target_type: 'link', target_id: 'lnk_001', target_name: 'R1:eth0 ↔ Lab LAN' };
 const R1_TO_LAN = { from: 'R1:eth0', to: 'Lab LAN' };
+
+/** An operation on something other than a lab object (an image, a setting). */
+function op(event: string, overrides: Partial<ActivityEntry>): ActivityEntry {
+  const [category, action] = event.split('.');
+  return entry({ event, category, action, target_type: category, lab_path: null, lab_name: null, ...overrides });
+}
 
 describe('activityPredicate (#297)', () => {
   it('says what happened, to what, and from where — for every kind of event', () => {
@@ -201,7 +208,93 @@ describe('activityPredicate (#297)', () => {
       [
         entry({ event: 'folder.delete', category: 'folder', action: 'delete', target_type: 'folder', target_id: '/Courses', target_name: null }),
         'deleted folder /Courses'
-      ]
+      ],
+
+      // Consoles and recordings.
+      [
+        entry({ event: 'console.open', category: 'console', action: 'open', detail: { console_mode: 'primary', protocol: 'telnet', via: 'html5' } }),
+        'opened the console of R1 (telnet) in lab Lab'
+      ],
+      [
+        entry({ event: 'console.open', category: 'console', action: 'open', detail: { console_mode: 'second', protocol: 'vnc', via: 'html5' } }),
+        'opened the second console of R1 (vnc) in lab Lab'
+      ],
+      [
+        entry({ event: 'console.open', category: 'console', action: 'open', detail: { console_mode: 'primary', protocol: 'telnet', via: 'external' } }),
+        'launched an external console for R1 (telnet) in lab Lab'
+      ],
+      [
+        entry({ event: 'console.open', category: 'console', action: 'open', detail: { console_mode: 'primary', protocol: 'rdp', via: 'native' } }),
+        'downloaded a console launcher for R1 (rdp) in lab Lab'
+      ],
+      [
+        entry({ event: 'console.close', category: 'console', action: 'close', detail: { console_mode: 'primary', duration: 840 } }),
+        'closed the console of R1 in lab Lab (open 14m)'
+      ],
+      [
+        entry({ event: 'console.close', category: 'console', action: 'close', detail: { console_mode: 'second', duration: null } }),
+        'closed the second console of R1 in lab Lab'
+      ],
+      [
+        entry({ event: 'recording.start', category: 'recording', action: 'start', detail: { console_mode: 'primary' } }),
+        'started recording the console of R1 in lab Lab'
+      ],
+      [
+        entry({ event: 'recording.stop', category: 'recording', action: 'stop', detail: { console_mode: 'second', duration: 195 } }),
+        'stopped recording the second console of R1 in lab Lab (3m)'
+      ],
+      [
+        entry({ event: 'recording.delete', category: 'recording', action: 'delete', detail: { node_id: 3, recorded_by: 'bob', duration: 120 } }),
+        'deleted a console recording of R1 in lab Lab (lasting 2m, recorded by bob)'
+      ],
+      [
+        entry({ event: 'recording.delete', category: 'recording', action: 'delete', detail: { node_id: 3, recorded_by: 'alice', duration: null } }),
+        // Deleted by the person who made it: saying so again would be noise.
+        'deleted a console recording of R1 in lab Lab'
+      ],
+
+      // Settings on a lab, and a node's interface.
+      [
+        entry({
+          event: 'lab.update',
+          category: 'lab',
+          action: 'update',
+          ...ON_LAB,
+          detail: { changes: { name: { from: 'Old', to: 'Lab' }, lock: { from: false, to: true } } }
+        }),
+        'updated lab Lab: name: Old → Lab, lock: false → true'
+      ],
+      [
+        node('update', { changes: { 'Gi0/1.planned_mac': { from: 'aa:00:00:00:00:01', to: 'aa:00:00:00:00:02' } } }),
+        'updated node R1: MAC address of Gi0/1: aa:00:00:00:00:01 → aa:00:00:00:00:02 in lab Lab'
+      ],
+
+      // Images, templates, system.
+      [op('image.delete', { target_id: 'qemu/csr1000v', target_name: 'csr1000v', detail: { image_type: 'qemu' } }), 'deleted the qemu image csr1000v'],
+      [
+        op('image.upload', { target_id: 'csr1000v.qcow2', target_name: 'csr1000v.qcow2', detail: { image_type: 'qemu', template: 'csr' } }),
+        'uploaded the qemu image csr1000v.qcow2 for the csr template'
+      ],
+      [op('image.pull', { target_id: 'alpine:3.22', target_name: 'alpine:3.22', detail: { source: 'docker' } }), 'pulled the docker image alpine:3.22'],
+      [op('image.mark', { target_id: 'alpine:3.22', target_name: 'alpine:3.22' }), 'made the docker image alpine:3.22 available to labs'],
+      [op('image.unmark', { target_id: 'alpine:3.22', target_name: 'alpine:3.22' }), 'removed the docker image alpine:3.22 from lab use'],
+      [
+        op('image.calibrate', { target_id: 'c7200-adventerprisek9-mz.124-15.T14.bin', target_name: 'c7200-adventerprisek9-mz.124-15.T14.bin', detail: { source: 'dynamips', idle_pc: '0x1c', seconds: 91 } }),
+        'calibrated the Dynamips image c7200-adventerprisek9-mz.124-15.T14.bin (idle-PC 0x1c, took 91s)'
+      ],
+      [
+        op('template.update', { target_id: 'qemu/csr', target_name: 'CSR 1000v', detail: { template_type: 'qemu', changes: { cpu: { from: 1, to: 2 }, ram: { from: 1024, to: 2048 } } } }),
+        'updated the qemu template CSR 1000v: cpu: 1 → 2, ram: 1024 → 2048'
+      ],
+      [
+        op('template.update', { target_id: 'qemu/csr', target_name: 'csr', detail: { template_type: 'qemu', submitted: ['cpu', 'ram'] } }),
+        'updated the qemu template csr: cpu, ram'
+      ],
+      [
+        op('system.settings', { target_id: 'settings', target_name: 'System settings', detail: { changes: { SESSION_MAX_AGE: { from: 14400, to: 28800 }, NAT_CLOUD_POOL: { from: null, to: '10.255.0.0/16' } }, restart_required: true } }),
+        'changed system settings: SESSION_MAX_AGE: 14400 → 28800, NAT_CLOUD_POOL: — → 10.255.0.0/16 (takes effect after a restart)'
+      ],
+      [op('system.iourc', { target_id: 'iourc', target_name: 'IOL license' }), 'replaced the IOL license file']
     ];
 
     for (const [event, expected] of cases) {
@@ -277,6 +370,29 @@ describe('formatActivityTime', () => {
 
     expect(formatActivityTime(T0 + 123)).toBe(local);
     expect(local).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+});
+
+describe('formatDuration', () => {
+  it.each([
+    [0, '0s'],
+    [42, '42s'],
+    [59.4, '59s'],
+    [59.6, '1m'],
+    [60, '1m'],
+    [840, '14m'],
+    [3599, '59m'],
+    [3600, '1h 00m'],
+    [7500, '2h 05m'],
+    [86400, '24h 00m']
+  ])('%s seconds reads as %s', (seconds, expected) => {
+    expect(formatDuration(seconds)).toBe(expected);
+  });
+
+  it('says nothing for a span that is not known', () => {
+    for (const unknown of [null, undefined, '14m', -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(formatDuration(unknown)).toBe('');
+    }
   });
 });
 

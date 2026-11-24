@@ -274,7 +274,8 @@ async def put_settings_route(
             content={"code": 422, "status": "fail", "message": str(exc)},
         )
 
-    overrides = _load_settings_overrides()
+    previous = _load_settings_overrides()
+    overrides = dict(previous)
     overrides.update(validated)
     path = _settings_overrides_path()
     try:
@@ -286,6 +287,22 @@ async def put_settings_route(
             content={"code": 500, "status": "fail", "message": f"Failed to persist settings: {exc}"},
         )
 
+    # #300: which settings took a new value. Saving the values already in
+    # force is not an event worth a row.
+    changes = {
+        key: {"from": previous.get(key), "to": value}
+        for key, value in validated.items()
+        if previous.get(key) != value
+    }
+    if changes:
+        await audit_service.record(
+            "system.settings",
+            actor=current_user.username,
+            target_type="system",
+            target_id="settings",
+            target_name="System settings",
+            detail={"changes": changes, "restart_required": True},
+        )
     return {
         "code": 200,
         "status": "success",
@@ -323,6 +340,15 @@ async def upload_iourc(
                 "message": str(exc),
             },
         )
+    # #300: that the license was replaced is the fact worth keeping. Its
+    # contents are a secret and are never written to the trail.
+    await audit_service.record(
+        "system.iourc",
+        actor=current_user.username,
+        target_type="system",
+        target_id="iourc",
+        target_name="IOL license",
+    )
     return {
         "code": 200,
         "status": "success",
