@@ -11,6 +11,7 @@ import pytest
 
 from app.routers.labs import move_lab
 from app.schemas.lab import LabMoveRequest
+from app.services.audit_service import AuditEvent
 from app.services.console_recording import ConsoleRecordingService, lab_recordings_dir
 from app.services.lab_service import LabService
 
@@ -259,3 +260,54 @@ async def test_admin_can_move_anywhere(labs_env):
     assert (labs_env / "Shared" / "foo.json").is_file()
     assert row.filename == "Shared/foo.json"
     assert row.path == "/Shared/foo.json"
+
+
+# ---------------------------------------------------------------------------
+# Activity trail (#297)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_move_is_audited_with_both_ends_of_the_move(labs_env, audit_events):
+    (labs_env / "lanes" / "alpha" / "foo.json").write_text("{}")
+    row = _lab_row("lanes/alpha/foo.json")
+    row.name = "Foo Lab"
+    _FakeLabService.row = row
+
+    payload = await _move("lanes/alpha/foo.json", "/Shared", _scoped_user(), _FakeDb())
+
+    assert payload["code"] == 200
+    assert audit_events == [
+        AuditEvent(
+            event="lab.move",
+            actor="alpha",
+            target_type="lab",
+            target_id="/Shared/foo.json",
+            target_name="Foo Lab",
+            lab_path="/Shared/foo.json",
+            detail={"from": "/lanes/alpha/foo.json", "to": "/Shared/foo.json"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_move_leaves_no_audit_row(labs_env, audit_events):
+    (labs_env / "lanes" / "alpha" / "foo.json").write_text("{}")
+    (labs_env / "Shared").mkdir()
+    (labs_env / "Shared" / "foo.json").write_text("{}")  # target taken → 409
+
+    payload = await _move("lanes/alpha/foo.json", "/Shared", _admin(), _FakeDb())
+
+    assert payload["code"] == 409
+    assert audit_events == []
+
+
+@pytest.mark.asyncio
+async def test_a_lab_without_a_database_row_is_named_by_its_file(labs_env, audit_events):
+    (labs_env / "lanes" / "alpha" / "bar.json").write_text("{}")
+    _FakeLabService.row = None
+
+    payload = await _move("lanes/alpha/bar.json", "/Shared", _admin(), _FakeDb())
+
+    assert payload["code"] == 200
+    assert audit_events[0].target_name == "bar"

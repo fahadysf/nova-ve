@@ -53,11 +53,18 @@ class AuthService:
         await self.db.refresh(user)
         return user
 
-    async def create_session(self, user: User) -> str:
+    async def create_session(self, user: User, *, ip: str | None = None) -> str:
         token = str(uuid.uuid4())
+        now = int(time.time())
         user.session_token = token
-        user.session_expires = int(time.time()) + session_max_age_seconds()
+        user.session_expires = now + session_max_age_seconds()
         user.online = True
+        # #297: last-login tracking for the Users management view. Only this
+        # sign-in path stamps it — validate_session runs on every request
+        # and must not.
+        user.last_login = now
+        if ip:
+            user.ip = ip
         await self.db.commit()
         return token
 
