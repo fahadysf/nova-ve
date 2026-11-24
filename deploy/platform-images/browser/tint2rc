@@ -1,0 +1,179 @@
+# Copyright (c) 2026 Fahad Yousuf <fahadysuf@gmail.com>
+# SPDX-License-Identifier: Apache-2.0
+#
+# nova-ve-browser taskbar (tint2). The panel is the station's window list:
+# one button per open window, so a minimized or covered window is always one
+# click away — that matters because the desktop is reached through a VNC
+# console where keys like Alt+Tab often never reach the window manager.
+# Left-click toggles a task (raise/restore an inactive one, minimize the
+# active one); scrolling over a task cycles through windows. Nothing on the
+# panel closes, launches or reconfigures anything.
+# Option reference: https://gitlab.com/o9000/tint2/wikis/Configure
+
+#-------------------------------------
+# Backgrounds — flat fills only, no gradients or bevels
+#-------------------------------------
+# Background 1: Panel
+rounded = 0
+border_width = 1
+border_sides = T
+background_color = #1f2430 100
+border_color = #3a4150 100
+background_color_hover = #1f2430 100
+border_color_hover = #3a4150 100
+background_color_pressed = #1f2430 100
+border_color_pressed = #3a4150 100
+
+# Background 2: Task
+rounded = 4
+border_width = 0
+border_sides = TBLR
+background_color = #353b4a 100
+border_color = #353b4a 100
+background_color_hover = #454d60 100
+border_color_hover = #454d60 100
+background_color_pressed = #353b4a 100
+border_color_pressed = #353b4a 100
+
+# Background 3: Active task
+rounded = 4
+border_width = 0
+border_sides = TBLR
+background_color = #5294e2 100
+border_color = #5294e2 100
+background_color_hover = #65a2e8 100
+border_color_hover = #65a2e8 100
+background_color_pressed = #5294e2 100
+border_color_pressed = #5294e2 100
+
+# Background 4: Iconified (minimized) task — dimmed so minimized windows
+# read at a glance
+rounded = 4
+border_width = 0
+border_sides = TBLR
+background_color = #151922 100
+border_color = #151922 100
+background_color_hover = #20262f 100
+border_color_hover = #20262f 100
+background_color_pressed = #151922 100
+border_color_pressed = #151922 100
+
+# Background 5: Urgent task
+rounded = 4
+border_width = 0
+border_sides = TBLR
+background_color = #aa4400 100
+border_color = #aa4400 100
+background_color_hover = #cc5500 100
+border_color_hover = #cc5500 100
+background_color_pressed = #aa4400 100
+border_color_pressed = #aa4400 100
+
+# Background 6: Tooltip
+rounded = 1
+border_width = 1
+border_sides = TBLR
+background_color = #222222 100
+border_color = #555555 100
+background_color_hover = #222222 100
+border_color_hover = #555555 100
+background_color_pressed = #222222 100
+border_color_pressed = #555555 100
+
+#-------------------------------------
+# Panel
+#-------------------------------------
+# T = taskbar, C = clock. No launcher (there is no app menu to link) and no
+# system tray (nothing in the station uses one).
+panel_items = TC
+panel_size = 100% 30
+panel_margin = 0 0
+panel_padding = 2 0 2
+panel_background_id = 1
+# Keep the WM's root menu off the panel.
+wm_menu = 0
+panel_dock = 0
+panel_position = bottom center horizontal
+panel_layer = top
+panel_monitor = all
+panel_shrink = 0
+autohide = 0
+# Reserve the panel's strip so maximized windows stop above it.
+strut_policy = follow_size
+# Names the panel's X window so QC can assert it (xdotool/xprop lookups).
+panel_window_name = nova-ve-browser taskbar
+disable_transparency = 1
+mouse_effects = 1
+font_shadow = 0
+mouse_hover_icon_asb = 100 0 10
+mouse_pressed_icon_asb = 100 0 0
+
+#-------------------------------------
+# Taskbar
+#-------------------------------------
+taskbar_mode = single_desktop
+taskbar_hide_if_empty = 0
+taskbar_padding = 0 0 2
+taskbar_background_id = 0
+taskbar_active_background_id = 0
+taskbar_name = 0
+taskbar_hide_inactive_tasks = 0
+taskbar_hide_different_monitor = 0
+taskbar_hide_different_desktop = 0
+taskbar_always_show_all_desktop_tasks = 0
+taskbar_distribute_size = 0
+taskbar_sort_order = none
+task_align = left
+
+#-------------------------------------
+# Task
+#-------------------------------------
+task_text = 1
+task_icon = 1
+task_centered = 0
+urgent_nb_of_blink = 100000
+task_maximum_size = 240 35
+task_padding = 4 2 4
+task_tooltip = 1
+task_font = sans 10
+task_font_color = #ffffff 100
+task_active_font_color = #ffffff 100
+task_urgent_font_color = #ffffff 100
+task_iconified_font_color = #ffffff 60
+task_background_id = 2
+task_active_background_id = 3
+task_urgent_background_id = 5
+task_iconified_background_id = 4
+# Clicking a task only raises/minimizes it — never close (tint2's stock
+# config closes the window on right-click; that is far too destructive for
+# a console desktop).
+mouse_left = toggle_iconify
+mouse_middle = none
+mouse_right = none
+mouse_scroll_up = toggle
+mouse_scroll_down = toggle
+
+#-------------------------------------
+# Clock
+#-------------------------------------
+time1_format = %H:%M
+time2_format =
+clock_font_color = #ffffff 100
+clock_padding = 4 0
+clock_background_id = 0
+clock_tooltip =
+clock_tooltip_timezone =
+clock_lclick_command =
+clock_rclick_command =
+clock_mclick_command =
+clock_uwheel_command =
+clock_dwheel_command =
+
+#-------------------------------------
+# Tooltip
+#-------------------------------------
+tooltip_show_timeout = 0.5
+tooltip_hide_timeout = 0.1
+tooltip_padding = 4 4
+tooltip_background_id = 6
+tooltip_font_color = #dddddd 100

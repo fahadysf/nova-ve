@@ -94,11 +94,36 @@ case "$kind" in
     listener_up 23 || fail "telnet second console is not listening on 23"
     say "telnet second console listening (port 23)"
 
+    # A listening port is not a working console: the login program has to
+    # hand out a shell. The quoted marker can only appear as command output,
+    # never as the terminal's echo of the typed line.
+    console_ok="$(docker exec -i "$container" /bin/bash -s <<'EOF' 2>/dev/null || echo no
+exec 3<>/dev/tcp/127.0.0.1/23
+printf 'echo nova-ve-console-"ok"\nexit\n' >&3
+for _ in {1..30}; do
+  IFS= read -r -t 1 line <&3 || continue
+  [[ "${line}" == *nova-ve-console-ok* ]] && { echo yes; exit 0; }
+done
+echo no
+EOF
+    )"
+    [[ "${console_ok}" == yes ]] || fail "telnet second console does not offer a shell"
+    say "telnet second console offers a shell"
+
     run 'pgrep -x Xvfb >/dev/null' || fail "Xvfb is not running"
     say "Xvfb running"
 
     run 'pgrep -x openbox >/dev/null' || fail "openbox is not running"
     say "window manager running"
+
+    # Taskbar + wallpaper: the window-switching surface (minimized windows
+    # have no other way back on screen) and the branded root window.
+    run 'pgrep -x tint2 >/dev/null' || fail "taskbar (tint2) is not running"
+    say "taskbar (tint2) running"
+
+    run 'test -f /usr/local/share/nova-ve/wallpaper.png' \
+      || fail "wallpaper asset missing"
+    say "wallpaper asset present"
     ;;
 esac
 
