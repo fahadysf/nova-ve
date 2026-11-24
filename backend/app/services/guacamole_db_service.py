@@ -13,6 +13,7 @@ import httpx
 
 from app.config import get_settings
 from app.schemas.user import UserRead
+from app.services.html5_service import rdp_connection_parameters
 
 
 class GuacamoleDatabaseError(Exception):
@@ -89,6 +90,7 @@ class GuacamoleDatabaseService:
         protocol: str,
         connection_name: str,
         connection_key: str | None = None,
+        rdp_password: str | None = None,
     ) -> str:
         username = self._guacamole_username(current_user)
         password = self._guacamole_password(current_user)
@@ -112,6 +114,7 @@ class GuacamoleDatabaseService:
                         protocol=protocol,
                         host=target_host,
                         port=port,
+                        rdp_password=rdp_password,
                     )
                     await self._ensure_connection_permission(conn, entity_id, connection_id)
                 await conn.close()
@@ -316,6 +319,7 @@ class GuacamoleDatabaseService:
         protocol: str,
         host: str,
         port: int,
+        rdp_password: str | None = None,
     ) -> int:
         connection_id = await conn.fetchval(
             """
@@ -355,7 +359,7 @@ class GuacamoleDatabaseService:
             connection_id,
         )
 
-        params = self._connection_parameters(host=host, port=port, protocol=protocol)
+        params = self._connection_parameters(host=host, port=port, protocol=protocol, rdp_password=rdp_password)
 
         for parameter_name, parameter_value in params.items():
             await conn.execute(
@@ -374,14 +378,15 @@ class GuacamoleDatabaseService:
 
         return connection_id
 
-    def _connection_parameters(self, *, host: str, port: int, protocol: str) -> dict[str, str]:
+    def _connection_parameters(
+        self, *, host: str, port: int, protocol: str, rdp_password: str | None = None,
+    ) -> dict[str, str]:
         params = {
             "hostname": host,
             "port": str(port),
         }
         if protocol == "rdp":
-            params["ignore-cert"] = "true"
-            params["security"] = "any"
+            params.update(rdp_connection_parameters(rdp_password))
             return params
 
         params["disable-auth"] = "true"

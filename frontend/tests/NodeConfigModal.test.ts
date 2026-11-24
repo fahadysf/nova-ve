@@ -274,12 +274,19 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     expect([...select.options].map((option) => option.value)).toEqual(['vnc', 'telnet']);
   });
 
-  it('keeps rdp available for docker templates', async () => {
+  it('offers RDP for either console on a Docker node', async () => {
     const catalog = makeCatalog(makeDockerTemplate());
     render(NodeConfigModal, { props: { open: true, mode: 'create', catalog, node: null } });
     await tick();
 
-    expect([...consoleSelect().options].map((option) => option.value)).toEqual(['telnet', 'vnc', 'rdp']);
+    const primary = consoleSelect();
+    expect([...primary.options].map((option) => option.value)).toEqual(['telnet', 'vnc', 'rdp']);
+    expect(primary.querySelector('option[value="rdp"]')?.textContent).toBe('RDP');
+
+    const second = screen.getByTestId('node-second-console');
+    expect(second.querySelector('option[value="rdp"]')?.textContent).toBe('RDP');
+    await fireEvent.change(primary, { target: { value: 'rdp' } });
+    expect(second.querySelector('option[value="rdp"]')).toBeNull();
   });
 
   it('limits iol templates to telnet consoles', async () => {

@@ -1059,7 +1059,7 @@ else
 fi
 run chown "${APP_OWNER}:${APP_GROUP}" "${DEMO_IMAGES_STATUS_FILE}" || true
 
-# Platform containers (#288): make nova-ve/mgmt-server + nova-ve/browser
+# Platform containers: make the management, browser and desktop images
 # available for labs. GHCR-first (auto mode: pull the published images,
 # fall back to building from the checked-out repo when the registry is
 # unreachable) so installs don't pay the pip/git build fetches. Failure
@@ -1078,7 +1078,7 @@ if run "${PLATFORM_BUILD_CMD[@]}"; then
   fi
 else
   run bash -c "echo failed > ${PLATFORM_IMAGES_STATUS_FILE}"
-  echo "WARN: platform-image pull/build failed; nova-ve/mgmt-server / nova-ve-browser may not be available locally for labs." >&2
+  echo "WARN: platform-image pull/build failed; management, browser and desktop images may not be available locally for labs." >&2
 fi
 run chown "${APP_OWNER}:${APP_GROUP}" "${PLATFORM_IMAGES_STATUS_FILE}" || true
 

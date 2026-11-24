@@ -1,0 +1,48 @@
+#!/bin/bash
+set -euo pipefail
+
+# The Lab Desktop's Xorg session uses a dedicated non-root account. Keep its
+# credential private to the container administrator and the console launcher.
+install -d -m 0700 /run/nova-ve
+install -d -m 0755 /run/xrdp /run/dbus
+install -d -m 1777 /tmp/.X11-unix
+umask 077
+password="${NOVA_VE_RDP_PASSWORD:-}"
+if [[ -z "$password" && -s /run/nova-ve/rdp-password ]]; then
+  password="$(cat /run/nova-ve/rdp-password)"
+fi
+if [[ -z "$password" ]]; then
+  password="$(openssl rand -hex 24)"
+fi
+case "$password" in
+  *:*|*$'\n'*|*$'\r'*)
+    echo 'NOVA_VE_RDP_PASSWORD cannot contain colons or line breaks' >&2
+    exit 1
+    ;;
+esac
+printf 'lab:%s\n' "$password" | chpasswd
+printf '%s\n' "$password" > /run/nova-ve/rdp-password
+unset password NOVA_VE_RDP_PASSWORD
+
+if [[ ! -s /etc/xrdp/cert.pem || ! -s /etc/xrdp/key.pem ]]; then
+  openssl req -x509 -newkey rsa:2048 -sha256 -noenc -days 365 \
+    -subj '/CN=Nova VE Lab Console' -out /etc/xrdp/cert.pem -keyout /etc/xrdp/key.pem \
+    >/dev/null 2>&1
+fi
+chgrp xrdp /etc/xrdp/cert.pem /etc/xrdp/key.pem
+chmod 0644 /etc/xrdp/cert.pem
+chmod 0640 /etc/xrdp/key.pem
+umask 022
+
+dbus-daemon --system --fork --nopidfile
+xrdp-sesman --nodaemon &
+sesman_pid=$!
+xrdp --nodaemon &
+rdp_pid=$!
+cleanup() {
+  kill "$rdp_pid" "$sesman_pid" 2>/dev/null || true
+  wait "$rdp_pid" "$sesman_pid" 2>/dev/null || true
+}
+trap cleanup EXIT
+trap 'exit 0' INT TERM
+wait -n "$rdp_pid" "$sesman_pid"

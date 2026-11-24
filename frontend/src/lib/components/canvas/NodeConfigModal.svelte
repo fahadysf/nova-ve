@@ -98,7 +98,7 @@
     docker: [
       { value: 'telnet', label: 'telnet' },
       { value: 'vnc', label: 'vnc' },
-      { value: 'rdp', label: 'rdp' },
+      { value: 'rdp', label: 'RDP' },
     ],
     iol: [{ value: 'telnet', label: 'telnet' }],
     dynamips: [{ value: 'telnet', label: 'telnet' }],
@@ -198,7 +198,7 @@
   const ALL_SECONDARY_MODES: ReadonlyArray<ConsoleOption> = [
     { value: 'telnet', label: 'telnet' },
     { value: 'vnc', label: 'vnc' },
-    { value: 'rdp', label: 'rdp' },
+    { value: 'rdp', label: 'RDP' },
   ] as ReadonlyArray<ConsoleOption>;
 
   function secondConsoleOptionsFor(type: NodeTypeKey, primary: ConsoleModeValue): Array<{ value: string; label: string }> {

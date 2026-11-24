@@ -32,10 +32,10 @@
 
 set -eu
 
-GL_PACKAGES="mesa llvm22-libs spirv-tools libxshmfence mesa-egl mesa-gles mesa-gbm"
-CODEC_PACKAGES="ffmpeg-libavcodec ffmpeg-libavutil ffmpeg-libswresample x265-libs aom-libs libSvtAv1Enc libjxl x264-libs rav1e-libs libvorbis libtheora libgomp lame-libs soxr xvidcore opus libogg libwebpmux libhwy hwdata-pci libva libvdpau numactl libpciaccess libheif-aom libheif-jpeg libheif-rav1e libheif-svtenc libheif-x264 libheif-x265"
-# Firefox's FFmpeg glue, loaded on demand only.
-CODEC_FILES="/usr/lib/firefox/libmozavcodec.so /usr/lib/firefox/libmozavutil.so /usr/lib/firefox/libmozinference.so"
+GL_PACKAGES="mesa llvm22-libs spirv-tools mesa-egl mesa-gles"
+CODEC_PACKAGES="ffmpeg-libavcodec ffmpeg-libavutil ffmpeg-libswresample x265-libs aom-libs libSvtAv1Enc libjxl x264-libs rav1e-libs libvorbis libtheora libgomp lame-libs soxr xvidcore libogg libwebpmux libhwy hwdata-pci libva libvdpau numactl libheif-aom libheif-jpeg libheif-rav1e libheif-svtenc libheif-x264 libheif-x265"
+# Firefox's FFmpeg glue and the HEIF FFmpeg plug-in are loaded on demand.
+CODEC_FILES="/usr/lib/firefox/libmozavcodec.so /usr/lib/firefox/libmozavutil.so /usr/lib/firefox/libmozinference.so /usr/lib/libheif/libheif-ffmpegdec.so"
 # Everything else in font-dejavu goes.
 KEEP_FACES="DejaVuSans.ttf DejaVuSans-Bold.ttf DejaVuSans-Oblique.ttf DejaVuSans-BoldOblique.ttf DejaVuSansMono.ttf DejaVuSansMono-Bold.ttf DejaVuSerif.ttf DejaVuSerif-Bold.ttf DejaVuSerif-Italic.ttf DejaVuSerif-BoldItalic.ttf"
 
@@ -71,7 +71,7 @@ unresolved_elfs() {
   local file
   find /bin /sbin /usr/bin /usr/sbin /usr/lib /usr/libexec -type f 2>/dev/null | while IFS= read -r file; do
     [ "$(head -c 4 "${file}" 2>/dev/null)" = "$(printf '\177ELF')" ] || continue
-    "${loader}" --list "${file}" 2>/dev/null | awk -v file="${file}" '/not found/ { print file " -> " $1 }'
+    "${loader}" --list "${file}" 2>&1 | awk -v file="${file}" '/Error loading shared library/ { print file " -> " $5 }'
   done
 }
 
