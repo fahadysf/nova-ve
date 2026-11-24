@@ -21,6 +21,7 @@ export interface UserRead {
   html5?: boolean;
   extauth?: string | null;
   online?: number | boolean;
+  /** Source address of the most recent successful sign-in (#297). */
   ip?: string | null;
   lab?: string | null;
   /** Quotas (#261): -1 = unlimited. RAM in MB. */
@@ -35,6 +36,8 @@ export interface UserRead {
   folder?: string | null;
   /** Tenant (pod) id. */
   pod?: number;
+  /** Epoch seconds of the last successful sign-in (#297); absent or null = never. */
+  last_login?: number | null;
 }
 
 // A type alias (not an interface) so it satisfies Record<string, unknown>

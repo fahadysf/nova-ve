@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -8,7 +8,7 @@ from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services.cloud_inventory_service import list_nat_clouds
 from app.services.bridge_cloud_service import list_bridge_clouds
-from app.services import iourc_service, qemu_versions
+from app.services import audit_service, iourc_service, qemu_versions
 from app.services.node_runtime_service import NodeRuntimeService
 import ipaddress
 import json
@@ -560,4 +560,42 @@ async def tail_log_file(
             "pattern": needle,
             "content": "".join(collected),
         },
+    }
+
+
+@router.get("/system/logs/activity")
+async def list_activity_log(
+    q: str = "",
+    category: str = "",
+    action: str = "",
+    actor: str = "",
+    from_ts: int | None = Query(default=None, alias="from"),
+    to_ts: int | None = Query(default=None, alias="to"),
+    limit: int = Query(default=audit_service.DEFAULT_PAGE_SIZE, ge=1, le=audit_service.MAX_PAGE_SIZE),
+    offset: int = Query(default=0, ge=0),
+    current_user: UserRead = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """User activity trail (#297) — who did what, from where, in which lab.
+
+    Admin only. ``q`` is free text over actor, target, lab, source address
+    and detail; ``category``/``action``/``actor`` narrow it; ``from``/``to``
+    are epoch-second bounds; ``limit``/``offset`` page through the result.
+    """
+    page = await audit_service.list_entries(
+        db,
+        q=q,
+        category=category,
+        action=action,
+        actor=actor,
+        since=from_ts,
+        until=to_ts,
+        limit=limit,
+        offset=offset,
+    )
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Activity log loaded.",
+        "data": page,
     }
