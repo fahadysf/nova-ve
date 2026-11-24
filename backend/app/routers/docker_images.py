@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.dependencies import get_current_admin, get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
+from app.services import audit_service
 from app.services.docker_image_service import DockerImageError, DockerImageService
 
 router = APIRouter(
@@ -22,6 +23,18 @@ router = APIRouter(
     tags=["docker-images"],
     responses=COMMON_RESPONSES,
 )
+
+
+async def _audit(event: str, actor: UserRead, reference: str, **detail) -> None:
+    """#300: an admin's change to which docker images labs may use."""
+    await audit_service.record(
+        event,
+        actor=actor.username,
+        target_type="image",
+        target_id=reference,
+        target_name=reference,
+        detail=detail,
+    )
 
 
 class ImageRefBody(BaseModel):
@@ -60,24 +73,26 @@ async def list_images(
 @router.post("/mark")
 async def mark_image(
     body: ImageRefBody,
-    _: UserRead = Depends(get_current_admin),
+    current_user: UserRead = Depends(get_current_admin),
 ):
     try:
         marker = DockerImageService().mark(body.image)
     except DockerImageError as exc:
         return _fail(str(exc))
+    await _audit("image.mark", current_user, body.image, source="docker")
     return _ok(f"Marked {body.image} for lab use.", {"reference": body.image, "marker": marker})
 
 
 @router.post("/unmark")
 async def unmark_image(
     body: ImageRefBody,
-    _: UserRead = Depends(get_current_admin),
+    current_user: UserRead = Depends(get_current_admin),
 ):
     try:
         marker = DockerImageService().unmark(body.image)
     except DockerImageError as exc:
         return _fail(str(exc))
+    await _audit("image.unmark", current_user, body.image, source="docker")
     return _ok(
         f"Unmarked {body.image} (image data preserved).",
         {"reference": body.image, "marker_removed": marker},
@@ -87,10 +102,11 @@ async def unmark_image(
 @router.post("/pull")
 async def pull_image(
     body: PullImageBody,
-    _: UserRead = Depends(get_current_admin),
+    current_user: UserRead = Depends(get_current_admin),
 ):
     try:
         result = DockerImageService().pull(body.reference, mark_after=body.mark)
     except DockerImageError as exc:
         return _fail(str(exc))
+    await _audit("image.pull", current_user, body.reference, source="docker", marked=body.mark)
     return _ok(f"Pulled {result['reference']}.", result)

@@ -10,21 +10,41 @@ Each entry names the user, the source address, the time, and the object involved
 |---|---|
 | Authentication | Sign-in, **failed sign-in**, sign-out |
 | Users | Account created, updated (with the fields that changed), deleted |
-| Labs | Created, deleted, moved, and the lab-wide *stop all* / *wipe all* actions |
-| Nodes | Created, updated, started, stopped, wiped, deleted |
+| Labs | Created, deleted, moved, settings changed, and the lab-wide *stop all* / *wipe all* actions |
+| Nodes | Created, updated, started, stopped, wiped, deleted; a changed interface MAC address |
 | Networks | Created, updated, deleted |
 | Links | Connected, updated, disconnected |
 | Folders | Created, renamed, deleted |
+| Consoles | Opened, closed (with how long it was open) |
+| Recordings | Recording started, stopped, deleted |
+| Images | Uploaded, deleted, Docker image marked / unmarked / pulled, Dynamips image calibrated |
+| Templates | Edited (with the fields that changed) |
+| System | Settings changed, IOL license replaced |
 
-A few rules decide what does and does not become an entry:
+### Consoles
+
+Opening a console in the browser is one entry. Closing it is another, with how long it was open: the lab page reports every console that ends, whether you close its tab, close the whole console workspace, remove its node, move to another lab, reload it, or leave the page.
+
+A console handed to an external or native client (the `telnet://`, `vnc://` and `rdp://` launches) is recorded as opened at the moment it is handed over. That client connects to the node directly, so the server never sees it end: there is an open and no close.
+
+### A few rules
 
 - **An entry means it happened.** Actions are recorded after they succeed. A refused or failed action (a start that errored, a delete that was denied) leaves no entry — except for failed sign-ins, which are recorded because repeated failures are the signal worth seeing.
 - **Saving without changing anything is not an entry.** Re-opening a node's edit dialog and clicking save, or stopping a lab in which nothing is running, writes nothing.
-- **Passwords are never recorded.** A password change appears only as "password changed".
+- **Passwords and licenses are never recorded.** A password change appears only as "password changed"; the IOL license only as replaced.
 - **The trail outlives the account.** Deleting a user does not remove their earlier entries.
 - **A session that times out is not a sign-out.** Only an explicit logout is recorded.
 
-Node positions and link styling (layout changes) are not recorded, as they do not affect what a lab does.
+### What is left out on purpose
+
+- **Layout.** Node positions, port positions and link styling do not affect what a lab does.
+- **Automatic housekeeping.** The bridge reconciliation the canvas runs when a lab opens, and re-computing an image's checksum, change nothing a user did.
+- **Reading.** Opening or downloading a recording is not recorded.
+
+### Limits worth knowing
+
+- A console closed by a crashed browser or a dropped connection may be reported late or not at all; its open then has no close.
+- How long a console was open is known only while the backend has been running since it was opened, and is left out otherwise.
 
 ## Searching
 
@@ -58,8 +78,8 @@ Entries are stored in the `audit_log` table of the Postgres database, so they ar
 | Parameter | Meaning |
 |---|---|
 | `q` | Free-text search |
-| `category` | `auth`, `user`, `lab`, `node`, `network`, `link`, `folder` |
-| `action` | For example `create`, `start`, `login_failed` |
+| `category` | `auth`, `user`, `lab`, `node`, `network`, `link`, `folder`, `console`, `recording`, `image`, `template`, `system` |
+| `action` | For example `create`, `start`, `open`, `close`, `mark`, `pull`, `settings`, `login_failed` |
 | `actor` | A username |
 | `from`, `to` | Epoch-second bounds, inclusive |
 | `limit`, `offset` | Paging; `limit` is at most 1000 |

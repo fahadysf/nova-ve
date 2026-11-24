@@ -34,6 +34,7 @@ from app.database import get_db
 from app.dependencies import get_current_user
 from app.routers.labs import _read_lab_data, _recording_lab_file, _scoped_lab_path
 from app.schemas.user import UserRead
+from app.services import audit_service
 from app.services.console_recording import _slug, get_console_recorder, lab_recordings_dir, recording_lab_id
 from app.services.lab_service import LabService
 
@@ -55,6 +56,20 @@ def _recording_lab(current_user: UserRead, lab_path: str) -> tuple[str, Path, di
     scoped = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
     lab_file = _recording_lab_file(scoped)
     return scoped, lab_file, _read_lab_data(scoped)
+
+
+def _lab_for_audit(current_user: UserRead, lab_path: str) -> tuple[str, dict | None]:
+    """Scoped path and lab data to describe an audited recording with.
+
+    #300: called after the action has already succeeded, so it must never
+    turn that success into an error — a lab that cannot be read is named
+    by its path alone.
+    """
+    try:
+        scoped, _, data = _recording_lab(current_user, lab_path)
+    except Exception:  # noqa: BLE001 — the audit entry must not fail the action
+        return lab_path, None
+    return scoped, data
 
 
 @dataclass
@@ -125,6 +140,15 @@ def _cast_duration(path: Path) -> float:
     except OSError:
         pass
     return 0.0
+
+
+def _seconds_since(moment: object) -> float | None:
+    """Whole seconds from an ISO timestamp to now, or None if unusable."""
+    try:
+        started = datetime.fromisoformat(str(moment))
+    except (TypeError, ValueError):
+        return None
+    return round(max(0.0, (datetime.now(UTC) - started).total_seconds()))
 
 
 def _entry_for(cast_path: Path, node_id: int, header: dict) -> dict:
@@ -234,6 +258,13 @@ async def delete_recording(
     # authorization, so another request cannot interleave with this check.
     if get_console_recorder().is_active(cast):
         return {"code": 409, "status": "fail", "message": "Stop the recording before deleting it."}
+    # #300: describe the recording from its header before the file is gone.
+    node_dir, _, _ = recording_id.partition("--")
+    header = _read_header(cast)
+    metadata = _recording_metadata(header)
+    duration = header.get("duration")
+    if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
+        duration = _cast_duration(cast)
     try:
         _delete_recording_files(cast)
     except ValueError as exc:
@@ -241,6 +272,24 @@ async def delete_recording(
     except OSError:
         _logger.exception("Could not delete console recording %s", cast)
         return {"code": 500, "status": "fail", "message": "Could not delete the recording."}
+    scoped, lab_data = _lab_for_audit(current_user, lab_path)
+    await audit_service.record(
+        "recording.delete",
+        actor=current_user.username,
+        target_type="recording",
+        target_id=recording_id,
+        target_name=metadata.get("node_name"),
+        **audit_service.lab_context(
+            lab_data,
+            scoped,
+            detail={
+                "node_id": int(node_dir) if node_dir.isdigit() else None,
+                "recorded_by": metadata.get("username"),
+                "console_mode": metadata.get("console"),
+                "duration": duration,
+            },
+        ),
+    )
     return {"code": 200, "status": "success", "message": "Recording deleted.", "data": {"id": recording_id}}
 
 
@@ -396,8 +445,10 @@ async def node_recording_control(
         return {
             "code": 404,
             "status": "fail",
-            "message": "No active console session for this node. Open the console first.",
-        }
+        "message": "No active console session for this node. Open the console first.",
+    }
+    status = session.status()
+    was_recording = bool(status.get("recording"))
     try:
         data = session.start_recording() if body.action == "start" else session.stop_recording()
     except ValueError as exc:
@@ -405,6 +456,18 @@ async def node_recording_control(
     except OSError:
         _logger.exception("Could not write console recording.")
         return {"code": 500, "status": "fail", "message": "Could not save console recording."}
+    # #300: only a real change of state is an event. Starting a recording
+    # that is already running — or stopping one that is not — is a no-op.
+    if bool(data.get("recording")) != was_recording:
+        scoped, lab_data = _lab_for_audit(current_user, lab_path)
+        detail = {"console_mode": body.console}
+        if body.action == "stop":
+            detail["duration"] = _seconds_since(status.get("started_at"))
+        await audit_service.record(
+            f"recording.{body.action}",
+            actor=current_user.username,
+            **audit_service.node_context(lab_data, node_id, scoped, detail=detail),
+        )
     return {
         "code": 200,
         "status": "success",

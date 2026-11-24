@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -51,7 +52,7 @@ def test_iourc_upload_rejects_empty_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_iourc_status_and_upload_routes(monkeypatch, tmp_path):
+async def test_iourc_status_and_upload_routes(monkeypatch, tmp_path, audit_events):
     settings = SimpleNamespace(IOURC_DIR=tmp_path / "iourc")
     monkeypatch.setattr("app.services.iourc_service.get_settings", lambda: settings)
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
@@ -71,13 +72,22 @@ async def test_iourc_status_and_upload_routes(monkeypatch, tmp_path):
 
             upload_response = await client.post(
                 "/api/system/iourc",
-                files={"file": ("iourc", b"[license]\n", "text/plain")},
+                files={"file": ("iourc", b"[license]\nHOSTID=secret-host-id", "text/plain")},
             )
             assert upload_response.status_code == 200
             upload_payload = upload_response.json()
             assert upload_payload["data"]["installed"] is True
             assert upload_payload["data"]["filename"] == "iourc"
-            assert (settings.IOURC_DIR / "iourc").read_text() == "[license]\n"
+            assert (settings.IOURC_DIR / "iourc").read_text() == "[license]\nHOSTID=secret-host-id"
+
+            # #300: the trail records that the license was replaced — and
+            # must carry nothing of the license itself.
+            uploaded = [entry for entry in audit_events if entry.event == "system.iourc"]
+            assert len(uploaded) == 1
+            assert uploaded[0].actor == "admin"
+            assert uploaded[0].target_name == "IOL license"
+            assert uploaded[0].detail == {}
+            assert "HOSTID" not in json.dumps(uploaded[0].__dict__, default=str)
 
             empty_response = await client.post(
                 "/api/system/iourc",
@@ -85,5 +95,7 @@ async def test_iourc_status_and_upload_routes(monkeypatch, tmp_path):
             )
             assert empty_response.status_code == 400
             assert empty_response.json()["message"] == "Uploaded IOURC file is empty."
+            # A rejected upload replaced nothing.
+            assert [entry for entry in audit_events if entry.event == "system.iourc"] == uploaded
     finally:
         app.dependency_overrides.clear()

@@ -330,6 +330,132 @@ def link_context(
     return context
 
 
+def text_lengths(
+    changes: dict[str, dict[str, Any]], fields: Sequence[str]
+) -> dict[str, dict[str, Any]]:
+    """Replace the values of free-text ``fields`` with their lengths.
+
+    That a lab's description or body changed is worth knowing; storing the
+    text itself is not.
+    """
+
+    def length(value: Any) -> Optional[str]:
+        if value is None or value == "":
+            return None
+        return f"{len(str(value))} characters"
+
+    return {
+        field: (
+            {"from": length(change.get("from")), "to": length(change.get("to"))}
+            if field in fields
+            else change
+        )
+        for field, change in changes.items()
+    }
+
+
+# ---------------------------------------------------------------------------
+# Console sessions (#300) — pairing a console's close with its open
+# ---------------------------------------------------------------------------
+
+# (lab path, node id, console mode, username)
+ConsoleKey = tuple[str, int, str, str]
+
+# A console whose close was never reported (crashed browser, lost
+# connection) must not linger and pair with a much later close.
+_CONSOLE_OPEN_MAX_AGE = 12 * 3600
+
+
+class _OpenConsoles:
+    """When each in-browser console was opened.
+
+    In memory, per process. It only decorates a close with a duration, so
+    losing it (a restart, more than one worker) costs the duration and
+    nothing else.
+    """
+
+    def __init__(self) -> None:
+        self._opened: dict[ConsoleKey, float] = {}
+
+    def opened(self, key: ConsoleKey) -> None:
+        self._prune()
+        self._opened[key] = time.time()
+
+    def closed(self, key: ConsoleKey) -> Optional[float]:
+        """Seconds the console was open, or None if its open is unknown."""
+        self._prune()
+        started = self._opened.pop(key, None)
+        return None if started is None else max(0.0, time.time() - started)
+
+    def _prune(self) -> None:
+        cutoff = time.time() - _CONSOLE_OPEN_MAX_AGE
+        for key in [key for key, started in self._opened.items() if started < cutoff]:
+            del self._opened[key]
+
+
+_open_consoles = _OpenConsoles()
+
+
+def console_key(lab_path: Any, node_id: Any, console: str, actor: Any) -> ConsoleKey:
+    return (display_path(lab_path) or "", int(node_id), console, _clean(actor, _MAX_LEN["actor"]) or "")
+
+
+async def record_console_open(
+    *,
+    actor: Any,
+    lab_data: Any,
+    node_id: Any,
+    lab_path: Any = None,
+    console: str = "primary",
+    via: str = "html5",
+    protocol: Any = None,
+) -> None:
+    """A console session began.
+
+    ``via="html5"`` is an in-browser console: its tab will report the
+    close, so it is registered to time it. ``external`` and ``native`` hand
+    the console to a client that connects straight to the node — the server
+    never sees that session end.
+    """
+    context = node_context(
+        lab_data,
+        node_id,
+        lab_path,
+        detail={"console_mode": console, "protocol": protocol, "via": via},
+    )
+    if via == "html5":
+        _open_consoles.opened(console_key(lab_path, node_id, console, actor))
+    await record("console.open", actor=actor, **context)
+
+
+async def record_console_close(
+    *,
+    actor: Any,
+    lab_data: Any,
+    node_id: Any,
+    lab_path: Any = None,
+    console: str = "primary",
+) -> Optional[float]:
+    """An in-browser console session ended.
+
+    Returns how long it was open, in whole seconds, or None if its open is
+    unknown — the same number the entry carries.
+    """
+    seconds = _open_consoles.closed(console_key(lab_path, node_id, console, actor))
+    duration = None if seconds is None else round(seconds)
+    await record(
+        "console.close",
+        actor=actor,
+        **node_context(
+            lab_data,
+            node_id,
+            lab_path,
+            detail={"console_mode": console, "duration": duration},
+        ),
+    )
+    return duration
+
+
 # ---------------------------------------------------------------------------
 # Reader — the searchable view behind System → Logs → Activity log
 # ---------------------------------------------------------------------------

@@ -4,6 +4,7 @@ from fastapi.responses import FileResponse
 from app.dependencies import get_current_admin, get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
+from app.services import audit_service
 from app.services.template_service import TemplateError, TemplateService
 
 router = APIRouter(prefix="/api/list", tags=["list"], responses=COMMON_RESPONSES)
@@ -76,11 +77,12 @@ async def upload_image(
     current_user: UserRead = Depends(get_current_admin),
 ):
     try:
+        content = await image.read()
         data = await TemplateService().upload_image(
             template_type=template_type,
             template_key=template_key,
             filename=image.filename or "",
-            content=await image.read(),
+            content=content,
             image_name=image_name,
         )
     except TemplateError as exc:
@@ -90,6 +92,20 @@ async def upload_image(
             "message": str(exc),
         }
 
+    # #300: an admin put a boot image on the host.
+    uploaded = data.get("image") if isinstance(data, dict) else None
+    await audit_service.record(
+        "image.upload",
+        actor=current_user.username,
+        target_type="image",
+        target_id=str(uploaded or image_name or image.filename or ""),
+        target_name=str(uploaded or image_name or image.filename or ""),
+        detail={
+            "image_type": template_type,
+            "template": template_key,
+            "bytes": len(content),
+        },
+    )
     return {
         "code": 200,
         "status": "success",
