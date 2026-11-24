@@ -279,3 +279,119 @@ describe('labState', () => {
     expect(state.networks).toEqual({});
   });
 });
+
+describe('labState link adoption (#306)', () => {
+  beforeEach(() => {
+    labState.reset();
+  });
+
+  function nodeWithInterfaces(id: number, count: number): NodeData {
+    return {
+      ...node(id, 0, 0),
+      interfaces: Array.from({ length: count }, (_, index) => ({
+        index,
+        name: `eth${index}`,
+        network_id: 0,
+        planned_mac: null,
+        port_position: { side: 'right' as const, offset: 0.5 }
+      }))
+    };
+  }
+
+  function linkBetween(id: string, from: Link['from'], to: Link['to']): Link {
+    return { id, from, to, style_override: null, label: '', color: '', width: '1' };
+  }
+
+  const toNetwork = { network_id: 9 };
+  const bridge: NetworkData = {
+    id: 21,
+    name: 'net-21',
+    type: 'bridge',
+    left: 0,
+    top: 0,
+    icon: 'Cloud.png',
+    visibility: false,
+    implicit: true,
+    count: 2
+  };
+
+  it('upsertLink replaces the entry with the same id instead of adding a second one', () => {
+    labState.setLinks([linkBetween('lnk_1', { node_id: 1, interface_index: 0 }, toNetwork)]);
+
+    labState.upsertLink(linkBetween('lnk_1', { node_id: 1, interface_index: 0 }, { network_id: 9 }));
+
+    expect(get(labState).links.map((entry) => entry.id)).toEqual(['lnk_1']);
+    expect(get(labState).links[0].to).toEqual({ network_id: 9 });
+  });
+
+  it('upsertLink retires an optimistic placeholder between the same endpoints', () => {
+    const placeholder = linkBetween('tmp_key', { node_id: 1, interface_index: 1 }, toNetwork);
+    const other = linkBetween('lnk_1', { node_id: 1, interface_index: 0 }, toNetwork);
+    labState.setLinks([placeholder, other]);
+
+    labState.upsertLink(linkBetween('lnk_101', { node_id: 1, interface_index: 1 }, toNetwork));
+
+    expect(get(labState).links.map((entry) => entry.id)).toEqual(['lnk_1', 'lnk_101']);
+  });
+
+  it('upsertLink keeps a placeholder that joins different endpoints', () => {
+    labState.setLinks([linkBetween('tmp_key', { node_id: 2, interface_index: 0 }, toNetwork)]);
+
+    labState.upsertLink(linkBetween('lnk_101', { node_id: 1, interface_index: 1 }, toNetwork));
+
+    expect(get(labState).links.map((entry) => entry.id)).toEqual(['tmp_key', 'lnk_101']);
+  });
+
+  it('upsertLink attaches the node-side interface to the network the link joins', () => {
+    labState.setNodes({ '1': nodeWithInterfaces(1, 2) });
+
+    labState.upsertLink(linkBetween('lnk_101', { node_id: 1, interface_index: 1 }, toNetwork));
+
+    const interfaces = get(labState).nodes['1'].interfaces;
+    expect(interfaces[1].network_id).toBe(9);
+    expect(interfaces[0].network_id).toBe(0);
+  });
+
+  it('applyCreatedLink swaps the placeholder for the created link and adopts the bridge', () => {
+    labState.setLinks([
+      linkBetween('tmp_key', { node_id: 1, interface_index: 1 }, { node_id: 2, interface_index: 0 })
+    ]);
+    labState.setNodes({ '1': nodeWithInterfaces(1, 2) });
+    const first = linkBetween('lnk_201', { node_id: 1, interface_index: 1 }, { network_id: 21 });
+
+    labState.applyCreatedLink(first, bridge, 'tmp_key');
+
+    const state = get(labState);
+    expect(state.links.map((entry) => entry.id)).toEqual(['lnk_201']);
+    expect(state.networks['21']).toEqual(bridge);
+    expect(state.nodes['1'].interfaces[1].network_id).toBe(21);
+  });
+
+  it('applyCreatedLink keeps a copy the WebSocket already delivered single', () => {
+    const first = linkBetween('lnk_201', { node_id: 1, interface_index: 1 }, { network_id: 21 });
+    labState.setLinks([
+      linkBetween('tmp_key', { node_id: 1, interface_index: 1 }, { node_id: 2, interface_index: 0 }),
+      first
+    ]);
+
+    labState.applyCreatedLink(first, bridge, 'tmp_key');
+
+    const state = get(labState);
+    expect(state.links.map((entry) => entry.id)).toEqual(['lnk_201']);
+    expect(state.networks['21']).toEqual(bridge);
+  });
+
+  it('applyCreatedLink without a network leaves the networks alone', () => {
+    labState.setNetworks({ '9': network(9, 0, 0) });
+    labState.setLinks([linkBetween('tmp_key', { node_id: 1, interface_index: 0 }, toNetwork)]);
+
+    labState.applyCreatedLink(
+      linkBetween('lnk_101', { node_id: 1, interface_index: 0 }, toNetwork),
+      null,
+      'tmp_key'
+    );
+
+    expect(get(labState).links.map((entry) => entry.id)).toEqual(['lnk_101']);
+    expect(Object.keys(get(labState).networks)).toEqual(['9']);
+  });
+});

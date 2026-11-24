@@ -65,6 +65,7 @@
   import { labState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
   import { deriveEdges, attachRouteObstacles, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
+  import { createdFromLinkResponse, type LinkCreateResponse } from '$lib/services/linkCreate';
   import {
     dragLinkStore,
     getDragLinkSnapshot,
@@ -1296,14 +1297,14 @@
     const toEndpoint = { network_id: entry.network_id };
 
     try {
-      const response = await apiRequest<Link>(`/labs/${labId}/links`, {
+      const response = await apiRequest<LinkCreateResponse>(`/labs/${labId}/links`, {
         method: 'POST',
         body: { from: fromEndpoint, to: toEndpoint },
         suppressToast: true,
       });
-      const serverLink = response.data;
-      if (serverLink && serverLink.id) {
-        labState.setLinks([...$labState.links, serverLink]);
+      const created = createdFromLinkResponse(response);
+      if (created.link) {
+        labState.applyCreatedLink(created.link, created.network);
       }
       adoptRevision(response);
       // Optimistically remove the discovered overlay immediately (HIGH-1).
@@ -1804,6 +1805,16 @@
     }
   }
 
+  /** Whether the other half of an implicit bridge's pair is already in local state. */
+  function hasPeerHalf(networkId: number, linkId: string): boolean {
+    return $labState.links.some(
+      (entry) =>
+        entry.id !== linkId &&
+        !String(entry.id).startsWith('tmp_') &&
+        entry.to?.network_id === networkId
+    );
+  }
+
   async function handleLinkConfirm(
     event: CustomEvent<{
       styleOverride: LinkStyle;
@@ -1875,7 +1886,7 @@
     dragLinkSourceAnchor = null;
 
     try {
-      const response = await apiRequest<Link>(`/labs/${labId}/links`, {
+      const response = await apiRequest<LinkCreateResponse>(`/labs/${labId}/links`, {
         method: 'POST',
         headers: { 'Idempotency-Key': idempotencyKey },
         body: {
@@ -1885,11 +1896,27 @@
         },
         suppressToast: true,
       });
-      const serverLink = response.data;
-      if (serverLink && serverLink.id) {
-        labState.setLinks($labState.links.map((entry) => (entry.id === tempId ? serverLink : entry)));
-      }
+      const created = createdFromLinkResponse(response);
       adoptRevision(response);
+
+      // The lab can only be patched in place from a complete result. A
+      // node-to-node link is stored as an implicit bridge with two halves, but
+      // the response carries just the half that was requested — the other
+      // arrives over the WebSocket, usually before this response. Adopting
+      // the bridge without both halves would paint it as a broken (orphaned)
+      // bridge until the peer lands. So when the result is incomplete, let the
+      // lab reload pick it up; the optimistic line stays on screen until the
+      // snapshot replaces it, so the link never blinks out.
+      const bridge = created.network;
+      const incomplete =
+        !created.link || (bridge?.implicit === true && !hasPeerHalf(bridge.id, created.link.id));
+      if (incomplete || !created.link) {
+        dispatchCanvasChange('link-create-reload', {
+        });
+        return;
+      }
+
+      labState.applyCreatedLink(created.link, created.network, tempId);
       publishFlowState();
       dispatchCanvasChange('topology', {
       });

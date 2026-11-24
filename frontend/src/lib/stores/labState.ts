@@ -129,6 +129,63 @@ function normalizeNodes(nodes: Record<string, NodeData>): Record<string, NodeDat
   return changed ? out : nodes;
 }
 
+/** Identity of one end of a link, for comparing links by their endpoints. */
+function endpointKey(endpoint: Link['from'] | Link['to'] | null | undefined): string {
+  if (!endpoint) return '';
+  return `${endpoint.node_id ?? ''}:${endpoint.interface_index ?? ''}:${endpoint.network_id ?? ''}`;
+}
+
+/** True when two links join the same endpoints in the same direction. */
+function joinSameEndpoints(a: Link, b: Link): boolean {
+  return endpointKey(a.from) === endpointKey(b.from) && endpointKey(a.to) === endpointKey(b.to);
+}
+
+/** ``links`` with ``link`` in place of the entry that has the same id, or appended. */
+function withLink(links: Link[], link: Link): Link[] {
+  const id = String(link.id);
+  const index = links.findIndex((entry) => String(entry.id) === id);
+  if (index === -1) return [...links, link];
+  const next = links.slice();
+  next[index] = link;
+  return next;
+}
+
+/**
+ * Mirror what the server did to the interfaces a link attaches: the
+ * node-side interface of a node-to-network link is attached to that network
+ * (link deletion already reverses this on its side). Returns the same object
+ * when there is nothing to change.
+ */
+function withAttachedInterfaces(
+  nodes: Record<string, NodeData>,
+  link: Link
+): Record<string, NodeData> {
+  let next = nodes;
+  for (const [endpoint, other] of [
+    [link.from, link.to],
+    [link.to, link.from]
+  ] as const) {
+    const nodeId = endpoint?.node_id;
+    const interfaceIndex = endpoint?.interface_index;
+    const networkId = other?.network_id;
+    if (typeof nodeId !== 'number' || typeof interfaceIndex !== 'number') continue;
+    if (typeof networkId !== 'number') continue;
+    const node = next[String(nodeId)];
+    const attached = node?.interfaces?.[interfaceIndex];
+    if (!node || !attached || attached.network_id === networkId) continue;
+    next = {
+      ...next,
+      [String(nodeId)]: {
+        ...node,
+        interfaces: node.interfaces.map(
+          (entry, index) => (index === interfaceIndex ? { ...entry, network_id: networkId } : entry)
+        )
+      }
+    };
+  }
+  return next;
+}
+
 function createLabState() {
   const store = writable<LabEditorState>(emptyState());
 
@@ -171,16 +228,50 @@ function createLabState() {
       }));
     },
 
+    /**
+     * Adopt one link: the entry with the same id is replaced, otherwise the
+     * link is appended.
+     *
+     * Adopting a real link also retires an optimistic placeholder
+     * (``tmp_*``) between the same endpoints (#306). The canvas inserts one
+     * while POST /links is in flight, and the backend announces the created
+     * link over the WebSocket — sometimes before the response arrives.
+     */
     upsertLink(link: Link): void {
       store.update((state) => {
         const id = String(link.id);
-        const index = state.links.findIndex((entry) => String(entry.id) === id);
-        if (index === -1) {
-          return { ...state, links: [...state.links, link] };
-        }
-        const links = state.links.slice();
-        links[index] = link;
-        return { ...state, links };
+        const real = !id.startsWith('tmp_');
+        let links = real
+          ? state.links.filter(
+              (entry) => !(String(entry.id).startsWith('tmp_') && joinSameEndpoints(entry, link))
+            )
+          : state.links;
+        links = withLink(links, link);
+        return { ...state, links, nodes: withAttachedInterfaces(state.nodes, link) };
+      });
+    },
+
+    /**
+     * Adopt the result of POST /links (#306): the created link, the network
+     * it created if any (a node-to-node link joins the two nodes through an
+     * implicit bridge), and the interface attachments it made.
+     * ``placeholderId`` is the optimistic link the request replaced.
+     */
+    applyCreatedLink(
+      link: Link,
+      network: NetworkData | null | undefined,
+      placeholderId?: string
+    ): void {
+      store.update((state) => {
+        const links = placeholderId
+          ? state.links.filter((entry) => String(entry.id) !== placeholderId)
+          : state.links;
+        return {
+          ...state,
+          links: withLink(links, link),
+          nodes: withAttachedInterfaces(state.nodes, link),
+          networks: network ? { ...state.networks, [String(network.id)]: network } : state.networks
+        };
       });
     },
 
