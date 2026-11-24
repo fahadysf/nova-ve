@@ -103,6 +103,7 @@ vi.mock('$lib/stores/labWs', () => ({
 }));
 
 import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
+import CanvasChangedHarness from './mocks/CanvasChangedHarness.svelte';
 import { apiRequest } from '$lib/api';
 import { labState } from '$lib/stores/labState';
 import { toastStore } from '$lib/stores/toasts';
@@ -835,5 +836,143 @@ describe('TopologyCanvas hover focus (#275)', () => {
     expect(pulsing('nodes', 'node1')).toBe(true);
     expect(pulsing('nodes', 'node2')).toBe(false);
     expect(classOf('edges', 'link:l3')).toBeNull();
+  });
+});
+
+// #306: the canvas read the created link from ``response.data``, but
+// POST /labs/{id}/links returns it as ``link`` (and an implicit bridge as
+// ``network``), so the optimistic placeholder was never replaced and the
+// WebSocket's copy of the same link drew beside it.
+describe('TopologyCanvas link creation adopts the create response (#306)', () => {
+  const defaultApi = vi.mocked(apiRequest).getMockImplementation()!;
+
+  function link(id: string, from: Link['from'], to: Link['to']): Link {
+    return { id, from, to, style_override: null, label: '', color: '', width: '1' };
+  }
+
+  const edgeIds = () =>
+    (
+      JSON.parse(screen.getByTestId('svelte-flow-mock').getAttribute('data-flow-edges') ?? '[]') as Array<{
+        id: string;
+      }>
+    ).map((edge) => edge.id);
+  const linkIds = () => get(labState).links.map((entry) => entry.id).sort();
+
+  /**
+   * Serve POST /links with the endpoint's real response shape.
+   * ``beforeResponding`` stands in for the WebSocket events the backend
+   * publishes before the HTTP response goes out.
+   */
+  function onCreate(
+    respond: (body: { from: Link['from']; to: Link['to'] }) => unknown,
+    beforeResponding?: () => void
+  ) {
+    vi.mocked(apiRequest).mockImplementation(async (path: string, options) => {
+      if (path === '/labs/lab-hotplug/links') {
+        beforeResponding?.();
+        return respond((options as { body: { from: Link['from']; to: Link['to'] } }).body) as never;
+      }
+      return defaultApi(path, options);
+    });
+  }
+
+  const hotplug = { hotplug: true, max_nics: 8, machine: 'q35' as const };
+  const bridge: NetworkData = {
+    id: 21,
+    name: 'Net 21',
+    type: 'bridge',
+    left: 0,
+    top: 0,
+    icon: 'Cloud.png',
+    visibility: false,
+    implicit: true,
+    count: 2
+  };
+
+  afterEach(() => {
+    vi.mocked(apiRequest).mockImplementation(defaultApi);
+  });
+
+  it('draws one link when the WebSocket and the response both announce a node-to-network link', async () => {
+    onCreate((body) => {
+      const created = link('lnk_101', body.from, body.to);
+      labState.upsertLink(created);
+      return {
+        code: 201,
+        status: 'success',
+        message: 'Link created successfully.',
+        link: created,
+        revision: 5
+      };
+    });
+    renderCanvas(
+      { '1': makeNode(1, 'edge-a', 0, hotplug, 2) },
+      { '9': makeNetwork(9, 'bridge-a') }
+    );
+
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), networkEndpoint(9, 'bridge-a'));
+    (await screen.findByTestId('link-confirm-button')).click();
+
+    await waitFor(() => expect(edgeIds()).toEqual(['link:lnk_101']));
+    expect(linkIds()).toEqual(['lnk_101']);
+    // The dialog's default choice is the first free interface.
+    expect(get(labState).nodes['1'].interfaces[0].network_id).toBe(9);
+  });
+
+  it('collapses a node-to-node link into one edge once the bridge and both halves are known', async () => {
+    onCreate((body) => {
+      const first = link('lnk_201', body.from, { network_id: 21 });
+      const second = link('lnk_202', body.to, { network_id: 21 });
+      labState.upsertLink(first);
+      labState.upsertLink(second);
+      return {
+        code: 201,
+        status: 'success',
+        message: 'Link created successfully.',
+        link: first,
+        network: bridge,
+        revision: 6
+      };
+    });
+    renderCanvas({
+      '1': makeNode(1, 'edge-a', 0, hotplug, 2),
+      '2': makeNode(2, 'edge-b', 0, hotplug, 2)
+    });
+
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), nodeSlotEndpoint(2, 'edge-b'));
+    (await screen.findByTestId('link-confirm-button')).click();
+
+    await waitFor(() => expect(edgeIds()).toEqual(['pair:net21']));
+    expect(linkIds()).toEqual(['lnk_201', 'lnk_202']);
+    expect(get(labState).networks['21']?.implicit).toBe(true);
+  });
+
+  it('asks for a lab reload instead of guessing when the response beats the peer half', async () => {
+    onCreate((body) => ({
+      code: 201,
+      status: 'success',
+      message: 'Link created successfully.',
+      link: link('lnk_201', body.from, { network_id: 21 }),
+      network: bridge,
+      revision: 6
+    }));
+    const reasons: string[] = [];
+    labState.reset();
+    labState.applySnapshot({
+      nodes: { '1': makeNode(1, 'edge-a', 0, hotplug, 2), '2': makeNode(2, 'edge-b', 0, hotplug, 2) },
+      networks: {},
+      topology: [],
+      links: [],
+      defaults: { link_style: 'orthogonal' }
+    });
+    render(CanvasChangedHarness, { props: { labId: 'lab-hotplug', reasons } });
+
+    driveConfirm(nodeSlotEndpoint(1, 'edge-a'), nodeSlotEndpoint(2, 'edge-b'));
+    (await screen.findByTestId('link-confirm-button')).click();
+
+    await waitFor(() => expect(reasons).toContain('link-create-reload'));
+    // The optimistic line stays until the snapshot lands, so the link does
+    // not blink out while the lab reloads.
+    expect(edgeIds()).toEqual([expect.stringMatching(/^link:tmp_/)]);
   });
 });
