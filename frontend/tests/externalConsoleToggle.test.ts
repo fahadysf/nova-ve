@@ -3,7 +3,7 @@
 
 // Lab editor page tests for the external-console toggle (#269) and Zen mode (#280).
 
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import LabEditorPage from '../src/routes/labs/[...id]/+page.svelte';
@@ -199,6 +199,44 @@ describe('lab editor controls', () => {
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'));
     expect(window.localStorage.getItem('nova-ve.external-console')).toBe('off');
+  });
+
+  it('resizes only the selected floating window and preserves its maximized state when minimized', async () => {
+    document.cookie = 'novaVeConsoleMode=floating; path=/';
+    render(LabEditorPage);
+    const openConsole = await screen.findByTestId('canvas-console-button');
+    plantNode(NODES['1']);
+    await fireEvent.click(openConsole);
+    const first = await screen.findByRole('dialog', { name: 'Console window for router-1' });
+    const firstIframe = within(first).getByTitle('Guacamole console for router-1');
+    const openingWidth = first.style.width;
+
+    plantNode({ ...NODES['1'], id: 2, name: 'router-2' });
+    await fireEvent.click(openConsole);
+    const second = await screen.findByRole('dialog', { name: 'Console window for router-2' });
+    const secondBounds = [second.style.left, second.style.top, second.style.width, second.style.height];
+
+    const firstLeft = first.style.left;
+    await fireEvent.keyDown(within(first).getByRole('button', { name: 'Resize router-1 console from bottom right' }), {
+      key: 'ArrowLeft'
+    });
+    expect(parseFloat(first.style.width)).toBeLessThan(parseFloat(openingWidth));
+    expect(first.style.left).toBe(firstLeft);
+    expect([second.style.left, second.style.top, second.style.width, second.style.height]).toEqual(secondBounds);
+
+    await fireEvent.click(within(first).getByRole('button', { name: 'Maximize router-1 console' }));
+    const maximizedWidth = first.style.width;
+    expect(parseFloat(maximizedWidth)).toBeGreaterThan(parseFloat(openingWidth));
+    await fireEvent.click(within(first).getByRole('button', { name: 'Minimize router-1 console' }));
+    expect(first).not.toBeVisible();
+    plantNode(NODES['1']);
+    await fireEvent.click(openConsole);
+    expect(first).toBeVisible();
+    expect(first.style.width).toBe(maximizedWidth);
+
+    await fireEvent.click(within(first).getByRole('button', { name: 'Restore router-1 console' }));
+    expect(first.style.width).toBe(openingWidth);
+    expect(within(first).getByTitle('Guacamole console for router-1')).toBe(firstIframe);
   });
 
   it('external mode: console action emits telnet:// without opening the workspace', async () => {
