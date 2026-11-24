@@ -12,6 +12,8 @@ vi.mock('$lib/api', () => ({
   apiRequest: (...args: unknown[]) => apiRequest(...args),
 }));
 
+const LAST_LOGIN = 1_795_000_000;
+
 const USERS: Record<string, unknown> = {
   admin: {
     username: 'admin',
@@ -26,6 +28,8 @@ const USERS: Record<string, unknown> = {
     folder: '/',
     datestart: 1735689600,
     expiration: -1,
+    last_login: LAST_LOGIN,
+    ip: '203.0.113.9'
   },
   trainee: {
     username: 'trainee',
@@ -39,8 +43,8 @@ const USERS: Record<string, unknown> = {
     ram: 8192,
     folder: '/trainee',
     datestart: -1,
-    expiration: 1798761600,
-  },
+    expiration: 1798761600
+  }
 };
 
 describe('User management page (#261)', () => {
@@ -65,6 +69,29 @@ describe('User management page (#261)', () => {
     expect(screen.getByText(/8192 MB\s*\/\s*4/)).toBeInTheDocument();
     expect(screen.getByText('/trainee')).toBeInTheDocument();
     expect(screen.getByText('2027-01-01')).toBeInTheDocument();
+  });
+
+  it('shows when each account last signed in, and "never" for one that has not (#297)', async () => {
+    render(UsersPage);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('users-last-login-trainee')).toBeInTheDocument();
+    });
+
+    // A sign-in time is read against "now", so it is shown in the admin's
+    // own time zone rather than as a UTC date like the lifecycle columns.
+    const date = new Date(LAST_LOGIN * 1000);
+    const pad = (value: number) => String(value).padStart(2, '0');
+    const local = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+
+    const admin = screen.getByTestId('users-last-login-admin');
+    expect(admin).toHaveTextContent(local);
+    expect(admin).toHaveTextContent('from 203.0.113.9');
+    expect(admin).not.toHaveTextContent('never');
+
+    const trainee = screen.getByTestId('users-last-login-trainee');
+    expect(trainee).toHaveTextContent(/^never$/);
+    expect(trainee).not.toHaveTextContent('from');
   });
 
   it('opens the create dialog and posts the payload', async () => {

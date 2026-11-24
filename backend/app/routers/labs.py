@@ -32,6 +32,7 @@ from app.schemas.node import (
 from app.schemas.user import UserRead
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
+from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
@@ -442,6 +443,15 @@ async def create_lab(
             "message": str(e),
         }
 
+    await audit_service.record(
+        "lab.create",
+        actor=current_user.username,
+        target_type="lab",
+        target_id=lab.path,
+        target_name=lab.name,
+        lab_path=lab.path,
+        lab_name=lab.name,
+    )
     return {
         "code": 200,
         "status": "success",
@@ -571,6 +581,12 @@ async def update_topology(
     settings = get_settings()
     normalized = _normalize_relative_lab_path(scoped_path)
 
+    # #297: before-values of the node/network fields this payload patches.
+    # The canvas saves link styling through this endpoint on every edit, so
+    # only a payload that really patches a field earns an audit entry.
+    patched_nodes: dict[str, dict] = {}
+    patched_networks: dict[str, dict] = {}
+
     # Issue #174 follow-up: serialize topology writes against link_service /
     # network_service via lab_lock. Without this, two concurrent writers can
     # interleave and lose mutations. Plus, the post-write reconcile below has
@@ -617,6 +633,7 @@ async def update_topology(
                         if field in _POSITION_FIELDS:
                             continue
                         if value is not None:
+                            patched_nodes.setdefault(str(node_id), {})[field] = node.get(field)
                             node[field] = value
             # Bridge-Cloud security boundary: PUT /topology accepts only
             # layout/display fields for network patches.  Semantic fields
@@ -639,6 +656,7 @@ async def update_topology(
                         if field not in _NETWORK_TOPOLOGY_FIELDS:
                             continue
                         if value is not None:
+                            patched_networks.setdefault(str(network_id), {})[field] = network.get(field)
                             network[field] = value
 
         LabService.write_lab_json_static(scoped_path, data)
@@ -671,6 +689,38 @@ async def update_topology(
                 scoped_path,
             )
 
+    # #297: report the field patches the payload applied (see patched_nodes).
+    nodes_after = data.get("nodes", {})
+    networks_after = data.get("networks", {})
+    topology_events: list[audit_service.AuditEvent] = []
+    for node_id, before in patched_nodes.items():
+        changes = audit_service.field_changes(before, nodes_after.get(node_id) or {})
+        if changes:
+            topology_events.append(
+                audit_service.AuditEvent(
+                    "node.update",
+                    actor=current_user.username,
+                    **audit_service.node_context(
+                        data, node_id, scoped_path, detail={"changes": changes, "via": "topology"}
+                    ),
+                )
+            )
+    for network_id, before in patched_networks.items():
+        changes = audit_service.field_changes(before, networks_after.get(network_id) or {})
+        if changes:
+            topology_events.append(
+                audit_service.AuditEvent(
+                    "network.update",
+                    actor=current_user.username,
+                    **audit_service.network_context(
+                        data,
+                        network_id,
+                        scoped_path,
+                        detail={"changes": changes, "via": "topology"},
+                    ),
+                )
+            )
+    await audit_service.record_batch(topology_events)
     return {
         "code": 200,
         "status": "success",
@@ -812,6 +862,14 @@ async def create_node(
     nodes[str(next_id)] = node
     LabService.write_lab_json_static(scoped_path, data)
 
+    # #297: covers from-template creation too — that handler delegates here.
+    await audit_service.record(
+        "node.create",
+        actor=current_user.username,
+        **audit_service.node_context(
+            data, next_id, scoped_path, detail={"image": node.get("image")}
+        ),
+    )
     return {
         "code": 200,
         "status": "success",
@@ -1316,6 +1374,38 @@ async def create_nodes_from_paired_template(
                 },
             )
 
+    # #297: one entry per object the template brought into existence.
+    await audit_service.record_batch(
+        [
+            audit_service.AuditEvent(
+                "node.create",
+                actor=current_user.username,
+                **audit_service.node_context(
+                    data,
+                    payload.get("id"),
+                    scoped_path,
+                    detail={
+                        "image": payload.get("image"),
+                        "paired_template": request.template_key,
+                    },
+                ),
+            )
+            for payload in created_nodes
+        ]
+        + [
+            audit_service.AuditEvent(
+                "link.create",
+                actor=current_user.username,
+                **audit_service.link_context(
+                    data,
+                    payload,
+                    scoped_path,
+                    detail={"paired_template": request.template_key},
+                ),
+            )
+            for payload in created_links
+        ]
+    )
     return {
         "code": 200,
         "status": "success",
@@ -1394,6 +1484,23 @@ async def create_nodes_batch(
         created_nodes.append(node)
 
     LabService.write_lab_json_static(scoped_path, data)
+
+    # #297: one entry per node — each is an object that now exists.
+    await audit_service.record_batch(
+        [
+            audit_service.AuditEvent(
+                "node.create",
+                actor=current_user.username,
+                **audit_service.node_context(
+                    data,
+                    node["id"],
+                    scoped_path,
+                    detail={"image": node.get("image"), "batch_size": request.count},
+                ),
+            )
+            for node in created_nodes
+        ]
+    )
     return {
         "code": 200,
         "status": "success",
@@ -1540,6 +1647,9 @@ async def update_node(
             "message": validation_error,
         }
 
+    # #297: shallow snapshot — the trail reports only what actually changed.
+    before = dict(node)
+
     for field, value in request.model_dump(exclude_unset=True).items():
         # ``second_console: null`` is meaningful — it clears the secondary
         # console (#268). Every other field keeps the skip-None behavior.
@@ -1552,6 +1662,16 @@ async def update_node(
         int(node.get("ethernet", 0)),
     )
     LabService.write_lab_json_static(scoped_path, data)
+
+    # A save that changed nothing (the edit dialog re-submits every field)
+    # is not an event worth a row.
+    changes = audit_service.field_changes(before, node, skip=("interfaces",))
+    if changes:
+        await audit_service.record(
+            "node.update",
+            actor=current_user.username,
+            **audit_service.node_context(data, node_id, scoped_path, detail={"changes": changes}),
+        )
 
     lab_id = str(data.get("id", "")).strip()
     enriched = NodeRuntimeService().enrich_node(lab_id, node_id, node) if lab_id else node
@@ -1598,6 +1718,9 @@ async def delete_node(
             "message": "Node does not exist.",
         }
 
+    # #297: describe the node before it leaves the lab.
+    audit_context = audit_service.node_context(data, node_id, scoped_path)
+
     try:
         NodeRuntimeService().wipe_node(data, node_id)
     except NodeRuntimeError:
@@ -1626,6 +1749,7 @@ async def delete_node(
     ]
     LabService.write_lab_json_static(scoped_path, data)
 
+    await audit_service.record("node.delete", actor=current_user.username, **audit_context)
     return {
         "code": 200,
         "status": "success",
@@ -1642,7 +1766,8 @@ async def start_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
     except FileNotFoundError:
         return {
             "code": 404,
@@ -1676,6 +1801,11 @@ async def start_node(
             "message": str(e),
         }
 
+    await audit_service.record(
+        "node.start",
+        actor=current_user.username,
+        **audit_service.node_context(data, node_id, scoped_path),
+    )
     return {
         "code": 200,
         "status": "success",
@@ -1690,7 +1820,8 @@ async def stop_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
         NodeRuntimeService().stop_node(data, node_id)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
@@ -1713,6 +1844,11 @@ async def stop_node(
             "message": str(e),
         }
 
+    await audit_service.record(
+        "node.stop",
+        actor=current_user.username,
+        **audit_service.node_context(data, node_id, scoped_path),
+    )
     return {
         "code": 200,
         "status": "success",
@@ -1727,7 +1863,8 @@ async def wipe_node(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = _read_lab_data(_scoped_lab_path(current_user, lab_path, treat_as_absolute=True))
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
         NodeRuntimeService().wipe_node(data, node_id)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
@@ -1750,6 +1887,11 @@ async def wipe_node(
             "message": str(e),
         }
 
+    await audit_service.record(
+        "node.wipe",
+        actor=current_user.username,
+        **audit_service.node_context(data, node_id, scoped_path),
+    )
     return {
         "code": 200,
         "status": "success",
@@ -2335,11 +2477,21 @@ async def update_network(
             ),
         }
 
+    before = dict(network)
     for field, value in patch.items():
         if value is not None:
             network[field] = value
 
     LabService.write_lab_json_static(scoped_path, data)
+    changes = audit_service.field_changes(before, network)
+    if changes:
+        await audit_service.record(
+            "network.update",
+            actor=current_user.username,
+            **audit_service.network_context(
+                data, network_id, scoped_path, detail={"changes": changes}
+            ),
+        )
     return {
         "code": 200,
         "status": "success",
@@ -2918,6 +3070,15 @@ async def delete_lab(
                 "message": exc.message,
                 "data": {"references": exc.references},
             }
+        await audit_service.record(
+            "lab.delete",
+            actor=current_user.username,
+            target_type="lab",
+            target_id=lab.path,
+            target_name=lab.name,
+            lab_path=lab.path,
+            lab_name=lab.name,
+        )
         return {
             "code": 200,
             "status": "success",
@@ -2949,6 +3110,16 @@ async def delete_lab(
                 "data": {"references": exc.references},
             }
         filepath.unlink()
+        # A lab.json with no database row — name it by its file stem.
+        await audit_service.record(
+            "lab.delete",
+            actor=current_user.username,
+            target_type="lab",
+            target_id=f"/{scoped_path}",
+            target_name=Path(scoped_path).stem,
+            lab_path=f"/{scoped_path}",
+            detail={"orphan": True},
+        )
         return {
             "code": 200,
             "status": "success",
@@ -3061,6 +3232,17 @@ async def move_lab(
                 "message": "Lab move failed (60039).",
             }
 
+    await audit_service.record(
+        "lab.move",
+        actor=current_user.username,
+        target_type="lab",
+        target_id=f"/{new_relative}",
+        # The lab row's name, falling back to the file stem for labs that
+        # have no database row (filesystem imports).
+        target_name=getattr(lab, "name", None) or source.stem,
+        lab_path=f"/{new_relative}",
+        detail={"from": f"/{scoped_path}", "to": f"/{new_relative}"},
+    )
     return {
         "code": 200,
         "status": "success",

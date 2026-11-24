@@ -29,5 +29,8 @@ class User(Base):
     # Runtime
     session_token = Column(String(255), nullable=True)
     session_expires = Column(BigInteger, nullable=True)
+    # Source address of the most recent successful sign-in (#297).
     ip = Column(String(64), nullable=True)
     online = Column(Boolean, default=False, nullable=False)
+    # #297: epoch seconds of the last successful sign-in (NULL = never).
+    last_login = Column(BigInteger, nullable=True)
