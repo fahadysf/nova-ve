@@ -37,6 +37,11 @@ frontend/pnpm-lock.yaml
 
 # Environment
 .env
+.env.*
+!.env.example
+backend.env
+db_password
+**/nova-ve-install-summary.md
 .credentials
 secrets/
 
@@ -49,6 +54,10 @@ secrets/
 
 # Local AI/editor tooling artifacts
 **/.claude/
+**/.codex/
+**/.serena/
+/.omx-state-locks/
+/.omx-state-locks.identity.json
 **/.cursorrules
 **/.kiro/
 **/.mcp.*
@@ -64,10 +73,19 @@ secrets/
 Thumbs.db
 
 # Data
+/.nova-data/
+/backend/data/
+/backend/labs/**/*.json.lock
+/backend/labs/**/*.json.bak
+/backend/labs/**/*.bak.json
 pgdata/
 labdata/
 *.qcow2
 *.iso
+
+# Local browser test output
+/frontend/test-results/
+/frontend/playwright-report/
 
 # Temp
 tmp/

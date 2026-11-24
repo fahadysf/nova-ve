@@ -48,7 +48,7 @@ That single command:
 8. Drops systemd units (`nova-ve-backend`, `caddy`) and starts them.
 9. Reconciles existing NAT-Cloud bridge state on upgraded hosts and deploys Docker runtime reconciliation for stale same-name containers.
 10. Runs the in-tree smoke check.
-11. Writes `nova-ve-install-summary.md` (mode `0600`) into the directory you launched the installer from — it contains the bootstrapped admin password, the location of every critical config file, and a map of the env vars in `/etc/nova-ve/backend.env`.
+11. Writes a private installation summary and reports its path.
 
 The script is idempotent: re-running it fast-forwards the repo, reapplies templates, reinstalls the helper, reconciles NAT-Cloud runtime state for existing bridges, and restarts services without rotating existing secrets.
 
@@ -65,7 +65,7 @@ Override knobs (env vars):
 | `NOVA_VE_QEMU_RELEASE` | `v1.0.0` | `nova-ve-qemu` GitHub Release tag to pull the pack from |
 | `NOVA_VE_QEMU_VERSIONS` | `2.12.1 4.1.0 5.2.0 11.1.3` | QEMU versions to install side-by-side under `/opt/nova-ve/qemu/` |
 
-After install, open `http://<host>/` and log in with the admin credentials printed at the end of the run (also written to `nova-ve-install-summary.md`).
+After install, open `http://<host>/` and log in with the admin credentials reported by the installer.
 
 For development workflows (running the backend with `--reload`, the frontend dev server, or a Rancher Desktop loop on macOS), see the [Deployment contract](docs/development/deployment-contract.md) and the helper scripts in [`deploy/scripts/`](deploy/scripts/).
 

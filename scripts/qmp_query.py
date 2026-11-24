@@ -22,8 +22,8 @@ Socket path convention::
 
     /var/lib/nova-ve/runtime/<lab-id>/<node-id>/qmp.sock
 
-The helper is designed to be executable from a tester's shell on the test VM
-with no Python project setup — it uses only the stdlib.
+Run the helper wherever the QMP socket is accessible. It uses only the
+Python standard library.
 
 QMP handshake (from QEMU Machine Protocol spec)::
 

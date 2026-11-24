@@ -16,7 +16,7 @@ Usage::
     python scripts/dedup_links.py --labs-dir /var/lib/nova-ve/labs --dry-run
 
     # live run:
-    sudo /<checkout>/.venv/bin/python scripts/dedup_links.py \\
+    sudo backend/.venv/bin/python scripts/dedup_links.py \\
         --labs-dir /var/lib/nova-ve/labs
 
 Exit codes:

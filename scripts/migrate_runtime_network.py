@@ -46,7 +46,7 @@ Usage::
     python scripts/migrate_runtime_network.py --labs-dir /var/lib/nova-ve/labs --dry-run
 
     # Live run (backend must be stopped first):
-    sudo /<checkout>/.venv/bin/python \\
+    sudo backend/.venv/bin/python \\
         scripts/migrate_runtime_network.py --labs-dir /var/lib/nova-ve/labs
 
 Exit codes:

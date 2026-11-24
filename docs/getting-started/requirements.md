@@ -37,4 +37,4 @@ You do not need to pre-install anything beyond a clean Ubuntu 26.04 image. `inst
 - Python 3 with venv + build deps.
 - QEMU/KVM userspace and networking tools (`qemu-system-x86`, `qemu-utils`, `iproute2`, `dnsmasq`, `nftables`), installed directly by the provisioner. Dynamips/uBridge are built from source.
 
-After the run, `nova-ve-install-summary.md` lists every config file, env var, and systemd unit the installer created.
+The installer reports the location of its private installation summary.

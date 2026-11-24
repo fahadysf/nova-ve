@@ -48,9 +48,6 @@ jobs:
       - name: Build site
         run: mkdocs build --strict
 
-      - name: Add removed-page tombstones
-        run: scripts/docs-tombstones.sh
-
       - name: Deploy to Cloudflare Pages
         if: github.event_name != 'pull_request'
         uses: cloudflare/wrangler-action@v3

@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | 
 
 The script provisions Docker, PostgreSQL, Caddy, the Python backend, the SvelteKit frontend, Guacamole for HTML5 consoles, `dnsmasq`/`nftables`, and the privileged network helper — then drops systemd units and starts everything. It is idempotent: re-running fast-forwards the repo, reinstalls the helper, reconciles existing NAT-Cloud bridge state, and restarts services without rotating existing secrets.
 
-After install, open `http://<host>/` and log in with the admin credentials printed at the end of the run (also written to `nova-ve-install-summary.md` in the directory you launched the installer from).
+After install, open `http://<host>/` and log in with the admin credentials reported by the installer.
 
 Docs are published at `docs.nova-ve.com` and mirrored to GitHub Pages.
 

@@ -583,8 +583,8 @@ bridge_cloud_cleanup_stale_transitional() {
   # before the Phase C cleanup landed (commit 5454520) left this file
   # in place, which causes systemd-networkd to re-apply eth0's L3
   # config on every reconfigure — re-creating the dual-IP regression
-  # (192.0.2.X on both eth0 AND br-eth0) and a second default
-  # route via eth0.
+  # on both the physical uplink and its bridge, along with a second
+  # default route via the uplink.
   #
   # Safe to run unconditionally on every provision: only acts when the
   # marker says "complete" AND the file is present.

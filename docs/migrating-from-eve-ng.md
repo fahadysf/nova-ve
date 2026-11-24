@@ -14,7 +14,7 @@ cd "${NOVA_VE_REPO_DIR:-/var/lib/nova-ve/nova-ve-git}"
 sudo ./deploy/scripts/import-eveng-templates.sh
 ```
 
-The first command is a dry-run plan; the second performs the import. The wrapper reads `/etc/nova-ve/backend.env`, finds the backend virtual environment, and uses these defaults:
+The first command is a dry-run plan; the second performs the import. The wrapper reads the backend environment file, finds the backend virtual environment, and uses these defaults:
 
 | Purpose | Default |
 |---|---|

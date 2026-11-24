@@ -16,7 +16,6 @@ Out of scope for this phase:
 - OVA/golden-image distribution
 - HA/cluster behavior
 - non-Ubuntu hosts
-- authoritative live testing on the development workstation
 
 ## Production Topology
 
@@ -75,14 +74,12 @@ Route ownership:
 ## Filesystem Layout
 
 - App checkout root: the absolute repo path where `deploy/scripts/provision-ubuntu-2604.sh` is executed; installer default is `/var/lib/nova-ve/nova-ve-git`
-- Backend env file: `/etc/nova-ve/backend.env`
 - **Instance ID file: `/etc/nova-ve/instance_id`** — written once by `provision-ubuntu-2604.sh`, never overwritten; authoritative source for bridge/TAP name derivation
 - Static frontend root: `/var/lib/nova-ve/www`
 - Labs: `/var/lib/nova-ve/labs`
 - Images: `/var/lib/nova-ve/images`
 - Temp: `/var/lib/nova-ve/tmp`
 - Guacamole support state: `/var/lib/nova-ve/guacamole`
-- Guacamole DB credentials and backend access URL are carried in `/etc/nova-ve/backend.env`
 
 ## Instance ID and Multi-Host Constraints
 
@@ -128,7 +125,7 @@ This is **not suitable for production** — provisioning writes the canonical fi
 
 ## Runtime Tunables
 
-The backend reads optional environment variables from `/etc/nova-ve/backend.env`
+The backend reads optional environment variables from its environment file
 to tune long-running reconciliation behavior. All values have safe defaults; set
 them only when an operator has a specific reason to deviate.
 

@@ -1,6 +1,6 @@
 # Filesystem layout
 
-Every path nova-ve writes to or reads from, in one table.
+Standard locations for application state, configuration, and installed components.
 
 ## Application state
 
@@ -33,7 +33,6 @@ Every path nova-ve writes to or reads from, in one table.
 
 | Path | Owner | Mode | Purpose |
 |---|---|---|---|
-| `/etc/nova-ve/backend.env` | root | 0600 | Backend env file — DB DSN, secrets, admin bootstrap. |
 | `/etc/sudoers.d/nova-ve` | root | 0440 | Visudo-validated `NOPASSWD:` sudoers fragment for the service user's privileged network helper calls. |
 | `/etc/caddy/Caddyfile` (or fragment) | root | 0644 | Caddy reverse-proxy config for the SPA + WS. |
 | `/etc/systemd/system/nova-ve-backend.service` | root | 0644 | Backend systemd unit. |
@@ -64,6 +63,6 @@ Every path nova-ve writes to or reads from, in one table.
 
 ## What you should *not* move
 
-- `/etc/nova-ve/backend.env` — referenced by an absolute path in the systemd unit.
+- The backend environment file — the systemd unit references it by absolute path.
 - `/opt/nova-ve/bin/` — the sudoers fragment matches this exact prefix.
 - `/var/lib/nova-ve/www/` — Caddy is configured to serve this exact path.

@@ -3,7 +3,7 @@
 Wrapper script: `deploy/scripts/import-eveng-templates.sh`
 Underlying module: `backend/scripts/import_eveng` (run as `python -m scripts.import_eveng`).
 
-The wrapper is the normal operator entrypoint. It sources `/etc/nova-ve/backend.env` when readable, asserts root for mutating imports, then `exec`s the venv'd Python module with the same argv. The default repo path is `/var/lib/nova-ve/nova-ve-git`; set `NOVA_VE_REPO_DIR` if the checkout lives elsewhere. `--dry-run` and `--help` may be run without sudo.
+The wrapper is the normal operator entrypoint. It sources the backend environment file when readable, asserts root for mutating imports, then `exec`s the venv'd Python module with the same argv. The default repo path is `/var/lib/nova-ve/nova-ve-git`; set `NOVA_VE_REPO_DIR` if the checkout lives elsewhere. `--dry-run` and `--help` may be run without sudo.
 
 On a standard installed host, the one-shot flow is:
 

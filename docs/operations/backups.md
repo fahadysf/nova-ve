@@ -10,8 +10,7 @@ A working nova-ve install carries state in three places. A complete backup captu
 | `/var/lib/nova-ve/templates/` | Vendor-converted templates from the EVE-NG importer + any hand-authored templates | After every importer run; otherwise rarely changes |
 | `/var/lib/nova-ve/images/` | Vendor boot disks (qcow2 / .image / .bin / Docker markers) | Once per major import; large but mostly static |
 | Postgres database `novadb` | User accounts, session state, audit log, app metadata | Daily |
-| `/etc/nova-ve/backend.env` | Secret keys, DB DSN, admin bootstrap | Once at install; whenever rotated |
-| `nova-ve-install-summary.md` | Admin password + config-file map | Once at install |
+| Backend configuration | Environment settings and deployment credentials | After installation and after configuration or credential changes |
 
 ## The two backups you should automate
 
@@ -54,7 +53,7 @@ On a freshly-provisioned target host:
    ```bash
    sudo -u postgres pg_restore --clean --if-exists -d novadb /backup/source/novadb-YYYY-MM-DD.dump
    ```
-4. Restart the backend so it picks up the restored `/etc/nova-ve/backend.env` and lab JSONs:
+4. Restart the backend so it loads the restored configuration and lab JSON files:
    ```bash
    sudo systemctl restart nova-ve-backend
    ```

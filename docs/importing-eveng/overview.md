@@ -55,7 +55,7 @@ The first command is a non-mutating plan. The second command performs the import
 | Generated templates | `/var/lib/nova-ve/templates` |
 | Manifest | `/var/lib/nova-ve/import-manifest.json` |
 
-The wrapper sources `/etc/nova-ve/backend.env`, changes into the installed backend directory, and runs the importer with the backend virtual environment. You only need the longer `--source`, `--dest`, `--templates-dir`, or `--manifest` flags when you intentionally use non-standard paths.
+The wrapper sources the backend environment file, changes into the installed backend directory, and runs the importer with the backend virtual environment. You only need the longer `--source`, `--dest`, `--templates-dir`, or `--manifest` flags when you intentionally use non-standard paths.
 
 `--dry-run` and `--help` may be run without sudo. Real imports still require sudo because the script writes `/var/lib/nova-ve/images`, `/var/lib/nova-ve/templates`, and the manifest with service-account ownership.
 
