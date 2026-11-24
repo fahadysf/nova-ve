@@ -10,8 +10,8 @@
 #       deploy/platform-images/mgmt-server/requirements.txt), sshd, telnet
 #       console, iperf3, tcpdump, git.
 #   - nova-ve/browser:latest      EVE eve-firefox analog:
-#       current-stable Firefox in openbox on Xvfb, VNC console on 5900,
-#       telnet debug shell on 23.
+#       current-stable Firefox in openbox on Xvfb with a taskbar and the
+#       nova-ve wallpaper, VNC console on 5900, telnet debug shell on 23.
 #
 # These images are intentionally NOT built at install time (the pip/git
 # fetches make deploys slow). Build manually after pulling updates:

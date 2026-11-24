@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright (c) 2026 Fahad Yousuf <fahadysuf@gmail.com>
+  SPDX-License-Identifier: Apache-2.0
+
+  nova-ve-browser desktop wallpaper: the nova-ve brand mark (the same glyph
+  as BrandMark.svelte in the app shell corner and the login chip — four lab
+  nodes wired to the canvas hub) centered on the flat near-black canvas the
+  UI uses (gray-950). Vector source, so the PNG the Dockerfile builder stage
+  renders from it stays a few KB regardless of resolution.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080" viewBox="0 0 1920 1080">
+  <rect width="1920" height="1080" fill="#030712"/>
+  <g transform="translate(768 348) scale(16)">
+    <line x1="5" y1="5" x2="12" y2="12" stroke="#6b7280" stroke-width="1.25" />
+    <line x1="19" y1="5" x2="12" y2="12" stroke="#6b7280" stroke-width="1.25" />
+    <line x1="5" y1="19" x2="12" y2="12" stroke="#6b7280" stroke-width="1.25" />
+    <line x1="19" y1="19" x2="12" y2="12" stroke="#6b7280" stroke-width="1.25" />
+    <rect x="2" y="2" width="6" height="6" rx="1" fill="#1f2937" stroke="#10b981" stroke-width="1.25" />
+    <rect x="16" y="2" width="6" height="6" rx="1" fill="#1f2937" stroke="#9ca3af" stroke-width="1.25" />
+    <rect x="2" y="16" width="6" height="6" rx="1" fill="#1f2937" stroke="#9ca3af" stroke-width="1.25" />
+    <rect x="16" y="16" width="6" height="6" rx="1" fill="#1f2937" stroke="#10b981" stroke-width="1.25" />
+    <circle cx="12" cy="12" r="2.5" fill="#3b82f6" />
+  </g>
+</svg>

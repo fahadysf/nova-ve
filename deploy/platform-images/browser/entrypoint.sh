@@ -4,10 +4,13 @@
 #
 # nova-ve-browser entrypoint (#288): Xvfb + openbox + Firefox on the virtual
 # display, exposed via x11vnc on the configured port so the in-browser
-# Guacamole VNC console presents the browser station. A busybox telnet
-# daemon on 23 backs the template's telnet second console (debug shell into
-# the station, EVE-style). Foreground x11vnc keeps docker stop semantics
-# clean (mirrors the alpine-vnc demo image).
+# Guacamole VNC console presents the browser station. A tint2 taskbar gives
+# every window a clickable button (minimized windows have no other way back
+# — the VNC console often eats Alt+Tab) and the root window carries the
+# nova-ve brand wallpaper. A busybox telnet daemon on 23 backs the
+# template's telnet second console (debug shell into the station,
+# EVE-style). Foreground x11vnc keeps docker stop semantics clean (mirrors
+# the alpine-vnc demo image).
 set -eu
 
 GEOM="${NOVA_VE_VNC_GEOMETRY:-1280x800x24}"
@@ -43,7 +46,21 @@ done
 # Telnet second console (daemonises; console-shell is a login shell).
 telnetd -p 23 -l /usr/local/bin/console-shell || true
 
+# Root-window wallpaper: flat nova-ve brand mark centered on the UI's
+# near-black. xwallpaper --center leaves the rest of the root window
+# untouched, so xsetroot paints the surrounding canvas first. Both are
+# best-effort — a missing setter must not cost the station its desktop.
+WALLPAPER="/usr/local/share/nova-ve/wallpaper.png"
+xsetroot -solid "#030712" -display "${DISPLAY_NAME}" >/dev/null 2>&1 || true
+if [ -f "${WALLPAPER}" ]; then
+  xwallpaper --screen 0 --center "${WALLPAPER}" >/dev/null 2>&1 || true
+fi
+
 openbox >/dev/null 2>&1 &
+
+# Taskbar: one button per window (minimize/restore with a click). Started
+# before the apps so the reserved strip exists before they map.
+tint2 -c /usr/local/share/nova-ve/tint2rc >/dev/null 2>&1 &
 
 # Firefox in-container flags: allow root (ephemeral lab container), relax
 # sandboxes that assume user namespaces, and skip first-run friction via a
