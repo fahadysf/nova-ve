@@ -846,7 +846,16 @@ def _docker_instance_id(monkeypatch, tmp_path):
     monkeypatch.setenv("NOVA_VE_PIDS_JSON", str(pids_path))
 
 
-def test_docker_start_maps_and_proxies_second_console(monkeypatch, tmp_path, _docker_instance_id):
+@pytest.mark.parametrize(("image", "primary", "secondary", "targets", "rdp_only_browser"), [
+    ("alpine:latest", "telnet", "vnc", (23, 5900), False),
+    ("nova-ve/browser:latest", "rdp", "telnet", (3389, 23), True),
+    ("nova-ve/browser:latest", "telnet", "rdp", (23, 3389), True),
+    ("nova-ve/browser:latest", "rdp", "vnc", (3389, 5900), False),
+    ("example.com/browser:latest", "rdp", "telnet", (3389, 23), False),
+])
+def test_docker_start_maps_and_proxies_second_console(
+    monkeypatch, tmp_path, _docker_instance_id, image, primary, secondary, targets, rdp_only_browser,
+):
     """A docker node with a secondary console publishes and proxies a second
     host port into the container's secondary console service (#268)."""
     from tests.test_node_runtime import _us203_helper_mock, _us204_docker_run_factory
@@ -866,6 +875,7 @@ def test_docker_start_maps_and_proxies_second_console(monkeypatch, tmp_path, _do
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
 
     lab_data = _docker_second_console_lab()
+    lab_data["nodes"]["1"].update(image=image, console=primary, second_console=secondary)
     containers: dict[str, dict[str, object]] = {}
     _mock_runtime_binaries(monkeypatch)
     _us203_helper_mock(monkeypatch)
@@ -894,23 +904,24 @@ def test_docker_start_maps_and_proxies_second_console(monkeypatch, tmp_path, _do
         if tok == "-p"
     ]
     assert publish == [
-        f"{runtime['console_port']}:23",
-        f"{runtime['second_console_port']}:5900",
+        f"{runtime['console_port']}:{targets[0]}",
+        f"{runtime['second_console_port']}:{targets[1]}",
     ]
-    assert runtime["console"] == "telnet"
-    assert runtime["second_console"] == "vnc"
+    assert ("NOVA_VE_BROWSER_VNC=0" in run_cmd) == rdp_only_browser
+    assert runtime["console"] == primary
+    assert runtime["second_console"] == secondary
     assert runtime["second_console_port"] != runtime["console_port"]
     assert runtime["second_console_proxy_pid"] == 9002
     assert len(proxy_calls) == 2
     assert proxy_calls[0]["listen_port"] == runtime["console_port"]
-    assert proxy_calls[0]["target_port"] == 23
+    assert proxy_calls[0]["target_port"] == targets[0]
     assert proxy_calls[1]["listen_port"] == runtime["second_console_port"]
-    assert proxy_calls[1]["target_port"] == 5900
+    assert proxy_calls[1]["target_port"] == targets[1]
 
     # The record round-trips through the persisted state file.
     service._persist_runtime(runtime)
     reloaded = json.loads(service._state_path("lab-268-docker", 1).read_text())
-    assert reloaded["second_console"] == "vnc"
+    assert reloaded["second_console"] == secondary
     assert reloaded["second_console_port"] == runtime["second_console_port"]
 
 

@@ -125,6 +125,22 @@ def _extra_bool(extras: dict[str, Any], key: str, default: bool = False) -> bool
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
+_PLATFORM_DESKTOP_IMAGES = {
+    "nova-ve/browser": "browser",
+    "nova-ve/desktop": "desktop",
+    "nova-ve-lab/nova-ve_browser": "browser",
+    "nova-ve-lab/nova-ve_desktop": "desktop",
+    "ghcr.io/fahadysf/nova-ve-browser": "browser",
+    "ghcr.io/fahadysf/nova-ve-desktop": "desktop",
+}
+
+
+def _platform_desktop_kind(node: dict[str, Any]) -> str | None:
+    image = str(node.get("image") or "").split("@", 1)[0]
+    prefix, sep, name = image.rpartition("/")
+    return _PLATFORM_DESKTOP_IMAGES.get(f"{prefix}{sep}{name.split(':', 1)[0]}")
+
+
 def _qemu_accel() -> str:
     """Host acceleration selector: kvm when /dev/kvm exists, else tcg."""
     return "kvm" if Path("/dev/kvm").exists() else "tcg"
@@ -861,6 +877,32 @@ class NodeRuntimeService:
             "port": console_port,
             "url": self._console_url(runtime),
         }
+
+    def platform_rdp_password(self, lab_data: dict[str, Any], node_id: int) -> str | None:
+        """Read the per-container login only for Nova VE desktop images."""
+        node = self._node_data(lab_data, node_id)
+        if node.get("type") != "docker" or _platform_desktop_kind(node) is None:
+            return None
+
+        runtime = self._runtime_record(self._lab_id(lab_data), node_id)
+        container_id = (runtime or {}).get("container_id")
+        docker_binary = self._resolve_binary("docker")
+        if not container_id or not docker_binary:
+            raise NodeRuntimeError("Could not resolve the running desktop container.")
+        try:
+            result = subprocess.run(
+                [
+                    docker_binary, "--host", self.settings.DOCKER_HOST, "exec",
+                    "--user", "0", str(container_id), "cat", "/run/nova-ve/rdp-password",
+                ],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired, UnicodeError):
+            raise NodeRuntimeError("Could not read the desktop RDP login.") from None
+        password = result.stdout.removesuffix("\n")
+        if result.returncode or not password or "\n" in password or "\r" in password:
+            raise NodeRuntimeError("Desktop RDP login is unavailable. Start the node with an RDP-capable image.")
+        return password
 
     def _ensure_console_proxy(
         self,
@@ -2673,6 +2715,12 @@ class NodeRuntimeService:
             if restart_policy not in _DOCKER_RESTART_POLICIES:
                 raise NodeRuntimeError(f"Invalid restart_policy: {restart_policy}")
             cmd += ["--restart", restart_policy]
+
+        console_modes = {console_mode, second_console_mode}
+        if _platform_desktop_kind(node) == "browser" and "rdp" in console_modes and "vnc" not in console_modes:
+            # An unexposed VNC display would start a second Firefox and can
+            # crowd out the RDP session at the template's 1 GiB memory limit.
+            cmd += ["-e", "NOVA_VE_BROWSER_VNC=0"]
 
         for entry in extras.get("environment") or []:
             if not isinstance(entry, dict):

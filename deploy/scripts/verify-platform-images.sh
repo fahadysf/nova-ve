@@ -7,10 +7,11 @@
 # Usage:
 #   deploy/scripts/verify-platform-images.sh mgmt-server <container-name>
 #   deploy/scripts/verify-platform-images.sh browser <container-name>
+#   deploy/scripts/verify-platform-images.sh desktop <container-name>
 #
 # Runs against a STARTED container (docker exec) and asserts the version
 # floors declared for each image plus the console services the templates
-# rely on (telnetd on 23, VNC on 5900 / sshd on 22). Exits non-zero on the
+# rely on (telnetd on 23, VNC on 5900, RDP on 3389, sshd on 22). Exits non-zero on the
 # first failed assertion so build pipelines and operator checks stop loudly.
 
 set -euo pipefail
@@ -18,8 +19,8 @@ set -euo pipefail
 kind="${1:-}"
 container="${2:-}"
 
-if [[ -z "$container" || ( "$kind" != "mgmt-server" && "$kind" != "browser" ) ]]; then
-  echo "usage: $0 <mgmt-server|browser> <container-name>" >&2
+if [[ -z "$container" || ( "$kind" != "mgmt-server" && "$kind" != "browser" && "$kind" != "desktop" ) ]]; then
+  echo "usage: $0 <mgmt-server|browser|desktop> <container-name>" >&2
   exit 2
 fi
 
@@ -44,6 +45,39 @@ listener_up() {
   # listener_up <port> — busybox netstat is present in every platform image;
   # pgrep -x is NOT reliable across busybox versions (comm matching differs).
   run "netstat -ltn 2>/dev/null | grep -q ':$1 '"
+}
+
+verify_rdp() {
+  listener_up 3389 || fail "RDP console is not listening on 3389"
+  run 'test -s /run/nova-ve/rdp-password && [ "$(stat -c "%u:%a" /run/nova-ve/rdp-password)" = "0:600" ]' \
+    || fail "RDP credential is missing or has incorrect permissions"
+  run 'test -s /etc/xrdp/cert.pem && test -x /usr/libexec/Xorg && test -x /etc/xrdp/startwm.sh' \
+    || fail "xRDP TLS or Xorg startup files are missing"
+  say "RDP listener, TLS, credentials and Xorg startup files ready"
+}
+
+verify_wallpaper() {
+  run 'test -s /usr/local/share/nova-ve/wallpaper.png' || fail "wallpaper asset missing"
+  say "wallpaper asset present"
+}
+
+verify_telnet_shell() {
+  listener_up 23 || fail "telnet second console is not listening on 23"
+
+  # A quote inside the marker prevents the input echo from matching.
+  local console_ok
+  console_ok="$(docker exec -i "$container" /bin/bash -s <<'EOF' 2>/dev/null || echo no
+exec 3<>/dev/tcp/127.0.0.1/23
+printf 'echo nova-ve-console-"ok"\nexit\n' >&3
+for _ in {1..10}; do
+  IFS= read -r -t 1 line <&3 || continue
+  [[ "${line}" == *nova-ve-console-ok* ]] && { echo yes; exit 0; }
+done
+echo no
+EOF
+  )"
+  [[ "${console_ok}" == yes ]] || fail "telnet second console does not offer a shell"
+  say "telnet second console offers a shell"
 }
 
 case "$kind" in
@@ -88,42 +122,46 @@ case "$kind" in
     firefox_minor="$(echo "$firefox_version" | awk '{print $NF}' | cut -d. -f2)"
     require_floor "firefox" "$firefox_major" "$firefox_minor" 125 0
 
-    listener_up 5900 || fail "VNC console is not listening on 5900"
-    say "VNC console listening (port 5900)"
+    verify_telnet_shell
+    verify_rdp
 
-    listener_up 23 || fail "telnet second console is not listening on 23"
-    say "telnet second console listening (port 23)"
+    if run '[ "${NOVA_VE_BROWSER_VNC:-1}" = 0 ]'; then
+      if listener_up 5900 || run 'pgrep -x Xvfb >/dev/null'; then
+        fail "RDP-only browser started VNC or Xvfb"
+      fi
+      say "RDP-only browser has no VNC display"
+    else
+      listener_up 5900 || fail "VNC console is not listening on 5900"
+      docker exec "$container" /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/5900; read -t 5 -r banner <&3 && [[ "$banner" == "RFB 003."* ]]' \
+        || fail "VNC console did not send an RFB greeting"
+      say "VNC console sent an RFB greeting (port 5900)"
 
-    # A listening port is not a working console: the login program has to
-    # hand out a shell. The quoted marker can only appear as command output,
-    # never as the terminal's echo of the typed line.
-    console_ok="$(docker exec -i "$container" /bin/bash -s <<'EOF' 2>/dev/null || echo no
-exec 3<>/dev/tcp/127.0.0.1/23
-printf 'echo nova-ve-console-"ok"\nexit\n' >&3
-for _ in {1..30}; do
-  IFS= read -r -t 1 line <&3 || continue
-  [[ "${line}" == *nova-ve-console-ok* ]] && { echo yes; exit 0; }
-done
-echo no
-EOF
-    )"
-    [[ "${console_ok}" == yes ]] || fail "telnet second console does not offer a shell"
-    say "telnet second console offers a shell"
+      run 'pgrep -x Xvfb >/dev/null' || fail "Xvfb is not running"
+      say "Xvfb running"
 
-    run 'pgrep -x Xvfb >/dev/null' || fail "Xvfb is not running"
-    say "Xvfb running"
+      run 'pgrep -x openbox >/dev/null' || fail "window manager is not running"
+      say "window manager running"
 
-    run 'pgrep -x openbox >/dev/null' || fail "openbox is not running"
-    say "window manager running"
+      run 'pgrep -x tint2 >/dev/null' || fail "taskbar (tint2) is not running"
+      say "taskbar (tint2) running"
+    fi
 
-    # Taskbar + wallpaper: the window-switching surface (minimized windows
-    # have no other way back on screen) and the branded root window.
-    run 'pgrep -x tint2 >/dev/null' || fail "taskbar (tint2) is not running"
-    say "taskbar (tint2) running"
+    verify_wallpaper
+    ;;
+  desktop)
+    verify_rdp
+    verify_telnet_shell
+    verify_wallpaper
 
-    run 'test -f /usr/local/share/nova-ve/wallpaper.png' \
-      || fail "wallpaper asset missing"
-    say "wallpaper asset present"
+    for tool in mate-session marco caja mate-terminal engrampa eom pluma zathura firefox chromium \
+                wireshark tshark dumpcap filezilla xfreerdp3 remmina vlc java dig snmpget iperf iperf3 mtr \
+                traceroute tcpdump git ssh sshd lftp tftp in.tftpd dhcpcd dnsmasq \
+                vsftpd httpd php85 vim asciidoctor dconf-editor xmllint xsltproc; do
+      run "command -v $tool >/dev/null" || fail "$tool missing"
+    done
+    run '/opt/nova-ve/venv/bin/python -c "import ansible, napalm, netmiko"' \
+      || fail "Python automation imports failed"
+    say "desktop, network and automation tools present"
     ;;
 esac
 

@@ -1,0 +1,16 @@
+type: docker
+name: Lab Desktop
+description: >-
+  Alpine MATE workstation with browsers, Wireshark, network clients,
+  automation tools, and on-demand lab services. Uses a resizable RDP
+  console and a telnet shell. Requires nova-ve/desktop:latest.
+cpulimit: 1
+icon_type: server
+cpu: 2
+ram: 2048
+ethernet: 1
+console_type: rdp
+second_console: telnet
+image: nova-ve/desktop:latest
+extras:
+  mgmt_access: "true"
