@@ -220,8 +220,9 @@
   $: busy = saving || checking;
   $: liveStatus = liveDhcp ? dhcpStatus(liveDhcp) : null;
   // The saved setting is right but the server is not in that state.
-  $: repairable = editing && !dhcpChanged && liveDhcp?.enabled === dhcp && !!liveStatus?.problem;
-  $: repairOnly = repairable && !renamed;
+  // Never combined with a rename, which must not fail because DHCP cannot start.
+  $: repairOnly =
+    editing && !dhcpChanged && !renamed && liveDhcp?.enabled === dhcp && !!liveStatus?.problem;
   $: submitLabel = !editing
     ? 'Create'
     : repairOnly
@@ -231,7 +232,7 @@
       : 'Save changes';
   $: canSubmit =
     !busy &&
-    (!editing || dhcpChanged || renamed || repairable) &&
+    (!editing || dhcpChanged || renamed || repairOnly) &&
     Object.keys(liveErrors).length === 0 &&
     trimmedName.length > 0 &&
     (type !== 'nat_cloud' || natCloudMode !== 'existing' || selectedNatCloudId.length > 0) &&
@@ -351,16 +352,18 @@
     if (!canSubmit) return;
     dismissServerError();
     const config: NetworkCreateConfig = {};
+    // Validated now; the fields stay editable while the check runs.
+    const name = trimmedName;
     if (editing) {
-      if (dhcpChanged || repairable) {
+      if (dhcpChanged || repairOnly) {
         // Only what changed: a stale form must not undo someone else's edit.
-        if (repairable || dhcp !== (network?.config?.dhcp !== false)) config.dhcp = dhcp;
+        if (repairOnly || dhcp !== (network?.config?.dhcp !== false)) config.dhcp = dhcp;
         // Blank means "back to the default", so it is sent too.
         if (dhcp && dhcpStart.trim() !== configText('dhcp_start')) config.dhcp_start = dhcpStart.trim();
         if (dhcp && dhcpEnd.trim() !== configText('dhcp_end')) config.dhcp_end = dhcpEnd.trim();
         if (!(await preflight(config))) return;
       }
-      dispatch('confirm', { name: trimmedName, type: 'nat_cloud', config });
+      dispatch('confirm', { name, type: 'nat_cloud', config });
       return;
     }
     if (type === 'nat_cloud') {
@@ -380,10 +383,10 @@
     } else if (type === 'shared_network') {
       if (!selectedShared) return;
       config.shared_network_id = selectedShared.id;
-      dispatch('confirm', { name: trimmedName, type: selectedShared.type, config });
+      dispatch('confirm', { name, type: selectedShared.type, config });
       return;
     }
-    dispatch('confirm', { name: trimmedName, type, config });
+    dispatch('confirm', { name, type, config });
   }
 
   function onKey(event: KeyboardEvent) {

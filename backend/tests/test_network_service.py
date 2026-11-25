@@ -28,13 +28,16 @@ state otherwise).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.services import host_net, network_service as network_service_mod
+from app.services.lab_service import LabService
 from app.services.network_service import (
     NetworkService,
     NetworkServiceError,
@@ -918,6 +921,33 @@ async def test_patch_nat_cloud_repairs_a_drifted_server_without_needless_restart
 
     assert len(helper_mocks["dnsmasq_start"]) == started
     assert len(helper_mocks["dnsmasq_stop"]) == stopped
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_keeps_an_edit_made_while_dnsmasq_stops(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """Node routes write the lab file without the lock; a save must not undo them."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-interleave")
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.91.0.0/24"}}
+    )
+    monkeypatch.setattr(host_net, "dnsmasq_stop", lambda _bridge: time.sleep(0.2))
+
+    async def add_node():
+        await asyncio.sleep(0.05)
+        data = LabService.read_lab_json_static(lab_name)
+        data["nodes"]["1"] = {"id": 1, "name": "edge", "type": "docker"}
+        LabService.write_lab_json_static(lab_name, data)
+
+    await asyncio.gather(
+        NetworkService().patch_network(lab_name, created["id"], {"config": {"dhcp": False}}),
+        asyncio.create_task(add_node()),
+    )
+
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert "1" in saved["nodes"]
+    assert saved["networks"]["1"]["config"]["dhcp"] is False
 
 
 @pytest.mark.asyncio

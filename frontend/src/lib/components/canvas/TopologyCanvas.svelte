@@ -1771,17 +1771,19 @@
       await createNetworkAt(pendingNetworkPosition ?? { x: 200, y: 200 }, event.detail);
       onNetworkModalCancel();
     } catch (error) {
-      networkSaveError = networkErrorOf(error);
+      showNetworkError(error);
     } finally {
       networkSaving = false;
     }
   }
 
-  function networkErrorOf(error: unknown): { message: string; field?: string } {
-    return {
+  function showNetworkError(error: unknown) {
+    networkSaveError = {
       message: error instanceof Error ? error.message : String(error),
       field: error instanceof ApiError ? error.field : undefined
     };
+    // Zen mode started during the request and hides the dialog.
+    if (hideNetworkModal) toastStore.push(networkSaveError.message, 'error');
   }
 
   function handleNetworkConfigure(targetId: string) {
@@ -1803,7 +1805,8 @@
     const rangeChanged = ['dhcp_start', 'dhcp_end'].some((key) => before.config?.[key] !== after.config?.[key]);
     // ``dhcp`` sent without changing it asks for a drifted server to be fixed.
     if (sent?.dhcp === isOn && wasOn === isOn && !rangeChanged) {
-      return isOn ? 'DHCP server started.' : 'DHCP server stopped.';
+      if (!isOn) return 'DHCP server stopped.';
+      return Number(after.runtime?.dhcp_pid ?? 0) > 0 ? 'DHCP server started.' : 'Network settings saved.';
     }
     if (!isOn || (wasOn && !rangeChanged)) return 'Network settings saved.';
     // The host reports a pid only for a server it verified as running.
@@ -1837,7 +1840,7 @@
       dispatchCanvasChange('network-update', {
       });
     } catch (error) {
-      networkSaveError = networkErrorOf(error);
+      showNetworkError(error);
     } finally {
       networkSaving = false;
     }

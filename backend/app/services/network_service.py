@@ -17,7 +17,6 @@ plan §US-204c "Lock-hold-time discipline".
 
 from __future__ import annotations
 
-import asyncio
 import ipaddress
 import json
 import logging
@@ -1617,10 +1616,9 @@ class NetworkService:
         implicit network into an explicit one, otherwise ``network_updated``.
         """
         normalized = _normalize_relative_lab_path(lab_path)
-        # DHCP changes wait for dnsmasq to stop; keep that off the event loop.
-        payload, event_type = await asyncio.to_thread(
-            self._patch_network_locked, normalized, network_id, patch
-        )
+        # Not in a worker thread: the node routes write the lab file without
+        # ``lab_lock``, so an edit made meanwhile would be overwritten.
+        payload, event_type = self._patch_network_locked(normalized, network_id, patch)
         await ws_hub.publish(normalized, event_type, {"network": dict(payload)})
         return payload, event_type
 

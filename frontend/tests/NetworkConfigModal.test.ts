@@ -228,6 +228,31 @@ describe('NetworkConfigModal NAT-Cloud (#320)', () => {
     );
   });
 
+  it('renames a drifted network without touching its DHCP server', async () => {
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      ip: { dhcp: { enabled: true, running: false, lease_count: 0, leases: [] } }
+    } as never);
+    const { show, confirm } = open({ mode: 'edit', network: nat() });
+    await show();
+    await screen.findByRole('button', { name: 'Start DHCP server' });
+    await fireEvent.input(screen.getByTestId('network-name-input'), { target: { value: 'wan' } });
+    await fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    expect(confirm).toHaveBeenCalledWith({ name: 'wan', type: 'nat_cloud', config: {} });
+  });
+
+  it('submits the name that was validated, not one edited during the check', async () => {
+    const { show, confirm } = open({ defaultType: 'nat_cloud', defaultName: 'net-1' });
+    await show();
+    let finish: (value: unknown) => void = () => {};
+    vi.mocked(apiRequest).mockReturnValueOnce(new Promise((resolve) => (finish = resolve)) as never);
+    await fireEvent.click(button());
+    await fireEvent.input(screen.getByTestId('network-name-input'), { target: { value: '' } });
+    finish({ data: {} });
+
+    await waitFor(() => expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ name: 'net-1' })));
+  });
+
   it('keeps a server error through blur and links it to its field', async () => {
     const { show } = open({ defaultType: 'nat_cloud', defaultName: 'net-1' });
     await show();

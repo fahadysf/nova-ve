@@ -433,10 +433,11 @@ reconcile_nat_cloud_runtime() {
         continue
       fi
       # A server from before the setting was saved can outlive a deploy (#320).
+      # Failing to stop it must not cost the network its NAT rules.
+      local stop_failed=0
       if [[ "${dhcp_enabled}" == "false" ]] && ! "${helper}" dnsmasq-stop "${bridge}"; then
         echo "WARN: failed to stop dnsmasq for NAT-Cloud bridge ${bridge}." >&2
-        failed=$((failed + 1))
-        continue
+        stop_failed=1
       fi
       if [[ -z "${egress}" ]]; then
         egress="$("${helper}" default-egress 2>/dev/null || true)"
@@ -468,6 +469,10 @@ reconcile_nat_cloud_runtime() {
           failed=$((failed + 1))
           continue
         fi
+      fi
+      if [[ "${stop_failed}" -eq 1 ]]; then
+        failed=$((failed + 1))
+        continue
       fi
       applied=$((applied + 1))
     done <<< "${rows}"

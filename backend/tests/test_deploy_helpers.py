@@ -519,6 +519,14 @@ def test_provisioner_reconciles_nat_cloud_dhcp_from_owner_records(tmp_path):
     ]
     assert "nat-apply br-owner 10.20.0.0/24 eth0" in calls
 
+    # A server that will not stop is reported, but NAT is still applied.
+    helper.write_text(f'#!/bin/bash\necho "$@" >> "{log}"\n[[ "$1" != dnsmasq-stop ]]\n')
+    log.unlink()
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "applied=1 skipped=1 failed=1" in result.stdout
+    assert "failed to stop dnsmasq" in result.stderr
+    assert "forward-apply br-owner 10.20.0.0/24 eth0" in log.read_text()
+
 
 def test_predictable_ifaces_sorted_handles_ens_enp_names(tmp_path):
     """Behavioral test for the MAC-pin enumerator on hosts with
