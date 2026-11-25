@@ -101,6 +101,7 @@ app.include_router(users.router)
 app.include_router(ws.router)
 
 app.add_exception_handler(LabLockTimeout, lab_lock_timeout_handler)
+app.add_exception_handler(labs.LabAccessDenied, labs.lab_access_denied_handler)
 
 
 @app.on_event("startup")

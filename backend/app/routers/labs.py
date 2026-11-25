@@ -157,6 +157,10 @@ def _user_root(current_user: UserRead) -> str:
 
 def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: bool) -> str:
     normalized = raw_path.strip().replace("\\", "/").strip("/")
+    # #327: the prefix checks below compare strings, so a ``..`` segment
+    # could pass them and only fail later at the file layer. Refuse it here.
+    if ".." in normalized.split("/"):
+        raise PermissionError("Access denied.")
     # #285: /Shared is a real read-write space for every authenticated user,
     # resolved at the labs root — never prefixed into a scoped user's root.
     if normalized == "Shared" or normalized.startswith("Shared/"):
@@ -175,6 +179,35 @@ def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: b
         raise PermissionError("Access denied.")
 
     return f"{root}/{normalized}"
+
+
+class LabAccessDenied(Exception):
+    """The caller may not open the lab named by the route's ``lab_path``."""
+
+
+def lab_access_denied_handler(_request: Request, _exc: LabAccessDenied) -> JSONResponse:
+    return JSONResponse(
+        status_code=403,
+        content={"code": 403, "status": "fail", "message": "Access denied."},
+    )
+
+
+async def require_lab_access(
+    lab_path: str,
+    current_user: UserRead = Depends(get_current_user),
+) -> str:
+    """Refuse a ``{lab_path}`` outside the caller's folder or ``/Shared`` (#327).
+
+    Every lab-path route declares this as a dependency, so the refusal comes
+    before the handler validates its body, reads the lab or touches the host.
+    """
+    try:
+        return _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError as exc:
+        raise LabAccessDenied(str(exc)) from exc
+
+
+LAB_ACCESS = Depends(require_lab_access)
 
 
 def _recording_lab_file(scoped_path: str) -> Path:
@@ -525,7 +558,7 @@ async def create_lab(
     }
 
 
-@router.put("/{lab_path:path}/meta")
+@router.put("/{lab_path:path}/meta", dependencies=[LAB_ACCESS])
 async def update_lab(
     lab_path: str,
     request: LabMetaUpdate,
@@ -602,7 +635,7 @@ async def update_lab(
     }
 
 
-@router.get("/{lab_path:path}/topology")
+@router.get("/{lab_path:path}/topology", dependencies=[LAB_ACCESS])
 async def get_topology(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
@@ -632,7 +665,7 @@ async def get_topology(
     }
 
 
-@router.put("/{lab_path:path}/topology")
+@router.put("/{lab_path:path}/topology", dependencies=[LAB_ACCESS])
 async def update_topology(
     lab_path: str,
     request: Request,
@@ -802,7 +835,7 @@ async def update_topology(
     }
 
 
-@router.get("/{lab_path:path}/nodes")
+@router.get("/{lab_path:path}/nodes", dependencies=[LAB_ACCESS])
 async def list_nodes(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
@@ -837,7 +870,7 @@ async def list_nodes(
     }
 
 
-@router.get("/{lab_path:path}/node-catalog")
+@router.get("/{lab_path:path}/node-catalog", dependencies=[LAB_ACCESS])
 async def node_catalog(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
@@ -875,7 +908,7 @@ async def node_catalog(
     }
 
 
-@router.post("/{lab_path:path}/nodes")
+@router.post("/{lab_path:path}/nodes", dependencies=[LAB_ACCESS])
 async def create_node(
     lab_path: str,
     request: NodeCreate,
@@ -951,7 +984,7 @@ async def create_node(
     }
 
 
-@router.post("/{lab_path:path}/nodes/from-template")
+@router.post("/{lab_path:path}/nodes/from-template", dependencies=[LAB_ACCESS])
 async def create_node_from_template(
     lab_path: str,
     request: NodeFromTemplate,
@@ -1150,7 +1183,7 @@ def _build_paired_child_payload(
     }
 
 
-@router.post("/{lab_path:path}/nodes/from-paired-template")
+@router.post("/{lab_path:path}/nodes/from-paired-template", dependencies=[LAB_ACCESS])
 async def create_nodes_from_paired_template(
     lab_path: str,
     request: NodeFromPairedTemplate,
@@ -1489,7 +1522,7 @@ async def create_nodes_from_paired_template(
     }
 
 
-@router.post("/{lab_path:path}/nodes/batch")
+@router.post("/{lab_path:path}/nodes/batch", dependencies=[LAB_ACCESS])
 async def create_nodes_batch(
     lab_path: str,
     request: NodeBatchCreate,
@@ -1581,7 +1614,7 @@ async def create_nodes_batch(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/interfaces")
+@router.get("/{lab_path:path}/nodes/{node_id}/interfaces", dependencies=[LAB_ACCESS])
 async def list_interfaces(
     lab_path: str,
     node_id: int,
@@ -1624,7 +1657,7 @@ async def list_interfaces(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}")
+@router.get("/{lab_path:path}/nodes/{node_id}", dependencies=[LAB_ACCESS])
 async def get_node(
     lab_path: str,
     node_id: int,
@@ -1670,7 +1703,7 @@ async def get_node(
     }
 
 
-@router.put("/{lab_path:path}/nodes/{node_id}")
+@router.put("/{lab_path:path}/nodes/{node_id}", dependencies=[LAB_ACCESS])
 async def update_node(
     lab_path: str,
     node_id: int,
@@ -1768,7 +1801,7 @@ async def update_node(
     }
 
 
-@router.delete("/{lab_path:path}/nodes/{node_id}")
+@router.delete("/{lab_path:path}/nodes/{node_id}", dependencies=[LAB_ACCESS])
 async def delete_node(
     lab_path: str,
     node_id: int,
@@ -1841,7 +1874,7 @@ async def delete_node(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/start")
+@router.get("/{lab_path:path}/nodes/{node_id}/start", dependencies=[LAB_ACCESS])
 async def start_node(
     lab_path: str,
     node_id: int,
@@ -1895,7 +1928,7 @@ async def start_node(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/stop")
+@router.get("/{lab_path:path}/nodes/{node_id}/stop", dependencies=[LAB_ACCESS])
 async def stop_node(
     lab_path: str,
     node_id: int,
@@ -1938,7 +1971,7 @@ async def stop_node(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/wipe")
+@router.get("/{lab_path:path}/nodes/{node_id}/wipe", dependencies=[LAB_ACCESS])
 async def wipe_node(
     lab_path: str,
     node_id: int,
@@ -1981,7 +2014,7 @@ async def wipe_node(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/logs")
+@router.get("/{lab_path:path}/nodes/{node_id}/logs", dependencies=[LAB_ACCESS])
 async def node_logs(
     lab_path: str,
     node_id: int,
@@ -2022,7 +2055,7 @@ async def node_logs(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/console")
+@router.get("/{lab_path:path}/nodes/{node_id}/console", dependencies=[LAB_ACCESS])
 async def node_console(
     lab_path: str,
     node_id: int,
@@ -2063,7 +2096,7 @@ async def node_console(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/qemu-preview")
+@router.get("/{lab_path:path}/nodes/{node_id}/qemu-preview", dependencies=[LAB_ACCESS])
 async def node_qemu_preview(
     lab_path: str,
     node_id: int,
@@ -2083,7 +2116,7 @@ async def node_qemu_preview(
     return {"code": 200, "status": "success", "message": "QEMU command preview.", "data": preview}
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/telnet")
+@router.get("/{lab_path:path}/nodes/{node_id}/telnet", dependencies=[LAB_ACCESS])
 async def node_telnet(
     lab_path: str,
     node_id: int,
@@ -2135,7 +2168,7 @@ async def node_telnet(
     return response
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/rdp")
+@router.get("/{lab_path:path}/nodes/{node_id}/rdp", dependencies=[LAB_ACCESS])
 async def node_rdp(
     lab_path: str,
     node_id: int,
@@ -2206,7 +2239,7 @@ _EXTERNAL_CONSOLE_SCHEMES = {
 }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/external-console")
+@router.get("/{lab_path:path}/nodes/{node_id}/external-console", dependencies=[LAB_ACCESS])
 async def node_external_console(
     lab_path: str,
     node_id: int,
@@ -2327,7 +2360,7 @@ async def node_external_console(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/html5")
+@router.get("/{lab_path:path}/nodes/{node_id}/html5", dependencies=[LAB_ACCESS])
 async def node_html5(
     lab_path: str,
     node_id: int,
@@ -2448,7 +2481,7 @@ async def node_html5(
     return RedirectResponse(url=html5_url, status_code=307)
 
 
-@router.post("/{lab_path:path}/nodes/{node_id}/console/close")
+@router.post("/{lab_path:path}/nodes/{node_id}/console/close", dependencies=[LAB_ACCESS])
 async def node_console_close(
     lab_path: str,
     node_id: int,
@@ -2497,7 +2530,7 @@ async def node_console_close(
     }
 
 
-@router.get("/{lab_path:path}/networks")
+@router.get("/{lab_path:path}/networks", dependencies=[LAB_ACCESS])
 async def list_networks(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
@@ -2527,7 +2560,7 @@ async def list_networks(
     }
 
 
-@router.post("/{lab_path:path}/networks")
+@router.post("/{lab_path:path}/networks", dependencies=[LAB_ACCESS])
 async def create_network(
     lab_path: str,
     request: NetworkCreate,
@@ -2584,7 +2617,7 @@ async def create_network(
     }
 
 
-@router.put("/{lab_path:path}/networks/{network_id}")
+@router.put("/{lab_path:path}/networks/{network_id}", dependencies=[LAB_ACCESS])
 async def update_network(
     lab_path: str,
     network_id: int,
@@ -2717,7 +2750,7 @@ async def update_network(
     }
 
 
-@router.delete("/{lab_path:path}/networks/{network_id}")
+@router.delete("/{lab_path:path}/networks/{network_id}", dependencies=[LAB_ACCESS])
 async def delete_network(
     lab_path: str,
     network_id: int,
@@ -2812,7 +2845,7 @@ def _interface_network_id(lab_data: dict, node_id: int, interface_index: int) ->
     return 0
 
 
-@router.patch("/{lab_path:path}/nodes/{node_id}/interfaces/{interface_index}")
+@router.patch("/{lab_path:path}/nodes/{node_id}/interfaces/{interface_index}", dependencies=[LAB_ACCESS])
 async def patch_node_interface(
     lab_path: str,
     node_id: int,
@@ -2933,7 +2966,7 @@ async def patch_node_interface(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/interfaces/v2")
+@router.get("/{lab_path:path}/nodes/{node_id}/interfaces/v2", dependencies=[LAB_ACCESS])
 async def list_node_interfaces_v2(
     lab_path: str,
     node_id: int,
@@ -2973,7 +3006,7 @@ async def list_node_interfaces_v2(
     }
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/interfaces/{idx}/live_mac")
+@router.get("/{lab_path:path}/nodes/{node_id}/interfaces/{idx}/live_mac", dependencies=[LAB_ACCESS])
 async def get_interface_live_mac(
     lab_path: str,
     node_id: int,
@@ -3077,7 +3110,7 @@ def _layout_validate_and_collect_forbidden(body: dict) -> list[str]:
     return unique
 
 
-@router.put("/{lab_path:path}/layout")
+@router.put("/{lab_path:path}/layout", dependencies=[LAB_ACCESS])
 async def put_layout(
     lab_path: str,
     request: Request,
@@ -3187,7 +3220,7 @@ async def put_layout(
     }
 
 
-@router.get("/{lab_path:path}")
+@router.get("/{lab_path:path}", dependencies=[LAB_ACCESS])
 async def get_lab(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
@@ -3274,7 +3307,7 @@ async def get_lab(
     }
 
 
-@router.delete("/_/{lab_path:path}")
+@router.delete("/_/{lab_path:path}", dependencies=[LAB_ACCESS])
 async def delete_lab(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
@@ -3370,7 +3403,7 @@ async def delete_lab(
     }
 
 
-@router.post("/_/{lab_path:path}/move")
+@router.post("/_/{lab_path:path}/move", dependencies=[LAB_ACCESS])
 async def move_lab(
     lab_path: str,
     request: LabMoveRequest,
