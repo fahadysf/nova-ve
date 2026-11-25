@@ -6,6 +6,7 @@
   import { apiGetData } from '$lib/api';
   import InfoFields from './InfoFields.svelte';
   import { dhcpStatus, leaseRemaining, type DhcpInfo } from '$lib/services/dhcpStatus';
+  import { dhcpEnabled } from '$lib/services/networkDhcp';
   import type { NetworkData, NetworkInfo } from '$lib/types';
 
   export let labId: string;
@@ -36,7 +37,7 @@
   }
 
   // Reload at once when something visible in the panel changes on the canvas.
-  $: dhcpKey = ['dhcp', 'dhcp_start', 'dhcp_end'].map((key) => String(network.config?.[key] ?? '')).join(',');
+  $: dhcpKey = ['cidr', 'dhcp', 'dhcp_server', 'dhcp_start', 'dhcp_end'].map((key) => String(network.config?.[key] ?? '')).join(',');
   $: changeKey = `${labId}|${network.id}|${network.name}|${network.count ?? 0}|${network.shared === true}|${dhcpKey}`;
   $: if (mounted && changeKey) void load();
 
@@ -94,13 +95,16 @@
       { label: 'Gateway', value: ip.gateway ?? '' },
       ip.nat && { label: 'Internet via', value: ip.egress_interface ?? '' },
       { label: 'Static range', value: range(ip.static_start, ip.static_end) },
-      ip.used_ips.length > 0 && { label: 'Static in use', value: ip.used_ips.join(', ') }
+      ip.used_ips.length > 0 && { label: 'Static in use', value: ip.used_ips.join(', ') },
+      // A bridge subnet without DHCP is only a label (#325).
+      !ip.nat && !ip.dhcp && { label: 'DHCP', value: 'Off' }
     ]);
   }
 
   function dhcpFields(dhcp: DhcpInfo): Field[] {
     if (!dhcp.enabled) return [];
     return compact([
+      { label: 'Server address', value: dhcp.server ?? '' },
       { label: 'Scope', value: range(dhcp.start, dhcp.end) },
       dhcp.size !== null && { label: 'Addresses', value: `${dhcp.lease_count} of ${dhcp.size} leased` },
       { label: 'Lease time', value: dhcp.lease_time ?? '' }
@@ -108,11 +112,14 @@
   }
 
   // Shown at once, and kept if the details cannot be loaded.
+  $: savedCidr = typeof network.config?.cidr === 'string' ? network.config.cidr : '';
   $: fallback = compact([
     { label: 'Type', value: network.type ?? 'linux_bridge' },
     { label: 'Network ID', value: String(network.id) },
     { label: 'Connections', value: String(network.count ?? 0) },
-    { label: 'Bridge', value: String(network.runtime?.bridge_name ?? '') }
+    { label: 'Bridge', value: String(network.runtime?.bridge_name ?? '') },
+    { label: 'Subnet', value: savedCidr },
+    savedCidr !== '' && { label: 'DHCP', value: dhcpEnabled(network) ? 'On' : 'Off' }
   ]);
   $: sections = info
     ? [

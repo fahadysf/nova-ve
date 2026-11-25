@@ -123,6 +123,51 @@ describe('NetworkInfoContent (#318)', () => {
     expect(screen.getByText('Nothing is connected.')).toBeInTheDocument();
   });
 
+  const bridgeIp = (dhcp: NonNullable<NetworkInfo['ip']>['dhcp']): NetworkInfo['ip'] => ({
+    cidr: '10.1.2.0/24', gateway: null, egress_interface: null, nat: false,
+    static_start: null, static_end: null, used_ips: [], dhcp
+  });
+
+  it('shows a bridge subnet with its DHCP server address and scope (#325)', async () => {
+    apiGetData.mockResolvedValue(info({
+      type: 'linux_bridge', type_label: 'Isolated bridge',
+      ip: bridgeIp({
+        enabled: true, server: '10.1.2.254', start: '10.1.2.128', end: '10.1.2.253', size: 126, lease_time: '12h',
+        running: true, pid: 12, lease_count: 0, leases: []
+      })
+    }));
+    render(NetworkInfoContent, { labId: 'a.json', network: network({ type: 'linux_bridge' }) });
+    const dhcp = within(await screen.findByTestId('network-info-dhcp'));
+    for (const text of ['Running', '10.1.2.254', '10.1.2.128 – 10.1.2.253', '0 of 126 leased']) {
+      expect(dhcp.getByText(text)).toBeInTheDocument();
+    }
+    expect(screen.getByText('10.1.2.0/24')).toBeInTheDocument();
+    expect(screen.queryByText('Internet via')).toBeNull();
+  });
+
+  it('says DHCP is off on a bridge whose subnet is only a label (#325)', async () => {
+    apiGetData.mockResolvedValue(info({ type: 'linux_bridge', type_label: 'Isolated bridge', ip: bridgeIp(null) }));
+    render(NetworkInfoContent, { labId: 'a.json', network: network({ type: 'linux_bridge' }) });
+    expect(await screen.findByText('10.1.2.0/24')).toBeInTheDocument();
+    expect(screen.getByText('DHCP')).toBeInTheDocument();
+    expect(screen.getByText('Off')).toBeInTheDocument();
+    expect(screen.queryByTestId('network-info-dhcp')).toBeNull();
+  });
+
+  it('shows the saved bridge subnet and DHCP state before details load, and reloads when they change (#325)', async () => {
+    apiGetData.mockRejectedValue(new Error('offline'));
+    const view = render(NetworkInfoContent, {
+      labId: 'a.json', network: network({ type: 'linux_bridge', config: { cidr: '10.1.2.0/29', dhcp: true } })
+    });
+    expect(await screen.findByRole('status')).toHaveTextContent('Could not load details');
+    expect(screen.getByText('10.1.2.0/29')).toBeInTheDocument();
+    expect(screen.getByText('On')).toBeInTheDocument();
+    await view.rerender({
+      network: network({ type: 'linux_bridge', config: { cidr: '10.1.2.0/29', dhcp: true, dhcp_server: '10.1.2.1' } })
+    });
+    await waitFor(() => expect(apiGetData).toHaveBeenCalledTimes(2));
+  });
+
   it('names the labs on a shared segment and warns about duplicate MACs', async () => {
     apiGetData.mockResolvedValue(
       info({
