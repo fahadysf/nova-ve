@@ -15,7 +15,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.services import host_net
-from app.services.cloud_inventory_service import _base_data_dir
+from app.services.cloud_inventory_service import (
+    LINUX_BRIDGE_TYPE,
+    _base_data_dir,
+    bridge_dhcp_config_on,
+)
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.network_service import (
     BRIDGE_CLOUD_TYPE,
@@ -309,6 +313,18 @@ def _ip_settings(network: dict, bridge: str | None, node_by_mac: dict[str, str])
         "dhcp": None,
     }
     if not is_nat:
+        # #325: an isolated bridge has DHCP settings once its CIDR allows them.
+        if str(network.get("type") or LINUX_BRIDGE_TYPE) == LINUX_BRIDGE_TYPE and config.get(
+            "dhcp_server"
+        ):
+            out["dhcp"] = _dhcp_block(
+                bridge_dhcp_config_on(config),
+                config.get("dhcp_server"),
+                config.get("dhcp_start"),
+                config.get("dhcp_end"),
+                bridge,
+                node_by_mac,
+            )
         return out
 
     try:
@@ -319,14 +335,33 @@ def _ip_settings(network: dict, bridge: str | None, node_by_mac: dict[str, str])
     except (ValueError, TypeError):
         pass
 
-    start = config.get("dhcp_start") or runtime.get("dhcp_start")
-    end = config.get("dhcp_end") or runtime.get("dhcp_end")
+    out["dhcp"] = _dhcp_block(
+        config.get("dhcp") is not False,
+        out["gateway"],
+        config.get("dhcp_start") or runtime.get("dhcp_start"),
+        config.get("dhcp_end") or runtime.get("dhcp_end"),
+        bridge,
+        node_by_mac,
+    )
+    return out
+
+
+def _dhcp_block(
+    enabled: bool,
+    server: Any,
+    start: Any,
+    end: Any,
+    bridge: str | None,
+    node_by_mac: dict[str, str],
+) -> dict[str, Any]:
+    """Saved DHCP settings next to the live server state and its leases."""
     try:
         size = int(ipaddress.IPv4Address(str(end))) - int(ipaddress.IPv4Address(str(start))) + 1
     except ValueError:
         size = None
     dhcp: dict[str, Any] = {
-        "enabled": config.get("dhcp") is not False,
+        "enabled": enabled,
+        "server": server,
         "start": start,
         "end": end,
         "size": size,
@@ -347,8 +382,7 @@ def _ip_settings(network: dict, bridge: str | None, node_by_mac: dict[str, str])
         dhcp["running"] = dhcp["pid"] is not None
         dhcp["leases"] = leases[:MAX_LEASES]
         dhcp["lease_count"] = len(leases)
-    out["dhcp"] = dhcp
-    return out
+    return dhcp
 
 
 def build_network_info(

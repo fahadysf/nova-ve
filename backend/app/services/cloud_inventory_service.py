@@ -22,6 +22,8 @@ from typing import Any, Iterator
 from app.config import get_settings
 
 NAT_CLOUD_TYPE = "nat_cloud"
+LINUX_BRIDGE_TYPE = "linux_bridge"
+BRIDGE_DHCP_KEYS = ("cidr", "dhcp_server", "dhcp_start", "dhcp_end")
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,7 @@ def _normalize_relative_path(raw_path: str) -> str:
 
 @contextmanager
 def nat_cloud_ipam_lock(timeout_s: float = 5.0) -> Iterator[None]:
+    """Host-wide lock for subnet choices: NAT-Cloud IPAM and DHCP bridges (#325)."""
     lock_path = _base_data_dir() / "nat-cloud-ipam.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+") as fh:
@@ -245,3 +248,66 @@ def find_nat_cloud_owner(shared_cloud_id: str, labs_dir: Path | None = None) -> 
         if ref.cloud_id == shared_cloud_id:
             return ref
     return None
+
+
+def bridge_dhcp_enabled(network: Any) -> bool:
+    """True when an isolated bridge record owns a DHCP server (#325).
+
+    Members use their owner's server. A ``dhcp: true`` without a server
+    address predates #325, was never validated and is never applied.
+    """
+    if not isinstance(network, dict) or network.get("implicit") is True:
+        return False
+    if str(network.get("type") or LINUX_BRIDGE_TYPE) != LINUX_BRIDGE_TYPE:
+        return False
+    config = network.get("config")
+    runtime = network.get("runtime")
+    if not isinstance(config, dict) or config.get("shared_network_id"):
+        return False
+    if isinstance(runtime, dict) and runtime.get("shared_reference") is True:
+        return False
+    return bridge_dhcp_config_on(config)
+
+
+def bridge_dhcp_config_on(config: Any) -> bool:
+    """True when bridge settings turn DHCP on with a complete scope."""
+    return (
+        isinstance(config, dict)
+        and config.get("dhcp") is True
+        and all(config.get(key) for key in BRIDGE_DHCP_KEYS)
+    )
+
+
+def list_dhcp_bridges(labs_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Every isolated bridge on this host that runs DHCP, in any lab."""
+    root = (labs_dir or _labs_dir()).resolve()
+    out: list[dict[str, Any]] = []
+    for path in _lab_json_files(root):
+        data = _read_json(path)
+        networks = data.get("networks") if data else None
+        if not isinstance(networks, dict):
+            continue
+        lab_path = _relative_lab_path(path, root)
+        meta = data.get("meta")
+        lab_name = str(meta.get("name") or lab_path) if isinstance(meta, dict) else lab_path
+        for raw_id, network in networks.items():
+            if not bridge_dhcp_enabled(network):
+                continue
+            try:
+                network_id = int(network.get("id", raw_id))
+            except (TypeError, ValueError):
+                continue
+            runtime = network.get("runtime")
+            out.append(
+                {
+                    "lab_path": lab_path,
+                    "lab_id": str(data.get("id") or lab_path),
+                    "lab_name": lab_name,
+                    "network_id": network_id,
+                    "network_name": str(network.get("name") or f"Network {network_id}"),
+                    "bridge_name": runtime.get("bridge_name") if isinstance(runtime, dict) else None,
+                    "cidr": network["config"]["cidr"],
+                    "dhcp_server": network["config"]["dhcp_server"],
+                }
+            )
+    return out

@@ -20,7 +20,13 @@ from fastapi.responses import JSONResponse
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.routers.labs import LAB_ACCESS, _scoped_lab_path
-from app.schemas.network import NATCloudValidate, NetworkCreate, NetworkSharingUpdate, NetworkUpdate
+from app.schemas.network import (
+    NATCloudValidate,
+    NetworkConfigValidate,
+    NetworkCreate,
+    NetworkSharingUpdate,
+    NetworkUpdate,
+)
 from app.schemas.user import UserRead
 from app.services import audit_service
 from app.services.host_net import HostNetBridgeOwnershipError
@@ -174,6 +180,30 @@ async def validate_nat_cloud_config(
     }
 
 
+@router.post("/{lab_path:path}/networks/validate-config", dependencies=[LAB_ACCESS])
+async def validate_network_config(
+    lab_path: str,
+    request: NetworkConfigValidate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Settings a create (or, with ``network_id``, an edit) would store (#325)."""
+    _data, err = _read_lab_or_error(lab_path)
+    if err is not None:
+        return err
+    try:
+        normalized = await asyncio.to_thread(
+            network_service.validate_network_config,
+            lab_path,
+            request.type,
+            request.config,
+            network_id=request.network_id,
+            can_open=lambda other: _can_open(current_user, other),
+        )
+    except NetworkServiceError as exc:
+        return _service_error_response(exc)
+    return {"code": 200, "status": "success", "data": {"config": normalized}}
+
+
 @router.delete("/{lab_path:path}/networks/{network_id}", dependencies=[LAB_ACCESS])
 async def delete_network(
     lab_path: str,
@@ -227,6 +257,7 @@ async def patch_network(
             lab_path,
             network_id,
             request.model_dump(exclude_unset=True),
+            can_open=lambda other: _can_open(current_user, other),
         )
     except NetworkServiceError as exc:
         body: Dict[str, Any] = {
