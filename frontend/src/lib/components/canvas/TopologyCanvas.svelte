@@ -57,6 +57,7 @@
   import { infoPanels } from '$lib/stores/infoPanels';
   import { networkSharing, type NetworkModalType } from '$lib/services/networkSharing';
   import { dhcpEnabled, dhcpToggle, LEASES_KEPT_NOTE, networkConfigurable } from '$lib/services/networkDhcp';
+  import { fieldError } from '$lib/services/apiErrors';
   import { toastStore } from '$lib/stores/toasts';
   import {
     createLayoutDebouncer,
@@ -1786,10 +1787,7 @@
   }
 
   function showNetworkError(error: unknown) {
-    networkSaveError = {
-      message: error instanceof Error ? error.message : String(error),
-      field: error instanceof ApiError ? error.field : undefined
-    };
+    networkSaveError = fieldError(error);
     // Zen mode started during the request and hides the dialog.
     if (hideNetworkModal) toastStore.push(networkSaveError.message, 'error');
   }

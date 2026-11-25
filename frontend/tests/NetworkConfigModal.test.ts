@@ -12,9 +12,13 @@ import type { NetworkData } from '$lib/types';
 vi.mock('$lib/api', () => ({
   ApiError: class ApiError extends Error {
     field?: string;
-    constructor(message: string, options?: { field?: string }) {
+    conflictingCidr?: string;
+    source?: string;
+    constructor(message: string, options?: { field?: string; conflictingCidr?: string; source?: string }) {
       super(message);
       this.field = options?.field;
+      this.conflictingCidr = options?.conflictingCidr;
+      this.source = options?.source;
     }
   },
   apiRequest: vi.fn(async () => ({ data: {} })),
@@ -499,6 +503,55 @@ describe('NetworkConfigModal linux_bridge create (#325)', () => {
     await waitFor(() => expect(confirm).toHaveBeenCalledTimes(1));
     await fireEvent.keyDown(screen.getByLabelText('CIDR'), { key: 'Escape' });
     expect(cancel).toHaveBeenCalled();
+  });
+});
+
+describe('NetworkConfigModal backend contract (#325)', () => {
+  it('shows a 409 subnet conflict on the CIDR field, naming the subnet', async () => {
+    const { confirm } = await openBridge();
+    await type('CIDR', '10.20.0.0/24');
+    await fireEvent.click(screen.getByLabelText('Enable DHCP'));
+    vi.mocked(apiRequest).mockRejectedValueOnce(
+      new ApiError('Subnet is in use.', {
+        field: 'config.cidr', conflictingCidr: '10.20.0.0/16', source: 'a NAT-Cloud in another lab'
+      } as never)
+    );
+    await fireEvent.click(button());
+
+    const message = await screen.findByText('Subnet is in use. It overlaps a NAT-Cloud in another lab (10.20.0.0/16).');
+    expect(message).toHaveAttribute('id', 'bridge-cidr-error');
+    expect(screen.getByLabelText('CIDR')).toHaveAttribute('aria-describedby', 'bridge-cidr-error bridge-cidr-note');
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it('shows a refused type change as a form error', async () => {
+    const network = bridge({
+      cidr: '10.1.2.0/29', dhcp: true, dhcp_server: '10.1.2.6', dhcp_start: '10.1.2.4', dhcp_end: '10.1.2.5'
+    });
+    const { view, show } = open({ mode: 'edit', network });
+    await show();
+    await view.rerender({ saveError: { message: 'Turn DHCP off before changing the network type.', field: 'type' } });
+    expect(screen.getByRole('alert')).toHaveTextContent('Turn DHCP off before changing the network type.');
+  });
+
+  it('shows a bare dhcp: true from before #325 as off and enables it properly', async () => {
+    const { show, confirm } = open({ mode: 'edit', network: bridge({ cidr: '10.1.2.0/24', dhcp: true }) });
+    await show();
+    const toggle = screen.getByLabelText('Enable DHCP');
+    expect(toggle).not.toBeChecked();
+    expect(screen.queryByText(/keep their current addresses/)).toBeNull();
+    await fireEvent.click(toggle);
+    expect(screen.getByLabelText('DHCP server')).toHaveValue('10.1.2.254');
+    await fireEvent.click(button());
+    await waitFor(() =>
+      expect(confirm).toHaveBeenCalledWith({ name: 'core', type: 'linux_bridge', config: { dhcp: true } })
+    );
+  });
+
+  it('never offers DHCP on a point-to-point link', async () => {
+    await open({ mode: 'edit', network: bridge({ cidr: '10.1.2.0/24' }, { implicit: true }) }).show();
+    expect(screen.queryByLabelText('Enable DHCP')).toBeNull();
+    expect(screen.getByTestId('bridge-dhcp-unavailable')).toHaveTextContent('not available on point-to-point links');
   });
 });
 

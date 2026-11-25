@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
-  import { ApiError, apiGetData, apiRequest } from '$lib/api';
+  import { apiGetData, apiRequest } from '$lib/api';
   import { Lock } from 'lucide-svelte';
   import { natDefaults, natFieldFromServer, validateNatForm, type NatField } from '$lib/services/natCloudForm';
   import {
@@ -14,7 +14,8 @@
     type BridgeDefaults,
     type BridgeField
   } from '$lib/services/bridgeForm';
-  import { networkKind } from '$lib/services/networkDhcp';
+  import { fieldError } from '$lib/services/apiErrors';
+  import { dhcpEnabled, networkKind } from '$lib/services/networkDhcp';
   import { networkSharing, type NetworkModalType } from '$lib/services/networkSharing';
   import { dhcpStatus } from '$lib/services/dhcpStatus';
   import type { NetworkCreateConfig, NetworkData, NetworkInfo, NetworkType, SharedNetwork } from '$lib/types';
@@ -185,7 +186,8 @@
       egressInterface = editing
         ? String(network?.runtime?.egress_interface ?? configText('egress_interface'))
         : '';
-      bridgeDhcp = editedBridge && network?.config?.dhcp === true;
+      // A bare ``dhcp: true`` from before #325 has no server and counts as off.
+      bridgeDhcp = editedBridge && network !== null && dhcpEnabled(network);
       bridgeServer = editedBridge ? configText('dhcp_server') : '';
       bridgeStart = editedBridge ? configText('dhcp_start') : '';
       bridgeEnd = editedBridge ? configText('dhcp_end') : '';
@@ -251,15 +253,20 @@
   $: defaults = natDefaults(cidr);
   $: bridgeScopeDefaults = bridgeDefaults(cidr);
   $: applyBridgeDefaults(bridgeScopeDefaults);
-  $: bridgeDhcpReason = dhcpUnavailableReason(cidr);
+  // The backend refuses DHCP on point-to-point links; the menu never offers them.
+  $: pointToPoint = editing && network?.implicit === true;
+  $: bridgeDhcpAllowed = !pointToPoint && bridgeScopeDefaults !== null;
+  $: bridgeDhcpReason = pointToPoint
+    ? 'DHCP is not available on point-to-point links.'
+    : dhcpUnavailableReason(cidr);
   // The checkbox keeps its state while the subnet is being typed; it only counts once the subnet qualifies.
-  $: bridgeDhcpOn = bridgeDhcp && bridgeScopeDefaults !== null;
-  $: storedBridgeDhcp = stored.dhcp === true;
+  $: bridgeDhcpOn = bridgeDhcp && bridgeDhcpAllowed;
+  $: storedBridgeDhcp = network !== null && networkKind(network) === 'linux_bridge' && dhcpEnabled(network);
   // Locked values come from the server, so only editable fields are checked.
   $: liveErrors = (natForm
     ? validateNatForm({ cidr, gateway, dhcp, dhcpStart, dhcpEnd })
     : bridgeForm
-      ? validateBridgeForm({ cidr, dhcp: bridgeDhcp, dhcpServer: bridgeServer, dhcpStart: bridgeStart, dhcpEnd: bridgeEnd })
+      ? validateBridgeForm({ cidr, dhcp: bridgeDhcp && !pointToPoint, dhcpServer: bridgeServer, dhcpStart: bridgeStart, dhcpEnd: bridgeEnd })
       : {}) as FieldErrors;
   $: serverError = saveError && saveError !== staleSaveError ? saveError : rejection;
   $: serverField = natForm
@@ -429,10 +436,7 @@
       return open && mine === session;
     } catch (err) {
       if (mine !== session) return false;
-      rejection = {
-        message: err instanceof Error ? err.message : String(err),
-        field: err instanceof ApiError ? err.field : undefined
-      };
+      rejection = fieldError(err);
       return false;
     } finally {
       if (mine === session) checking = false;
@@ -864,7 +868,7 @@
               </div>
 
               <div class="flex items-center justify-between gap-3 border-t border-slate-800 pt-3 sm:col-span-2">
-                {#if bridgeScopeDefaults}
+                {#if bridgeDhcpAllowed}
                   <label class="flex items-center gap-2">
                     <input
                       bind:checked={bridgeDhcp}

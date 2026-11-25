@@ -17,13 +17,25 @@ export class ApiError extends Error {
   unauthorized: boolean;
   /** Request field the server blames, e.g. ``config.cidr`` (#320). */
   field?: string;
+  /** Subnet a rejected CIDR overlaps, and what owns it (409 conflicts, #325). */
+  conflictingCidr?: string;
+  source?: string;
 
   constructor(
     message: string,
-    options?: { statusCode?: number; responseCode?: number; unauthorized?: boolean; field?: string }
+    options?: {
+      statusCode?: number;
+      responseCode?: number;
+      unauthorized?: boolean;
+      field?: string;
+      conflictingCidr?: string;
+      source?: string;
+    }
   ) {
     super(message);
     this.field = options?.field;
+    this.conflictingCidr = options?.conflictingCidr;
+    this.source = options?.source;
     this.name = 'ApiError';
     this.statusCode = options?.statusCode ?? 0;
     this.responseCode = options?.responseCode;
@@ -99,10 +111,13 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
       }
 
       if (!response.ok || payload.code >= 400 || payload.status === 'fail' || payload.status === 'error') {
+        const detail = payload as { field?: string; conflicting_cidr?: string; source?: string };
         throw new ApiError(payload.message || 'Request failed.', {
           statusCode: response.status,
           responseCode: payload.code,
-          field: (payload as { field?: string }).field
+          field: detail.field,
+          conflictingCidr: detail.conflicting_cidr,
+          source: detail.source
         });
       }
 
