@@ -45,6 +45,8 @@ def helper(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "PROC_ROOT", proc_root, raising=True)
     monkeypatch.setattr(mod, "RUNTIME_ROOT", tmp_path / "runtime", raising=True)
     monkeypatch.setattr(mod, "IP_FORWARD_PATH", tmp_path / "ip_forward", raising=True)
+    monkeypatch.setattr(mod, "IPV4_CONF_ROOT", tmp_path / "ipv4-conf", raising=True)
+    monkeypatch.setattr(mod, "GUARD_LOCK_PATH", tmp_path / "guard.lock", raising=True)
 
     # Capture the argv that WOULD have been run — never actually fork.
     calls: list[list[str]] = []
@@ -475,6 +477,28 @@ def test_dnsmasq_start_isolated_sends_no_router_and_no_dns(helper, monkeypatch):
     assert "dhcp-authoritative" not in lines
 
 
+def test_dnsmasq_config_never_follows_planted_links(helper, monkeypatch, tmp_path):
+    """The state directory is the service account's: root writes stay inside it."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim"
+    victim.write_text("keep\n")
+    root = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den2"
+    root.mkdir(parents=True)
+    (root / "dnsmasq.conf").symlink_to(victim)
+    argv = ["dnsmasq-start", "novec0den2", "10.40.1.254", "10.40.1.128", "10.40.1.253", "--no-router"]
+    assert _start_dnsmasq(helper, monkeypatch, argv) == 0
+    assert victim.read_text() == "keep\n"
+    assert not (root / "dnsmasq.conf").is_symlink()
+    assert "dhcp-option=3" in (root / "dnsmasq.conf").read_text()
+
+    # A symlinked directory is refused outright.
+    (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den3").symlink_to(outside)
+    argv[1] = "novec0den3"
+    assert helper.main(argv) == 1
+    assert sorted(p.name for p in outside.iterdir()) == ["victim"]
+
+
 def test_dnsmasq_start_keeps_router_for_nat_cloud(helper, monkeypatch):
     rc = _start_dnsmasq(
         helper, monkeypatch, ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
@@ -500,8 +524,17 @@ def test_dnsmasq_start_isolated_rejects_bad_arguments(helper, argv):
     assert helper._test_calls == []
 
 
+def _bridge_conf(helper, bridge="novec0den2"):
+    root = helper.IPV4_CONF_ROOT / bridge
+    root.mkdir(parents=True)
+    (root / "arp_ignore").write_text("0\n")
+    return root / "arp_ignore"
+
+
 def test_bridge_guard_apply_installs_one_transaction(helper):
+    arp_ignore = _bridge_conf(helper)
     assert helper.main(["bridge-guard-apply", "novec0den2"]) == 0
+    assert arp_ignore.read_text() == "1\n"
     [(argv, script)] = helper._test_input_calls
     assert argv == [helper.NFT_BIN, "-f", "-"]
     lines = script.splitlines()
@@ -515,6 +548,7 @@ def test_bridge_guard_apply_installs_one_transaction(helper):
     ]
     assert lines[5:] == [
         f'add rule {table} in_novec0den2 iifname "novec0den2" meta nfproto ipv4 udp sport 68 udp dport 67 accept',
+        f'add rule {table} in_novec0den2 iifname "novec0den2" icmp type echo-reply accept',
         f'add rule {table} in_novec0den2 iifname "novec0den2" drop',
         f'add rule {table} fwd_novec0den2 iifname "novec0den2" oifname "novec0den2" accept',
         f'add rule {table} fwd_novec0den2 iifname "novec0den2" drop',
@@ -534,7 +568,24 @@ def test_bridge_guard_remove_is_a_no_op_when_absent(helper, monkeypatch):
     assert helper._test_calls == []
 
 
+def test_bridge_guard_apply_fails_for_a_missing_bridge(helper, capsys):
+    assert helper.main(["bridge-guard-apply", "novec0den2"]) == 1
+    assert "does not exist" in capsys.readouterr().err
+
+
+def test_bridge_guard_refuses_a_symlinked_lock(helper, tmp_path):
+    _bridge_conf(helper)
+    target = tmp_path / "elsewhere"
+    target.write_text("keep\n")
+    helper.GUARD_LOCK_PATH.symlink_to(target)
+    assert helper.main(["bridge-guard-apply", "novec0den2"]) == 1
+    assert helper._test_input_calls == []
+    assert target.read_text() == "keep\n"
+
+
 def test_bridge_guard_remove_deletes_its_chains_and_the_empty_table(helper, monkeypatch):
+    arp_ignore = _bridge_conf(helper)
+    arp_ignore.write_text("1\n")
     listings: list[list[str]] = []
 
     def capture(argv):
@@ -552,6 +603,7 @@ def test_bridge_guard_remove_deletes_its_chains_and_the_empty_table(helper, monk
         "delete chain inet nova_ve_bridge_guard fwd_novec0den2\n",
     ]
     assert helper._test_calls == [[helper.NFT_BIN, "delete", "table", "inet", "nova_ve_bridge_guard"]]
+    assert arp_ignore.read_text() == "0\n"
 
 
 def test_bridge_guard_remove_keeps_a_table_other_bridges_use(helper, monkeypatch):

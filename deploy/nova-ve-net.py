@@ -66,6 +66,9 @@ NFT_BIN = os.environ.get("NOVA_VE_NFT_BIN") or "nft"
 DNSMASQ_BIN = os.environ.get("NOVA_VE_DNSMASQ_BIN") or "dnsmasq"
 RUNTIME_ROOT = Path(os.environ.get("NOVA_VE_RUNTIME_ROOT", "/var/lib/nova-ve"))
 IP_FORWARD_PATH = Path(os.environ.get("NOVA_VE_IP_FORWARD_PATH", "/proc/sys/net/ipv4/ip_forward"))
+IPV4_CONF_ROOT = Path(os.environ.get("NOVA_VE_IPV4_CONF_ROOT", "/proc/sys/net/ipv4/conf"))
+# Root-owned, unlike the service account's state directory.
+GUARD_LOCK_PATH = Path(os.environ.get("NOVA_VE_GUARD_LOCK", "/run/nova-ve-bridge-guard.lock"))
 
 
 # ---------------------------------------------------------------------------
@@ -802,20 +805,38 @@ def _guard_chains(bridge: str) -> tuple[str, str]:
     return f"in_{bridge}", f"fwd_{bridge}"
 
 
-def _guard_lock_path() -> Path:
-    return RUNTIME_ROOT / "bridge-guard.lock"
-
-
 def _guard_locked(fn: Callable[[str], int], bridge: str) -> int:
     """Serialize guard edits: removal deletes the table once it is empty."""
-    lock_path = _guard_lock_path()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        try:
-            return fn(bridge)
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    # O_NOFOLLOW: never open (and create) a file through a planted symlink.
+    try:
+        fd = os.open(GUARD_LOCK_PATH, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    except OSError as exc:
+        print(f"cannot open {GUARD_LOCK_PATH}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fn(bridge)
+    finally:
+        os.close(fd)
+
+
+def _set_arp_ignore(bridge: str, value: str, *, missing_ok: bool) -> int:
+    """Answer ARP on the bridge only for the bridge's own address.
+
+    Without it the host answers ARP for every local address, telling lab
+    nodes about the host's other networks.
+    """
+    try:
+        (IPV4_CONF_ROOT / bridge / "arp_ignore").write_text(f"{value}\n")
+    except FileNotFoundError:
+        if missing_ok:
+            return 0
+        print(f"bridge {bridge} does not exist", file=sys.stderr)
+        return 1
+    except OSError as exc:
+        print(f"failed to set arp_ignore on {bridge}: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def _guard_script(bridge: str) -> str:
@@ -829,8 +850,11 @@ def _guard_script(bridge: str) -> str:
             f"add chain {table} {chain_fwd} {{ type filter hook forward priority {GUARD_PRIORITY}; policy accept; }}",
             f"flush chain {table} {chain_in}",
             f"flush chain {table} {chain_fwd}",
-            # DHCP from clients is the only host input the bridge may carry.
+            # DHCP from clients is the only host input the bridge may carry,
+            # plus echo replies: dnsmasq pings an address before offering
+            # it, and the host can check that a node is up.
             f"add rule {table} {chain_in} iifname {quoted} meta nfproto ipv4 udp sport 68 udp dport 67 accept",
+            f"add rule {table} {chain_in} iifname {quoted} icmp type echo-reply accept",
             # Everything else is dropped: IPv6 (link-local included), and
             # traffic for any host address, not just the bridge's own.
             f"add rule {table} {chain_in} iifname {quoted} drop",
@@ -847,11 +871,15 @@ def _guard_script(bridge: str) -> str:
 
 def _guard_apply(bridge: str) -> int:
     # One transaction: the chains are never half-filled.
-    return _run_input([NFT_BIN, "-f", "-"], _guard_script(bridge))
+    rc = _run_input([NFT_BIN, "-f", "-"], _guard_script(bridge))
+    return rc if rc != 0 else _set_arp_ignore(bridge, "1", missing_ok=False)
 
 
 def _guard_remove(bridge: str) -> int:
     table = f"inet {GUARD_TABLE}"
+    rc = _set_arp_ignore(bridge, "0", missing_ok=True)
+    if rc != 0:
+        return rc
     for chain in _guard_chains(bridge):
         if _run_capture([NFT_BIN, "list", "chain", "inet", GUARD_TABLE, chain]).returncode != 0:
             continue  # absent already
@@ -875,6 +903,36 @@ def cmd_bridge_guard_apply(args: argparse.Namespace) -> int:
 def cmd_bridge_guard_remove(args: argparse.Namespace) -> int:
     bridge = validate_network_bridge_name(args.bridge)
     return _guard_locked(_guard_remove, bridge)
+
+
+def _write_private_file(path: Path, text: str) -> None:
+    """Write ``path`` as root without following links the service account made.
+
+    The state directory belongs to the unprivileged service account, so a
+    symlink planted there must never redirect a root write. Directories are
+    created and checked one by one below ``RUNTIME_ROOT``; the file is
+    written to a fresh temporary name and renamed into place.
+    """
+    # The root itself is the operator's choice and may be a link.
+    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
+    current = RUNTIME_ROOT
+    for part in path.parent.relative_to(RUNTIME_ROOT).parts:
+        current = current / part
+        try:
+            os.mkdir(current, 0o755)
+        except FileExistsError:
+            pass
+        if current.is_symlink() or not current.is_dir():
+            raise OSError(f"refusing to write through {current}: not a plain directory")
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
@@ -937,6 +995,33 @@ def _dnsmasq_options(gateway: str, dhcp_start: str, dhcp_end: str, *, no_router:
     ]
 
 
+def _write_dnsmasq_conf(
+    conf: Path,
+    pidfile: Path,
+    leases: Path,
+    bridge: str,
+    gateway: str,
+    dhcp_start: str,
+    dhcp_end: str,
+    no_router: bool,
+) -> None:
+    _write_private_file(
+        conf,
+        "\n".join(
+            [
+                "bind-interfaces",
+                f"interface={bridge}",
+                f"listen-address={gateway}",
+                "port=0",
+                *_dnsmasq_options(gateway, dhcp_start, dhcp_end, no_router=no_router),
+                f"dhcp-leasefile={leases}",
+                f"pid-file={pidfile}",
+                "",
+            ]
+        ),
+    )
+
+
 def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     no_router = bool(getattr(args, "no_router", False))
     bridge = (validate_network_bridge_name if no_router else validate_bridge_name)(args.bridge)
@@ -955,22 +1040,11 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     if not _dnsmasq_stop_bridge(bridge):
         return 1
     conf, pidfile, leases = _dnsmasq_paths(bridge)
-    conf.parent.mkdir(parents=True, exist_ok=True)
-    conf.write_text(
-        "\n".join(
-            [
-                "bind-interfaces",
-                f"interface={bridge}",
-                f"listen-address={gateway}",
-                "port=0",
-                *_dnsmasq_options(gateway, dhcp_start, dhcp_end, no_router=no_router),
-                f"dhcp-leasefile={leases}",
-                f"pid-file={pidfile}",
-                "",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    try:
+        _write_dnsmasq_conf(conf, pidfile, leases, bridge, gateway, dhcp_start, dhcp_end, no_router)
+    except OSError as exc:
+        print(f"failed to write {conf}: {exc}", file=sys.stderr)
+        return 1
     rc = _run([DNSMASQ_BIN, f"--conf-file={conf}"])
     if rc != 0:
         return rc
