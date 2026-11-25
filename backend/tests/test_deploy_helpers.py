@@ -439,7 +439,7 @@ def test_vyos_installer_resolves_default_owner_group_from_account():
 def test_provisioner_honours_saved_nat_cloud_dhcp_flag(config, expected):
     """#320: jq's ``//`` treats false as missing and re-enabled DHCP on deploy."""
     lines = [line.strip() for line in PROVISION_SH.read_text().splitlines()]
-    expressions = [line.rstrip(",") for line in lines if ".value.config.dhcp " in line]
+    expressions = [line.rstrip(",") for line in lines if ".value.config.dhcp == false" in line]
     assert len(expressions) == 1
 
     result = subprocess.run(
@@ -526,6 +526,118 @@ def test_provisioner_reconciles_nat_cloud_dhcp_from_owner_records(tmp_path):
     assert "applied=1 skipped=1 failed=1" in result.stdout
     assert "failed to stop dnsmasq" in result.stderr
     assert "forward-apply br-owner 10.20.0.0/24 eth0" in log.read_text()
+
+
+def _provisioner_function(name: str, helper: pathlib.Path) -> str:
+    body = PROVISION_SH.read_text()
+    start = body.index(f"{name}() {{")
+    function = body[start : body.index("\n}\n", start) + 3]
+    function, replaced = re.subn(r"(local helper=).*", rf'\1"{helper}"', function)
+    assert replaced == 1
+    return function
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None or not _bash_supports_associative_arrays(),
+    reason="needs jq and bash 4+",
+)
+def test_provisioner_counts_failed_dnsmasq_stop_without_egress_as_failed(tmp_path):
+    """#320 N2: a server that will not stop is a failure even when NAT is skipped."""
+    labs = tmp_path / "labs"
+    labs.mkdir()
+    network = {
+        "type": "nat_cloud",
+        "runtime": {"bridge_name": "br-off"},
+        "config": {"cidr": "10.30.0.0/24", "gateway": "10.30.0.1", "dhcp": False},
+    }
+    (labs / "lab.json").write_text(json.dumps({"networks": {"1": network}}))
+    helper = tmp_path / "helper"
+    # dnsmasq-stop fails and no default route is found.
+    helper.write_text('#!/bin/bash\n[[ "$1" != dnsmasq-stop && "$1" != default-egress ]]\n')
+    helper.chmod(0o755)
+    env_file = tmp_path / "env"
+    env_file.write_text(f"LABS_DIR={labs}\n")
+    function = _provisioner_function("reconcile_nat_cloud_runtime", helper)
+    script = f'DRY_RUN=0\nENV_FILE="{env_file}"\nip() {{ return 0; }}\n{function}\nreconcile_nat_cloud_runtime\n'
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "applied=0 skipped=0 failed=1" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
+def test_provisioner_reconciles_bridge_dhcp(tmp_path):
+    """#325: deploys restore DHCP bridges and clear disabled ones; members and
+    plain bridges are left alone."""
+
+    def bridge(name, dhcp, **extra):
+        config = {
+            "cidr": "10.40.1.0/24",
+            "dhcp": dhcp,
+            "dhcp_server": "10.40.1.254",
+            "dhcp_start": "10.40.1.128",
+            "dhcp_end": "10.40.1.253",
+        }
+        config.update(extra.pop("config", {}))
+        return {"type": "linux_bridge", "runtime": {"bridge_name": name}, "config": config, **extra}
+
+    labs = tmp_path / "labs"
+    labs.mkdir()
+    (labs / "lab.json").write_text(
+        json.dumps(
+            {
+                "networks": {
+                    "1": bridge("nove0001n1", True),
+                    "2": bridge("nove0001n2", False),
+                    # Legacy ``dhcp: true`` without a server was never applied.
+                    "3": bridge("nove0001n3", True, config={"dhcp_server": None}),
+                    "4": bridge("nove0001n4", True, config={"shared_network_id": "shared-net:x:1"}),
+                    "5": {"type": "linux_bridge", "runtime": {"bridge_name": "nove0001n5"}, "config": {}},
+                    "6": {
+                        "type": "linux_bridge",
+                        "runtime": {"bridge_name": "nove0001n6"},
+                        "config": {"cidr": "10.40.6.0/24"},
+                    },
+                }
+            }
+        )
+    )
+    log = tmp_path / "calls"
+    helper = tmp_path / "helper"
+    helper.write_text(f'#!/bin/bash\necho "$@" >> "{log}"\n')
+    helper.chmod(0o755)
+    env_file = tmp_path / "env"
+    env_file.write_text(f"LABS_DIR={labs}\n")
+    function = _provisioner_function("reconcile_bridge_dhcp_runtime", helper)
+    script = (
+        f'DRY_RUN=0\nENV_FILE="{env_file}"\nip() {{ return 0; }}\n{function}\n'
+        "reconcile_bridge_dhcp_runtime\n"
+    )
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "applied=3 skipped=0 failed=0" in result.stdout
+    assert log.read_text().splitlines() == [
+        "bridge-guard-apply nove0001n1",
+        "bridge-addr-add nove0001n1 10.40.1.254/24",
+        "link-up nove0001n1",
+        "dnsmasq-start nove0001n1 10.40.1.254 10.40.1.128 10.40.1.253 --no-router",
+        "dnsmasq-stop nove0001n2",
+        "bridge-addr-del nove0001n2 10.40.1.254/24",
+        "bridge-guard-remove nove0001n2",
+        "dnsmasq-stop nove0001n3",
+        "bridge-guard-remove nove0001n3",
+    ]
+
+    # A failing step is reported and nothing after it runs for that bridge.
+    helper.write_text(f'#!/bin/bash\necho "$@" >> "{log}"\n[[ "$1" != bridge-addr-add ]]\n')
+    log.unlink()
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "applied=2 skipped=0 failed=1" in result.stdout
+    assert "failed to restore DHCP for bridge nove0001n1" in result.stderr
+    assert not any(line.startswith("dnsmasq-start") for line in log.read_text().splitlines())
 
 
 def test_predictable_ifaces_sorted_handles_ens_enp_names(tmp_path):
