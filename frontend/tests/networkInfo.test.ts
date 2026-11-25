@@ -68,11 +68,51 @@ describe('NetworkInfoContent (#318)', () => {
 
   it('says when DHCP is off instead of showing a scope', async () => {
     const data = info();
-    data.ip!.dhcp!.enabled = false;
+    Object.assign(data.ip!.dhcp!, { enabled: false, running: false });
     apiGetData.mockResolvedValue(data);
     render(NetworkInfoContent, { labId: 'a.json', network: network() });
     expect(await screen.findByText('Disabled')).toBeInTheDocument();
     expect(screen.queryByText('Scope')).toBeNull();
+  });
+
+  it.each([
+    [true, true, 'Running', ''],
+    [true, false, 'Not running', 'Reopen the lab to start it'],
+    [false, true, 'Still running', 'Reopen the lab to stop it'],
+    [false, false, 'Disabled', '']
+  ])('reports the live server (enabled %s, running %s, #320)', async (enabled, running, label, problem) => {
+    const data = info();
+    Object.assign(data.ip!.dhcp!, { enabled, running });
+    apiGetData.mockResolvedValue(data);
+    render(NetworkInfoContent, { labId: 'a.json', network: network() });
+    expect(await screen.findByTestId('network-info-dhcp-status')).toHaveTextContent(label);
+    if (problem) expect(screen.getByRole('alert')).toHaveTextContent(problem);
+    else expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('lists leases with device, MAC and remaining time, and keeps them after DHCP is off (#320)', async () => {
+    const data = info();
+    data.ip!.dhcp!.enabled = false;
+    data.ip!.dhcp!.running = false;
+    data.ip!.dhcp!.leases[0].expires_at = new Date(Date.now() + 90 * 60_000).toISOString();
+    apiGetData.mockResolvedValue(data);
+    render(NetworkInfoContent, { labId: 'a.json', network: network() });
+    const leases = within(await screen.findByTestId('network-info-leases'));
+    for (const text of ['Leases (1)', '10.255.0.140', 'edge-1', '50:00:00:01:00:00', '1 h 30 min left']) {
+      expect(leases.getByText(text)).toBeInTheDocument();
+    }
+    expect(leases.getByText(/before DHCP was disabled/)).toBeInTheDocument();
+  });
+
+  it('says when nothing is leased yet and reloads when DHCP settings change (#320)', async () => {
+    const data = info();
+    Object.assign(data.ip!.dhcp!, { leases: [], lease_count: 0 });
+    apiGetData.mockResolvedValue(data);
+    const view = render(NetworkInfoContent, { labId: 'a.json', network: network({ config: { dhcp: true } }) });
+    expect(await screen.findByText('No addresses leased yet.')).toBeInTheDocument();
+    expect(apiGetData).toHaveBeenCalledTimes(1);
+    await view.rerender({ network: network({ config: { dhcp: false } }) });
+    await waitFor(() => expect(apiGetData).toHaveBeenCalledTimes(2));
   });
 
   it('omits addressing for a layer 2 bridge', async () => {

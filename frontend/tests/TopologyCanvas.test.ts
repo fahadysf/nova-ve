@@ -494,6 +494,8 @@ describe('TopologyCanvas lab controls', () => {
     });
     expect(get(labState).networks['7'].config?.dhcp).toBe(false);
     expect(get(labState).revision).toBe(51);
+    await openNetworkMenu();
+    expect(screen.getByTestId('network-menu-configure')).toHaveTextContent('DHCP off');
   });
 
   it('only offers Configure on NAT-Clouds, disabled for shared members (#320)', async () => {

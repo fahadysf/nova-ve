@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/sv
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import NetworkConfigModal from '$lib/components/canvas/NetworkConfigModal.svelte';
-import { ApiError, apiRequest } from '$lib/api';
+import { ApiError, apiGetData, apiRequest } from '$lib/api';
 import { natDefaults, validateNatForm } from '$lib/services/natCloudForm';
 import type { NetworkData } from '$lib/types';
 
@@ -117,6 +117,19 @@ describe('NetworkConfigModal NAT-Cloud (#320)', () => {
       body: { config: { dhcp: false }, network_id: 3 },
       suppressToast: true
     });
+  });
+
+  it('shows the live DHCP server state, and when it cannot be read', async () => {
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      ip: { dhcp: { enabled: true, running: true, lease_count: 2, leases: [] } }
+    } as never);
+    await open({ mode: 'edit', network: nat() }).show();
+    expect(await screen.findByText(/Server: Running · 2 leased/)).toBeInTheDocument();
+    cleanup();
+
+    vi.mocked(apiGetData).mockRejectedValueOnce(new Error('offline'));
+    await open({ mode: 'edit', network: nat() }).show();
+    expect(await screen.findByText('Server: status unavailable')).toBeInTheDocument();
   });
 
   it('renames without sending or re-validating any config', async () => {

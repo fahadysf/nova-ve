@@ -7,7 +7,8 @@
   import { Lock } from 'lucide-svelte';
   import { natDefaults, natFieldFromServer, validateNatForm, type NatErrors } from '$lib/services/natCloudForm';
   import type { NetworkModalType } from '$lib/services/networkSharing';
-  import type { NetworkCreateConfig, NetworkData, NetworkType, SharedNetwork } from '$lib/types';
+  import { dhcpStatus, type DhcpInfo } from '$lib/services/dhcpStatus';
+  import type { NetworkCreateConfig, NetworkData, NetworkInfo, NetworkType, SharedNetwork } from '$lib/types';
 
   export let open = false;
   export let suspended = false;
@@ -92,6 +93,21 @@
   /** Server rejection of the current values; cleared on the next change. */
   let rejection: { message: string; field?: string } | null = null;
   let staleSaveError: typeof saveError = null;
+  /** Live DHCP server state; null while unknown. */
+  let liveDhcp: DhcpInfo | null = null;
+  let liveDhcpError = false;
+
+  async function loadLiveDhcp(networkId: number) {
+    try {
+      const info = await apiGetData<NetworkInfo>(`/labs/${labId}/networks/${networkId}/info`, {
+        suppressToast: true,
+        retry: 0
+      });
+      if (open && network?.id === networkId) liveDhcp = info?.ip?.dhcp ?? null;
+    } catch {
+      if (open && network?.id === networkId) liveDhcpError = true;
+    }
+  }
 
   /** A new value makes the previous server verdict stale. */
   function dismissServerError() {
@@ -124,6 +140,9 @@
         : '';
       checking = false;
       rejection = null;
+      liveDhcp = null;
+      liveDhcpError = false;
+      if (editing && network) void loadLiveDhcp(network.id);
       natCloudMode = 'new';
       selectedNatCloudId = '';
       natClouds = [];
@@ -185,6 +204,7 @@
   $: unchanged = editing && !dhcpChanged && trimmedName === (network?.name ?? '');
   $: turningDhcpOff = editing && !dhcp && network?.config?.dhcp !== false;
   $: busy = saving || checking;
+  $: liveStatus = liveDhcp ? dhcpStatus(liveDhcp) : null;
   $: canSubmit =
     !busy &&
     !unchanged &&
@@ -580,10 +600,29 @@
                     Gateway and egress are fixed too.
                   </p>
                 {/if}
-                <label class="flex items-center gap-2 border-t border-slate-800 pt-3 sm:col-span-2">
-                  <input bind:checked={dhcp} type="checkbox" class="h-4 w-4 rounded border-slate-700 bg-slate-900" />
-                  <span class="text-xs text-slate-300">Enable DHCP</span>
-                </label>
+                <div class="flex items-center justify-between gap-3 border-t border-slate-800 pt-3 sm:col-span-2">
+                  <label class="flex items-center gap-2">
+                    <input bind:checked={dhcp} type="checkbox" class="h-4 w-4 rounded border-slate-700 bg-slate-900" />
+                    <span class="text-xs text-slate-300">Enable DHCP</span>
+                  </label>
+                  {#if editing}
+                    <span class="flex items-center gap-1.5 text-xs text-slate-400" data-testid="nat-dhcp-status">
+                      {#if liveStatus}
+                        <span class={`h-2 w-2 rounded-full ${liveStatus.dot}`} aria-hidden="true"></span>
+                        Server: {liveStatus.label}{liveDhcp && liveDhcp.lease_count > 0
+                          ? ` · ${liveDhcp.lease_count} leased`
+                          : ''}
+                      {:else}
+                        {liveDhcpError ? 'Server: status unavailable' : 'Server: checking…'}
+                      {/if}
+                    </span>
+                  {/if}
+                </div>
+                {#if editing && liveStatus?.problem}
+                  <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
+                    {liveStatus.problem}
+                  </p>
+                {/if}
                 {#if dhcp}
                 <div class="space-y-1.5">
                   <label for="nat-dhcp-start" class="flex items-center gap-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">

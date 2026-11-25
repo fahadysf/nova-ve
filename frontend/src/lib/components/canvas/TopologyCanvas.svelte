@@ -1784,6 +1784,18 @@
     if (zenMode) zenDialog = 'network';
   }
 
+  function networkSavedMessage(before: NetworkData, after: NetworkData): string {
+    const wasOn = before.config?.dhcp !== false;
+    const isOn = after.config?.dhcp !== false;
+    if (wasOn && !isOn) return 'DHCP disabled.';
+    const rangeChanged = ['dhcp_start', 'dhcp_end'].some((key) => before.config?.[key] !== after.config?.[key]);
+    if (!isOn || (wasOn && !rangeChanged)) return 'Network settings saved.';
+    // The host reports a pid only for a server it verified as running.
+    const started = Number(after.runtime?.dhcp_pid ?? 0) > 0;
+    if (!wasOn) return started ? 'DHCP enabled; server running.' : 'DHCP enabled.';
+    return started ? 'DHCP range updated; server restarted.' : 'DHCP range updated.';
+  }
+
   /** The modal stays open until the server accepts the change (#320). */
   async function saveNetworkEdit(
     network: NetworkData,
@@ -1804,7 +1816,7 @@
       adoptRevision(response);
       labState.setNetworks({ ...$labState.networks, [String(updated.id)]: updated });
       publishFlowState();
-      toastStore.push('NAT-Cloud settings saved.', 'success');
+      toastStore.push(networkSavedMessage(network, updated), 'success');
       onNetworkModalCancel();
       dispatchCanvasChange('network-update', {
       });
@@ -2768,7 +2780,15 @@
               : 'DHCP and name settings'}
             on:click|preventDefault|stopPropagation={() => handleNetworkConfigure(menu?.targetId ?? '')}
           >
-            <span>Configure…</span><Settings2 class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+            <span>Configure…</span>
+            <span class="flex items-center gap-1.5">
+              {#if menuSharing?.role !== 'member'}
+                <span class="text-[9px] uppercase tracking-wide text-gray-500">
+                  {menuNetwork.config?.dhcp === false ? 'DHCP off' : 'DHCP on'}
+                </span>
+              {/if}
+              <Settings2 class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+            </span>
           </button>
         {/if}
         {#if menuSharing}
