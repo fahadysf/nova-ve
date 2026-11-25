@@ -146,6 +146,8 @@ export interface FolderEntry {
   spy?: number;
   lock?: boolean;
   shared?: number;
+  /** Username, '*' (all users) or 'system' (#322). */
+  owner?: string;
 }
 
 export interface LabListItem {
@@ -156,6 +158,7 @@ export interface LabListItem {
   spy?: number;
   lock?: boolean;
   shared?: number;
+  owner?: string;
 }
 
 export interface FolderListing {

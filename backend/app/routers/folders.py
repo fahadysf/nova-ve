@@ -57,8 +57,38 @@ def _scoped_folder_path(current_user: UserRead, raw_path: str, treat_as_absolute
     return f"{root}/{normalized}"
 
 
+SHARED_OWNER = "*"  # rendered as "All users" by the UI (#322)
+SYSTEM_OWNER = "system"
+_SYSTEM_FOLDERS = {"Running", "Users"}
+
+
+def folder_owner(path: str) -> str:
+    """Owner of a folder path: top-level ``/<user>`` folders belong to that
+    user (children inherit), ``/Shared`` belongs to every user, and the
+    virtual ``Running``/``Users`` roots belong to the system."""
+    top = path.strip("/").split("/", 1)[0]
+    if not top:
+        return SYSTEM_OWNER
+    if top == "Shared":
+        return SHARED_OWNER
+    if top in _SYSTEM_FOLDERS:
+        return SYSTEM_OWNER
+    return top
+
+
+def annotate_owners(result: dict, lab_owners: dict[str, str] | None = None) -> dict:
+    """Add an additive ``owner`` field to every folder and lab entry."""
+    lab_owners = lab_owners or {}
+    for folder in result.get("folders", []):
+        folder.setdefault("owner", folder_owner(folder["path"]))
+    for lab in result.get("labs", []):
+        lab.setdefault("owner", lab_owners.get(lab["path"]) or folder_owner(lab["path"].rsplit("/", 1)[0]))
+    return result
+
+
 async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recursive: bool = False) -> dict:
     existing_paths = {lab["path"] for lab in result["labs"]}
+    lab_owners: dict[str, str] = {}
     folder_prefix = folder_path.strip("/")
     lab_service = LabService(db)
 
@@ -85,11 +115,13 @@ async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recur
         elif not recursive and "/" in relative_filename:
             continue
 
+        lab_owners[lab.path] = lab.owner
         if lab.path in existing_paths:
             continue
 
         result["labs"].append(
             {
+                "owner": lab.owner,
                 "file": relative_filename.split("/")[-1],
                 "path": lab.path,
                 "umtime": int(time.time()),
@@ -99,7 +131,7 @@ async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recur
                 "shared": 0,
             }
         )
-    return result
+    return annotate_owners(result, lab_owners)
 
 
 @router.get("/")
