@@ -86,6 +86,9 @@ describe('bridge form rules (#325)', () => {
 });
 
 describe('network DHCP state (#325)', () => {
+  const served = {
+    cidr: '10.1.2.0/29', dhcp: true, dhcp_server: '10.1.2.6', dhcp_start: '10.1.2.4', dhcp_end: '10.1.2.5'
+  };
   const net = (overrides: Partial<NetworkData> = {}): NetworkData => ({
     id: 7, name: 'core', type: 'linux_bridge', left: 0, top: 0, icon: '', visibility: true, config: {}, ...overrides
   });
@@ -94,14 +97,21 @@ describe('network DHCP state (#325)', () => {
     expect(dhcpEnabled(net({ type: 'nat_cloud' }))).toBe(true);
     expect(dhcpEnabled(net({ type: 'nat_cloud', config: { dhcp: false } }))).toBe(false);
     expect(dhcpEnabled(net())).toBe(false);
-    expect(dhcpEnabled(net({ config: { dhcp: true } }))).toBe(true);
+    expect(dhcpEnabled(net({ config: { ...served, dhcp: false } }))).toBe(false);
+    expect(dhcpEnabled(net({ config: served }))).toBe(true);
+  });
+
+  it('treats a bare dhcp: true from before #325 as off, as the backend does', () => {
+    expect(dhcpEnabled(net({ config: { dhcp: true } }))).toBe(false);
+    expect(dhcpEnabled(net({ config: { cidr: '10.1.2.0/24', dhcp: true } }))).toBe(false);
+    expect(dhcpToggle(net({ config: { cidr: '10.1.2.0/24', dhcp: true } }))).toEqual({ enabled: false });
   });
 
   it.each([
     ['owner NAT-Cloud', net({ type: 'nat_cloud' }), { enabled: true }],
     ['NAT-Cloud with DHCP off', net({ type: 'nat_cloud', config: { dhcp: false } }), { enabled: false }],
     ['bridge with a /24', net({ config: { cidr: '192.0.2.0/24' } }), { enabled: false }],
-    ['bridge with DHCP on', net({ config: { cidr: '10.1.2.0/29', dhcp: true } }), { enabled: true }],
+    ['bridge with DHCP on', net({ config: served }), { enabled: true }],
     ['untyped bridge', net({ type: undefined as never, config: { cidr: '10.1.0.0/22' } }), { enabled: false }],
     ['bridge without a subnet', net(), null],
     ['bridge with a /21', net({ config: { cidr: '10.0.0.0/21' } }), null],

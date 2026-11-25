@@ -13,9 +13,18 @@ export function networkKind(network: NetworkData): string {
   return network.type ?? 'linux_bridge';
 }
 
-/** The saved DHCP setting: on by default for NAT-Clouds, off for bridges (#325). */
+/** Settings a bridge needs before its DHCP server runs, as the backend checks them. */
+const BRIDGE_DHCP_KEYS = ['cidr', 'dhcp_server', 'dhcp_start', 'dhcp_end'];
+
+/**
+ * The saved DHCP setting: on by default for NAT-Clouds, off for bridges (#325).
+ * A bridge's bare ``dhcp: true`` from before #325 has no server, so the
+ * backend treats it as off; so does the UI, which then offers to enable it.
+ */
 export function dhcpEnabled(network: NetworkData): boolean {
-  return networkKind(network) === 'nat_cloud' ? network.config?.dhcp !== false : network.config?.dhcp === true;
+  const config = network.config ?? {};
+  if (networkKind(network) === 'nat_cloud') return config.dhcp !== false;
+  return config.dhcp === true && BRIDGE_DHCP_KEYS.every((key) => Boolean(config[key]));
 }
 
 /** NAT-Clouds and lab bridges have settings; point-to-point and host networks do not. */

@@ -133,6 +133,9 @@ describe('NetworkInfoContent (#318)', () => {
     expect(screen.getByText('Nothing is connected.')).toBeInTheDocument();
   });
 
+  const servedBridge = {
+    cidr: '10.1.2.0/29', dhcp: true, dhcp_server: '10.1.2.6', dhcp_start: '10.1.2.4', dhcp_end: '10.1.2.5'
+  };
   const bridgeIp = (dhcp: NonNullable<NetworkInfo['ip']>['dhcp']): NetworkInfo['ip'] => ({
     cidr: '10.1.2.0/24', gateway: null, egress_interface: null, nat: false,
     static_start: null, static_end: null, used_ips: [], dhcp
@@ -167,15 +170,24 @@ describe('NetworkInfoContent (#318)', () => {
   it('shows the saved bridge subnet and DHCP state before details load, and reloads when they change (#325)', async () => {
     apiGetData.mockRejectedValue(new Error('offline'));
     const view = render(NetworkInfoContent, {
-      labId: 'a.json', network: network({ type: 'linux_bridge', config: { cidr: '10.1.2.0/29', dhcp: true } })
+      labId: 'a.json', network: network({ type: 'linux_bridge', config: { ...servedBridge } })
     });
     expect(await screen.findByRole('status')).toHaveTextContent('Could not load details');
     expect(screen.getByText('10.1.2.0/29')).toBeInTheDocument();
     expect(screen.getByText('On')).toBeInTheDocument();
     await view.rerender({
-      network: network({ type: 'linux_bridge', config: { cidr: '10.1.2.0/29', dhcp: true, dhcp_server: '10.1.2.1' } })
+      network: network({ type: 'linux_bridge', config: { ...servedBridge, dhcp_server: '10.1.2.1' } })
     });
     await waitFor(() => expect(apiGetData).toHaveBeenCalledTimes(2));
+  });
+
+  it('shows a bare dhcp: true from before #325 as off (#325)', async () => {
+    apiGetData.mockRejectedValue(new Error('offline'));
+    render(NetworkInfoContent, {
+      labId: 'a.json', network: network({ type: 'linux_bridge', config: { cidr: '10.1.2.0/24', dhcp: true } })
+    });
+    expect(await screen.findByRole('status')).toHaveTextContent('Could not load details');
+    expect(screen.getByText('Off')).toBeInTheDocument();
   });
 
   it('names the labs on a shared segment and warns about duplicate MACs', async () => {

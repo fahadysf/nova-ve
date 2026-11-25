@@ -547,11 +547,16 @@ describe('TopologyCanvas lab controls', () => {
     expect(screen.getByTestId('network-member-settings')).toBeInTheDocument();
   });
 
+  const servedBridge = {
+    cidr: '10.1.2.0/29', dhcp: true, dhcp_server: '10.1.2.6', dhcp_start: '10.1.2.4', dhcp_end: '10.1.2.5',
+  };
+
   it.each([
     ['a bridge without a subnet', {}, null, 'DHCP off'],
     ['a bridge with a /21', { cidr: '10.0.0.0/21' }, null, 'DHCP off'],
     ['a bridge with a /24', { cidr: '10.1.2.0/24' }, 'Enable DHCP', 'DHCP off'],
-    ['a bridge serving DHCP', { cidr: '10.1.2.0/29', dhcp: true }, 'Disable DHCP', 'DHCP on'],
+    ['a bridge serving DHCP', servedBridge, 'Disable DHCP', 'DHCP on'],
+    ['a bridge with a bare dhcp: true from before #325', { cidr: '10.1.2.0/24', dhcp: true }, 'Enable DHCP', 'DHCP off'],
     ['a shared bridge member', { cidr: '10.1.2.0/24', dhcp: true, shared_network_id: 'shared-net:b:1' }, null, 'Read-only'],
   ])('labels the DHCP actions of %s (#325)', async (_label, config, toggle, state) => {
     renderCanvas({}, { '7': makeSharingNetwork({ config }) });
@@ -619,7 +624,12 @@ describe('TopologyCanvas lab controls', () => {
     renderCanvas({}, { '7': network });
     const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
     vi.mocked(apiRequest).mockResolvedValueOnce({
-      network: { ...network, config: { cidr: '10.1.2.0/24', dhcp: true }, runtime: { dhcp_pid: 42 } }, revision: 62,
+      network: {
+        ...network,
+        config: { cidr: '10.1.2.0/24', dhcp: true, dhcp_server: '10.1.2.254', dhcp_start: '10.1.2.128', dhcp_end: '10.1.2.253' },
+        runtime: { dhcp: true, dhcp_pid: 42 },
+      },
+      revision: 62,
     } as never);
     await openNetworkMenu();
     await fireEvent.click(screen.getByTestId('network-menu-dhcp'));
