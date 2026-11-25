@@ -699,6 +699,11 @@ async def test_info_reports_dhcp_scope_server_and_leases(settings, labs_dir, mon
     (root / "dnsmasq.pid").unlink()
     assert build_network_info(lab, 1, lambda path: True)["ip"]["dhcp"]["pid"] == 77
     (root / "dnsmasq.pid").write_text("77\n")
+    # The helper passes the data directory unresolved.
+    (tmp_path / "data-link").symlink_to(tmp_path, target_is_directory=True)
+    linked = tmp_path / "data-link" / "nat-cloud" / bridge
+    (proc / "77" / "cmdline").write_bytes(f"dnsmasq\0--conf-file={linked}/dnsmasq.conf\0".encode())
+    assert build_network_info(lab, 1, lambda path: True)["ip"]["dhcp"]["pid"] == 77
     (proc / "77" / "cmdline").write_bytes(f"dnsmasq\0--conf-file={root}0/dnsmasq.conf\0".encode())
     assert build_network_info(lab, 1, lambda path: True)["ip"]["dhcp"]["running"] is False
     assert info["endpoints"][0]["interface"] == "Gi0"

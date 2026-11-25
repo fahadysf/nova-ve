@@ -833,6 +833,160 @@ async def test_nat_cloud_validation_errors_name_the_field(
     assert exc.value.extra["field"] == field
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["false", None, 0])
+async def test_nat_cloud_dhcp_flag_must_be_boolean(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, value
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-dhcp-type")
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.84.0.0/24"}}
+    )
+    before = (labs_dir / lab_name).read_text()
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().patch_network(lab_name, created["id"], {"config": {"dhcp": value}})
+
+    assert (exc.value.code, exc.value.extra["field"]) == (422, "config.dhcp")
+    assert (labs_dir / lab_name).read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_stored_null_dhcp_flag_counts_as_enabled(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """The UI and the provisioner treat only an explicit false as disabled."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-dhcp-null")
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.85.0.0/24"}}
+    )
+    data = json.loads((labs_dir / lab_name).read_text())
+    data["networks"]["1"]["config"]["dhcp"] = None
+    (labs_dir / lab_name).write_text(json.dumps(data))
+
+    payload, _ = await NetworkService().patch_network(
+        lab_name, created["id"], {"config": {"dhcp_start": "10.85.0.120"}}
+    )
+
+    assert payload["config"]["dhcp"] is True
+    assert helper_mocks["dnsmasq_start"][-1][2] == "10.85.0.120"
+    assert helper_mocks["dnsmasq_stop"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_blank_scope_returns_to_defaults(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-blank-scope")
+    created = await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "internet",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.86.0.0/24", "dhcp_start": "10.86.0.200"},
+        },
+    )
+
+    payload, _ = await NetworkService().patch_network(
+        lab_name, created["id"], {"config": {"dhcp_start": "", "dhcp_end": "10.86.0.150"}}
+    )
+
+    assert payload["config"]["dhcp_start"] == "10.86.0.100"
+    assert payload["config"]["dhcp_end"] == "10.86.0.150"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dhcp", "pid", "started", "stopped"),
+    [(True, None, 1, 0), (True, 77, 0, 0), (False, 77, 0, 1), (False, None, 0, 0)],
+)
+async def test_patch_nat_cloud_repairs_a_drifted_server_without_needless_restarts(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch, dhcp, pid, started, stopped
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-drift")
+    created = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.87.0.0/24", "dhcp": dhcp}},
+    )
+    helper_mocks["dnsmasq_start"].clear()
+    helper_mocks["dnsmasq_stop"].clear()
+    monkeypatch.setattr(
+        "app.services.network_info_service.dhcp_server_pid", lambda _bridge: pid
+    )
+
+    await NetworkService().patch_network(lab_name, created["id"], {"config": {"dhcp": dhcp}})
+
+    assert len(helper_mocks["dnsmasq_start"]) == started
+    assert len(helper_mocks["dnsmasq_stop"]) == stopped
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_rejects_unknown_egress_interface(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch, tmp_path
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-egress")
+    sysfs = tmp_path / "sysfs"
+    (sysfs / "eth0").mkdir(parents=True)
+    monkeypatch.setattr(host_net, "_SYSFS_NET", sysfs)
+    request = {"name": "internet", "type": "nat_cloud", "config": {"egress_interface": "eth9"}}
+
+    for bad in ("eth9", "../eth0", ".."):
+        request["config"] = {"egress_interface": bad}
+        with pytest.raises(NetworkServiceError) as exc:
+            await NetworkService().create_network(lab_name, request)
+        assert (exc.value.code, exc.value.extra["field"]) == (422, "config.egress_interface")
+    assert helper_mocks["bridge_add"] == []
+
+    request["config"] = {"egress_interface": "eth0"}
+    created = await NetworkService().create_network(lab_name, request)
+    assert created["runtime"]["egress_interface"] == "eth0"
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_ignores_its_own_leftover_bridge(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """A bridge that survived a failed delete must not block its successor."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-leftover")
+    bridge = host_net.bridge_name("lab-nat-leftover", 1)
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [(bridge, "10.88.0.1/24")])
+    config = {"cidr": "10.88.0.0/24"}
+
+    NetworkService().validate_nat_cloud_config(lab_name, config)
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": config}
+    )
+
+    assert created["runtime"]["bridge_name"] == bridge
+
+
+@pytest.mark.asyncio
+async def test_nat_cloud_conflict_does_not_name_labs_the_caller_cannot_open(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    owner = _seed_lab(labs_dir, lab_id="lab-secret", name="secret.json")
+    await NetworkService().create_network(
+        owner, {"name": "hidden-net", "type": "nat_cloud", "config": {"cidr": "10.89.0.0/24"}}
+    )
+    other = _seed_lab(labs_dir, lab_id="lab-other", name="other.json")
+
+    with pytest.raises(NetworkServiceError) as exc:
+        NetworkService().validate_nat_cloud_config(
+            other, {"cidr": "10.89.0.0/24"}, can_open=lambda path: path == other
+        )
+    assert exc.value.code == 409
+    assert exc.value.extra["conflicting_cidr"] == "10.89.0.0/24"
+    assert "secret" not in str(exc.value.extra) + exc.value.message
+    assert "hidden-net" not in str(exc.value.extra) + exc.value.message
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().create_network(
+            other,
+            {"name": "mine", "type": "nat_cloud", "config": {"cidr": "10.89.0.0/24"}},
+            can_open=lambda path: path == other,
+        )
+    assert "secret" not in str(exc.value.extra) + exc.value.message
+
+
 # ---------------------------------------------------------------------------
 # Cross-host collision resistance
 # ---------------------------------------------------------------------------

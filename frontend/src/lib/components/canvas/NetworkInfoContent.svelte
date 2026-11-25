@@ -161,7 +161,7 @@
         </div>
         {#if status.problem}
           <p class="mb-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200" role="alert">
-            {status.problem}
+            {status.problem} {status.fix}
           </p>
         {/if}
         <InfoFields fields={dhcpFields(dhcp)} />

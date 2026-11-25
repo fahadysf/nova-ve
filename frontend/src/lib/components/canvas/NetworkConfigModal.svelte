@@ -88,6 +88,8 @@
   let modalEl: HTMLDivElement | null = null;
   let nameInputEl: HTMLInputElement | null = null;
   let wasOpen = false;
+  /** Bumped on every open, so a late response cannot act on the next form. */
+  let session = 0;
   let returnFocusEl: HTMLElement | null = null;
   let checking = false;
   /** Server rejection of the current values; cleared on the next change. */
@@ -98,14 +100,15 @@
   let liveDhcpError = false;
 
   async function loadLiveDhcp(networkId: number) {
+    const mine = session;
     try {
       const info = await apiGetData<NetworkInfo>(`/labs/${labId}/networks/${networkId}/info`, {
         suppressToast: true,
         retry: 0
       });
-      if (open && network?.id === networkId) liveDhcp = info?.ip?.dhcp ?? null;
+      if (open && mine === session) liveDhcp = info?.ip?.dhcp ?? null;
     } catch {
-      if (open && network?.id === networkId) liveDhcpError = true;
+      if (open && mine === session) liveDhcpError = true;
     }
   }
 
@@ -113,6 +116,16 @@
   function dismissServerError() {
     rejection = null;
     staleSaveError = saveError;
+  }
+
+  function selectNatCloudMode(next: 'new' | 'existing') {
+    natCloudMode = next;
+    dismissServerError();
+  }
+
+  function describedBy(error: string | undefined, errorId: string, locked: boolean): string | undefined {
+    const ids = [error ? errorId : '', locked ? 'nat-locked-note' : ''].filter(Boolean);
+    return ids.length > 0 ? ids.join(' ') : undefined;
   }
 
   function configText(key: string): string {
@@ -127,6 +140,7 @@
   $: {
     if (open && !wasOpen) {
       const editing = mode === 'edit' && network !== null;
+      session += 1;
       returnFocusEl = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
       name = editing ? (network?.name ?? '') : defaultName;
       type = editing ? 'nat_cloud' : defaultType;
@@ -201,13 +215,23 @@
     editing &&
     (dhcp !== (network?.config?.dhcp !== false) ||
       (dhcp && (dhcpStart.trim() !== configText('dhcp_start') || dhcpEnd.trim() !== configText('dhcp_end'))));
-  $: unchanged = editing && !dhcpChanged && trimmedName === (network?.name ?? '');
+  $: renamed = trimmedName !== (network?.name ?? '');
   $: turningDhcpOff = editing && !dhcp && network?.config?.dhcp !== false;
   $: busy = saving || checking;
   $: liveStatus = liveDhcp ? dhcpStatus(liveDhcp) : null;
+  // The saved setting is right but the server is not in that state.
+  $: repairable = editing && !dhcpChanged && liveDhcp?.enabled === dhcp && !!liveStatus?.problem;
+  $: repairOnly = repairable && !renamed;
+  $: submitLabel = !editing
+    ? 'Create'
+    : repairOnly
+      ? dhcp
+        ? 'Start DHCP server'
+        : 'Stop DHCP server'
+      : 'Save changes';
   $: canSubmit =
     !busy &&
-    !unchanged &&
+    (!editing || dhcpChanged || renamed || repairable) &&
     Object.keys(liveErrors).length === 0 &&
     trimmedName.length > 0 &&
     (type !== 'nat_cloud' || natCloudMode !== 'existing' || selectedNatCloudId.length > 0) &&
@@ -301,6 +325,7 @@
 
   /** Side-effect-free server check (host subnet conflicts) before saving. */
   async function preflight(config: NetworkCreateConfig): Promise<boolean> {
+    const mine = session;
     checking = true;
     rejection = null;
     try {
@@ -309,15 +334,16 @@
         body: { config: { ...config }, ...(editing ? { network_id: network?.id } : {}) },
         suppressToast: true
       });
-      return true;
+      return open && mine === session;
     } catch (err) {
+      if (mine !== session) return false;
       rejection = {
         message: err instanceof Error ? err.message : String(err),
         field: err instanceof ApiError ? err.field : undefined
       };
       return false;
     } finally {
-      checking = false;
+      if (mine === session) checking = false;
     }
   }
 
@@ -326,11 +352,13 @@
     dismissServerError();
     const config: NetworkCreateConfig = {};
     if (editing) {
-      if (dhcpChanged) {
-        config.dhcp = dhcp;
-        if (dhcp && dhcpStart.trim()) config.dhcp_start = dhcpStart.trim();
-        if (dhcp && dhcpEnd.trim()) config.dhcp_end = dhcpEnd.trim();
-        if (!(await preflight(config)) || !open) return;
+      if (dhcpChanged || repairable) {
+        // Only what changed: a stale form must not undo someone else's edit.
+        if (repairable || dhcp !== (network?.config?.dhcp !== false)) config.dhcp = dhcp;
+        // Blank means "back to the default", so it is sent too.
+        if (dhcp && dhcpStart.trim() !== configText('dhcp_start')) config.dhcp_start = dhcpStart.trim();
+        if (dhcp && dhcpEnd.trim() !== configText('dhcp_end')) config.dhcp_end = dhcpEnd.trim();
+        if (!(await preflight(config))) return;
       }
       dispatch('confirm', { name: trimmedName, type: 'nat_cloud', config });
       return;
@@ -345,7 +373,7 @@
         if (dhcp && dhcpStart.trim()) config.dhcp_start = dhcpStart.trim();
         if (dhcp && dhcpEnd.trim()) config.dhcp_end = dhcpEnd.trim();
         if (egressInterface.trim()) config.egress_interface = egressInterface.trim();
-        if (!(await preflight(config)) || !open) return;
+        if (!(await preflight(config))) return;
       }
     } else if (type === 'bridge_cloud') {
       config.host_bridge = selectedHostBridge;
@@ -450,7 +478,6 @@
         class="max-h-[70vh] space-y-4 overflow-y-auto px-5 py-4 text-sm text-slate-200"
         role="presentation"
         on:input={dismissServerError}
-        on:change={dismissServerError}
       >
         <label class="block space-y-1.5">
           <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Name</span>
@@ -486,14 +513,14 @@
               <button
                 type="button"
                 class={`rounded-lg px-3 py-1.5 text-xs transition ${natCloudMode === 'new' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-100'}`}
-                on:click={() => (natCloudMode = 'new')}
+                on:click={() => selectNatCloudMode('new')}
               >
                 New
               </button>
               <button
                 type="button"
                 class={`rounded-lg px-3 py-1.5 text-xs transition ${natCloudMode === 'existing' ? 'bg-blue-500/20 text-blue-100' : 'text-slate-400 hover:text-slate-100'}`}
-                on:click={() => (natCloudMode = 'existing')}
+                on:click={() => selectNatCloudMode('existing')}
               >
                 Existing
               </button>
@@ -546,7 +573,7 @@
                     placeholder={'Auto from NAT-Cloud pool'}
                     aria-invalid={errors.cidr ? 'true' : undefined}
                     readonly={editing}
-                    aria-describedby={editing ? 'nat-locked-note' : undefined}
+                    aria-describedby={describedBy(errors.cidr, 'nat-cidr-error', editing)}
                   />
                   {#if errors.cidr}
                     <p id="nat-cidr-error" class="text-xs text-red-300" role="alert">{errors.cidr}</p>
@@ -567,7 +594,7 @@
                     placeholder={defaults?.gateway ?? 'Automatic'}
                     aria-invalid={errors.gateway ? 'true' : undefined}
                     readonly={editing}
-                    aria-describedby={editing ? 'nat-locked-note' : undefined}
+                    aria-describedby={describedBy(errors.gateway, 'nat-gateway-error', editing)}
                   />
                   {#if errors.gateway}
                     <p id="nat-gateway-error" class="text-xs text-red-300" role="alert">{errors.gateway}</p>
@@ -588,7 +615,7 @@
                     placeholder={'Default route'}
                     aria-invalid={errors.egress_interface ? 'true' : undefined}
                     readonly={editing}
-                    aria-describedby={editing ? 'nat-locked-note' : undefined}
+                    aria-describedby={describedBy(errors.egress_interface, 'nat-egress-error', editing)}
                   />
                   {#if errors.egress_interface}
                     <p id="nat-egress-error" class="text-xs text-red-300" role="alert">{errors.egress_interface}</p>
@@ -779,7 +806,7 @@
           data-testid="network-confirm-button"
           aria-busy={busy}
         >
-          {saving ? (editing ? 'Saving…' : 'Creating…') : checking ? 'Validating…' : editing ? 'Save changes' : 'Create'}
+          {saving ? (editing ? 'Saving…' : 'Creating…') : checking ? 'Validating…' : submitLabel}
         </button>
       </div>
     </div>

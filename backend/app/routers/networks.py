@@ -62,6 +62,14 @@ def _read_lab_or_error(lab_path: str):
         )
 
 
+def _can_open(user: UserRead, lab_path: str) -> bool:
+    try:
+        _scoped_lab_path(user, lab_path, treat_as_absolute=True)
+    except PermissionError:
+        return False
+    return True
+
+
 @router.get("/{lab_path:path}/networks")
 async def list_networks(
     lab_path: str,
@@ -96,6 +104,7 @@ async def create_network(
             request.model_dump(),
             # Same audience as the NAT-Cloud inventory in /api/system/clouds.
             allow_unshared_clouds=current_user.role == "admin",
+            can_open=lambda other: _can_open(current_user, other),
         )
     except HostNetBridgeOwnershipError as exc:
         return JSONResponse(
@@ -139,12 +148,19 @@ async def validate_nat_cloud_config(
     request: NATCloudValidate,
     current_user: UserRead = Depends(get_current_user),
 ):
+    # It reports host subnets and stored settings, so it needs lab access.
+    if not _can_open(current_user, lab_path):
+        return _access_denied()
     _data, err = _read_lab_or_error(lab_path)
     if err is not None:
         return err
     try:
-        normalized = network_service.validate_nat_cloud_config(
-            lab_path, request.config, network_id=request.network_id
+        normalized = await asyncio.to_thread(
+            network_service.validate_nat_cloud_config,
+            lab_path,
+            request.config,
+            network_id=request.network_id,
+            can_open=lambda other: _can_open(current_user, other),
         )
     except NetworkServiceError as exc:
         body: Dict[str, Any] = {
@@ -275,20 +291,18 @@ async def get_network_info(
     field by field when the bridge, DHCP server or lease file is absent.
     """
 
-    def can_open(other_path: str) -> bool:
-        try:
-            _scoped_lab_path(current_user, other_path, treat_as_absolute=True)
-        except PermissionError:
-            return False
-        return True
-
-    if not can_open(lab_path):
+    if not _can_open(current_user, lab_path):
         return _access_denied()
     _data, err = _read_lab_or_error(lab_path)
     if err is not None:
         return err
     try:
-        info = await asyncio.to_thread(build_network_info, lab_path, network_id, can_open)
+        info = await asyncio.to_thread(
+            build_network_info,
+            lab_path,
+            network_id,
+            lambda other: _can_open(current_user, other),
+        )
     except NetworkServiceError as exc:
         return _service_error_response(exc)
     return {

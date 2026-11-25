@@ -180,6 +180,73 @@ describe('NetworkConfigModal NAT-Cloud (#320)', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Could not apply the DHCP settings.');
   });
 
+  it('sends only what changed, and blank as a return to the default', async () => {
+    const { show, confirm } = open({ mode: 'edit', network: nat({ dhcp_start: '10.20.0.200' }) });
+    await show();
+    await fireEvent.input(screen.getByLabelText('DHCP start'), { target: { value: '' } });
+    await fireEvent.click(button());
+
+    await waitFor(() =>
+      expect(confirm).toHaveBeenCalledWith({ name: 'internet', type: 'nat_cloud', config: { dhcp_start: '' } })
+    );
+  });
+
+  it('drops a check that finishes after the dialog was reopened for another network', async () => {
+    const { view, show, confirm } = open({ mode: 'edit', network: nat() });
+    await show();
+    await fireEvent.click(screen.getByLabelText('Enable DHCP'));
+    let finish: (value: unknown) => void = () => {};
+    vi.mocked(apiRequest).mockReturnValueOnce(new Promise((resolve) => (finish = resolve)) as never);
+    await fireEvent.click(button());
+    expect(button()).toHaveTextContent('Validating…');
+
+    await view.rerender({ open: false });
+    await view.rerender({ open: true, network: { ...nat(), id: 4, name: 'other' } });
+    finish({ data: {} });
+    await new Promise((resolve) => setTimeout(resolve));
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(screen.getByTestId('network-name-input')).toHaveValue('other');
+    expect(button()).toHaveTextContent('Save changes');
+  });
+
+  it.each([
+    [true, false, 'Start DHCP server'],
+    [false, true, 'Stop DHCP server']
+  ])('offers to repair a drifted server (enabled %s, running %s)', async (enabled, running, label) => {
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      ip: { dhcp: { enabled, running, lease_count: 0, leases: [] } }
+    } as never);
+    const { show, confirm } = open({ mode: 'edit', network: nat({ dhcp: enabled }) });
+    await show();
+    const repair = await screen.findByRole('button', { name: label });
+    expect(repair).toBeEnabled();
+    await fireEvent.click(repair);
+
+    await waitFor(() =>
+      expect(confirm).toHaveBeenCalledWith({ name: 'internet', type: 'nat_cloud', config: { dhcp: enabled } })
+    );
+  });
+
+  it('keeps a server error through blur and links it to its field', async () => {
+    const { show } = open({ defaultType: 'nat_cloud', defaultName: 'net-1' });
+    await show();
+    const egress = screen.getByLabelText('Egress');
+    await fireEvent.input(egress, { target: { value: 'eth9' } });
+    vi.mocked(apiRequest).mockRejectedValueOnce(
+      new ApiError('Host has no network interface named eth9.', { field: 'config.egress_interface' } as never)
+    );
+    await fireEvent.click(button());
+    const message = await screen.findByText(/no network interface named eth9/);
+    await fireEvent.change(egress);
+
+    expect(message).toBeInTheDocument();
+    expect(egress).toHaveAttribute('aria-describedby', message.id);
+    // Switching to an existing NAT-Cloud makes the verdict irrelevant.
+    await fireEvent.click(screen.getByRole('button', { name: 'Existing' }));
+    expect(screen.queryByText(/no network interface named eth9/)).toBeNull();
+  });
+
   it('cancels, not saves, on Enter over the Cancel button and keeps Tab inside', async () => {
     const { show, confirm, cancel } = open({ defaultType: 'nat_cloud', defaultName: 'net-1' });
     await show();

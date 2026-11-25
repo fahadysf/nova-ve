@@ -77,8 +77,8 @@ describe('NetworkInfoContent (#318)', () => {
 
   it.each([
     [true, true, 'Running', ''],
-    [true, false, 'Not running', 'Reopen the lab to start it'],
-    [false, true, 'Still running', 'Reopen the lab to stop it'],
+    [true, false, 'Not running', 'Start it from Configure…'],
+    [false, true, 'Still running', 'Stop it from Configure…'],
     [false, false, 'Disabled', '']
   ])('reports the live server (enabled %s, running %s, #320)', async (enabled, running, label, problem) => {
     const data = info();

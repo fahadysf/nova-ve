@@ -206,7 +206,7 @@ def list_nat_clouds(labs_dir: Path | None = None) -> list[dict[str, Any]]:
                 "bridge_name": runtime.get("bridge_name") if isinstance(runtime, dict) else None,
                 "cidr": config.get("cidr") if isinstance(config, dict) else None,
                 "gateway": config.get("gateway") if isinstance(config, dict) else None,
-                "dhcp": config.get("dhcp", True) if isinstance(config, dict) else True,
+                "dhcp": config.get("dhcp") is not False if isinstance(config, dict) else True,
                 "dhcp_start": config.get("dhcp_start") if isinstance(config, dict) else None,
                 "dhcp_end": config.get("dhcp_end") if isinstance(config, dict) else None,
                 "egress_interface": config.get("egress_interface") if isinstance(config, dict) else None,

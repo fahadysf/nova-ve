@@ -482,6 +482,29 @@ async def test_validate_nat_cloud_edit_excludes_current_network(
 
 
 @pytest.mark.asyncio
+async def test_validate_nat_cloud_requires_access_to_the_lab(
+    patched_route_settings, auth_override, monkeypatch
+):
+    """It reveals host subnets and stored settings, so it is scoped like /info."""
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        username="bob", role="user", html5=True, folder="/bob",
+    )
+    monkeypatch.setattr(
+        "app.services.host_net.list_ipv4_addrs",
+        lambda: pytest.fail("must be refused before reading the host"),
+    )
+    lab_name = _seed_lab(patched_route_settings.LABS_DIR)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/labs/{lab_name}/networks/validate-nat-cloud",
+            json={"config": {"cidr": "10.90.0.0/24"}},
+        )
+
+    assert resp.status_code == 403
+
+
+@pytest.mark.asyncio
 async def test_patch_and_put_reject_nat_cloud_cidr_change(
     patched_route_settings, auth_override
 ):

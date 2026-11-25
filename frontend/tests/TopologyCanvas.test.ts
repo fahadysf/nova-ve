@@ -498,6 +498,29 @@ describe('TopologyCanvas lab controls', () => {
     expect(screen.getByTestId('network-menu-configure')).toHaveTextContent('DHCP off');
   });
 
+  it('keeps the create form open when the server refuses the network (#320)', async () => {
+    renderCanvas({});
+    await fireEvent.click(screen.getByRole('button', { name: 'Open add element menu' }));
+    await fireEvent.click(await screen.findByRole('button', { name: /network container type/i }));
+    await fireEvent.click(screen.getByRole('button', { name: /bridge network/i }));
+    const name = screen.getByTestId('network-name-input');
+    await fireEvent.input(name, { target: { value: 'taken' } });
+    vi.mocked(apiRequest).mockRejectedValueOnce(new Error("A network named 'taken' already exists."));
+    await fireEvent.click(screen.getByTestId('network-confirm-button'));
+
+    expect(await screen.findByText(/already exists/)).toBeInTheDocument();
+    expect(name).toHaveValue('taken');
+
+    await fireEvent.input(name, { target: { value: 'free' } });
+    vi.mocked(apiRequest).mockResolvedValueOnce({
+      network: makeSharingNetwork({ name: 'free' }), revision: 52,
+    } as never);
+    await fireEvent.click(screen.getByTestId('network-confirm-button'));
+
+    await waitFor(() => expect(screen.queryByTestId('network-config-modal')).toBeNull());
+    expect(get(labState).networks['7'].name).toBe('free');
+  });
+
   it('only offers Configure on NAT-Clouds, disabled for shared members (#320)', async () => {
     renderCanvas({}, { '7': makeSharingNetwork() });
     await openNetworkMenu();

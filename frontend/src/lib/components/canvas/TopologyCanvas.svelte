@@ -1696,7 +1696,8 @@
     }
     const response = await apiRequest<NetworkData>(`/labs/${labId}/networks`, {
       method: 'POST',
-      body
+      body,
+      suppressToast: true
     });
     // POST /networks (US-063/US-064) returns ``{...,"network": <record>}`` — the
     // single-record envelope chosen for write routes. List routes still use
@@ -1762,14 +1763,25 @@
       await saveNetworkEdit(editingNetwork, event.detail);
       return;
     }
-    const position = pendingNetworkPosition ?? { x: 200, y: 200 };
-    networkModalOpen = false;
-    pendingNetworkPosition = null;
+    // The modal stays open until the server accepts it, so a name conflict or
+    // a provisioning failure does not lose what was typed.
+    networkSaving = true;
+    networkSaveError = null;
     try {
-      await createNetworkAt(position, event.detail);
-    } catch (_error) {
-      // apiRequest already surfaced a toast; nothing else to do here.
+      await createNetworkAt(pendingNetworkPosition ?? { x: 200, y: 200 }, event.detail);
+      onNetworkModalCancel();
+    } catch (error) {
+      networkSaveError = networkErrorOf(error);
+    } finally {
+      networkSaving = false;
     }
+  }
+
+  function networkErrorOf(error: unknown): { message: string; field?: string } {
+    return {
+      message: error instanceof Error ? error.message : String(error),
+      field: error instanceof ApiError ? error.field : undefined
+    };
   }
 
   function handleNetworkConfigure(targetId: string) {
@@ -1784,11 +1796,15 @@
     if (zenMode) zenDialog = 'network';
   }
 
-  function networkSavedMessage(before: NetworkData, after: NetworkData): string {
+  function networkSavedMessage(before: NetworkData, after: NetworkData, sent?: NetworkCreateConfig): string {
     const wasOn = before.config?.dhcp !== false;
     const isOn = after.config?.dhcp !== false;
     if (wasOn && !isOn) return 'DHCP disabled.';
     const rangeChanged = ['dhcp_start', 'dhcp_end'].some((key) => before.config?.[key] !== after.config?.[key]);
+    // ``dhcp`` sent without changing it asks for a drifted server to be fixed.
+    if (sent?.dhcp === isOn && wasOn === isOn && !rangeChanged) {
+      return isOn ? 'DHCP server started.' : 'DHCP server stopped.';
+    }
     if (!isOn || (wasOn && !rangeChanged)) return 'Network settings saved.';
     // The host reports a pid only for a server it verified as running.
     const started = Number(after.runtime?.dhcp_pid ?? 0) > 0;
@@ -1816,15 +1832,12 @@
       adoptRevision(response);
       labState.setNetworks({ ...$labState.networks, [String(updated.id)]: updated });
       publishFlowState();
-      toastStore.push(networkSavedMessage(network, updated), 'success');
+      toastStore.push(networkSavedMessage(network, updated, detail.config), 'success');
       onNetworkModalCancel();
       dispatchCanvasChange('network-update', {
       });
     } catch (error) {
-      networkSaveError = {
-        message: error instanceof Error ? error.message : String(error),
-        field: error instanceof ApiError ? error.field : undefined
-      };
+      networkSaveError = networkErrorOf(error);
     } finally {
       networkSaving = false;
     }

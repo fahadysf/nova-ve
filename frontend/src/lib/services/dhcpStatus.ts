@@ -11,26 +11,30 @@ export interface DhcpStatus {
   dot: string;
   /** Set when the saved setting and the live server disagree. */
   problem: string;
+  /** What to do about ``problem``. */
+  fix: string;
 }
 
 /** Live DHCP server state compared with the saved setting (#320). */
 export function dhcpStatus(dhcp: DhcpInfo): DhcpStatus {
   if (dhcp.enabled) {
     return dhcp.running
-      ? { label: 'Running', dot: 'bg-emerald-400', problem: '' }
+      ? { label: 'Running', dot: 'bg-emerald-400', problem: '', fix: '' }
       : {
           label: 'Not running',
           dot: 'bg-amber-400',
-          problem: 'DHCP is enabled, but its server is not running. Reopen the lab to start it.'
+          problem: 'DHCP is enabled, but its server is not running.',
+          fix: 'Start it from Configure… on the owning network, or reopen the lab.'
         };
   }
   return dhcp.running
     ? {
         label: 'Still running',
         dot: 'bg-red-400',
-        problem: 'DHCP is disabled, but its server is still running. Reopen the lab to stop it.'
+        problem: 'DHCP is disabled, but its server is still running.',
+        fix: 'Stop it from Configure… on the owning network, or reopen the lab.'
       }
-    : { label: 'Disabled', dot: 'bg-gray-500', problem: '' };
+    : { label: 'Disabled', dot: 'bg-gray-500', problem: '', fix: '' };
 }
 
 /** Short remaining time for a lease, e.g. "11 h 58 min left". */

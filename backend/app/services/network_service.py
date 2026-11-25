@@ -17,12 +17,13 @@ plan §US-204c "Lock-hold-time discipline".
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import logging
 from contextlib import nullcontext
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.config import get_settings
 from app.services import host_net
@@ -119,8 +120,13 @@ def _validate_ipv4(value: Any, field: str) -> ipaddress.IPv4Address:
         raise NetworkServiceError(422, f"{field} is not a valid IPv4 address: {exc}") from exc
 
 
+def nat_cloud_dhcp_enabled(config: dict) -> bool:
+    """Only an explicit ``false`` disables DHCP, as in the UI and provisioner."""
+    return config.get("dhcp") is not False
+
+
 def _reconcile_nat_cloud_dhcp(bridge: str, config: dict) -> int:
-    if config.get("dhcp", True):
+    if nat_cloud_dhcp_enabled(config):
         return host_net.dnsmasq_start(
             bridge,
             str(config["gateway"]),
@@ -204,11 +210,12 @@ def _host_ipv4_networks(
 
 
 def _nat_cloud_owner_networks(
-    *, exclude_cloud_id: str | None = None
+    can_open: Callable[[str], bool] | None = None,
 ) -> list[tuple[str, ipaddress.IPv4Network]]:
+    """Owner subnets in every lab; labs the caller cannot open stay unnamed."""
     occupied: list[tuple[str, ipaddress.IPv4Network]] = []
     for item in list_nat_clouds():
-        if item.get("is_reference") or item.get("id") == exclude_cloud_id:
+        if item.get("is_reference"):
             continue
         try:
             network = ipaddress.ip_network(str(item.get("cidr") or ""), strict=True)
@@ -220,6 +227,8 @@ def _nat_cloud_owner_networks(
             f"NAT-Cloud {item.get('network_name')!r} in lab "
             f"{item.get('lab_name')!r} ({item.get('lab_path')})"
         )
+        if can_open is not None and not can_open(str(item.get("lab_path") or "")):
+            source = "a NAT-Cloud in another lab"
         occupied.append((source, network))
     return occupied
 
@@ -238,6 +247,35 @@ def _allocate_nat_cloud_cidr(networks: dict, extra_used: list[ipaddress.IPv4Netw
     )
 
 
+def _next_network_id(networks: dict) -> int:
+    return max((int(key) for key in networks if str(key).isdigit()), default=0) + 1
+
+
+def _normalize_new_nat_cloud(
+    raw_config: dict,
+    lab_id: str,
+    networks: dict,
+    can_open: Callable[[str], bool] | None,
+) -> dict:
+    """Full checks for a NAT-Cloud that does not exist yet."""
+    # A bridge left over from a failed delete is reused, so it is no conflict.
+    own_bridge = host_net.bridge_name(lab_id, _next_network_id(networks))
+    config = _normalize_nat_cloud_config(
+        raw_config,
+        networks,
+        occupied=[
+            *_nat_cloud_owner_networks(can_open),
+            *_host_ipv4_networks(exclude_bridge=own_bridge),
+        ],
+    )
+    egress = config.get("egress_interface")
+    if egress and not host_net.host_iface_exists(egress):
+        raise _field_error(
+            "config.egress_interface", f"Host has no network interface named {egress!r}."
+        )
+    return config
+
+
 def _normalize_nat_cloud_config(
     raw_config: dict,
     networks: dict,
@@ -246,6 +284,9 @@ def _normalize_nat_cloud_config(
     occupied: list[tuple[str, ipaddress.IPv4Network]] | None = None,
     check_overlap: bool = True,
 ) -> dict:
+    dhcp = raw_config.get("dhcp", True)
+    if not isinstance(dhcp, bool):
+        raise _field_error("config.dhcp", "config.dhcp must be true or false")
     occupied = occupied or []
     occupied_networks = [network for _source, network in occupied]
     if raw_config.get("cidr"):
@@ -323,7 +364,7 @@ def _normalize_nat_cloud_config(
         {
             "cidr": str(cidr),
             "gateway": str(gateway),
-            "dhcp": bool(raw_config.get("dhcp", True)),
+            "dhcp": dhcp,
             "dhcp_start": str(dhcp_start),
             "dhcp_end": str(dhcp_end),
         }
@@ -347,7 +388,8 @@ def _normalize_nat_cloud_edit(current: dict, changes: dict) -> dict:
                 f"Cannot change a NAT-Cloud {'CIDR' if key == 'cidr' else key} after creation; "
                 "delete and recreate the NAT-Cloud with the correct settings.",
             )
-    merged = {**current, **{k: v for k, v in changes.items() if k in ("dhcp", "dhcp_start", "dhcp_end")}}
+    merged = {**current, "dhcp": nat_cloud_dhcp_enabled(current)}
+    merged.update({k: v for k, v in changes.items() if k in ("dhcp", "dhcp_start", "dhcp_end")})
     return _normalize_nat_cloud_config(merged, {}, check_overlap=False)
 
 
@@ -615,7 +657,8 @@ class NetworkService:
         host_net.forward_apply(bridge, str(config["cidr"]), egress)
 
         dhcp_pid = 0
-        if bool(config.get("dhcp", True)):
+        dhcp_enabled = nat_cloud_dhcp_enabled(config)
+        if dhcp_enabled:
             dhcp_pid = host_net.dnsmasq_start(
                 bridge,
                 str(config["gateway"]),
@@ -630,7 +673,7 @@ class NetworkService:
             "driver": NAT_CLOUD_TYPE,
             "gateway": str(config["gateway"]),
             "egress_interface": egress,
-            "dhcp": bool(config.get("dhcp", True)),
+            "dhcp": dhcp_enabled,
             "dhcp_start": str(config["dhcp_start"]),
             "dhcp_end": str(config["dhcp_end"]),
             "dhcp_pid": dhcp_pid,
@@ -665,20 +708,19 @@ class NetworkService:
             logger.warning("cleanup_nat_cloud: nat_remove(%s) failed", bridge)
 
     def validate_nat_cloud_config(
-        self, lab_path: str, raw_config: dict, *, network_id: int | None = None
+        self,
+        lab_path: str,
+        raw_config: dict,
+        *,
+        network_id: int | None = None,
+        can_open: Callable[[str], bool] | None = None,
     ) -> dict:
         normalized = _normalize_relative_lab_path(lab_path)
         data = LabService.read_lab_json_static(normalized)
         networks = data.get("networks") or {}
         if network_id is None:
-            return _normalize_nat_cloud_config(
-                raw_config,
-                networks,
-                occupied=[
-                    *_nat_cloud_owner_networks(),
-                    *_host_ipv4_networks(),
-                ],
-            )
+            lab_id = str(data.get("id") or normalized)
+            return _normalize_new_nat_cloud(raw_config, lab_id, networks, can_open)
 
         network = networks.get(str(network_id))
         if not isinstance(network, dict) or network.get("type") != NAT_CLOUD_TYPE:
@@ -1006,12 +1048,18 @@ class NetworkService:
         }
 
     async def create_network(
-        self, lab_path: str, request: dict, *, allow_unshared_clouds: bool = False
+        self,
+        lab_path: str,
+        request: dict,
+        *,
+        allow_unshared_clouds: bool = False,
+        can_open: Callable[[str], bool] | None = None,
     ) -> dict:
         """Create a network in a lab.
 
         ``allow_unshared_clouds`` lets an administrator reuse any NAT-Cloud by
         ``shared_cloud_id``; everyone else can join only what is shared (#319).
+        ``can_open`` keeps labs the caller cannot open out of conflict messages.
         """
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
@@ -1085,13 +1133,8 @@ class NetworkService:
                     if shared_cloud_id:
                         normalized_config, owner_runtime = _normalize_shared_nat_cloud_config(shared_cloud_id)
                     else:
-                        normalized_config = _normalize_nat_cloud_config(
-                            raw_config,
-                            networks,
-                            occupied=[
-                                *_nat_cloud_owner_networks(),
-                                *_host_ipv4_networks(),
-                            ],
+                        normalized_config = _normalize_new_nat_cloud(
+                            raw_config, lab_id, networks, can_open
                         )
                         owner_runtime = {}
                 else:
@@ -1114,10 +1157,7 @@ class NetworkService:
                             "provision-ubuntu-2604.sh on the host first.",
                             extra={"host_bridge": host_bridge},
                         )
-                next_id = max(
-                    (int(key) for key in networks.keys() if str(key).isdigit()),
-                    default=0,
-                ) + 1
+                next_id = _next_network_id(networks)
                 bridge = (
                     normalized_config["host_bridge"]
                     if network_type == BRIDGE_CLOUD_TYPE
@@ -1577,6 +1617,19 @@ class NetworkService:
         implicit network into an explicit one, otherwise ``network_updated``.
         """
         normalized = _normalize_relative_lab_path(lab_path)
+        # DHCP changes wait for dnsmasq to stop; keep that off the event loop.
+        payload, event_type = await asyncio.to_thread(
+            self._patch_network_locked, normalized, network_id, patch
+        )
+        await ws_hub.publish(normalized, event_type, {"network": dict(payload)})
+        return payload, event_type
+
+    def _patch_network_locked(
+        self, normalized: str, network_id: int, patch: Dict[str, Any]
+    ) -> Tuple[dict, str]:
+        # Local import: network_info_service imports this module.
+        from app.services.network_info_service import dhcp_server_pid
+
         labs_dir = get_settings().LABS_DIR
 
         with lab_lock(normalized, labs_dir):
@@ -1691,6 +1744,12 @@ class NetworkService:
                     current_nat_config.get(key) != normalized_nat_config.get(key)
                     for key in ("dhcp", "dhcp_start", "dhcp_end")
                 )
+                # An explicit ``dhcp`` also repairs a server whose real state has
+                # drifted from the setting, for example after it crashed.
+                if not dhcp_changed and "dhcp" in new_config:
+                    dhcp_changed = (
+                        dhcp_server_pid(bridge) is not None
+                    ) != normalized_nat_config["dhcp"]
                 if dhcp_changed:
                     # Fill keys that older records may not carry, so a
                     # rollback always has a complete scope to restore.
@@ -1726,7 +1785,6 @@ class NetworkService:
             payload = _serialize_network(network, count)
             event_type = "network_promoted" if promoted else "network_updated"
 
-        await ws_hub.publish(normalized, event_type, {"network": dict(payload)})
         return payload, event_type
 
     async def set_sharing(self, lab_path: str, network_id: int, shared: bool) -> Tuple[dict, bool]:

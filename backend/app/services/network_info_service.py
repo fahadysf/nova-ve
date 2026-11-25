@@ -123,14 +123,19 @@ def _dnsmasq_pid(root: Path) -> int | None:
     Same rule as the privileged helper: the process is identified by its exact
     ``--conf-file`` argument. The pid file is only a shortcut (#320).
     """
-    wanted = f"--conf-file={root / 'dnsmasq.conf'}".encode()
+    # The helper does not resolve symlinks in the data directory; we do.
+    wanted = os.path.realpath(root / "dnsmasq.conf")
+    prefix = b"--conf-file="
 
     def serves(pid: str) -> bool:
         try:
             argv = (PROC_ROOT / pid / "cmdline").read_bytes().split(b"\0")
         except OSError:
             return False
-        return os.path.basename(argv[0]) == b"dnsmasq" and wanted in argv
+        return os.path.basename(argv[0]) == b"dnsmasq" and any(
+            arg.startswith(prefix) and os.path.realpath(os.fsdecode(arg[len(prefix):])) == wanted
+            for arg in argv
+        )
 
     recorded = (_read_text(root / "dnsmasq.pid") or "").strip()
     if recorded.isdigit() and serves(recorded):
@@ -140,6 +145,14 @@ def _dnsmasq_pid(root: Path) -> int | None:
     except OSError:
         return None
     return next((int(pid) for pid in candidates if serves(pid)), None)
+
+
+def dhcp_server_pid(bridge: str | None) -> int | None:
+    """Pid of the DHCP server really running for a lab bridge."""
+    # The directory name comes from a JSON record; only lab bridges have one.
+    if not bridge or not host_net.RE_BRIDGE_NAME.match(bridge):
+        return None
+    return _dnsmasq_pid(_base_data_dir() / "nat-cloud" / bridge)
 
 
 def _lease_time(root: Path) -> str | None:
@@ -313,7 +326,7 @@ def _ip_settings(network: dict, bridge: str | None, node_by_mac: dict[str, str])
     except ValueError:
         size = None
     dhcp: dict[str, Any] = {
-        "enabled": bool(config.get("dhcp", True)),
+        "enabled": config.get("dhcp") is not False,
         "start": start,
         "end": end,
         "size": size,
@@ -330,7 +343,7 @@ def _ip_settings(network: dict, bridge: str | None, node_by_mac: dict[str, str])
         for lease in leases:
             lease["node_name"] = node_by_mac.get(lease["mac"])
         dhcp["lease_time"] = _lease_time(root)
-        dhcp["pid"] = _dnsmasq_pid(root)
+        dhcp["pid"] = dhcp_server_pid(bridge)
         dhcp["running"] = dhcp["pid"] is not None
         dhcp["leases"] = leases[:MAX_LEASES]
         dhcp["lease_count"] = len(leases)
