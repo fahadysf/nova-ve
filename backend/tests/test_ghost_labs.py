@@ -42,7 +42,7 @@ class _FakeLabService(LabService):
 
 
 def _lab_row(filename: str):
-    return SimpleNamespace(filename=filename, path=f"/{filename}")
+    return SimpleNamespace(filename=filename, path=f"/{filename}", owner="admin")
 
 
 @pytest.fixture()
