@@ -56,7 +56,7 @@ sudo rsync -a --delete build/ /var/lib/nova-ve/www/
 sudo systemctl restart nova-ve-backend
 ```
 
-The manual path above is enough for application code, migrations, and the static frontend. It does not reinstall `/opt/nova-ve/bin/nova-ve-net.py`, refresh `/etc/sudoers.d/nova-ve`, or run the installer-side NAT-Cloud bridge reconciliation. Use the full installer path when upgrading across host-networking changes such as NAT-Cloud DHCP/NAT/forwarding or Docker runtime reconciliation.
+The manual path above is enough for application code, migrations, and the static frontend. It does not reinstall `/opt/nova-ve/bin/nova-ve-net.py`, refresh `/etc/sudoers.d/nova-ve`, or run the installer-side NAT-Cloud bridge reconciliation. Use the full installer path when upgrading across host-networking changes such as NAT-Cloud DHCP/NAT/forwarding, bridge DHCP and its guard rules, or Docker runtime reconciliation. If you upgrade manually anyway, reinstall the helper with `sudo install -m 0755 -o root -g root deploy/nova-ve-net.py /opt/nova-ve/bin/nova-ve-net.py`.
 
 Caddy serves `/var/lib/nova-ve/www` from disk on each request, so a frontend rebuild needs no Caddy restart or reload.
 

@@ -24,6 +24,13 @@ gateway as `.1`, and serves DHCP from `.100` through the last usable address.
 For example, a default NAT-Cloud subnet can lease addresses such as
 `10.255.0.144` to attached clients.
 
+## Turning DHCP on or off
+
+Right-click the NAT-Cloud and choose **Enable DHCP** or **Disable DHCP**, or
+change it in **Configure…**. The bridge and its links stay as they are.
+Disabling DHCP does not withdraw leases already given out: nodes keep their
+addresses until the lease expires (12 hours) or they renew it.
+
 ## What nova-ve configures
 
 When the network is created or reconciled, nova-ve:
