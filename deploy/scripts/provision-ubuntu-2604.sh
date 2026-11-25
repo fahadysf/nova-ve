@@ -398,7 +398,7 @@ reconcile_nat_cloud_runtime() {
             (.value.runtime.bridge_name // ""),
             (.value.config.cidr // ""),
             (.value.config.gateway // ""),
-            ((.value.config.dhcp // true) | tostring),
+            (if .value.config.dhcp == false then "false" else "true" end),
             (.value.config.dhcp_start // ""),
             (.value.config.dhcp_end // ""),
             (.value.runtime.egress_interface // .value.config.egress_interface // ""),

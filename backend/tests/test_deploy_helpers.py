@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
 import shutil
@@ -427,6 +428,28 @@ def test_import_wrapper_tolerates_unreadable_env_for_non_root_dry_run():
 def test_vyos_installer_resolves_default_owner_group_from_account():
     body = INSTALL_VYOS_SH.read_text()
     assert 'OWNER_GROUP="$(id -gn "${OWNER_USER}")"' in body
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [({"dhcp": False}, "false"), ({"dhcp": True}, "true"), ({}, "true"), ({"dhcp": None}, "true")],
+)
+def test_provisioner_honours_saved_nat_cloud_dhcp_flag(config, expected):
+    """#320: jq's ``//`` treats false as missing and re-enabled DHCP on deploy."""
+    lines = [line.strip() for line in PROVISION_SH.read_text().splitlines()]
+    expressions = [line.rstrip(",") for line in lines if ".value.config.dhcp " in line]
+    assert len(expressions) == 1
+
+    result = subprocess.run(
+        ["jq", "-r", expressions[0]],
+        input=json.dumps({"value": {"config": config}}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == expected
 
 
 def test_predictable_ifaces_sorted_handles_ens_enp_names(tmp_path):
