@@ -93,6 +93,7 @@ tmp/
 .omx/
 research/
 AGENTS.md
+.worktrees/
 
 # MkDocs build output
 site/
