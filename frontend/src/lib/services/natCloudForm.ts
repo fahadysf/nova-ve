@@ -90,7 +90,7 @@ export function validateNatForm(form: NatForm): NatErrors {
     const start = address('dhcp_start', form.dhcpStart);
     const end = address('dhcp_end', form.dhcpEnd);
     if (start !== null && cidr && start <= cidr.network + STATIC_LAST_OFFSET) {
-      errors.dhcp_start = `Start at ${formatIpv4(cidr.network + DHCP_FIRST_OFFSET)} or later; lower addresses are reserved for static use.`;
+      errors.dhcp_start = `Must be ${formatIpv4(cidr.network + DHCP_FIRST_OFFSET)} or later.`;
     }
     const effectiveStart = start ?? (cidr ? cidr.network + DHCP_FIRST_OFFSET : null);
     const effectiveEnd = end ?? (cidr ? cidr.broadcast - 1 : null);

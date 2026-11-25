@@ -447,7 +447,7 @@
       </div>
 
       <div
-        class="max-h-[65vh] space-y-4 overflow-y-auto px-5 py-4 text-sm text-slate-200"
+        class="max-h-[70vh] space-y-4 overflow-y-auto px-5 py-4 text-sm text-slate-200"
         role="presentation"
         on:input={dismissServerError}
         on:change={dismissServerError}
@@ -664,7 +664,7 @@
                 </div>
                 {:else if turningDhcpOff}
                   <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
-                    Nodes keep their current addresses until the lease expires (12 h) or they renew.
+                    Nodes keep their current addresses until the lease expires (12&nbsp;h) or they renew.
                   </p>
                 {:else}
                   <p class="text-xs text-slate-400 sm:col-span-2">Nodes on this network need static addresses.</p>

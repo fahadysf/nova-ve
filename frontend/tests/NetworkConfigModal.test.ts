@@ -148,7 +148,7 @@ describe('NetworkConfigModal NAT-Cloud (#320)', () => {
     await fireEvent.input(screen.getByLabelText('DHCP start'), { target: { value: '10.20.0.20' } });
 
     expect(screen.getByLabelText('DHCP start')).toHaveAttribute('aria-invalid', 'true');
-    expect(screen.getByRole('alert')).toHaveTextContent(/reserved for static use/);
+    expect(screen.getByRole('alert')).toHaveTextContent(/10\.20\.0\.100 or later/);
     expect(button()).toBeDisabled();
   });
 
