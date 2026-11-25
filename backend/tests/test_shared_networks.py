@@ -65,6 +65,7 @@ def host(monkeypatch, tmp_path):
         monkeypatch.setattr(host_net, name, lambda *a, **k: None)
     monkeypatch.setattr(host_net, "nat_apply", lambda bridge, cidr, egress: state.nat.append(bridge))
     monkeypatch.setattr(host_net, "default_egress_iface", lambda: "eth0")
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [])
     monkeypatch.setattr(host_net, "dnsmasq_start", lambda *a: 4321)
     return state
 
@@ -694,6 +695,17 @@ async def test_info_reports_dhcp_scope_server_and_leases(settings, labs_dir, mon
         ("10.255.0.101", None, None), ("10.255.0.140", "r1", "r1"),
     ]
     assert info["bridge"]["admin_up"] is True and info["bridge"]["ports"] == 1
+    # #320: found without its pid file; another network's server never counts.
+    (root / "dnsmasq.pid").unlink()
+    assert build_network_info(lab, 1, lambda path: True)["ip"]["dhcp"]["pid"] == 77
+    (root / "dnsmasq.pid").write_text("77\n")
+    # The helper passes the data directory unresolved.
+    (tmp_path / "data-link").symlink_to(tmp_path, target_is_directory=True)
+    linked = tmp_path / "data-link" / "nat-cloud" / bridge
+    (proc / "77" / "cmdline").write_bytes(f"dnsmasq\0--conf-file={linked}/dnsmasq.conf\0".encode())
+    assert build_network_info(lab, 1, lambda path: True)["ip"]["dhcp"]["pid"] == 77
+    (proc / "77" / "cmdline").write_bytes(f"dnsmasq\0--conf-file={root}0/dnsmasq.conf\0".encode())
+    assert build_network_info(lab, 1, lambda path: True)["ip"]["dhcp"]["running"] is False
     assert info["endpoints"][0]["interface"] == "Gi0"
     assert info["sharing"] == {
         "role": "none", "shareable": True, "reason": None,

@@ -5,6 +5,7 @@
   import { onMount } from 'svelte';
   import { apiGetData } from '$lib/api';
   import InfoFields from './InfoFields.svelte';
+  import { dhcpStatus, leaseRemaining, type DhcpInfo } from '$lib/services/dhcpStatus';
   import type { NetworkData, NetworkInfo } from '$lib/types';
 
   export let labId: string;
@@ -35,7 +36,8 @@
   }
 
   // Reload at once when something visible in the panel changes on the canvas.
-  $: changeKey = `${labId}|${network.id}|${network.name}|${network.count ?? 0}|${network.shared === true}`;
+  $: dhcpKey = ['dhcp', 'dhcp_start', 'dhcp_end'].map((key) => String(network.config?.[key] ?? '')).join(',');
+  $: changeKey = `${labId}|${network.id}|${network.name}|${network.count ?? 0}|${network.shared === true}|${dhcpKey}`;
   $: if (mounted && changeKey) void load();
 
   onMount(() => {
@@ -96,10 +98,9 @@
     ]);
   }
 
-  function dhcpFields(dhcp: NonNullable<NonNullable<NetworkInfo['ip']>['dhcp']>): Field[] {
-    if (!dhcp.enabled) return [{ label: 'Server', value: 'Disabled' }];
+  function dhcpFields(dhcp: DhcpInfo): Field[] {
+    if (!dhcp.enabled) return [];
     return compact([
-      { label: 'Server', value: dhcp.running ? 'Running' : 'Not running' },
       { label: 'Scope', value: range(dhcp.start, dhcp.end) },
       dhcp.size !== null && { label: 'Addresses', value: `${dhcp.lease_count} of ${dhcp.size} leased` },
       { label: 'Lease time', value: dhcp.lease_time ?? '' }
@@ -116,10 +117,11 @@
   $: sections = info
     ? [
         { title: '', fields: generalFields(info) },
-        ...(info.ip ? [{ title: 'Addressing', fields: addressFields(info.ip) }] : []),
-        ...(info.ip?.dhcp ? [{ title: 'DHCP', fields: dhcpFields(info.ip.dhcp) }] : [])
+        ...(info.ip ? [{ title: 'Addressing', fields: addressFields(info.ip) }] : [])
       ]
     : [];
+  $: dhcp = info?.ip?.dhcp ?? null;
+  $: status = dhcp ? dhcpStatus(dhcp) : null;
 </script>
 
 <div class="space-y-3" data-testid="network-info-content">
@@ -148,20 +150,54 @@
       </section>
     {/each}
 
-    {#if info.ip?.dhcp && info.ip.dhcp.leases.length > 0}
-      <section>
-        <h3 class="section-title">Leases</h3>
-        <ul class="max-h-40 space-y-1 overflow-y-auto">
-          {#each info.ip.dhcp.leases as lease (lease.ip)}
-            <li class="flex items-baseline justify-between gap-3" title={lease.expires_at ? `Expires ${when(lease.expires_at)}` : 'Does not expire'}>
-              <span class="tabular-nums text-gray-100">{lease.ip}</span>
-              <span class="min-w-0 truncate text-right tabular-nums text-gray-400">
-                {lease.node_name ?? lease.hostname ?? lease.mac}
-              </span>
-            </li>
-          {/each}
-        </ul>
+    {#if dhcp && status}
+      <section data-testid="network-info-dhcp">
+        <div class="mb-1 flex items-center justify-between gap-3">
+          <h3 class="section-title !mb-0">DHCP server</h3>
+          <span class="flex items-center gap-1.5 text-gray-100" data-testid="network-info-dhcp-status">
+            <span class={`h-2 w-2 rounded-full ${status.dot}`} aria-hidden="true"></span>
+            <span>{status.label}</span>
+          </span>
+        </div>
+        {#if status.problem}
+          <p class="mb-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200" role="alert">
+            {status.problem} {status.fix}
+          </p>
+        {/if}
+        <InfoFields fields={dhcpFields(dhcp)} />
       </section>
+
+      {#if dhcp.enabled || dhcp.leases.length > 0}
+        <section data-testid="network-info-leases">
+          <h3 class="section-title">Leases{dhcp.lease_count > 0 ? ` (${dhcp.lease_count})` : ''}</h3>
+          {#if dhcp.leases.length === 0}
+            <p class="text-gray-400">No addresses leased yet.</p>
+          {:else}
+            {#if !dhcp.enabled}
+              <p class="mb-1 text-gray-400">Handed out before DHCP was disabled; valid until they expire.</p>
+            {/if}
+            <ul class="max-h-40 space-y-1.5 overflow-y-auto">
+              {#each dhcp.leases as lease (lease.ip)}
+                <li title={lease.expires_at ? `Expires ${when(lease.expires_at)}` : 'Does not expire'}>
+                  <div class="flex items-baseline justify-between gap-3">
+                    <span class="tabular-nums text-gray-100">{lease.ip}</span>
+                    <span class="min-w-0 truncate text-right text-gray-100">
+                      {lease.node_name ?? lease.hostname ?? 'Unknown device'}
+                    </span>
+                  </div>
+                  <div class="flex items-baseline justify-between gap-3 text-[10px] tabular-nums text-gray-400">
+                    <span>{lease.mac}</span>
+                    <span>{leaseRemaining(lease.expires_at)}</span>
+                  </div>
+                </li>
+              {/each}
+            </ul>
+            {#if dhcp.lease_count > dhcp.leases.length}
+              <p class="mt-1 text-gray-400">Showing {dhcp.leases.length} of {dhcp.lease_count}.</p>
+            {/if}
+          {/if}
+        </section>
+      {/if}
     {/if}
 
     {#if info.sharing.role !== 'none'}

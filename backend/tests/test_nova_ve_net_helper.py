@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
+import signal
 import sys
 from pathlib import Path
 
@@ -349,7 +351,78 @@ def test_forward_remove_deletes_docker_user_rules_when_rule_shape_available(help
     ]
 
 
-def test_dnsmasq_start_writes_bridge_config(helper):
+def _seed_dnsmasq(helper, pid: int, bridge: str) -> None:
+    conf = helper.RUNTIME_ROOT / "nat-cloud" / bridge / "dnsmasq.conf"
+    entry = helper._test_proc_root / str(pid)
+    entry.mkdir()
+    (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={conf}\0".encode())
+
+
+def _fake_kill(helper, monkeypatch, *, ignores=()):
+    """``os.kill`` that removes the fake process unless it ignores the signal."""
+    killed: list[tuple[int, int]] = []
+
+    def kill(pid, sig):
+        killed.append((pid, sig))
+        if sig not in ignores:
+            shutil.rmtree(helper._test_proc_root / str(pid))
+
+    monkeypatch.setattr(helper.os, "kill", kill)
+    monkeypatch.setattr(helper.time, "sleep", lambda _seconds: None)
+    return killed
+
+
+def test_dnsmasq_stop_finds_server_without_pid_file(helper, monkeypatch):
+    _seed_dnsmasq(helper, 501, "novec0den1")
+    killed = _fake_kill(helper, monkeypatch)
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert killed == [(501, helper.signal.SIGTERM)]
+
+
+def test_dnsmasq_stop_ignores_stale_pid_file_of_another_network(helper, monkeypatch):
+    # n1 vs n10: names that share a prefix must not match either.
+    _seed_dnsmasq(helper, 502, "novec0den10")
+    root = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1"
+    root.mkdir(parents=True)
+    (root / "dnsmasq.pid").write_text("502\n")
+    killed = _fake_kill(helper, monkeypatch)
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert killed == []
+    assert not (root / "dnsmasq.pid").exists()
+
+
+def test_dnsmasq_stop_escalates_to_sigkill(helper, monkeypatch):
+    _seed_dnsmasq(helper, 503, "novec0den1")
+    killed = _fake_kill(helper, monkeypatch, ignores=(signal.SIGTERM,))
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert [sig for _pid, sig in killed] == [signal.SIGTERM, signal.SIGKILL]
+
+
+def test_dnsmasq_stop_and_start_fail_when_the_server_survives(helper, monkeypatch, capsys):
+    _seed_dnsmasq(helper, 504, "novec0den1")
+    _fake_kill(helper, monkeypatch, ignores=(signal.SIGTERM, signal.SIGKILL))
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 1
+    assert "did not stop" in capsys.readouterr().err
+    start = ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
+    assert helper.main(start) == 1
+    assert helper._test_calls == []
+
+
+def test_dnsmasq_start_fails_when_the_daemon_exits(helper, capsys):
+    start = ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
+    assert helper.main(start) == 1
+    assert "exited right after starting" in capsys.readouterr().err
+
+
+def test_dnsmasq_start_writes_bridge_config(helper, monkeypatch):
+    record = helper._run
+
+    def run(argv):
+        rc = record(argv)
+        _seed_dnsmasq(helper, 505, "novec0den1")
+        return rc
+
+    monkeypatch.setattr(helper, "_run", run)
     rc = helper.main(
         ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
     )

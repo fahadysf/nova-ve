@@ -142,6 +142,11 @@ class NetworkSharingUpdate(BaseModel):
     shared: bool
 
 
+class NATCloudValidate(BaseModel):
+    config: Dict[str, Any] = Field(default_factory=dict)
+    network_id: Optional[int] = None
+
+
 class NetworkUpdate(BaseModel):
     name: Optional[str] = None
     type: Optional[NetworkType] = None

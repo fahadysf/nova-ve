@@ -39,6 +39,7 @@ import re
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -749,25 +750,42 @@ def _dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
     return root / "dnsmasq.conf", root / "dnsmasq.pid", root / "leases"
 
 
-def _dnsmasq_stop_bridge(bridge: str) -> None:
-    _conf, pidfile, _leases = _dnsmasq_paths(bridge)
-    try:
-        raw = pidfile.read_text().strip()
-        pid = int(raw)
-    except (FileNotFoundError, ValueError, OSError):
-        return
-    try:
-        cmdline = (PROC_ROOT / str(pid) / "cmdline").read_bytes().split(b"\x00")
-    except OSError:
-        cmdline = []
-    if cmdline and not any(b"dnsmasq" in arg for arg in cmdline):
-        print(f"pid {pid} does not look like dnsmasq; refusing to kill", file=sys.stderr)
-        return
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    pidfile.unlink(missing_ok=True)
+def _dnsmasq_pids(bridge: str) -> list[int]:
+    """Pids of the dnsmasq processes serving ``bridge``.
+
+    Matched on the exact ``--conf-file`` argument rather than the pid file: a
+    lost pid file must not leave a server running, and a stale one must not
+    get another network's server killed (#320).
+    """
+    wanted = f"--conf-file={_dnsmasq_paths(bridge)[0]}".encode()
+    pids: list[int] = []
+    for entry in PROC_ROOT.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = (entry / "cmdline").read_bytes().split(b"\x00")
+        except OSError:
+            continue
+        if os.path.basename(argv[0]) == b"dnsmasq" and wanted in argv:
+            pids.append(int(entry.name))
+    return sorted(pids)
+
+
+def _dnsmasq_stop_bridge(bridge: str) -> bool:
+    """Stop the bridge's dnsmasq and confirm that it is gone."""
+    for sig, attempts in ((signal.SIGTERM, 40), (signal.SIGKILL, 20)):
+        for pid in _dnsmasq_pids(bridge):
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        for _attempt in range(attempts):
+            if not _dnsmasq_pids(bridge):
+                _dnsmasq_paths(bridge)[1].unlink(missing_ok=True)
+                return True
+            time.sleep(0.05)
+    print(f"dnsmasq for {bridge} did not stop", file=sys.stderr)
+    return False
 
 
 def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
@@ -778,7 +796,8 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     if int(ipaddress.IPv4Address(dhcp_start)) > int(ipaddress.IPv4Address(dhcp_end)):
         raise _ValidationError("dhcp_start>dhcp_end")
 
-    _dnsmasq_stop_bridge(bridge)
+    if not _dnsmasq_stop_bridge(bridge):
+        return 1
     conf, pidfile, leases = _dnsmasq_paths(bridge)
     conf.parent.mkdir(parents=True, exist_ok=True)
     conf.write_text(
@@ -801,19 +820,18 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     rc = _run([DNSMASQ_BIN, f"--conf-file={conf}"])
     if rc != 0:
         return rc
-    try:
-        pid_text = pidfile.read_text().strip()
-    except OSError:
-        pid_text = ""
-    if pid_text:
-        print(pid_text)
+    # dnsmasq daemonises after binding; confirm the daemon stayed up.
+    pids = _dnsmasq_pids(bridge)
+    if not pids:
+        print(f"dnsmasq for {bridge} exited right after starting", file=sys.stderr)
+        return 1
+    print(pids[0])
     return 0
 
 
 def cmd_dnsmasq_stop(args: argparse.Namespace) -> int:
     bridge = validate_bridge_name(args.bridge)
-    _dnsmasq_stop_bridge(bridge)
-    return 0
+    return 0 if _dnsmasq_stop_bridge(bridge) else 1
 
 
 def cmd_link_set_name_in_netns(args: argparse.Namespace) -> int:

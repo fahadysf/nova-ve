@@ -14,8 +14,10 @@ Covers:
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import pathlib
+import re
 import shutil
 import stat
 import subprocess
@@ -427,6 +429,103 @@ def test_import_wrapper_tolerates_unreadable_env_for_non_root_dry_run():
 def test_vyos_installer_resolves_default_owner_group_from_account():
     body = INSTALL_VYOS_SH.read_text()
     assert 'OWNER_GROUP="$(id -gn "${OWNER_USER}")"' in body
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="jq not installed")
+@pytest.mark.parametrize(
+    ("config", "expected"),
+    [({"dhcp": False}, "false"), ({"dhcp": True}, "true"), ({}, "true"), ({"dhcp": None}, "true")],
+)
+def test_provisioner_honours_saved_nat_cloud_dhcp_flag(config, expected):
+    """#320: jq's ``//`` treats false as missing and re-enabled DHCP on deploy."""
+    lines = [line.strip() for line in PROVISION_SH.read_text().splitlines()]
+    expressions = [line.rstrip(",") for line in lines if ".value.config.dhcp " in line]
+    assert len(expressions) == 1
+
+    result = subprocess.run(
+        ["jq", "-r", expressions[0]],
+        input=json.dumps({"value": {"config": config}}),
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == expected
+
+
+def _bash_supports_associative_arrays() -> bool:
+    return subprocess.run(["bash", "-c", "declare -A probe"], capture_output=True).returncode == 0
+
+
+@pytest.mark.skipif(
+    shutil.which("jq") is None or not _bash_supports_associative_arrays(),
+    reason="needs jq and bash 4+",
+)
+def test_provisioner_reconciles_nat_cloud_dhcp_from_owner_records(tmp_path):
+    """#320: deploys stop disabled DHCP and never mistake a member for its owner."""
+
+    def nat(bridge, cidr, dhcp, **config):
+        return {
+            "type": "nat_cloud",
+            "runtime": {"bridge_name": bridge, **({} if config else {"egress_interface": "eth0"})},
+            "config": {
+                "cidr": cidr,
+                "gateway": cidr.replace(".0/24", ".1"),
+                "dhcp": dhcp,
+                "dhcp_start": cidr.replace(".0/24", ".100"),
+                "dhcp_end": cidr.replace(".0/24", ".254"),
+                **config,
+            },
+        }
+
+    labs = tmp_path / "labs"
+    labs.mkdir()
+    # Sorts before its owner, and carries a stale copy of the owner's settings.
+    (labs / "a-member.json").write_text(
+        json.dumps({"networks": {"1": nat("br-owner", "10.20.0.0/24", True, shared_cloud_id="lab:1")}})
+    )
+    (labs / "b-owner.json").write_text(
+        json.dumps(
+            {
+                "networks": {
+                    "1": nat("br-owner", "10.20.0.0/24", False),
+                    "2": nat("br-on", "10.21.0.0/24", True),
+                }
+            }
+        )
+    )
+    log = tmp_path / "calls"
+    helper = tmp_path / "helper"
+    helper.write_text(f'#!/bin/bash\necho "$@" >> "{log}"\n')
+    helper.chmod(0o755)
+    env_file = tmp_path / "env"
+    env_file.write_text(f"LABS_DIR={labs}\n")
+
+    body = PROVISION_SH.read_text()
+    start = body.index("reconcile_nat_cloud_runtime() {")
+    function = body[start : body.index("\n}\n", start) + 3]
+    function, replaced = re.subn(r"(local helper=).*", rf'\1"{helper}"', function)
+    assert replaced == 1
+    script = f'DRY_RUN=0\nENV_FILE="{env_file}"\nip() {{ return 0; }}\n{function}\nreconcile_nat_cloud_runtime\n'
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "applied=2 skipped=1 failed=0" in result.stdout
+    calls = log.read_text().splitlines()
+    assert [call for call in calls if call.startswith("dnsmasq")] == [
+        "dnsmasq-stop br-owner",
+        "dnsmasq-start br-on 10.21.0.1 10.21.0.100 10.21.0.254",
+    ]
+    assert "nat-apply br-owner 10.20.0.0/24 eth0" in calls
+
+    # A server that will not stop is reported, but NAT is still applied.
+    helper.write_text(f'#!/bin/bash\necho "$@" >> "{log}"\n[[ "$1" != dnsmasq-stop ]]\n')
+    log.unlink()
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "applied=1 skipped=1 failed=1" in result.stdout
+    assert "failed to stop dnsmasq" in result.stderr
+    assert "forward-apply br-owner 10.20.0.0/24 eth0" in log.read_text()
 
 
 def test_predictable_ifaces_sorted_handles_ens_enp_names(tmp_path):

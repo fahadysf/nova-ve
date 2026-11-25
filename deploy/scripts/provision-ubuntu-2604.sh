@@ -398,20 +398,22 @@ reconcile_nat_cloud_runtime() {
             (.value.runtime.bridge_name // ""),
             (.value.config.cidr // ""),
             (.value.config.gateway // ""),
-            ((.value.config.dhcp // true) | tostring),
+            (if .value.config.dhcp == false then "false" else "true" end),
             (.value.config.dhcp_start // ""),
             (.value.config.dhcp_end // ""),
             (.value.runtime.egress_interface // .value.config.egress_interface // ""),
             (.value.config.shared_cloud_id // "")
           ]
-        | @tsv
+        | map(tostring) | join("\u001f")
       ' "${lab_file}" 2>/dev/null || true
     )"
     if [[ -z "${rows}" ]]; then
       continue
     fi
 
-    while IFS=$'\t' read -r bridge cidr gateway dhcp_enabled dhcp_start dhcp_end egress shared_cloud_id; do
+    # Not tab-separated: ``read`` merges adjacent tabs, so an empty egress
+    # would shift shared_cloud_id and make a member look like an owner.
+    while IFS=$'\x1f' read -r bridge cidr gateway dhcp_enabled dhcp_start dhcp_end egress shared_cloud_id; do
       if [[ -n "${shared_cloud_id}" ]]; then
         skipped=$((skipped + 1))
         continue
@@ -429,6 +431,13 @@ reconcile_nat_cloud_runtime() {
       if ! ip link show "${bridge}" >/dev/null 2>&1; then
         skipped=$((skipped + 1))
         continue
+      fi
+      # A server from before the setting was saved can outlive a deploy (#320).
+      # Failing to stop it must not cost the network its NAT rules.
+      local stop_failed=0
+      if [[ "${dhcp_enabled}" == "false" ]] && ! "${helper}" dnsmasq-stop "${bridge}"; then
+        echo "WARN: failed to stop dnsmasq for NAT-Cloud bridge ${bridge}." >&2
+        stop_failed=1
       fi
       if [[ -z "${egress}" ]]; then
         egress="$("${helper}" default-egress 2>/dev/null || true)"
@@ -460,6 +469,10 @@ reconcile_nat_cloud_runtime() {
           failed=$((failed + 1))
           continue
         fi
+      fi
+      if [[ "${stop_failed}" -eq 1 ]]; then
+        failed=$((failed + 1))
+        continue
       fi
       applied=$((applied + 1))
     done <<< "${rows}"

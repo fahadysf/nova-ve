@@ -28,13 +28,16 @@ state otherwise).
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from app.services import host_net, network_service as network_service_mod
+from app.services.lab_service import LabService
 from app.services.network_service import (
     NetworkService,
     NetworkServiceError,
@@ -122,6 +125,7 @@ def helper_mocks(monkeypatch):
     monkeypatch.setattr(host_net, "forward_remove", lambda bridge, cidr=None, egress_iface=None: calls["forward_remove"].append((bridge, cidr, egress_iface)))
     monkeypatch.setattr(host_net, "dnsmasq_start", lambda bridge, gateway, start, end: calls["dnsmasq_start"].append((bridge, gateway, start, end)) or 1234)
     monkeypatch.setattr(host_net, "dnsmasq_stop", lambda bridge: calls["dnsmasq_stop"].append(bridge))
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [])
     return calls
 
 
@@ -306,6 +310,82 @@ async def test_create_nat_cloud_skips_host_wide_existing_cidr(
 
 
 @pytest.mark.asyncio
+async def test_create_nat_cloud_overlap_identifies_existing_owner(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    owner_lab = _seed_lab(labs_dir, lab_id="lab-nat-source-a", name="owner-a.json")
+    other_lab = _seed_lab(labs_dir, lab_id="lab-nat-source-b", name="other-b.json")
+    await NetworkService().create_network(
+        owner_lab,
+        {
+            "name": "owner-net",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.60.0.0/24"},
+        },
+    )
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().create_network(
+            other_lab,
+            {
+                "name": "conflicting-net",
+                "type": "nat_cloud",
+                "config": {"cidr": "10.60.0.0/24"},
+            },
+        )
+
+    assert exc.value.code == 409
+    assert exc.value.extra["field"] == "config.cidr"
+    assert "owner-net" in exc.value.message
+    assert "owner-a.json" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_rejects_host_subnet_overlap(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-host-overlap")
+    monkeypatch.setattr(
+        host_net,
+        "list_ipv4_addrs",
+        lambda: [("br-eth0", "172.20.50.10/24")],
+    )
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().create_network(
+            lab_name,
+            {
+                "name": "internet",
+                "type": "nat_cloud",
+                "config": {"cidr": "172.20.50.0/24"},
+            },
+        )
+
+    assert exc.value.code == 409
+    assert exc.value.extra["field"] == "config.cidr"
+    assert exc.value.extra["conflicting_cidr"] == "172.20.50.0/24"
+    assert "br-eth0" in exc.value.message
+    assert helper_mocks["bridge_add"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_auto_allocation_skips_host_subnet(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-host-allocation")
+    monkeypatch.setattr(
+        host_net, "list_ipv4_addrs", lambda: [("eth0", "10.255.0.20/24")]
+    )
+
+    payload = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+
+    assert payload["config"]["cidr"] == "10.255.1.0/24"
+
+
+@pytest.mark.asyncio
 async def test_create_nat_cloud_reference_reuses_owner_bridge_without_provisioning(
     instance_id, settings, helper_mocks, stub_publish, labs_dir
 ):
@@ -453,6 +533,488 @@ async def test_create_nat_cloud_rejects_dhcp_overlap_with_static_range(
 
     assert exc.value.code == 422
     assert "static range" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_rejects_cidr_change_without_side_effects(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-immutable-cidr")
+    created = await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "internet",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.70.0.0/24"},
+        },
+    )
+    before = (labs_dir / lab_name).read_text()
+    helper_mocks["dnsmasq_start"].clear()
+    helper_mocks["dnsmasq_stop"].clear()
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().patch_network(
+            lab_name,
+            created["id"],
+            {"config": {"cidr": "10.71.0.0/24"}},
+        )
+
+    assert exc.value.code == 422
+    assert "delete and recreate" in exc.value.message.lower()
+    assert exc.value.extra["field"] == "config.cidr"
+    assert (labs_dir / lab_name).read_text() == before
+    assert helper_mocks["dnsmasq_start"] == []
+    assert helper_mocks["dnsmasq_stop"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_disables_dhcp_without_recreating_network(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-disable-dhcp")
+    created = await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "internet",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.71.0.0/24", "dhcp": True},
+        },
+    )
+    bridge = created["runtime"]["bridge_name"]
+    for calls in helper_mocks.values():
+        calls.clear()
+
+    payload, event_type = await NetworkService().patch_network(
+        lab_name,
+        created["id"],
+        {"config": {"dhcp": False}},
+    )
+
+    assert event_type == "network_updated"
+    assert payload["config"] == {
+        "cidr": "10.71.0.0/24",
+        "gateway": "10.71.0.1",
+        "dhcp": False,
+        "dhcp_start": "10.71.0.100",
+        "dhcp_end": "10.71.0.254",
+    }
+    assert payload["runtime"]["dhcp"] is False
+    assert payload["runtime"]["dhcp_pid"] == 0
+    assert helper_mocks["dnsmasq_stop"] == [bridge]
+    assert helper_mocks["dnsmasq_start"] == []
+    assert helper_mocks["bridge_add"] == []
+    assert helper_mocks["bridge_addr_add"] == []
+    assert helper_mocks["nat_apply"] == []
+    assert helper_mocks["forward_apply"] == []
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"][str(created["id"])]["config"]["dhcp"] is False
+    assert saved["networks"][str(created["id"])]["runtime"]["dhcp_pid"] == 0
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_enables_dhcp_with_valid_scope(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-enable-dhcp")
+    created = await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "internet",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.72.0.0/24", "dhcp": False},
+        },
+    )
+    bridge = created["runtime"]["bridge_name"]
+    helper_mocks["dnsmasq_start"].clear()
+    helper_mocks["dnsmasq_stop"].clear()
+
+    payload, _event_type = await NetworkService().patch_network(
+        lab_name,
+        created["id"],
+        {
+            "config": {
+                "dhcp": True,
+                "dhcp_start": "10.72.0.120",
+                "dhcp_end": "10.72.0.150",
+            }
+        },
+    )
+
+    assert payload["config"]["dhcp"] is True
+    assert payload["runtime"]["dhcp"] is True
+    assert payload["runtime"]["dhcp_pid"] == 1234
+    assert helper_mocks["dnsmasq_start"] == [
+        (bridge, "10.72.0.1", "10.72.0.120", "10.72.0.150")
+    ]
+    assert helper_mocks["dnsmasq_stop"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_restores_dhcp_when_persistence_fails(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-dhcp-rollback")
+    created = await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "internet",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.73.0.0/24", "dhcp": False},
+        },
+    )
+    bridge = created["runtime"]["bridge_name"]
+    before = (labs_dir / lab_name).read_text()
+    events = []
+    monkeypatch.setattr(
+        host_net,
+        "dnsmasq_start",
+        lambda bridge, gateway, start, end: events.append(
+            ("start", bridge, gateway, start, end)
+        ) or 1234,
+    )
+    monkeypatch.setattr(
+        host_net,
+        "dnsmasq_stop",
+        lambda bridge: events.append(("stop", bridge)),
+    )
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        network_service_mod.LabService, "write_lab_json_static", fail_write
+    )
+    with pytest.raises(OSError, match="disk full"):
+        await NetworkService().patch_network(
+            lab_name,
+            created["id"],
+            {"config": {"dhcp": True}},
+        )
+
+    assert events == [
+        ("start", bridge, "10.73.0.1", "10.73.0.100", "10.73.0.254"),
+        ("stop", bridge),
+    ]
+    assert (labs_dir / lab_name).read_text() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("gateway", "10.73.0.2"), ("egress_interface", "eth9")],
+)
+async def test_patch_nat_cloud_rejects_unsupported_post_create_config_changes(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, field, value
+):
+    lab_name = _seed_lab(labs_dir, lab_id=f"lab-nat-immutable-{field}")
+    created = await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "internet",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.74.0.0/24"},
+        },
+    )
+    before = (labs_dir / lab_name).read_text()
+    helper_mocks["dnsmasq_start"].clear()
+    helper_mocks["dnsmasq_stop"].clear()
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().patch_network(
+            lab_name, created["id"], {"config": {field: value}}
+        )
+
+    assert exc.value.code == 422
+    assert exc.value.extra["field"] == f"config.{field}"
+    assert (labs_dir / lab_name).read_text() == before
+    assert helper_mocks["dnsmasq_start"] == []
+    assert helper_mocks["dnsmasq_stop"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_rejects_type_transition(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-immutable-type")
+    created = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+    before = (labs_dir / lab_name).read_text()
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().patch_network(
+            lab_name, created["id"], {"type": "linux_bridge"}
+        )
+
+    assert exc.value.code == 422
+    assert "delete and recreate" in exc.value.message.lower()
+    assert (labs_dir / lab_name).read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_restores_dhcp_when_dnsmasq_fails(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-dnsmasq-fail")
+    created = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.75.0.0/24"}},
+    )
+    before = (labs_dir / lab_name).read_text()
+    starts = []
+
+    def flaky_start(bridge, gateway, start, end):
+        starts.append(start)
+        if len(starts) == 1:
+            raise host_net.HostNetError("dnsmasq refused to start")
+        return 4321
+
+    monkeypatch.setattr(host_net, "dnsmasq_start", flaky_start)
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().patch_network(
+            lab_name, created["id"], {"config": {"dhcp_start": "10.75.0.150"}}
+        )
+
+    assert exc.value.code == 500
+    assert starts == ["10.75.0.150", "10.75.0.100"]
+    assert (labs_dir / lab_name).read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_disables_dhcp_despite_new_host_overlap(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-late-overlap")
+    created = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.76.0.0/24"}},
+    )
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [("eth9", "10.76.0.9/24")])
+
+    payload, _ = await NetworkService().patch_network(
+        lab_name, created["id"], {"config": {"dhcp": False}}
+    )
+
+    assert payload["config"]["dhcp"] is False
+
+
+@pytest.mark.asyncio
+async def test_patch_rejects_turning_a_bridge_into_a_nat_cloud(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-bridge-to-nat")
+    created = await NetworkService().create_network(
+        lab_name, {"name": "lan", "type": "linux_bridge", "config": {}}
+    )
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().patch_network(lab_name, created["id"], {"type": "nat_cloud"})
+
+    assert exc.value.code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("config", "field"),
+    [
+        ({"cidr": "nonsense"}, "config.cidr"),
+        ({"cidr": "10.77.0.0/28"}, "config.cidr"),
+        ({"cidr": "10.77.0.0/24", "gateway": "10.78.0.1"}, "config.gateway"),
+        ({"cidr": "10.77.0.0/24", "dhcp_start": "10.77.0.10"}, "config.dhcp_start"),
+        ({"cidr": "10.77.0.0/24", "dhcp_end": "10.78.0.10"}, "config.dhcp_end"),
+    ],
+)
+async def test_nat_cloud_validation_errors_name_the_field(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, config, field
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-fields")
+
+    with pytest.raises(NetworkServiceError) as exc:
+        NetworkService().validate_nat_cloud_config(lab_name, config)
+
+    assert exc.value.extra["field"] == field
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["false", None, 0])
+async def test_nat_cloud_dhcp_flag_must_be_boolean(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, value
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-dhcp-type")
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.84.0.0/24"}}
+    )
+    before = (labs_dir / lab_name).read_text()
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().patch_network(lab_name, created["id"], {"config": {"dhcp": value}})
+
+    assert (exc.value.code, exc.value.extra["field"]) == (422, "config.dhcp")
+    assert (labs_dir / lab_name).read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_stored_null_dhcp_flag_counts_as_enabled(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """The UI and the provisioner treat only an explicit false as disabled."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-dhcp-null")
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.85.0.0/24"}}
+    )
+    data = json.loads((labs_dir / lab_name).read_text())
+    data["networks"]["1"]["config"]["dhcp"] = None
+    (labs_dir / lab_name).write_text(json.dumps(data))
+
+    payload, _ = await NetworkService().patch_network(
+        lab_name, created["id"], {"config": {"dhcp_start": "10.85.0.120"}}
+    )
+
+    assert payload["config"]["dhcp"] is True
+    assert helper_mocks["dnsmasq_start"][-1][2] == "10.85.0.120"
+    assert helper_mocks["dnsmasq_stop"] == []
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_blank_scope_returns_to_defaults(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-blank-scope")
+    created = await NetworkService().create_network(
+        lab_name,
+        {
+            "name": "internet",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.86.0.0/24", "dhcp_start": "10.86.0.200"},
+        },
+    )
+
+    payload, _ = await NetworkService().patch_network(
+        lab_name, created["id"], {"config": {"dhcp_start": "", "dhcp_end": "10.86.0.150"}}
+    )
+
+    assert payload["config"]["dhcp_start"] == "10.86.0.100"
+    assert payload["config"]["dhcp_end"] == "10.86.0.150"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dhcp", "pid", "started", "stopped"),
+    [(True, None, 1, 0), (True, 77, 0, 0), (False, 77, 0, 1), (False, None, 0, 0)],
+)
+async def test_patch_nat_cloud_repairs_a_drifted_server_without_needless_restarts(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch, dhcp, pid, started, stopped
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-drift")
+    created = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.87.0.0/24", "dhcp": dhcp}},
+    )
+    helper_mocks["dnsmasq_start"].clear()
+    helper_mocks["dnsmasq_stop"].clear()
+    monkeypatch.setattr(
+        "app.services.network_info_service.dhcp_server_pid", lambda _bridge: pid
+    )
+
+    await NetworkService().patch_network(lab_name, created["id"], {"config": {"dhcp": dhcp}})
+
+    assert len(helper_mocks["dnsmasq_start"]) == started
+    assert len(helper_mocks["dnsmasq_stop"]) == stopped
+
+
+@pytest.mark.asyncio
+async def test_patch_nat_cloud_keeps_an_edit_made_while_dnsmasq_stops(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """Node routes write the lab file without the lock; a save must not undo them."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-interleave")
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.91.0.0/24"}}
+    )
+    monkeypatch.setattr(host_net, "dnsmasq_stop", lambda _bridge: time.sleep(0.2))
+
+    async def add_node():
+        await asyncio.sleep(0.05)
+        data = LabService.read_lab_json_static(lab_name)
+        data["nodes"]["1"] = {"id": 1, "name": "edge", "type": "docker"}
+        LabService.write_lab_json_static(lab_name, data)
+
+    await asyncio.gather(
+        NetworkService().patch_network(lab_name, created["id"], {"config": {"dhcp": False}}),
+        asyncio.create_task(add_node()),
+    )
+
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert "1" in saved["nodes"]
+    assert saved["networks"]["1"]["config"]["dhcp"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_rejects_unknown_egress_interface(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch, tmp_path
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-egress")
+    sysfs = tmp_path / "sysfs"
+    (sysfs / "eth0").mkdir(parents=True)
+    monkeypatch.setattr(host_net, "_SYSFS_NET", sysfs)
+    request = {"name": "internet", "type": "nat_cloud", "config": {"egress_interface": "eth9"}}
+
+    for bad in ("eth9", "../eth0", ".."):
+        request["config"] = {"egress_interface": bad}
+        with pytest.raises(NetworkServiceError) as exc:
+            await NetworkService().create_network(lab_name, request)
+        assert (exc.value.code, exc.value.extra["field"]) == (422, "config.egress_interface")
+    assert helper_mocks["bridge_add"] == []
+
+    request["config"] = {"egress_interface": "eth0"}
+    created = await NetworkService().create_network(lab_name, request)
+    assert created["runtime"]["egress_interface"] == "eth0"
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_ignores_its_own_leftover_bridge(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """A bridge that survived a failed delete must not block its successor."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-leftover")
+    bridge = host_net.bridge_name("lab-nat-leftover", 1)
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [(bridge, "10.88.0.1/24")])
+    config = {"cidr": "10.88.0.0/24"}
+
+    NetworkService().validate_nat_cloud_config(lab_name, config)
+    created = await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": config}
+    )
+
+    assert created["runtime"]["bridge_name"] == bridge
+
+
+@pytest.mark.asyncio
+async def test_nat_cloud_conflict_does_not_name_labs_the_caller_cannot_open(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    owner = _seed_lab(labs_dir, lab_id="lab-secret", name="secret.json")
+    await NetworkService().create_network(
+        owner, {"name": "hidden-net", "type": "nat_cloud", "config": {"cidr": "10.89.0.0/24"}}
+    )
+    other = _seed_lab(labs_dir, lab_id="lab-other", name="other.json")
+
+    with pytest.raises(NetworkServiceError) as exc:
+        NetworkService().validate_nat_cloud_config(
+            other, {"cidr": "10.89.0.0/24"}, can_open=lambda path: path == other
+        )
+    assert exc.value.code == 409
+    assert exc.value.extra["conflicting_cidr"] == "10.89.0.0/24"
+    assert "secret" not in str(exc.value.extra) + exc.value.message
+    assert "hidden-net" not in str(exc.value.extra) + exc.value.message
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().create_network(
+            other,
+            {"name": "mine", "type": "nat_cloud", "config": {"cidr": "10.89.0.0/24"}},
+            can_open=lambda path: path == other,
+        )
+    assert "secret" not in str(exc.value.extra) + exc.value.message
 
 
 # ---------------------------------------------------------------------------

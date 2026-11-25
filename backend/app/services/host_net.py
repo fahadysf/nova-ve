@@ -470,6 +470,7 @@ RE_BRIDGE_NAME = re.compile(r"\Anove[a-f0-9]{4}n[0-9]{1,5}\Z")
 # networks.  Lab-side helpers MUST refuse to operate on these names; the
 # dedicated ``link_master_host`` / ``link-master-host`` privileged-helper
 # verb is the only path allowed to touch them.
+_RE_HOST_IFACE = re.compile(r"[A-Za-z0-9_.-]{1,15}")
 RE_HOST_BRIDGE_NAME = re.compile(r"\Abr-eth[0-9]+\Z")
 
 
@@ -648,6 +649,18 @@ def link_up(iface: str) -> None:
 def bridge_addr_add(name: str, cidr: str) -> None:
     """Idempotently assign ``cidr`` to host bridge ``name``."""
     _invoke_helper("bridge-addr-add", name, cidr)
+
+
+def host_iface_exists(name: str) -> bool:
+    """True if the host has an interface with this name (unprivileged read).
+
+    Sandbox mode (#253): always True, the value is stored as data only.
+    """
+    if sandbox_mode():
+        return True
+    if not _RE_HOST_IFACE.fullmatch(name) or name in {".", ".."}:
+        return False
+    return (_SYSFS_NET / name).exists()
 
 
 def default_egress_iface() -> str:
