@@ -157,6 +157,10 @@ def _user_root(current_user: UserRead) -> str:
 
 def _scoped_lab_path(current_user: UserRead, raw_path: str, treat_as_absolute: bool) -> str:
     normalized = raw_path.strip().replace("\\", "/").strip("/")
+    # #327: the prefix checks below compare strings, so a ``..`` segment
+    # could pass them and only fail later at the file layer. Refuse it here.
+    if ".." in normalized.split("/"):
+        raise PermissionError("Access denied.")
     # #285: /Shared is a real read-write space for every authenticated user,
     # resolved at the labs root — never prefixed into a scoped user's root.
     if normalized == "Shared" or normalized.startswith("Shared/"):

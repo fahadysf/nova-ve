@@ -21,6 +21,7 @@ from starlette.testclient import WebSocketDisconnect
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.main import app
+from app.routers.labs import require_lab_access
 from app.services.lab_service import LabService
 
 
@@ -298,6 +299,38 @@ async def _network_and_link_round_trip(lab_path: str, labs_dir) -> None:
 async def test_callers_who_can_open_the_lab_still_succeed(user, lab_path, labs_dir):
     app.dependency_overrides[get_current_user] = user
     await _network_and_link_round_trip(lab_path, labs_dir)
+
+
+def test_every_lab_path_route_declares_the_access_dependency():
+    # The behavioural sweep cannot see a host action a handler runs before
+    # its own refusal, so also require the dependency itself on every route.
+    missing = []
+    for route in app.routes:
+        if not (isinstance(route, APIRoute) and "{lab_path" in route.path):
+            continue
+        if any((m, route.path) in ADMIN_ONLY_ROUTES for m in route.methods):
+            continue
+        calls = {dep.call for dep in route.dependant.dependencies}
+        if require_lab_access not in calls:
+            missing.append((sorted(route.methods), route.path))
+    assert missing == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user", [_scoped_user, _admin], ids=["scoped", "admin"])
+@pytest.mark.parametrize(
+    "lab_path",
+    ["lanes/alpha/%2E%2E/beta/lab.json", "Shared/%2E%2E/lanes/beta/lab.json"],
+    ids=["own-root-dotdot", "shared-dotdot"],
+)
+async def test_dotdot_segments_are_refused_before_the_lab_is_read(
+    user, lab_path, labs_dir, lab_reads
+):
+    app.dependency_overrides[get_current_user] = user
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        response = await c.get(f"/api/labs/{lab_path}/networks")
+    assert response.status_code == 403, response.text
+    assert lab_reads == []
 
 
 @pytest.mark.asyncio

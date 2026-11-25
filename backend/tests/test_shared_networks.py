@@ -831,7 +831,8 @@ async def test_sharing_api(client, labs_dir):
         mine = await c.get("/api/system/shared-networks", params={"for_lab": f"/{owner}"})
         assert mine.json()["data"] == []
         bad = await c.get("/api/system/shared-networks", params={"for_lab": "../x"})
-        assert bad.status_code == 400
+        # #327: a ``..`` segment is refused as access denied.
+        assert bad.status_code == 403
         joined = await c.post(
             f"/api/labs/{member}/networks",
             json={"name": "j", "config": {"shared_network_id": listed[0]["id"]}},
