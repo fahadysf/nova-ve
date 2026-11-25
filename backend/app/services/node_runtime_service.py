@@ -1043,8 +1043,7 @@ class NodeRuntimeService:
     @classmethod
     async def _run_heartbeat_cycle(cls) -> None:
         """Single heartbeat cycle: reconcile node.status for all known runtimes."""
-        from app.services.lab_service import LabService  # avoid import cycle at module load
-        from app.services.lab_lock import lab_lock
+        from app.services.lab_service import locked_lab_async  # avoid import cycle at module load
         from app.services.ws_hub import ws_hub
 
         settings = get_settings()
@@ -1099,9 +1098,9 @@ class NodeRuntimeService:
             expected_status = 2 if is_alive else 0
 
             try:
-                with lab_lock(filename, labs_dir):
-                    data = LabService.read_lab_json_static(filename)
-                    nodes: dict = data.get("nodes") or {}
+                # Waits for the lock without blocking the event loop.
+                async with locked_lab_async(filename) as lab:
+                    nodes: dict = lab.data.get("nodes") or {}
                     node = nodes.get(str(node_id))
                     if not isinstance(node, dict):
                         continue
@@ -1111,7 +1110,7 @@ class NodeRuntimeService:
                     node["status"] = expected_status
                     # #248: status reconcile is bookkeeping, not an edit —
                     # don't invalidate editors' If-Match tokens.
-                    LabService.write_lab_json_static(filename, data, bump_revision=False)
+                    lab.save(bump_revision=False)
             except Exception:
                 _logger.exception(
                     "heartbeat: failed to reconcile lab=%s node=%s", lab_id, node_id

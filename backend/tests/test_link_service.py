@@ -714,3 +714,55 @@ async def test_delete_link_cascades_orphan_implicit_bridge_half(
     data = json.loads((link_settings.LABS_DIR / lab_name).read_text())
     assert data.get("links") == []
     assert data.get("networks") == {}
+
+
+@pytest.mark.asyncio
+async def test_create_link_with_attach_stamp_bumps_revision_once(
+    link_settings, monkeypatch, tmp_path,
+):
+    """The stamp write after a running attach must not undo the create's bump."""
+    from app.services import node_runtime_service
+
+    _instance_id_fixture(monkeypatch, tmp_path)
+    _patch_host_net_for_attach(monkeypatch)
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": _node(1)},
+        networks={"5": _explicit_network(5, "lan")},
+    )
+    lab_file = link_settings.LABS_DIR / lab_name
+    seeded = json.loads(lab_file.read_text())
+    seeded["meta"]["revision"] = 7
+    lab_file.write_text(json.dumps(seeded))
+
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_runtime_record",
+        lambda _self, _lab_id, _node_id, *, include_stopped=False: {
+            "kind": "docker", "lab_id": "lab", "node_id": 1
+        },
+    )
+    monkeypatch.setattr(
+        node_runtime_service.NodeRuntimeService,
+        "_attach_docker_interface_locked",
+        lambda self, _lab_id, _node_id, _net, interface_index, *, bridge_name=None: {
+            "interface_index": interface_index, "attach_generation": 1
+        },
+    )
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    link_payload, _net, _replayed = await LinkService().create_link(
+        lab_name,
+        {"node_id": 1, "interface_index": 0},
+        {"network_id": 5},
+    )
+
+    saved = json.loads(lab_file.read_text())
+    assert link_payload["runtime"]["attach_generation"] == 1
+    assert saved["links"][0]["runtime"]["attach_generation"] == 1
+    assert saved["meta"]["revision"] == 8
