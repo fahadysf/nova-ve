@@ -521,10 +521,17 @@ describe('TopologyCanvas lab controls', () => {
     expect(get(labState).networks['7'].name).toBe('free');
   });
 
-  it('only offers Configure on NAT-Clouds, disabled for shared members (#320)', async () => {
-    renderCanvas({}, { '7': makeSharingNetwork() });
+  it('offers Configure on NAT-Clouds and bridges, read-only for shared members (#320, #325)', async () => {
+    renderCanvas({}, { '7': makeSharingNetwork({ type: 'bridge_cloud' }) });
     await openNetworkMenu();
     expect(screen.queryByTestId('network-menu-configure')).toBeNull();
+    expect(screen.queryByTestId('network-menu-dhcp')).toBeNull();
+    cleanup();
+
+    renderCanvas({}, { '7': makeSharingNetwork({ implicit: true, config: { cidr: '10.1.2.0/24' } }) });
+    await openNetworkMenu();
+    expect(screen.queryByTestId('network-menu-configure')).toBeNull();
+    expect(screen.queryByTestId('network-menu-dhcp')).toBeNull();
     cleanup();
 
     renderCanvas({}, {
@@ -532,8 +539,118 @@ describe('TopologyCanvas lab controls', () => {
     });
     await openNetworkMenu();
     const configure = screen.getByTestId('network-menu-configure');
-    expect(configure).toBeDisabled();
+    expect(configure).toBeEnabled();
+    expect(configure).toHaveTextContent('Read-only');
     expect(configure).toHaveAttribute('title', expect.stringContaining('owns this network'));
+    expect(screen.queryByTestId('network-menu-dhcp')).toBeNull();
+    await fireEvent.click(configure);
+    expect(screen.getByTestId('network-member-settings')).toBeInTheDocument();
+  });
+
+  it.each([
+    ['a bridge without a subnet', {}, null, 'DHCP off'],
+    ['a bridge with a /21', { cidr: '10.0.0.0/21' }, null, 'DHCP off'],
+    ['a bridge with a /24', { cidr: '10.1.2.0/24' }, 'Enable DHCP', 'DHCP off'],
+    ['a bridge serving DHCP', { cidr: '10.1.2.0/29', dhcp: true }, 'Disable DHCP', 'DHCP on'],
+    ['a shared bridge member', { cidr: '10.1.2.0/24', dhcp: true, shared_network_id: 'shared-net:b:1' }, null, 'Read-only'],
+  ])('labels the DHCP actions of %s (#325)', async (_label, config, toggle, state) => {
+    renderCanvas({}, { '7': makeSharingNetwork({ config }) });
+    await openNetworkMenu();
+    if (toggle) expect(screen.getByTestId('network-menu-dhcp')).toHaveTextContent(toggle);
+    else expect(screen.queryByTestId('network-menu-dhcp')).toBeNull();
+    expect(screen.getByTestId('network-menu-configure')).toHaveTextContent(new RegExp(`^Configure…\\s*${state}$`));
+  });
+
+  it.each([false, true])('turns NAT-Cloud DHCP off from the menu with progress and a lease note (zen: %s, #325)', async (zenMode) => {
+    const network = makeSharingNetwork({ type: 'nat_cloud', config: natConfig });
+    const view = renderCanvas({}, { '7': network });
+    await view.rerender({ zenMode });
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+    await openNetworkMenu();
+    const toggle = screen.getByTestId('network-menu-dhcp');
+    expect(toggle).toHaveTextContent('Disable DHCP');
+    expect(toggle).toHaveAttribute('title', expect.stringContaining('lease expires (12 h)'));
+
+    vi.mocked(apiRequest).mockClear();
+    let finish: (value: unknown) => void = () => {};
+    vi.mocked(apiRequest).mockReturnValueOnce(new Promise((resolve) => (finish = resolve)) as never);
+    await fireEvent.click(toggle);
+    expect(toggle).toHaveTextContent('Disabling DHCP…');
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAttribute('aria-busy', 'true');
+    expect(screen.getByTestId('network-menu-configure')).toBeDisabled();
+    await fireEvent.click(toggle);
+    expect(apiRequest).toHaveBeenCalledTimes(1);
+    expect(apiRequest).toHaveBeenCalledWith('/labs/lab-hotplug/networks/7', {
+      method: 'PATCH', body: { config: { dhcp: false } }, suppressToast: true,
+    });
+
+    finish({ network: { ...network, config: { ...natConfig, dhcp: false } }, revision: 61 });
+    await waitFor(() => expect(screen.queryByRole('menu')).toBeNull());
+    expect(get(labState).networks['7'].config?.dhcp).toBe(false);
+    expect(get(labState).revision).toBe(61);
+    expect(toast).toHaveBeenCalledWith(
+      'DHCP disabled. Nodes keep their addresses until the lease expires (12 h) or they renew.', 'success', 8000
+    );
+    await openNetworkMenu();
+    expect(screen.getByTestId('network-menu-dhcp')).toHaveTextContent('Enable DHCP');
+    toast.mockRestore();
+  });
+
+  it('keeps the bridge setting and reports why when enabling DHCP fails (#325)', async () => {
+    renderCanvas({}, { '7': makeSharingNetwork({ config: { cidr: '10.1.2.0/24' } }) });
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+    vi.mocked(apiRequest).mockRejectedValueOnce(new Error('Node r1 already uses 10.1.2.200 inside the DHCP range.'));
+    await openNetworkMenu();
+    await fireEvent.click(screen.getByTestId('network-menu-dhcp'));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      'Could not enable DHCP on core: Node r1 already uses 10.1.2.200 inside the DHCP range.', 'error', 8000
+    ));
+    expect(get(labState).networks['7'].config?.dhcp).toBeUndefined();
+    await openNetworkMenu();
+    expect(screen.getByTestId('network-menu-dhcp')).toBeEnabled();
+    expect(screen.getByTestId('network-menu-dhcp')).toHaveTextContent('Enable DHCP');
+    toast.mockRestore();
+  });
+
+  it('enables bridge DHCP from the menu and says whether its server runs (#325)', async () => {
+    const network = makeSharingNetwork({ config: { cidr: '10.1.2.0/24' } });
+    renderCanvas({}, { '7': network });
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+    vi.mocked(apiRequest).mockResolvedValueOnce({
+      network: { ...network, config: { cidr: '10.1.2.0/24', dhcp: true }, runtime: { dhcp_pid: 42 } }, revision: 62,
+    } as never);
+    await openNetworkMenu();
+    await fireEvent.click(screen.getByTestId('network-menu-dhcp'));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith('DHCP enabled; server running.', 'success', 4000));
+    expect(get(labState).networks['7'].config?.dhcp).toBe(true);
+    toast.mockRestore();
+  });
+
+  it('configures a bridge from the menu with PATCH (#325)', async () => {
+    const network = makeSharingNetwork();
+    renderCanvas({}, { '7': network });
+    await openNetworkMenu();
+    await fireEvent.click(screen.getByTestId('network-menu-configure'));
+    expect(screen.getByRole('dialog', { name: 'Configure bridge' })).toBeVisible();
+    await fireEvent.input(screen.getByLabelText('CIDR'), { target: { value: '10.1.2.0/24' } });
+    vi.mocked(apiRequest).mockClear();
+    vi.mocked(apiRequest)
+      .mockResolvedValueOnce({ data: {} } as never)
+      .mockResolvedValueOnce({ network: { ...network, config: { cidr: '10.1.2.0/24' } }, revision: 63 } as never);
+    await fireEvent.click(screen.getByTestId('network-confirm-button'));
+
+    await waitFor(() => expect(screen.queryByTestId('network-config-modal')).toBeNull());
+    expect(apiRequest).toHaveBeenCalledWith('/labs/lab-hotplug/networks/validate-config', {
+      method: 'POST', body: { type: 'linux_bridge', config: { cidr: '10.1.2.0/24' }, network_id: 7 }, suppressToast: true,
+    });
+    expect(apiRequest).toHaveBeenLastCalledWith('/labs/lab-hotplug/networks/7', {
+      method: 'PATCH', body: { config: { cidr: '10.1.2.0/24' } }, suppressToast: true,
+    });
+    expect(get(labState).networks['7'].config?.cidr).toBe('10.1.2.0/24');
+    await openNetworkMenu();
+    expect(screen.getByTestId('network-menu-dhcp')).toHaveTextContent('Enable DHCP');
   });
 
   it('leaves Zen shortcuts available and preserves a pending link', async () => {
