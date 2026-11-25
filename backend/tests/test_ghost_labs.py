@@ -42,7 +42,7 @@ class _FakeLabService(LabService):
 
 
 def _lab_row(filename: str):
-    return SimpleNamespace(filename=filename, path=f"/{filename}")
+    return SimpleNamespace(filename=filename, path=f"/{filename}", owner="admin")
 
 
 @pytest.fixture()
@@ -133,3 +133,32 @@ async def test_reconcile_treats_unsafe_filenames_as_missing(seeded_labs):
 
 async def _async_list(items):
     return list(items)
+
+
+@pytest.mark.asyncio
+async def test_merge_db_labs_reports_db_owner_and_folder_fallback(seeded_labs):
+    """#322: DB-backed rows carry their DB owner; a file-scan lab with no DB
+    row falls back to the owner of the folder it lives in; Shared is owned by
+    all users."""
+    (seeded_labs / "Shared").mkdir()
+    (seeded_labs / "Shared" / "team.json").write_text("{}")
+    (seeded_labs / "alice").mkdir()
+    (seeded_labs / "alice" / "orphan.json").write_text("{}")
+    _FakeLabService.rows = [
+        SimpleNamespace(filename="real.json", path="/real.json", owner="carol"),
+        SimpleNamespace(filename="Shared/team.json", path="/Shared/team.json", owner="bob"),
+    ]
+    result = {
+        "folders": [{"name": "alice", "path": "/alice"}, {"name": "Shared", "path": "/Shared"}],
+        "labs": [{"file": "orphan.json", "path": "/alice/orphan.json"}],
+    }
+
+    merged = await _merge_db_labs(result, _FakeDb(), "", recursive=True)
+
+    owners = {lab["path"]: lab["owner"] for lab in merged["labs"]}
+    assert owners == {
+        "/alice/orphan.json": "alice",  # no DB row -> folder owner
+        "/real.json": "carol",
+        "/Shared/team.json": "bob",  # creator shown; the folder itself is shared
+    }
+    assert {f["path"]: f["owner"] for f in merged["folders"]} == {"/alice": "alice", "/Shared": "*"}

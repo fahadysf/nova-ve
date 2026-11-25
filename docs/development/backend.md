@@ -25,7 +25,7 @@ Each module under `routers/` mounts an `APIRouter` at a path prefix:
 |---|---|---|
 | `auth.py` | `/api/auth` | Session login / logout / current-user. |
 | `users.py` | `/api/users` | User CRUD (admin-only). |
-| `folders.py` | `/api/folders` | Lab folder hierarchy. |
+| `folders.py` | `/api/folders` | Lab folder hierarchy. Listing entries carry an `owner`: a top-level `/<user>` folder is owned by that user (children inherit), `/Shared` by all users (`*`), `Running`/`Users` by `system`; labs report their stored owner. |
 | `labs.py` | `/api/labs` | Lab CRUD, node start/stop, runtime control, external-console endpoints. |
 | `links.py` | `/api/labs/{lab}/links` | Link create / delete / list. |
 | `networks.py` | `/api/labs/{lab}/networks` | Network create / patch / delete + runtime bridge reconciliation. |
