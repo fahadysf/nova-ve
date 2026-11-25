@@ -5,10 +5,22 @@
   import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
   import { ApiError, apiGetData, apiRequest } from '$lib/api';
   import { Lock } from 'lucide-svelte';
-  import { natDefaults, natFieldFromServer, validateNatForm, type NatErrors } from '$lib/services/natCloudForm';
-  import type { NetworkModalType } from '$lib/services/networkSharing';
-  import { dhcpStatus, type DhcpInfo } from '$lib/services/dhcpStatus';
+  import { natDefaults, natFieldFromServer, validateNatForm, type NatField } from '$lib/services/natCloudForm';
+  import {
+    bridgeDefaults,
+    bridgeFieldFromServer,
+    dhcpUnavailableReason,
+    validateBridgeForm,
+    type BridgeDefaults,
+    type BridgeField
+  } from '$lib/services/bridgeForm';
+  import { networkKind } from '$lib/services/networkDhcp';
+  import { networkSharing, type NetworkModalType } from '$lib/services/networkSharing';
+  import { dhcpStatus } from '$lib/services/dhcpStatus';
   import type { NetworkCreateConfig, NetworkData, NetworkInfo, NetworkType, SharedNetwork } from '$lib/types';
+
+  type FieldErrors = Partial<Record<NatField | BridgeField, string>>;
+  type ScopeKey = 'dhcp_server' | 'dhcp_start' | 'dhcp_end';
 
   export let open = false;
   export let suspended = false;
@@ -16,7 +28,7 @@
   /** #319: shared networks this lab owns or already uses are not offered. */
   export let labId = '';
   export let defaultType: NetworkModalType = 'linux_bridge';
-  /** #320: editing an existing NAT-Cloud instead of creating a network. */
+  /** Editing an existing NAT-Cloud (#320) or bridge (#325) instead of creating a network. */
   export let mode: 'create' | 'edit' = 'create';
   export let network: NetworkData | null = null;
   /** The parent is persisting the confirmed values. */
@@ -74,6 +86,16 @@
   let dhcpStart = '';
   let dhcpEnd = '';
   let egressInterface = '';
+  // linux_bridge (#325): DHCP is off by default and the scope is prefilled.
+  let bridgeDhcp = false;
+  let bridgeServer = '';
+  let bridgeStart = '';
+  let bridgeEnd = '';
+  // Set once a field holds the user's (or a saved) value, so the defaults of
+  // a newly typed subnet no longer replace it.
+  let serverEdited = false;
+  let startEdited = false;
+  let endEdited = false;
   let natCloudMode: 'new' | 'existing' = 'new';
   let selectedNatCloudId = '';
   let natClouds: NatCloud[] = [];
@@ -95,20 +117,20 @@
   /** Server rejection of the current values; cleared on the next change. */
   let rejection: { message: string; field?: string } | null = null;
   let staleSaveError: typeof saveError = null;
-  /** Live DHCP server state; null while unknown. */
-  let liveDhcp: DhcpInfo | null = null;
-  let liveDhcpError = false;
+  /** Live network details (DHCP server state, owner of a shared network); null while unknown. */
+  let liveInfo: NetworkInfo | null = null;
+  let liveInfoError = false;
 
-  async function loadLiveDhcp(networkId: number) {
+  async function loadLiveInfo(networkId: number) {
     const mine = session;
     try {
       const info = await apiGetData<NetworkInfo>(`/labs/${labId}/networks/${networkId}/info`, {
         suppressToast: true,
         retry: 0
       });
-      if (open && mine === session) liveDhcp = info?.ip?.dhcp ?? null;
+      if (open && mine === session) liveInfo = info ?? null;
     } catch {
-      if (open && mine === session) liveDhcpError = true;
+      if (open && mine === session) liveInfoError = true;
     }
   }
 
@@ -123,14 +145,24 @@
     dismissServerError();
   }
 
-  function describedBy(error: string | undefined, errorId: string, locked: boolean): string | undefined {
-    const ids = [error ? errorId : '', locked ? 'nat-locked-note' : ''].filter(Boolean);
+  function describedBy(error: string | undefined, errorId: string, noteId = ''): string | undefined {
+    const ids = [error ? errorId : '', noteId].filter(Boolean);
     return ids.length > 0 ? ids.join(' ') : undefined;
   }
 
-  function configText(key: string): string {
-    const value = network?.config?.[key];
+  function text(value: unknown): string {
     return typeof value === 'string' ? value : '';
+  }
+
+  function configText(key: string): string {
+    return text(network?.config?.[key]);
+  }
+
+  /** Prefill the scope fields the user has not edited from the subnet's defaults. */
+  function applyBridgeDefaults(next: BridgeDefaults | null) {
+    if (!serverEdited) bridgeServer = next?.server ?? '';
+    if (!startEdited) bridgeStart = next?.start ?? '';
+    if (!endEdited) bridgeEnd = next?.end ?? '';
   }
 
   // Single reactive block so the open-edge detection and the prev-state
@@ -142,8 +174,9 @@
       const editing = mode === 'edit' && network !== null;
       session += 1;
       returnFocusEl = typeof document !== 'undefined' ? (document.activeElement as HTMLElement | null) : null;
+      const editedBridge = editing && network !== null && networkKind(network) !== 'nat_cloud';
       name = editing ? (network?.name ?? '') : defaultName;
-      type = editing ? 'nat_cloud' : defaultType;
+      type = editing ? (editedBridge ? 'linux_bridge' : 'nat_cloud') : defaultType;
       cidr = editing ? configText('cidr') : '';
       gateway = editing ? configText('gateway') : '';
       dhcp = editing ? network?.config?.dhcp !== false : true;
@@ -152,11 +185,20 @@
       egressInterface = editing
         ? String(network?.runtime?.egress_interface ?? configText('egress_interface'))
         : '';
+      bridgeDhcp = editedBridge && network?.config?.dhcp === true;
+      bridgeServer = editedBridge ? configText('dhcp_server') : '';
+      bridgeStart = editedBridge ? configText('dhcp_start') : '';
+      bridgeEnd = editedBridge ? configText('dhcp_end') : '';
+      // Saved values are the user's; only empty fields follow the subnet.
+      serverEdited = bridgeServer !== '';
+      startEdited = bridgeStart !== '';
+      endEdited = bridgeEnd !== '';
+      applyBridgeDefaults(bridgeDefaults(cidr));
       checking = false;
       rejection = null;
-      liveDhcp = null;
-      liveDhcpError = false;
-      if (editing && network) void loadLiveDhcp(network.id);
+      liveInfo = null;
+      liveInfoError = false;
+      if (editing && network) void loadLiveInfo(network.id);
       natCloudMode = 'new';
       selectedNatCloudId = '';
       natClouds = [];
@@ -199,30 +241,70 @@
   }
   $: trimmedName = name.trim();
   $: editing = mode === 'edit';
-  $: natForm = type === 'nat_cloud' && (editing || natCloudMode === 'new');
+  $: stored = (network?.config ?? {}) as Record<string, unknown>;
+  // A network joined from another lab can be renamed here, nothing else (#319).
+  $: member = editing && network !== null && networkSharing(network).role === 'member';
+  $: natForm = !member && type === 'nat_cloud' && (editing || natCloudMode === 'new');
+  $: bridgeForm = !member && type === 'linux_bridge';
+  // A NAT-Cloud's subnet is fixed at creation; a bridge's once it has one.
+  $: cidrLocked = editing && (type === 'nat_cloud' || text(stored.cidr) !== '');
   $: defaults = natDefaults(cidr);
+  $: bridgeScopeDefaults = bridgeDefaults(cidr);
+  $: applyBridgeDefaults(bridgeScopeDefaults);
+  $: bridgeDhcpReason = dhcpUnavailableReason(cidr);
+  // The checkbox keeps its state while the subnet is being typed; it only counts once the subnet qualifies.
+  $: bridgeDhcpOn = bridgeDhcp && bridgeScopeDefaults !== null;
+  $: storedBridgeDhcp = stored.dhcp === true;
   // Locked values come from the server, so only editable fields are checked.
-  $: liveErrors = natForm
+  $: liveErrors = (natForm
     ? validateNatForm({ cidr, gateway, dhcp, dhcpStart, dhcpEnd })
-    : ({} as NatErrors);
+    : bridgeForm
+      ? validateBridgeForm({ cidr, dhcp: bridgeDhcp, dhcpServer: bridgeServer, dhcpStart: bridgeStart, dhcpEnd: bridgeEnd })
+      : {}) as FieldErrors;
   $: serverError = saveError && saveError !== staleSaveError ? saveError : rejection;
-  $: serverField = natForm ? natFieldFromServer(serverError?.field) : null;
+  $: serverField = natForm
+    ? natFieldFromServer(serverError?.field)
+    : bridgeForm
+      ? bridgeFieldFromServer(serverError?.field)
+      : null;
   $: errors = (serverField && serverError
     ? { ...liveErrors, [serverField]: serverError.message }
-    : liveErrors) as NatErrors;
+    : liveErrors) as FieldErrors;
   $: formMessage = serverError && !serverField ? serverError.message : '';
-  $: dhcpChanged =
+  $: natDhcpChanged =
     editing &&
-    (dhcp !== (network?.config?.dhcp !== false) ||
-      (dhcp && (dhcpStart.trim() !== configText('dhcp_start') || dhcpEnd.trim() !== configText('dhcp_end'))));
+    natForm &&
+    (dhcp !== (stored.dhcp !== false) ||
+      (dhcp && (dhcpStart.trim() !== text(stored.dhcp_start) || dhcpEnd.trim() !== text(stored.dhcp_end))));
+  $: cidrAdded = editing && bridgeForm && !cidrLocked && cidr.trim() !== '';
+  $: bridgeScope = [
+    ['dhcp_server', bridgeServer, serverEdited],
+    ['dhcp_start', bridgeStart, startEdited],
+    ['dhcp_end', bridgeEnd, endEdited]
+  ] as Array<[ScopeKey, string, boolean]>;
+  $: bridgeScopeChanged =
+    bridgeDhcpOn && bridgeScope.some(([key, value, edited]) => edited && value.trim() !== text(stored[key]));
+  $: bridgeChanged =
+    editing && bridgeForm && (cidrAdded || bridgeDhcpOn !== storedBridgeDhcp || bridgeScopeChanged);
+  $: dhcpChanged = natDhcpChanged || bridgeChanged;
+  $: currentDhcp = natForm ? dhcp : bridgeDhcpOn;
   $: renamed = trimmedName !== (network?.name ?? '');
-  $: turningDhcpOff = editing && !dhcp && network?.config?.dhcp !== false;
+  $: turningDhcpOff =
+    editing && (natForm ? !dhcp && stored.dhcp !== false : bridgeForm && !bridgeDhcpOn && storedBridgeDhcp);
   $: busy = saving || checking;
+  $: liveDhcp = liveInfo?.ip?.dhcp ?? null;
   $: liveStatus = liveDhcp ? dhcpStatus(liveDhcp) : null;
+  $: ownerLab = liveInfo?.sharing?.owner_lab || 'the lab that owns this network';
+  $: kindLabel = type === 'nat_cloud' ? 'NAT-Cloud' : type === 'linux_bridge' ? 'bridge' : 'network';
   // The saved setting is right but the server is not in that state.
   // Never combined with a rename, which must not fail because DHCP cannot start.
   $: repairOnly =
-    editing && !dhcpChanged && !renamed && liveDhcp?.enabled === dhcp && !!liveStatus?.problem;
+    editing &&
+    (natForm || bridgeForm) &&
+    !dhcpChanged &&
+    !renamed &&
+    liveDhcp?.enabled === currentDhcp &&
+    !!liveStatus?.problem;
   $: submitLabel = !editing
     ? 'Create'
     : repairOnly
@@ -324,17 +406,26 @@
     dispatch('cancel');
   }
 
-  /** Side-effect-free server check (host subnet conflicts) before saving. */
-  async function preflight(config: NetworkCreateConfig): Promise<boolean> {
+  /** Side-effect-free server check (subnet conflicts, scope rules) before saving. */
+  async function preflight(kind: 'nat_cloud' | 'linux_bridge', config: NetworkCreateConfig): Promise<boolean> {
     const mine = session;
     checking = true;
     rejection = null;
+    const target = editing ? { network_id: network?.id } : {};
     try {
-      await apiRequest(`/labs/${labId}/networks/validate-nat-cloud`, {
-        method: 'POST',
-        body: { config: { ...config }, ...(editing ? { network_id: network?.id } : {}) },
-        suppressToast: true
-      });
+      await apiRequest(
+        kind === 'nat_cloud'
+          ? `/labs/${labId}/networks/validate-nat-cloud`
+          : `/labs/${labId}/networks/validate-config`,
+        {
+          method: 'POST',
+          body:
+            kind === 'nat_cloud'
+              ? { config: { ...config }, ...target }
+              : { type: kind, config: { ...config }, ...target },
+          suppressToast: true
+        }
+      );
       return open && mine === session;
     } catch (err) {
       if (mine !== session) return false;
@@ -348,25 +439,59 @@
     }
   }
 
+  /** What a bridge form submits: on create everything set, on edit only what changed. */
+  function bridgeConfig(): NetworkCreateConfig {
+    const config: NetworkCreateConfig = {};
+    if (!editing) {
+      if (cidr.trim()) config.cidr = cidr.trim();
+      if (bridgeDhcpOn) {
+        config.dhcp = true;
+        // Untouched prefilled values are the server's defaults; let it fill them.
+        for (const [key, value, edited] of bridgeScope) if (edited && value.trim()) config[key] = value.trim();
+      }
+      return config;
+    }
+    if (cidrAdded) config.cidr = cidr.trim();
+    if (repairOnly || bridgeDhcpOn !== storedBridgeDhcp) config.dhcp = bridgeDhcpOn;
+    if (bridgeDhcpOn) {
+      // Blank means "back to the default", so it is sent too.
+      for (const [key, value, edited] of bridgeScope) {
+        if (edited && value.trim() !== text(stored[key])) config[key] = value.trim();
+      }
+    }
+    return config;
+  }
+
   async function confirm() {
     if (!canSubmit) return;
     dismissServerError();
     const config: NetworkCreateConfig = {};
-    // Validated now; the fields stay editable while the check runs.
+    // Everything submitted is read before the check: the fields, the type
+    // included, stay editable while it runs.
     const name = trimmedName;
+    const submitType = type;
     if (editing) {
-      if (dhcpChanged || repairOnly) {
+      const editType = submitType === 'nat_cloud' ? 'nat_cloud' : 'linux_bridge';
+      if (member) {
+        // Settings belong to the owning lab; a rename is all this lab can do.
+      } else if (natForm && (dhcpChanged || repairOnly)) {
         // Only what changed: a stale form must not undo someone else's edit.
         if (repairOnly || dhcp !== (network?.config?.dhcp !== false)) config.dhcp = dhcp;
         // Blank means "back to the default", so it is sent too.
         if (dhcp && dhcpStart.trim() !== configText('dhcp_start')) config.dhcp_start = dhcpStart.trim();
         if (dhcp && dhcpEnd.trim() !== configText('dhcp_end')) config.dhcp_end = dhcpEnd.trim();
-        if (!(await preflight(config))) return;
+        if (!(await preflight('nat_cloud', config))) return;
+      } else if (bridgeForm && (dhcpChanged || repairOnly)) {
+        Object.assign(config, bridgeConfig());
+        if (!(await preflight('linux_bridge', config))) return;
       }
-      dispatch('confirm', { name, type: 'nat_cloud', config });
+      dispatch('confirm', { name, type: editType, config });
       return;
     }
-    if (type === 'nat_cloud') {
+    if (submitType === 'linux_bridge') {
+      Object.assign(config, bridgeConfig());
+      if (Object.keys(config).length > 0 && !(await preflight('linux_bridge', config))) return;
+    } else if (submitType === 'nat_cloud') {
       if (natCloudMode === 'existing') {
         config.shared_cloud_id = selectedNatCloudId;
       } else {
@@ -376,17 +501,17 @@
         if (dhcp && dhcpStart.trim()) config.dhcp_start = dhcpStart.trim();
         if (dhcp && dhcpEnd.trim()) config.dhcp_end = dhcpEnd.trim();
         if (egressInterface.trim()) config.egress_interface = egressInterface.trim();
-        if (!(await preflight(config))) return;
+        if (!(await preflight('nat_cloud', config))) return;
       }
-    } else if (type === 'bridge_cloud') {
+    } else if (submitType === 'bridge_cloud') {
       config.host_bridge = selectedHostBridge;
-    } else if (type === 'shared_network') {
+    } else if (submitType === 'shared_network') {
       if (!selectedShared) return;
       config.shared_network_id = selectedShared.id;
       dispatch('confirm', { name, type: selectedShared.type, config });
       return;
     }
-    dispatch('confirm', { name, type, config });
+    dispatch('confirm', { name, type: submitType, config });
   }
 
   function onKey(event: KeyboardEvent) {
@@ -454,7 +579,7 @@
       role="dialog"
       tabindex="-1"
       aria-modal="true"
-      aria-label={editing ? 'Configure NAT-Cloud' : 'Configure new network'}
+      aria-label={editing ? `Configure ${kindLabel}` : 'Configure new network'}
       class="flex w-full max-w-md flex-col overflow-hidden rounded-[1.4rem] border border-slate-700 bg-slate-950/95 shadow-2xl shadow-black/40"
       data-testid="network-config-modal"
     >
@@ -464,7 +589,7 @@
             {editing ? 'Existing network' : 'New network'}
           </div>
           <div class="mt-1 text-sm font-semibold text-slate-100">
-            {editing || type === 'nat_cloud' ? 'Configure NAT-Cloud' : 'Configure network'}
+            Configure {kindLabel}
           </div>
         </div>
         <button
@@ -509,7 +634,7 @@
         </label>
         {/if}
 
-        {#if type === 'nat_cloud'}
+        {#if type === 'nat_cloud' && !member}
           <div class="space-y-3 rounded-xl border border-slate-800 bg-slate-900/30 p-3">
             {#if !editing}
             <div class="grid grid-cols-2 rounded-xl border border-slate-800 bg-slate-950/60 p-1">
@@ -576,7 +701,7 @@
                     placeholder={'Auto from NAT-Cloud pool'}
                     aria-invalid={errors.cidr ? 'true' : undefined}
                     readonly={editing}
-                    aria-describedby={describedBy(errors.cidr, 'nat-cidr-error', editing)}
+                    aria-describedby={describedBy(errors.cidr, 'nat-cidr-error', editing ? 'nat-locked-note' : '')}
                   />
                   {#if errors.cidr}
                     <p id="nat-cidr-error" class="text-xs text-red-300" role="alert">{errors.cidr}</p>
@@ -597,7 +722,7 @@
                     placeholder={defaults?.gateway ?? 'Automatic'}
                     aria-invalid={errors.gateway ? 'true' : undefined}
                     readonly={editing}
-                    aria-describedby={describedBy(errors.gateway, 'nat-gateway-error', editing)}
+                    aria-describedby={describedBy(errors.gateway, 'nat-gateway-error', editing ? 'nat-locked-note' : '')}
                   />
                   {#if errors.gateway}
                     <p id="nat-gateway-error" class="text-xs text-red-300" role="alert">{errors.gateway}</p>
@@ -618,7 +743,7 @@
                     placeholder={'Default route'}
                     aria-invalid={errors.egress_interface ? 'true' : undefined}
                     readonly={editing}
-                    aria-describedby={describedBy(errors.egress_interface, 'nat-egress-error', editing)}
+                    aria-describedby={describedBy(errors.egress_interface, 'nat-egress-error', editing ? 'nat-locked-note' : '')}
                   />
                   {#if errors.egress_interface}
                     <p id="nat-egress-error" class="text-xs text-red-300" role="alert">{errors.egress_interface}</p>
@@ -643,7 +768,7 @@
                           ? ` · ${liveDhcp.lease_count} leased`
                           : ''}
                       {:else}
-                        {liveDhcpError ? 'Server: status unavailable' : 'Server: checking…'}
+                        {liveInfoError ? 'Server: status unavailable' : 'Server: checking…'}
                       {/if}
                     </span>
                   {/if}
@@ -701,6 +826,186 @@
                 {/if}
               </div>
             {/if}
+          </div>
+        {/if}
+
+        {#if bridgeForm}
+          <div class="space-y-3 rounded-xl border border-slate-800 bg-slate-900/30 p-3" data-testid="bridge-settings">
+            <div class="grid gap-3 sm:grid-cols-2">
+              <div class="space-y-1.5 sm:col-span-2">
+                <label for="bridge-cidr" class="flex items-center gap-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">
+                  CIDR
+                  {#if cidrLocked}<Lock class="h-3 w-3" aria-hidden="true" />{/if}
+                </label>
+                <input
+                  id="bridge-cidr"
+                  bind:value={cidr}
+                  type="text"
+                  autocomplete="off"
+                  spellcheck="false"
+                  class={fieldClass(errors.cidr, cidrLocked)}
+                  placeholder="Optional, e.g. 10.10.0.0/24"
+                  aria-invalid={errors.cidr ? 'true' : undefined}
+                  readonly={cidrLocked}
+                  aria-describedby={describedBy(errors.cidr, 'bridge-cidr-error', cidrLocked ? 'bridge-locked-note' : 'bridge-cidr-note')}
+                />
+                {#if errors.cidr}
+                  <p id="bridge-cidr-error" class="text-xs text-red-300" role="alert">{errors.cidr}</p>
+                {/if}
+                {#if cidrLocked}
+                  <p id="bridge-locked-note" class="text-xs text-slate-400">
+                    The subnet cannot be changed. To use another one, delete and recreate the network.
+                  </p>
+                {:else}
+                  <p id="bridge-cidr-note" class="text-xs text-slate-400">
+                    Optional. Without DHCP it is only a label: the host takes no address on this network.
+                  </p>
+                {/if}
+              </div>
+
+              <div class="flex items-center justify-between gap-3 border-t border-slate-800 pt-3 sm:col-span-2">
+                {#if bridgeScopeDefaults}
+                  <label class="flex items-center gap-2">
+                    <input
+                      bind:checked={bridgeDhcp}
+                      type="checkbox"
+                      class="h-4 w-4 rounded border-slate-700 bg-slate-900"
+                      aria-invalid={errors.dhcp ? 'true' : undefined}
+                      aria-describedby={errors.dhcp ? 'bridge-dhcp-error' : undefined}
+                    />
+                    <span class="text-xs text-slate-300">Enable DHCP</span>
+                  </label>
+                {:else}
+                  <p class="text-xs text-slate-400" data-testid="bridge-dhcp-unavailable">{bridgeDhcpReason}</p>
+                {/if}
+                {#if editing && (liveStatus || (cidrLocked && bridgeScopeDefaults && !liveInfo))}
+                  <span class="flex shrink-0 items-center gap-1.5 text-xs text-slate-400" data-testid="bridge-dhcp-status">
+                    {#if liveStatus}
+                      <span class={`h-2 w-2 rounded-full ${liveStatus.dot}`} aria-hidden="true"></span>
+                      Server: {liveStatus.label}{liveDhcp && liveDhcp.lease_count > 0
+                        ? ` · ${liveDhcp.lease_count} leased`
+                        : ''}
+                    {:else}
+                      {liveInfoError ? 'Server: status unavailable' : 'Server: checking…'}
+                    {/if}
+                  </span>
+                {/if}
+              </div>
+              {#if errors.dhcp}
+                <p id="bridge-dhcp-error" class="text-xs text-red-300 sm:col-span-2" role="alert">{errors.dhcp}</p>
+              {/if}
+              {#if editing && liveStatus?.problem}
+                <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
+                  {liveStatus.problem}
+                </p>
+              {/if}
+
+              {#if bridgeDhcpOn}
+                <div class="space-y-1.5 sm:col-span-2">
+                  <label for="bridge-dhcp-server" class="flex items-center gap-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">
+                    DHCP server
+                  </label>
+                  <input
+                    id="bridge-dhcp-server"
+                    bind:value={bridgeServer}
+                    on:input={() => (serverEdited = true)}
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class={fieldClass(errors.dhcp_server, false)}
+                    placeholder={bridgeScopeDefaults?.server ?? ''}
+                    aria-invalid={errors.dhcp_server ? 'true' : undefined}
+                    aria-describedby={describedBy(errors.dhcp_server, 'bridge-dhcp-server-error', 'bridge-dhcp-server-note')}
+                  />
+                  {#if errors.dhcp_server}
+                    <p id="bridge-dhcp-server-error" class="text-xs text-red-300" role="alert">{errors.dhcp_server}</p>
+                  {/if}
+                  <p id="bridge-dhcp-server-note" class="text-xs text-slate-400">
+                    The host's address on this network, outside the range. It answers DHCP only.
+                  </p>
+                </div>
+                <div class="space-y-1.5">
+                  <label for="bridge-dhcp-start" class="flex items-center gap-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">
+                    DHCP start
+                  </label>
+                  <input
+                    id="bridge-dhcp-start"
+                    bind:value={bridgeStart}
+                    on:input={() => (startEdited = true)}
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class={fieldClass(errors.dhcp_start, false)}
+                    placeholder={bridgeScopeDefaults?.start ?? ''}
+                    aria-invalid={errors.dhcp_start ? 'true' : undefined}
+                    aria-describedby={errors.dhcp_start ? 'bridge-dhcp-start-error' : undefined}
+                  />
+                  {#if errors.dhcp_start}
+                    <p id="bridge-dhcp-start-error" class="text-xs text-red-300" role="alert">{errors.dhcp_start}</p>
+                  {/if}
+                </div>
+                <div class="space-y-1.5">
+                  <label for="bridge-dhcp-end" class="flex items-center gap-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">
+                    DHCP end
+                  </label>
+                  <input
+                    id="bridge-dhcp-end"
+                    bind:value={bridgeEnd}
+                    on:input={() => (endEdited = true)}
+                    type="text"
+                    autocomplete="off"
+                    spellcheck="false"
+                    class={fieldClass(errors.dhcp_end, false)}
+                    placeholder={bridgeScopeDefaults?.end ?? ''}
+                    aria-invalid={errors.dhcp_end ? 'true' : undefined}
+                    aria-describedby={errors.dhcp_end ? 'bridge-dhcp-end-error' : undefined}
+                  />
+                  {#if errors.dhcp_end}
+                    <p id="bridge-dhcp-end-error" class="text-xs text-red-300" role="alert">{errors.dhcp_end}</p>
+                  {/if}
+                </div>
+                <p
+                  class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2"
+                  data-testid="bridge-dhcp-warning"
+                >
+                  Run only one DHCP server on this network: turn off DHCP on any node attached here, such as a lab
+                  router. Leases carry no gateway or DNS server.
+                </p>
+              {:else if turningDhcpOff}
+                <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
+                  Nodes keep their current addresses until the lease expires (12&nbsp;h) or they renew.
+                </p>
+              {/if}
+            </div>
+          </div>
+        {/if}
+
+        {#if member}
+          <div
+            class="space-y-3 rounded-xl border border-dashed border-slate-800 bg-slate-900/30 p-3"
+            data-testid="network-member-settings"
+          >
+            <p class="flex items-start gap-1.5 text-xs text-slate-300">
+              <Lock class="mt-0.5 h-3 w-3 shrink-0" aria-hidden="true" />
+              <span>
+                Settings are managed by <strong class="font-medium text-slate-100">{ownerLab}</strong>. Change them in
+                that lab; only the name can be changed here.
+              </span>
+            </p>
+            <dl class="grid grid-cols-[auto,1fr] gap-x-4 gap-y-1 text-xs">
+              <dt class="text-slate-500">Subnet</dt>
+              <dd class="text-slate-300">
+                {liveInfo ? (liveInfo.ip?.cidr ?? 'None') : liveInfoError ? 'Unavailable' : 'Loading…'}
+              </dd>
+              <dt class="text-slate-500">DHCP</dt>
+              <dd class="text-slate-300">
+                {#if liveDhcp?.enabled}
+                  On{liveDhcp.start && liveDhcp.end ? ` · ${liveDhcp.start} – ${liveDhcp.end}` : ''}
+                {:else}
+                  {liveInfo ? 'Off' : liveInfoError ? 'Unavailable' : 'Loading…'}
+                {/if}
+              </dd>
+            </dl>
           </div>
         {/if}
 
