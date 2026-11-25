@@ -3,6 +3,8 @@ import logging
 import os
 import shutil
 import uuid
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 
 from sqlalchemy import select
@@ -12,6 +14,7 @@ from app.config import get_settings
 from app.models.lab import LabMeta
 from app.services import host_net
 from app.services.console_recording import RECORDINGS_FOLDER
+from app.services.lab_lock import lab_lock, lab_lock_async
 from app.services.shared_network_service import (
     assert_no_external_members_for_scope,
     is_member,
@@ -446,6 +449,53 @@ def _strip_legacy_fields(data: dict) -> dict:
     return cleaned
 
 
+class LockedLab:
+    """A lab file read under its ``lab_lock``; :meth:`save` writes it back."""
+
+    def __init__(self, path: str, data: dict):
+        self.path = path
+        self.data = data
+        self.revision: int | None = None
+
+    def save(self, *, bump_revision: bool = True) -> int | None:
+        """Write ``data`` and return the ``meta.revision`` that landed."""
+        self.revision = LabService.write_lab_json_static(
+            self.path, self.data, bump_revision=bump_revision
+        )
+        return self.revision
+
+    def restore(self, snapshot: dict) -> None:
+        """Write back a copy taken under this lock. A rollback is not an edit."""
+        self.data = snapshot
+        self.save(bump_revision=False)
+
+
+@contextmanager
+def locked_lab(filename: str, *, reader: Callable[[str], dict] | None = None) -> Iterator[LockedLab]:
+    """Take the lab's ``lab_lock`` and read the lab inside it (#328).
+
+    Every read-modify-write of a lab file goes through this or
+    :func:`locked_lab_async`, so a change is applied to the file as it is now
+    and no other writer can land between the read and the write.
+    """
+    normalized = _normalize_relative_lab_path(filename)
+    with lab_lock(normalized, get_settings().LABS_DIR):
+        yield LockedLab(normalized, (reader or LabService.read_lab_json_static)(normalized))
+
+
+@asynccontextmanager
+async def locked_lab_async(
+    filename: str, *, reader: Callable[[str], dict] | None = None
+) -> AsyncIterator[LockedLab]:
+    """:func:`locked_lab` for coroutines: waits for the lock off the event loop.
+
+    Keep the body free of awaits that need this lab's lock.
+    """
+    normalized = _normalize_relative_lab_path(filename)
+    async with lab_lock_async(normalized, get_settings().LABS_DIR):
+        yield LockedLab(normalized, (reader or LabService.read_lab_json_static)(normalized))
+
+
 class LabService:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -572,11 +622,11 @@ class LabService:
         await self.db.refresh(lab)
 
         if filepath.exists():
-            data = LabService.read_lab_json_static(lab.filename)
-            for field in db_fields:
-                if field in updates and updates[field] is not None:
-                    data["meta"][field] = updates[field]
-            LabService.write_lab_json_static(lab.filename, data)
+            async with locked_lab_async(lab.filename) as locked:
+                for field in db_fields:
+                    if field in updates and updates[field] is not None:
+                        locked.data["meta"][field] = updates[field]
+                locked.save()
 
         return lab
 
@@ -627,7 +677,12 @@ class LabService:
         return revision if isinstance(revision, int) else None
 
     @staticmethod
-    def write_lab_json_static(filename: str, data: dict, *, bump_revision: bool = True) -> None:
+    def write_lab_json_static(filename: str, data: dict, *, bump_revision: bool = True) -> int | None:
+        """Write a lab file; returns the ``meta.revision`` written.
+
+        Callers that read-modify-write must hold the lab's ``lab_lock`` from
+        the read to here: use :func:`locked_lab` / :func:`locked_lab_async`.
+        """
         filepath = _lab_file_path(filename)
         filepath.parent.mkdir(parents=True, exist_ok=True)
 
@@ -671,3 +726,6 @@ class LabService:
             cleaned["meta"] = revision_meta
 
         _replace_json(filepath, cleaned)
+        meta = cleaned.get("meta")
+        revision = meta.get("revision") if isinstance(meta, dict) else None
+        return revision if isinstance(revision, int) else None

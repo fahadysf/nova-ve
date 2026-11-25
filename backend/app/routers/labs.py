@@ -9,6 +9,7 @@ import logging
 import re
 import shutil
 import uuid
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
@@ -36,8 +37,14 @@ from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleD
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
 from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
-from app.services.lab_lock import lab_lock
-from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
+from app.services.lab_lock import lab_lock_async
+from app.services.lab_service import (
+    LEGACY_SCHEMA_ERROR,
+    LabService,
+    _lab_file_path,
+    _normalize_relative_lab_path,
+    locked_lab_async,
+)
 from app.services.network_service import NetworkServiceError, network_service
 from app.services.cloud_inventory_service import SharedCloudReferenceError
 from app.services.shared_network_service import (
@@ -119,6 +126,28 @@ def _read_lab_data(lab_path: str) -> dict:
         if message.startswith(LEGACY_SCHEMA_ERROR):
             raise LegacyLabSchemaError(lab_path) from exc
         raise
+
+
+@asynccontextmanager
+async def _locked_lab(lab_path: str):
+    """Hold the lab's ``lab_lock`` and yield ``(lab, None)``, read inside it (#328).
+
+    Yields ``(None, response)`` when the lab cannot be read. Every route that
+    changes a lab file writes through this, so the change is applied to the
+    file as it is now and no other writer lands between the read and the
+    write. Keep awaits that need the lab's lock out of the body.
+    """
+    async with AsyncExitStack() as stack:
+        lab = error = None
+        try:
+            lab = await stack.enter_async_context(
+                locked_lab_async(lab_path, reader=_read_lab_data)
+            )
+        except LegacyLabSchemaError as exc:
+            error = _legacy_schema_response(exc)
+        except FileNotFoundError:
+            error = {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+        yield lab, error
 
 
 def _lab_revision(data: dict) -> int:
@@ -681,9 +710,6 @@ async def update_topology(
             "message": str(e),
         }
 
-    settings = get_settings()
-    normalized = _normalize_relative_lab_path(scoped_path)
-
     # #297: before-values of the node/network fields this payload patches.
     # The canvas saves link styling through this endpoint on every edit, so
     # only a payload that really patches a field earns an audit entry.
@@ -694,17 +720,10 @@ async def update_topology(
     # network_service via lab_lock. Without this, two concurrent writers can
     # interleave and lose mutations. Plus, the post-write reconcile below has
     # to see the same JSON state we just wrote — read inside the lock.
-    with lab_lock(normalized, settings.LABS_DIR):
-        try:
-            data = _read_lab_data(scoped_path)
-        except LegacyLabSchemaError as exc:
-            return _legacy_schema_response(exc)
-        except FileNotFoundError:
-            return {
-                "code": 404,
-                "status": "fail",
-                "message": "Lab does not exist (60038).",
-            }
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
 
         # #245: same optimistic-concurrency guard as PUT /layout.
         mismatch = _if_match_mismatch(request, data)
@@ -762,7 +781,7 @@ async def update_topology(
                             patched_networks.setdefault(str(network_id), {})[field] = network.get(field)
                             network[field] = value
 
-        LabService.write_lab_json_static(scoped_path, data)
+        lab.save()
 
         # Issue #174 follow-up: bridge the legacy PUT /topology bypass that
         # previously skipped runtime reconciliation. The UI deletes a link by
@@ -932,8 +951,6 @@ async def create_node(
             "message": str(e),
         }
 
-    nodes = data.setdefault("nodes", {})
-    next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
     try:
         template = TemplateService().validate_node_request(
             request.type,
@@ -954,17 +971,24 @@ async def create_node(
             "message": console_error,
         }
 
-    node = _build_node_payload(
-        lab_id=str(data.get("id") or scoped_path),
-        node_id=next_id,
-        request=request,
-        template=template,
-        name=request.name,
-        left=request.left,
-        top=request.top,
-    )
-    nodes[str(next_id)] = node
-    LabService.write_lab_json_static(scoped_path, data)
+    # #328: the id and the write come from the file as it is under the lock.
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
+        nodes = data.setdefault("nodes", {})
+        next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
+        node = _build_node_payload(
+            lab_id=str(data.get("id") or scoped_path),
+            node_id=next_id,
+            request=request,
+            template=template,
+            name=request.name,
+            left=request.left,
+            top=request.top,
+        )
+        nodes[str(next_id)] = node
+        lab.save()
 
     # #297: covers from-template creation too — that handler delegates here.
     await audit_service.record(
@@ -980,7 +1004,7 @@ async def create_node(
         "message": "Node created successfully.",
         "data": node,
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": lab.revision,
     }
 
 
@@ -1244,9 +1268,6 @@ async def create_nodes_from_paired_template(
             },
         )
 
-    settings = get_settings()
-    normalized = _normalize_relative_lab_path(scoped_path)
-
     from app.services.link_service import LinkService
 
     link_service = LinkService()
@@ -1258,20 +1279,10 @@ async def create_nodes_from_paired_template(
     # would silently clobber their work). LinkService.create_link normally
     # acquires its own lab_lock; we pass _lab_lock_held=True so the inner
     # call uses a nullcontext (fcntl flock is not reentrant on Linux).
-    with lab_lock(normalized, settings.LABS_DIR):
-        try:
-            data = _read_lab_data(scoped_path)
-        except LegacyLabSchemaError as exc:
-            return _json_error(422, _legacy_schema_response(exc))
-        except FileNotFoundError:
-            return _json_error(
-                404,
-                {
-                    "code": 404,
-                    "status": "fail",
-                    "message": "Lab does not exist (60038).",
-                },
-            )
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return _json_error(error["code"], error)
+        data = lab.data
 
         snapshot = copy.deepcopy(data)
         nodes_map = data.setdefault("nodes", {})
@@ -1309,7 +1320,7 @@ async def create_nodes_from_paired_template(
                 created_nodes.append(payload)
                 next_id += 1
 
-            LabService.write_lab_json_static(scoped_path, data)
+            lab.save()
         except (ValueError, TemplateError) as exc:
             # #208-MEDIUM — bad child scalars (e.g. ``ethernet: "not-an-int"``)
             # and malformed-child entries are template defects, not server
@@ -1317,7 +1328,7 @@ async def create_nodes_from_paired_template(
             # message instead of a generic 500. Pre-flight already catches
             # link/iface defects; this catches the scalar shape that pre-flight
             # doesn't (and shouldn't, to keep validator scope tight).
-            LabService.write_lab_json_static(scoped_path, snapshot, bump_revision=False)
+            lab.restore(snapshot)
             _logger.exception(
                 "from-paired-template: node-creation phase failed for %s "
                 "(template defect); rolled back",
@@ -1335,7 +1346,7 @@ async def create_nodes_from_paired_template(
                 },
             )
         except Exception as exc:  # noqa: BLE001 — broad catch is the rollback contract
-            LabService.write_lab_json_static(scoped_path, snapshot, bump_revision=False)
+            lab.restore(snapshot)
             _logger.exception(
                 "from-paired-template: node-creation phase failed for %s; rolled back",
                 request.template_key,
@@ -1400,7 +1411,7 @@ async def create_nodes_from_paired_template(
                         done.get("id"),
                         comp_exc,
                     )
-            LabService.write_lab_json_static(scoped_path, snapshot, bump_revision=False)
+            lab.restore(snapshot)
             _logger.exception(
                 "from-paired-template: link-creation phase failed for %s; rolled back",
                 request.template_key,
@@ -1473,6 +1484,8 @@ async def create_nodes_from_paired_template(
                     "message": f"Failed to create paired links: {exc}",
                 },
             )
+        # The links wrote the file after lab.save(); read what landed last.
+        revision = LabService.read_meta_revision_static(lab.path)
 
     # #297: one entry per object the template brought into existence.
     await audit_service.record_batch(
@@ -1518,7 +1531,7 @@ async def create_nodes_from_paired_template(
             "links": created_links,
         },
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": revision,
     }
 
 
@@ -1546,8 +1559,6 @@ async def create_nodes_batch(
             "message": str(e),
         }
 
-    nodes = data.setdefault("nodes", {})
-    next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
     try:
         template = TemplateService().validate_node_request(
             request.type,
@@ -1568,23 +1579,29 @@ async def create_nodes_batch(
             "message": console_error,
         }
 
-    created_nodes = []
-    for index in range(request.count):
-        node_id = next_id + index
-        left, top = _node_position(index, request.left, request.top, request.placement)
-        node = _build_node_payload(
-            lab_id=str(data.get("id") or scoped_path),
-            node_id=node_id,
-            request=request,
-            template=template,
-            name=f"{request.name_prefix}-{index + 1}",
-            left=left,
-            top=top,
-        )
-        nodes[str(node_id)] = node
-        created_nodes.append(node)
-
-    LabService.write_lab_json_static(scoped_path, data)
+    # #328: ids and the write come from the file as it is under the lock.
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
+        nodes = data.setdefault("nodes", {})
+        next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
+        created_nodes = []
+        for index in range(request.count):
+            node_id = next_id + index
+            left, top = _node_position(index, request.left, request.top, request.placement)
+            node = _build_node_payload(
+                lab_id=str(data.get("id") or scoped_path),
+                node_id=node_id,
+                request=request,
+                template=template,
+                name=f"{request.name_prefix}-{index + 1}",
+                left=left,
+                top=top,
+            )
+            nodes[str(node_id)] = node
+            created_nodes.append(node)
+        lab.save()
 
     # #297: one entry per node — each is an object that now exists.
     await audit_service.record_batch(
@@ -1610,7 +1627,7 @@ async def create_nodes_batch(
             "nodes": created_nodes,
         },
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": lab.revision,
     }
 
 
@@ -1712,15 +1729,6 @@ async def update_node(
 ):
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-        data = _read_lab_data(scoped_path)
-    except LegacyLabSchemaError as exc:
-        return _legacy_schema_response(exc)
-    except FileNotFoundError:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
     except PermissionError as e:
         return {
             "code": 403,
@@ -1728,55 +1736,60 @@ async def update_node(
             "message": str(e),
         }
 
-    node = data.get("nodes", {}).get(str(node_id))
-    if not node:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Node does not exist.",
-        }
+    # #328: validate and apply the edit against the file as it is under the lock.
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
+        node = data.get("nodes", {}).get(str(node_id))
+        if not node:
+            return {
+                "code": 404,
+                "status": "fail",
+                "message": "Node does not exist.",
+            }
 
-    validation_error = _validate_node_update_request(
-        node,
-        request,
-        _node_is_running(data, node_id),
-    )
-    if validation_error:
-        return {
-            "code": 400,
-            "status": "fail",
-            "message": validation_error,
-        }
+        validation_error = _validate_node_update_request(
+            node,
+            request,
+            _node_is_running(data, node_id),
+        )
+        if validation_error:
+            return {
+                "code": 400,
+                "status": "fail",
+                "message": validation_error,
+            }
 
-    new_mac = (request.extras or {}).get("firstmac")
-    old_extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
-    if (
-        new_mac
-        and new_mac != old_extras.get("firstmac")
-        and not _MAC_RE.fullmatch(str(new_mac))
-    ):
-        return {
-            "code": 400,
-            "status": "fail",
-            "message": "First MAC address must look like 50:00:00:01:00:00.",
-        }
+        new_mac = (request.extras or {}).get("firstmac")
+        old_extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
+        if (
+            new_mac
+            and new_mac != old_extras.get("firstmac")
+            and not _MAC_RE.fullmatch(str(new_mac))
+        ):
+            return {
+                "code": 400,
+                "status": "fail",
+                "message": "First MAC address must look like 50:00:00:01:00:00.",
+            }
 
-    # #297: shallow snapshot — the trail reports only what actually changed.
-    before = dict(node)
+        # #297: shallow snapshot — the trail reports only what actually changed.
+        before = dict(node)
 
-    for field, value in request.model_dump(exclude_unset=True).items():
-        # ``second_console: null`` is meaningful — it clears the secondary
-        # console (#268). Every other field keeps the skip-None behavior.
-        if value is not None or field == "second_console":
-            node[field] = value
+        for field, value in request.model_dump(exclude_unset=True).items():
+            # ``second_console: null`` is meaningful — it clears the secondary
+            # console (#268). Every other field keeps the skip-None behavior.
+            if value is not None or field == "second_console":
+                node[field] = value
 
-    node["interfaces"] = _resize_interfaces(
-        node.get("interfaces", []),
-        node.get("type", "qemu"),
-        int(node.get("ethernet", 0)),
-    )
-    _apply_first_mac_edit(before, node)
-    LabService.write_lab_json_static(scoped_path, data)
+        node["interfaces"] = _resize_interfaces(
+            node.get("interfaces", []),
+            node.get("type", "qemu"),
+            int(node.get("ethernet", 0)),
+        )
+        _apply_first_mac_edit(before, node)
+        lab.save()
 
     # A save that changed nothing (the edit dialog re-submits every field)
     # is not an event worth a row.
@@ -1797,7 +1810,7 @@ async def update_node(
         "message": "Node updated successfully.",
         "data": enriched,
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": lab.revision,
     }
 
 
@@ -1836,33 +1849,41 @@ async def delete_node(
     # #297: describe the node before it leaves the lab.
     audit_context = audit_service.node_context(data, node_id, scoped_path)
 
+    # Host teardown runs before the lock: it can take a while and does not
+    # write the lab file.
     try:
         NodeRuntimeService().wipe_node(data, node_id)
     except NodeRuntimeError:
         pass
 
-    nodes.pop(str(node_id))
-    data["topology"] = [
-        link
-        for link in data.get("topology", [])
-        if link.get("source") != f"node{node_id}" and link.get("destination") != f"node{node_id}"
-    ]
-    # Issue #174 follow-up: write_lab_json_static no longer regenerates
-    # links[] from topology[] for v2 labs (it preserves links[] as
-    # authoritative). Drop links[] entries referencing the deleted node
-    # explicitly so the topology[] filter above doesn't leave stale links.
-    data["links"] = [
-        link
-        for link in data.get("links", []) or []
-        if not (
-            isinstance(link, dict)
-            and (
-                (isinstance(link.get("from"), dict) and link["from"].get("node_id") == node_id)
-                or (isinstance(link.get("to"), dict) and link["to"].get("node_id") == node_id)
+    # #328: remove the node from the file as it is under the lock, so edits
+    # made while the node was torn down are kept.
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
+        data.get("nodes", {}).pop(str(node_id), None)
+        data["topology"] = [
+            link
+            for link in data.get("topology", [])
+            if link.get("source") != f"node{node_id}" and link.get("destination") != f"node{node_id}"
+        ]
+        # Issue #174 follow-up: write_lab_json_static no longer regenerates
+        # links[] from topology[] for v2 labs (it preserves links[] as
+        # authoritative). Drop links[] entries referencing the deleted node
+        # explicitly so the topology[] filter above doesn't leave stale links.
+        data["links"] = [
+            link
+            for link in data.get("links", []) or []
+            if not (
+                isinstance(link, dict)
+                and (
+                    (isinstance(link.get("from"), dict) and link["from"].get("node_id") == node_id)
+                    or (isinstance(link.get("to"), dict) and link["to"].get("node_id") == node_id)
+                )
             )
-        )
-    ]
-    LabService.write_lab_json_static(scoped_path, data)
+        ]
+        lab.save()
 
     await audit_service.record("node.delete", actor=current_user.username, **audit_context)
     return {
@@ -1870,7 +1891,7 @@ async def delete_node(
         "status": "success",
         "message": "Node deleted successfully.",
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": lab.revision,
     }
 
 
@@ -2568,15 +2589,6 @@ async def create_network(
 ):
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-        data = _read_lab_data(scoped_path)
-    except LegacyLabSchemaError as exc:
-        return _legacy_schema_response(exc)
-    except FileNotFoundError:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
     except PermissionError as e:
         return {
             "code": 403,
@@ -2584,27 +2596,32 @@ async def create_network(
             "message": str(e),
         }
 
-    networks = data.setdefault("networks", {})
-    next_id = max((int(network_key) for network_key in networks.keys()), default=0) + 1
-    network = {
-        "id": next_id,
-        "name": request.name,
-        "type": request.type,
-        "left": request.left,
-        "top": request.top,
-        "icon": "01-Cloud-Default.svg",
-        "width": 0,
-        "style": "Solid",
-        "linkstyle": "Straight",
-        "color": "",
-        "label": "",
-        "visibility": True,
-        "implicit": False,
-        "smart": -1,
-        "config": {},
-    }
-    networks[str(next_id)] = network
-    LabService.write_lab_json_static(scoped_path, data)
+    # #328: the id and the write come from the file as it is under the lock.
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
+        networks = data.setdefault("networks", {})
+        next_id = max((int(network_key) for network_key in networks.keys()), default=0) + 1
+        network = {
+            "id": next_id,
+            "name": request.name,
+            "type": request.type,
+            "left": request.left,
+            "top": request.top,
+            "icon": "01-Cloud-Default.svg",
+            "width": 0,
+            "style": "Solid",
+            "linkstyle": "Straight",
+            "color": "",
+            "label": "",
+            "visibility": True,
+            "implicit": False,
+            "smart": -1,
+            "config": {},
+        }
+        networks[str(next_id)] = network
+        lab.save()
     network["count"] = 0
 
     return {
@@ -2613,7 +2630,7 @@ async def create_network(
         "message": "Network created successfully.",
         "data": network,
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": lab.revision,
     }
 
 
@@ -2626,15 +2643,6 @@ async def update_network(
 ):
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-        data = _read_lab_data(scoped_path)
-    except LegacyLabSchemaError as exc:
-        return _legacy_schema_response(exc)
-    except FileNotFoundError:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
     except PermissionError as e:
         return {
             "code": 403,
@@ -2642,61 +2650,75 @@ async def update_network(
             "message": str(e),
         }
 
-    network = data.get("networks", {}).get(str(network_id))
-    if not network:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Network does not exist.",
-        }
+    # #328: validate and apply against the file as it is under the lock. A
+    # NAT-Cloud edit is handed to the network service after the lock is
+    # released; it takes the lock itself and validates again.
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
+        network = data.get("networks", {}).get(str(network_id))
+        if not network:
+            return {
+                "code": 404,
+                "status": "fail",
+                "message": "Network does not exist.",
+            }
 
-    # Bridge-Cloud security: same rule as ``NetworkService.patch_network``
-    # — refuse type↔bridge_cloud transitions and refuse setting
-    # ``config.host_bridge`` on a non-bridge_cloud record.  See plan
-    # §6.2 T2 + .omc/plans/bridge-cloud-feature.md.
-    patch = request.model_dump(exclude_unset=True)
-    current_type = str(network.get("type", "linux_bridge") or "linux_bridge")
-    new_type = patch.get("type")
-    if new_type is not None and new_type != current_type:
-        if new_type == "bridge_cloud" or current_type == "bridge_cloud":
+        # Bridge-Cloud security: same rule as ``NetworkService.patch_network``
+        # — refuse type↔bridge_cloud transitions and refuse setting
+        # ``config.host_bridge`` on a non-bridge_cloud record.  See plan
+        # §6.2 T2 + .omc/plans/bridge-cloud-feature.md.
+        patch = request.model_dump(exclude_unset=True)
+        current_type = str(network.get("type", "linux_bridge") or "linux_bridge")
+        new_type = patch.get("type")
+        if new_type is not None and new_type != current_type:
+            if new_type == "bridge_cloud" or current_type == "bridge_cloud":
+                return {
+                    "code": 422,
+                    "status": "fail",
+                    "message": (
+                        "Cannot mutate network type to/from 'bridge_cloud' via "
+                        "update; delete and recreate the network instead."
+                    ),
+                }
+        new_config = patch.get("config")
+        if isinstance(new_config, dict) and "host_bridge" in new_config:
+            if current_type != "bridge_cloud":
+                return {
+                    "code": 422,
+                    "status": "fail",
+                    "message": (
+                        "config.host_bridge is only valid on bridge_cloud "
+                        "networks; cannot set it on a non-bridge_cloud record."
+                    ),
+                }
+        if current_type == "bridge_cloud" and "config" in patch:
             return {
                 "code": 422,
                 "status": "fail",
                 "message": (
-                    "Cannot mutate network type to/from 'bridge_cloud' via "
-                    "update; delete and recreate the network instead."
+                    "Cannot mutate config on a bridge_cloud network; "
+                    "delete and recreate to retarget the host bridge."
                 ),
             }
-    new_config = patch.get("config")
-    if isinstance(new_config, dict) and "host_bridge" in new_config:
-        if current_type != "bridge_cloud":
-            return {
-                "code": 422,
-                "status": "fail",
-                "message": (
-                    "config.host_bridge is only valid on bridge_cloud "
-                    "networks; cannot set it on a non-bridge_cloud record."
-                ),
-            }
-    if current_type == "bridge_cloud" and "config" in patch:
-        return {
-            "code": 422,
-            "status": "fail",
-            "message": (
-                "Cannot mutate config on a bridge_cloud network; "
-                "delete and recreate to retarget the host bridge."
-            ),
-        }
 
-    violation = patch_violation(network, patch)
-    if violation:
-        return {"code": 422, "status": "fail", "message": violation}
+        violation = patch_violation(network, patch)
+        if violation:
+            return {"code": 422, "status": "fail", "message": violation}
 
-    before = dict(network)
-    retype = new_type is not None and new_type != current_type
-    if (current_type == "nat_cloud" and (isinstance(new_config, dict) or retype)) or (
-        retype and new_type == "nat_cloud"
-    ):
+        before = dict(network)
+        retype = new_type is not None and new_type != current_type
+        nat_cloud_edit = (
+            current_type == "nat_cloud" and (isinstance(new_config, dict) or retype)
+        ) or (retype and new_type == "nat_cloud")
+        if not nat_cloud_edit:
+            for field, value in patch.items():
+                if value is not None:
+                    network[field] = value
+            lab.save()
+
+    if nat_cloud_edit:
         try:
             updated, _event_type = await network_service.patch_network(
                 scoped_path, network_id, patch
@@ -2726,11 +2748,6 @@ async def update_network(
             "revision": LabService.read_meta_revision_static(scoped_path),
         }
 
-    for field, value in patch.items():
-        if value is not None:
-            network[field] = value
-
-    LabService.write_lab_json_static(scoped_path, data)
     changes = audit_service.field_changes(before, network)
     if changes:
         await audit_service.record(
@@ -2746,7 +2763,7 @@ async def update_network(
         "message": "Network updated successfully.",
         "data": network,
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": lab.revision,
     }
 
 
@@ -2758,15 +2775,6 @@ async def delete_network(
 ):
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-        data = _read_lab_data(scoped_path)
-    except LegacyLabSchemaError as exc:
-        return _legacy_schema_response(exc)
-    except FileNotFoundError:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
     except PermissionError as e:
         return {
             "code": 403,
@@ -2774,49 +2782,54 @@ async def delete_network(
             "message": str(e),
         }
 
-    networks = data.get("networks", {})
-    if str(network_id) not in networks:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Network does not exist.",
-        }
+    # #328: remove the network from the file as it is under the lock.
+    async with _locked_lab(scoped_path) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
+        networks = data.get("networks", {})
+        if str(network_id) not in networks:
+            return {
+                "code": 404,
+                "status": "fail",
+                "message": "Network does not exist.",
+            }
 
-    networks.pop(str(network_id))
-    for node in data.get("nodes", {}).values():
-        for interface in node.get("interfaces", []):
-            if interface.get("network_id") == network_id:
-                interface["network_id"] = 0
+        networks.pop(str(network_id))
+        for node in data.get("nodes", {}).values():
+            for interface in node.get("interfaces", []):
+                if interface.get("network_id") == network_id:
+                    interface["network_id"] = 0
 
-    data["topology"] = [
-        link
-        for link in data.get("topology", [])
-        if link.get("network_id") != network_id
-        and link.get("source") != f"network{network_id}"
-        and link.get("destination") != f"network{network_id}"
-    ]
-    # Issue #174 follow-up: also drop v2 links[] entries referencing the
-    # deleted network — write_lab_json_static no longer regenerates
-    # links[] from topology[] for v2 labs.
-    data["links"] = [
-        link
-        for link in data.get("links", []) or []
-        if not (
-            isinstance(link, dict)
-            and (
-                (isinstance(link.get("from"), dict) and link["from"].get("network_id") == network_id)
-                or (isinstance(link.get("to"), dict) and link["to"].get("network_id") == network_id)
+        data["topology"] = [
+            link
+            for link in data.get("topology", [])
+            if link.get("network_id") != network_id
+            and link.get("source") != f"network{network_id}"
+            and link.get("destination") != f"network{network_id}"
+        ]
+        # Issue #174 follow-up: also drop v2 links[] entries referencing the
+        # deleted network — write_lab_json_static no longer regenerates
+        # links[] from topology[] for v2 labs.
+        data["links"] = [
+            link
+            for link in data.get("links", []) or []
+            if not (
+                isinstance(link, dict)
+                and (
+                    (isinstance(link.get("from"), dict) and link["from"].get("network_id") == network_id)
+                    or (isinstance(link.get("to"), dict) and link["to"].get("network_id") == network_id)
+                )
             )
-        )
-    ]
-    LabService.write_lab_json_static(scoped_path, data)
+        ]
+        lab.save()
 
     return {
         "code": 200,
         "status": "success",
         "message": "Network deleted successfully.",
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(scoped_path),
+        "revision": lab.revision,
     }
 
 
@@ -2859,15 +2872,11 @@ async def patch_node_interface(
         return {"code": 403, "status": "fail", "message": str(e)}
 
     normalized = _normalize_relative_lab_path(scoped_path)
-    settings = get_settings()
 
-    with lab_lock(normalized, settings.LABS_DIR):
-        try:
-            data = _read_lab_data(normalized)
-        except LegacyLabSchemaError as exc:
-            return _legacy_schema_response(exc)
-        except FileNotFoundError:
-            return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+    async with _locked_lab(normalized) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
 
         node = (data.get("nodes") or {}).get(str(node_id))
         if not isinstance(node, dict):
@@ -2910,7 +2919,7 @@ async def patch_node_interface(
             iface["port_position"] = body["port_position"]
 
         data.pop("topology", None)
-        LabService.write_lab_json_static(normalized, data)
+        lab.save()
 
         from app.services.link_service import _recompute_mac_registry
         _recompute_mac_registry(normalized, data)
@@ -2962,7 +2971,7 @@ async def patch_node_interface(
         "message": "Interface updated successfully.",
         "interface": response_iface,
         # #248: post-write revision for the editor's next If-Match write.
-        "revision": LabService.read_meta_revision_static(normalized),
+        "revision": lab.revision,
     }
 
 
@@ -3135,18 +3144,14 @@ async def put_layout(
         )
 
     normalized = _normalize_relative_lab_path(scoped_path)
-    settings = get_settings()
 
     affected_nodes: list[int] = []
     affected_networks: list[int] = []
 
-    with lab_lock(normalized, settings.LABS_DIR):
-        try:
-            data = _read_lab_data(normalized)
-        except LegacyLabSchemaError as exc:
-            return _legacy_schema_response(exc)
-        except FileNotFoundError:
-            return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+    async with _locked_lab(normalized) as (lab, error):
+        if error is not None:
+            return error
+        data = lab.data
 
         # #245: optimistic concurrency — a stale client (racing reload or a
         # second tab) must get 412 instead of silently reverting newer state.
@@ -3195,7 +3200,7 @@ async def put_layout(
             data["defaults"] = {**(data.get("defaults") or {}), **body["defaults"]}
 
         data.pop("topology", None)
-        LabService.write_lab_json_static(normalized, data)
+        lab.save()
 
     await ws_hub.publish(
         normalized,
@@ -3446,7 +3451,8 @@ async def move_lab(
             "message": f"Lab already exists at target: /{new_relative} (60039).",
         }
 
-    with lab_lock(scoped_path, settings.LABS_DIR):
+    # Waits for the lock off the event loop: the body awaits the database.
+    async with lab_lock_async(_normalize_relative_lab_path(scoped_path), settings.LABS_DIR):
         lab = await lab_service.get_lab_by_filename(scoped_path)
         if not source.is_file():
             return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}

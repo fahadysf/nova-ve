@@ -1,0 +1,437 @@
+"""Every lab-file write takes ``lab_lock`` and re-reads under it (#328).
+
+Each test holds the lab's lock in a worker thread — the way NAT-Cloud saves
+and lab-open reconciliation do — and changes the lab while a route runs.
+Both changes must be in the file afterwards, on different revisions.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+import time
+from contextlib import contextmanager
+from types import SimpleNamespace
+
+import pytest
+
+from app.routers import labs
+from app.schemas.network import NetworkCreate, NetworkUpdate
+from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
+from app.services import network_service as network_service_mod
+from app.services.lab_lock import LabLockTimeout, lab_lock, lab_lock_async
+from app.services.lab_service import LabService, locked_lab
+from app.services.network_service import NetworkService
+
+LAB = "race.json"
+HOLD_S = 0.3
+ADMIN = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
+
+
+@pytest.fixture()
+def settings(tmp_path, monkeypatch):
+    s = SimpleNamespace(
+        LABS_DIR=tmp_path / "labs",
+        IMAGES_DIR=tmp_path / "images",
+        TMP_DIR=tmp_path / "tmp",
+        TEMPLATES_DIR=tmp_path / "templates",
+        QEMU_BINARY="qemu-system-x86_64",
+        QEMU_IMG_BINARY="qemu-img",
+        DOCKER_HOST="unix:///var/run/docker.sock",
+    )
+    for directory in (s.LABS_DIR, s.IMAGES_DIR, s.TMP_DIR, s.TEMPLATES_DIR):
+        directory.mkdir()
+    for module in (
+        "app.routers.labs",
+        "app.services.lab_service",
+        "app.services.template_service",
+        "app.services.node_runtime_service",
+        "app.services.network_service",
+        "app.services.link_service",
+        "app.services.cloud_inventory_service",
+    ):
+        monkeypatch.setattr(f"{module}.get_settings", lambda: s)
+
+    async def no_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", no_publish)
+    return s
+
+
+@pytest.fixture()
+def docker_template(settings, monkeypatch):
+    monkeypatch.setattr(
+        "app.services.template_service.TemplateService._docker_image_catalog",
+        lambda _self: {
+            "nova-ve/alpine-telnet:latest": {
+                "image": "nova-ve/alpine-telnet:latest",
+                "files": [],
+                "path": "nova-ve/alpine-telnet:latest",
+                "source": "docker",
+            }
+        },
+    )
+    template_dir = settings.TEMPLATES_DIR / "docker"
+    template_dir.mkdir()
+    (template_dir / "docker.yml").write_text(
+        "type: docker\nname: Docker Host\ncpu: 1\nram: 1024\nethernet: 1\n"
+        "console_type: telnet\nicon_type: server\ncpulimit: 1\n"
+    )
+
+
+def _seed(settings, *, nodes=None, networks=None) -> None:
+    (settings.LABS_DIR / LAB).write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "id": "race-lab",
+                "meta": {"name": "race", "revision": 0},
+                "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+                "nodes": nodes or {},
+                "networks": networks or {},
+                "links": [],
+                "defaults": {"link_style": "orthogonal"},
+            }
+        )
+    )
+
+
+def _saved(settings) -> dict:
+    return json.loads((settings.LABS_DIR / LAB).read_text())
+
+
+def _docker_node(node_id: int, name: str) -> dict:
+    return {
+        "id": node_id,
+        "name": name,
+        "type": "docker",
+        "template": "docker",
+        "image": "nova-ve/alpine-telnet:latest",
+        "console": "telnet",
+        "ethernet": 1,
+        "left": 0,
+        "top": 0,
+        "interfaces": [{"index": 0, "name": "eth0", "network_id": 0}],
+    }
+
+
+def _bridge(network_id: int, name: str) -> dict:
+    return {
+        "id": network_id,
+        "name": name,
+        "type": "linux_bridge",
+        "left": 0,
+        "top": 0,
+        "visibility": True,
+        "implicit": False,
+        "config": {},
+    }
+
+
+def _add_node_9(data: dict) -> None:
+    data.setdefault("nodes", {})["9"] = _docker_node(9, "added-meanwhile")
+
+
+def _add_network_9(data: dict) -> None:
+    data.setdefault("networks", {})["9"] = _bridge(9, "added-meanwhile")
+
+
+@contextmanager
+def _slow_locked_writer(mutate):
+    """Hold the lab's lock in a thread, change the lab, write it on release."""
+    holding = threading.Event()
+    result: dict = {}
+
+    def run() -> None:
+        with locked_lab(LAB) as lab:
+            holding.set()
+            time.sleep(HOLD_S)
+            mutate(lab.data)
+            result["revision"] = lab.save()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert holding.wait(2), "writer never took the lock"
+    try:
+        yield result
+    finally:
+        thread.join(5)
+
+
+def _assert_distinct_revisions(writer: dict, route_revision, settings) -> None:
+    assert writer["revision"] is not None and route_revision is not None
+    assert writer["revision"] != route_revision
+    assert _saved(settings)["meta"]["revision"] == max(writer["revision"], route_revision)
+
+
+@pytest.mark.asyncio
+async def test_create_node_keeps_a_concurrent_locked_edit(settings, docker_template):
+    _seed(settings)
+
+    with _slow_locked_writer(_add_network_9) as writer:
+        response = await labs.create_node(
+            LAB,
+            NodeCreate(
+                name="new", type="docker", template="docker", image="nova-ve/alpine-telnet:latest"
+            ),
+            current_user=ADMIN,
+        )
+
+    assert response["code"] == 200, response
+    saved = _saved(settings)
+    assert "9" in saved["networks"]
+    assert saved["nodes"]["1"]["name"] == "new"
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_create_node_takes_the_next_id_from_the_locked_read(settings, docker_template):
+    _seed(settings)
+
+    with _slow_locked_writer(_add_node_9) as writer:
+        response = await labs.create_node(
+            LAB,
+            NodeCreate(
+                name="new", type="docker", template="docker", image="nova-ve/alpine-telnet:latest"
+            ),
+            current_user=ADMIN,
+        )
+
+    saved = _saved(settings)
+    assert saved["nodes"]["9"]["name"] == "added-meanwhile"
+    assert saved["nodes"]["10"]["name"] == "new"
+    assert response["data"]["id"] == 10
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_create_nodes_batch_keeps_a_concurrent_locked_edit(settings, docker_template):
+    _seed(settings)
+
+    with _slow_locked_writer(_add_network_9) as writer:
+        response = await labs.create_nodes_batch(
+            LAB,
+            NodeBatchCreate(
+                name_prefix="batch",
+                count=2,
+                type="docker",
+                template="docker",
+                image="nova-ve/alpine-telnet:latest",
+            ),
+            current_user=ADMIN,
+        )
+
+    assert response["code"] == 200, response
+    saved = _saved(settings)
+    assert "9" in saved["networks"]
+    assert sorted(saved["nodes"]) == ["1", "2"]
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_update_node_keeps_a_concurrent_locked_edit(settings):
+    _seed(settings, nodes={"1": _docker_node(1, "old")})
+
+    with _slow_locked_writer(_add_network_9) as writer:
+        response = await labs.update_node(LAB, 1, NodeUpdate(name="renamed"), current_user=ADMIN)
+
+    assert response["code"] == 200, response
+    saved = _saved(settings)
+    assert "9" in saved["networks"]
+    assert saved["nodes"]["1"]["name"] == "renamed"
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_update_node_applies_the_edit_to_the_locked_read(settings):
+    """The writer's change to the same node is kept; only the edited field moves."""
+    _seed(settings, nodes={"1": _docker_node(1, "old")})
+
+    def move_node(data: dict) -> None:
+        data["nodes"]["1"]["left"] = 400
+
+    with _slow_locked_writer(move_node):
+        await labs.update_node(LAB, 1, NodeUpdate(name="renamed"), current_user=ADMIN)
+
+    node = _saved(settings)["nodes"]["1"]
+    assert (node["name"], node["left"]) == ("renamed", 400)
+
+
+@pytest.mark.asyncio
+async def test_delete_node_does_not_bring_back_or_lose_state(settings):
+    _seed(settings, nodes={"1": _docker_node(1, "doomed")})
+
+    with _slow_locked_writer(_add_network_9) as writer:
+        response = await labs.delete_node(LAB, 1, current_user=ADMIN)
+
+    assert response["code"] == 200, response
+    saved = _saved(settings)
+    assert "1" not in saved["nodes"]
+    assert "9" in saved["networks"]
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_legacy_create_network_keeps_a_concurrent_locked_edit(settings):
+    _seed(settings)
+
+    with _slow_locked_writer(_add_network_9) as writer:
+        response = await labs.create_network(LAB, NetworkCreate(name="lan"), current_user=ADMIN)
+
+    assert response["code"] == 200, response
+    saved = _saved(settings)
+    assert saved["networks"]["9"]["name"] == "added-meanwhile"
+    assert saved["networks"]["10"]["name"] == "lan"
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_legacy_update_network_keeps_a_concurrent_locked_edit(settings):
+    _seed(settings, networks={"1": _bridge(1, "old")})
+
+    with _slow_locked_writer(_add_node_9) as writer:
+        response = await labs.update_network(
+            LAB, 1, NetworkUpdate(name="renamed"), current_user=ADMIN
+        )
+
+    assert response["code"] == 200, response
+    saved = _saved(settings)
+    assert "9" in saved["nodes"]
+    assert saved["networks"]["1"]["name"] == "renamed"
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_legacy_delete_network_keeps_a_concurrent_locked_edit(settings):
+    _seed(settings, networks={"1": _bridge(1, "doomed")})
+
+    with _slow_locked_writer(_add_node_9) as writer:
+        response = await labs.delete_network(LAB, 1, current_user=ADMIN)
+
+    assert response["code"] == 200, response
+    saved = _saved(settings)
+    assert "9" in saved["nodes"]
+    assert "1" not in saved["networks"]
+    _assert_distinct_revisions(writer, response["revision"], settings)
+
+
+@pytest.mark.asyncio
+async def test_update_lab_meta_keeps_a_concurrent_locked_edit(settings):
+    _seed(settings)
+    lab_row = SimpleNamespace(
+        filename=LAB,
+        name="race",
+        author=None,
+        description=None,
+        body=None,
+        version=None,
+        scripttimeout=None,
+        countdown=None,
+        linkwidth=None,
+        grid=None,
+        lock=None,
+    )
+
+    class FakeDb:
+        async def commit(self):
+            return None
+
+        async def refresh(self, _obj):
+            return None
+
+    with _slow_locked_writer(_add_node_9) as writer:
+        await LabService(FakeDb()).update_lab(lab_row, name="renamed")
+
+    saved = _saved(settings)
+    assert "9" in saved["nodes"]
+    assert saved["meta"]["name"] == "renamed"
+    assert saved["meta"]["revision"] == writer["revision"] + 1
+
+
+@pytest.mark.asyncio
+async def test_patch_network_runs_off_the_event_loop_and_keeps_a_node_edit(settings, monkeypatch):
+    """#320 regression, now with the PATCH in a worker thread (#328)."""
+    _seed(
+        settings,
+        nodes={"1": _docker_node(1, "old")},
+        networks={
+            "1": {
+                **_bridge(1, "internet"),
+                "type": "nat_cloud",
+                "config": {"cidr": "10.91.0.0/24", "dhcp": True},
+                "runtime": {"bridge_name": "nve-race-n1"},
+            }
+        },
+    )
+    dhcp_busy = threading.Event()
+
+    def slow_dhcp(_bridge, _config):
+        dhcp_busy.set()
+        time.sleep(HOLD_S)
+        return 0
+
+    monkeypatch.setattr(network_service_mod, "_reconcile_nat_cloud_dhcp", slow_dhcp)
+
+    patch = asyncio.create_task(
+        NetworkService().patch_network(LAB, 1, {"config": {"dhcp": False}})
+    )
+    assert await asyncio.to_thread(dhcp_busy.wait, 2)
+    # The event loop is free while dnsmasq stops.
+    assert not patch.done()
+    response = await labs.update_node(LAB, 1, NodeUpdate(name="renamed"), current_user=ADMIN)
+    await patch
+
+    saved = _saved(settings)
+    assert saved["nodes"]["1"]["name"] == "renamed"
+    assert saved["networks"]["1"]["config"]["dhcp"] is False
+    assert response["revision"] == 2
+    assert saved["meta"]["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_lab_lock_async_waits_for_a_thread_holder_without_blocking_the_loop(tmp_path):
+    holding = threading.Event()
+    release = threading.Event()
+
+    def hold() -> None:
+        with lab_lock("lab.json", tmp_path):
+            holding.set()
+            release.wait(2)
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert holding.wait(2)
+    ticks = 0
+
+    async def tick() -> None:
+        nonlocal ticks
+        while not release.is_set():
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    async def waiter() -> float:
+        async with lab_lock_async("lab.json", tmp_path):
+            return time.monotonic()
+
+    ticker = asyncio.create_task(tick())
+    waiting = asyncio.create_task(waiter())
+    await asyncio.sleep(0.2)
+    assert not waiting.done()
+    released_at = time.monotonic()
+    release.set()
+    acquired_at = await waiting
+    await ticker
+    thread.join(2)
+
+    assert acquired_at >= released_at
+    assert ticks >= 5
+
+
+@pytest.mark.asyncio
+async def test_lab_lock_async_times_out(tmp_path):
+    with lab_lock("lab.json", tmp_path):
+        with pytest.raises(LabLockTimeout):
+            async with lab_lock_async("lab.json", tmp_path, timeout_s=0.1):
+                pass

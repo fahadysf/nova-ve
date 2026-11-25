@@ -985,8 +985,9 @@ async def test_208a_paired_create_acquires_lab_lock_around_phases(patched_split,
 
     from app.services import lab_lock as lab_lock_module
     real_lab_lock = lab_lock_module.lab_lock
+    real_lab_lock_async = lab_lock_module.lab_lock_async
 
-    from contextlib import contextmanager
+    from contextlib import asynccontextmanager, contextmanager
 
     @contextmanager
     def counting_lab_lock(lab_id, labs_dir, timeout_s=5.0):
@@ -994,8 +995,16 @@ async def test_208a_paired_create_acquires_lab_lock_around_phases(patched_split,
         with real_lab_lock(lab_id, labs_dir, timeout_s=timeout_s):
             yield
 
+    @asynccontextmanager
+    async def counting_lab_lock_async(lab_id, labs_dir, timeout_s=5.0):
+        acquire_count["n"] += 1
+        async with real_lab_lock_async(lab_id, labs_dir, timeout_s=timeout_s):
+            yield
+
     # Patch the symbol everywhere the routers and services import it from.
-    monkeypatch.setattr("app.routers.labs.lab_lock", counting_lab_lock)
+    # The route takes the lock through lab_service.locked_lab_async (#328).
+    monkeypatch.setattr("app.services.lab_service.lab_lock_async", counting_lab_lock_async)
+    monkeypatch.setattr("app.services.lab_service.lab_lock", counting_lab_lock)
     monkeypatch.setattr("app.services.link_service.lab_lock", counting_lab_lock)
 
     response = await labs.create_nodes_from_paired_template(
