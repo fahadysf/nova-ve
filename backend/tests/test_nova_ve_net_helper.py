@@ -60,10 +60,18 @@ def helper(monkeypatch, tmp_path):
             return mod.subprocess.CompletedProcess(argv, 1, stdout="", stderr="")
         return mod.subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
 
+    input_calls: list[tuple[list[str], str]] = []
+
+    def fake_run_input(argv, text):
+        input_calls.append((list(argv), text))
+        return 0
+
     monkeypatch.setattr(mod, "_run", fake_run, raising=True)
     monkeypatch.setattr(mod, "_run_capture", fake_run_capture, raising=True)
+    monkeypatch.setattr(mod, "_run_input", fake_run_input, raising=True)
 
     mod._test_calls = calls  # type: ignore[attr-defined]
+    mod._test_input_calls = input_calls  # type: ignore[attr-defined]
     mod._test_capture_calls = capture_calls  # type: ignore[attr-defined]
     mod._test_pids_path = pids_path  # type: ignore[attr-defined]
     mod._test_proc_root = proc_root  # type: ignore[attr-defined]
@@ -434,6 +442,184 @@ def test_dnsmasq_start_writes_bridge_config(helper, monkeypatch):
     assert "dhcp-range=10.255.0.100,10.255.0.254,12h" in text
     assert helper._test_calls[-1][0] == helper.DNSMASQ_BIN
     assert helper._test_calls[-1][1] == f"--conf-file={conf}"
+
+
+def _start_dnsmasq(helper, monkeypatch, argv):
+    record = helper._run
+
+    def run(cmd):
+        rc = record(cmd)
+        _seed_dnsmasq(helper, 506, argv[1])
+        return rc
+
+    monkeypatch.setattr(helper, "_run", run)
+    return helper.main(argv)
+
+
+def test_dnsmasq_start_isolated_sends_no_router_and_no_dns(helper, monkeypatch):
+    """#325: an isolated bridge's server offers addresses only."""
+    rc = _start_dnsmasq(
+        helper,
+        monkeypatch,
+        ["dnsmasq-start", "novec0den2", "10.40.1.254", "10.40.1.128", "10.40.1.253", "--no-router"],
+    )
+    assert rc == 0
+    lines = (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den2" / "dnsmasq.conf").read_text().splitlines()
+    assert "listen-address=10.40.1.254" in lines
+    assert "port=0" in lines
+    assert "dhcp-range=10.40.1.128,10.40.1.253,12h" in lines
+    # Empty options: dnsmasq then sends neither a router nor a DNS server.
+    assert "dhcp-option=3" in lines and "dhcp-option=6" in lines
+    assert not any("router" in line for line in lines)
+    # A lab router may serve the same segment; do not NAK its clients.
+    assert "dhcp-authoritative" not in lines
+
+
+def test_dnsmasq_start_keeps_router_for_nat_cloud(helper, monkeypatch):
+    rc = _start_dnsmasq(
+        helper, monkeypatch, ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
+    )
+    assert rc == 0
+    lines = (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1" / "dnsmasq.conf").read_text().splitlines()
+    assert "dhcp-option=option:router,10.255.0.1" in lines
+    assert "dhcp-authoritative" in lines
+    assert "dhcp-option=3" not in lines
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        # management bridges never run isolated DHCP
+        ["dnsmasq-start", "novec0demg", "10.40.1.254", "10.40.1.128", "10.40.1.253", "--no-router"],
+        # server inside its own scope
+        ["dnsmasq-start", "novec0den2", "10.40.1.200", "10.40.1.128", "10.40.1.253", "--no-router"],
+    ],
+)
+def test_dnsmasq_start_isolated_rejects_bad_arguments(helper, argv):
+    assert helper.main(argv) == 2
+    assert helper._test_calls == []
+
+
+def test_bridge_guard_apply_installs_one_transaction(helper):
+    assert helper.main(["bridge-guard-apply", "novec0den2"]) == 0
+    [(argv, script)] = helper._test_input_calls
+    assert argv == [helper.NFT_BIN, "-f", "-"]
+    lines = script.splitlines()
+    table = "inet nova_ve_bridge_guard"
+    assert lines[:5] == [
+        f"add table {table}",
+        f"add chain {table} in_novec0den2 {{ type filter hook input priority -10; policy accept; }}",
+        f"add chain {table} fwd_novec0den2 {{ type filter hook forward priority -10; policy accept; }}",
+        f"flush chain {table} in_novec0den2",
+        f"flush chain {table} fwd_novec0den2",
+    ]
+    assert lines[5:] == [
+        f'add rule {table} in_novec0den2 iifname "novec0den2" meta nfproto ipv4 udp sport 68 udp dport 67 accept',
+        f'add rule {table} in_novec0den2 iifname "novec0den2" drop',
+        f'add rule {table} fwd_novec0den2 iifname "novec0den2" oifname "novec0den2" accept',
+        f'add rule {table} fwd_novec0den2 iifname "novec0den2" drop',
+        f'add rule {table} fwd_novec0den2 oifname "novec0den2" drop',
+    ]
+    assert not any("nat" in line or "masquerade" in line for line in lines)
+
+
+def test_bridge_guard_remove_is_a_no_op_when_absent(helper, monkeypatch):
+    monkeypatch.setattr(
+        helper,
+        "_run_capture",
+        lambda argv: helper.subprocess.CompletedProcess(argv, 1, stdout="", stderr="No such file"),
+    )
+    assert helper.main(["bridge-guard-remove", "novec0den2"]) == 0
+    assert helper._test_input_calls == []
+    assert helper._test_calls == []
+
+
+def test_bridge_guard_remove_deletes_its_chains_and_the_empty_table(helper, monkeypatch):
+    listings: list[list[str]] = []
+
+    def capture(argv):
+        listings.append(list(argv))
+        # Both chains exist; afterwards the table holds no chain.
+        stdout = "table inet nova_ve_bridge_guard {\n}\n" if argv[2] == "table" else ""
+        return helper.subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(helper, "_run_capture", capture)
+    assert helper.main(["bridge-guard-remove", "novec0den2"]) == 0
+    assert [text for _argv, text in helper._test_input_calls] == [
+        "flush chain inet nova_ve_bridge_guard in_novec0den2\n"
+        "delete chain inet nova_ve_bridge_guard in_novec0den2\n",
+        "flush chain inet nova_ve_bridge_guard fwd_novec0den2\n"
+        "delete chain inet nova_ve_bridge_guard fwd_novec0den2\n",
+    ]
+    assert helper._test_calls == [[helper.NFT_BIN, "delete", "table", "inet", "nova_ve_bridge_guard"]]
+
+
+def test_bridge_guard_remove_keeps_a_table_other_bridges_use(helper, monkeypatch):
+    def capture(argv):
+        stdout = (
+            "table inet nova_ve_bridge_guard {\n\tchain in_novec0den3 {\n\t}\n}\n"
+            if argv[2] == "table"
+            else ""
+        )
+        return helper.subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(helper, "_run_capture", capture)
+    assert helper.main(["bridge-guard-remove", "novec0den2"]) == 0
+    assert helper._test_calls == []
+
+
+def _addr_listing(helper, monkeypatch, *, rc=0, stdout="", stderr=""):
+    monkeypatch.setattr(
+        helper,
+        "_run_capture",
+        lambda argv: helper.subprocess.CompletedProcess(argv, rc, stdout=stdout, stderr=stderr),
+    )
+
+
+def test_bridge_addr_del_removes_a_present_address(helper, monkeypatch):
+    _addr_listing(
+        helper,
+        monkeypatch,
+        stdout="7: novec0den2    inet 10.40.1.254/24 scope global novec0den2\\       valid_lft forever\n",
+    )
+    assert helper.main(["bridge-addr-del", "novec0den2", "10.40.1.254/24"]) == 0
+    assert helper._test_calls == [[helper.IP_BIN, "addr", "del", "10.40.1.254/24", "dev", "novec0den2"]]
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [
+        {"stdout": "7: novec0den2    inet 10.40.1.1/24 scope global novec0den2\n"},
+        {"rc": 1, "stderr": 'Device "novec0den2" does not exist.\n'},
+    ],
+)
+def test_bridge_addr_del_succeeds_when_already_gone(helper, monkeypatch, listing):
+    _addr_listing(helper, monkeypatch, **listing)
+    assert helper.main(["bridge-addr-del", "novec0den2", "10.40.1.254/24"]) == 0
+    assert helper._test_calls == []
+
+
+def test_bridge_addr_del_reports_other_listing_failures(helper, monkeypatch):
+    _addr_listing(helper, monkeypatch, rc=1, stderr="permission denied\n")
+    assert helper.main(["bridge-addr-del", "novec0den2", "10.40.1.254/24"]) == 1
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["bridge-guard-apply", "novec0demg"],
+        ["bridge-guard-apply", "br-eth0"],
+        ["bridge-guard-apply", "novec0den2; nft flush ruleset"],
+        ["bridge-guard-remove", "eth0"],
+        ["bridge-addr-del", "novec0demg", "10.40.1.254/24"],
+        ["bridge-addr-del", "novec0den2", "10.40.1.254"],
+        ["bridge-addr-del", "novec0den2", "fe80::1/64"],
+    ],
+)
+def test_bridge_dhcp_verbs_reject_bad_arguments(helper, argv):
+    assert helper.main(argv) == 2
+    assert helper._test_calls == []
+    assert helper._test_input_calls == []
 
 
 # ---------------------------------------------------------------------------

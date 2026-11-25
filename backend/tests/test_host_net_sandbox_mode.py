@@ -78,6 +78,7 @@ def test_nat_cloud_sandbox_values(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NOVA_VE_SANDBOX_MODE", "1")
     assert host_net.default_egress_iface() == "eth0"
     assert host_net.dnsmasq_start("nove0001n2", "10.0.0.1/24", "10.0.0.10", "10.0.0.50") == 0
+    assert host_net.dnsmasq_start_isolated("nove0001n2", "10.0.0.254", "10.0.0.128", "10.0.0.253") == 0
 
 
 def test_console_proxy_start_zero_in_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -32,6 +32,7 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import fcntl
 import ipaddress
 import json
 import os
@@ -78,6 +79,10 @@ IP_FORWARD_PATH = Path(os.environ.get("NOVA_VE_IP_FORWARD_PATH", "/proc/sys/net/
 # Lab bridges: nove<lab_hash:04x>n<net 1-5 digits>, plus the per-lab
 # management bridge (#287): nove<lab_hash:04x>mg
 RE_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}(n[0-9]{1,5}|mg)$")
+
+# Lab network bridges only (no management bridge): the isolated-bridge DHCP
+# verbs (#325) never apply to anything else.
+RE_NETWORK_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}n[0-9]{1,5}$")
 
 # Host-owned bridges created by the provision script for Bridge-Cloud
 # networks.  Lab-side verbs MUST NOT accept these; only the dedicated
@@ -127,6 +132,10 @@ def _check_regex(value: str, pattern: re.Pattern[str], label: str) -> str:
 
 def validate_bridge_name(value: str) -> str:
     return _check_regex(value, RE_BRIDGE_NAME, "bridge_name")
+
+
+def validate_network_bridge_name(value: str) -> str:
+    return _check_regex(value, RE_NETWORK_BRIDGE_NAME, "bridge_name")
 
 
 def validate_host_bridge_name(value: str) -> str:
@@ -430,6 +439,19 @@ def _run_capture(argv: Sequence[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_input(argv: Sequence[str], text: str) -> int:
+    """Run ``argv`` with ``text`` on stdin (``nft -f -``); return the exit code."""
+    for piece in argv:
+        if not isinstance(piece, str):
+            raise TypeError(f"argv element not a str: {piece!r}")
+    try:
+        proc = subprocess.run(list(argv), shell=False, check=False, input=text, text=True)
+    except FileNotFoundError as exc:
+        print(f"required binary not found: {exc}", file=sys.stderr)
+        return 1
+    return proc.returncode
+
+
 def _ip(*args: str) -> int:
     return _run([IP_BIN, *args])
 
@@ -540,6 +562,25 @@ def cmd_bridge_addr_add(args: argparse.Namespace) -> int:
     bridge = validate_bridge_name(args.bridge)
     cidr = validate_cidr(args.cidr)
     return _ip("addr", "replace", cidr, "dev", bridge)
+
+
+def cmd_bridge_addr_del(args: argparse.Namespace) -> int:
+    """Remove one address from a lab bridge; succeed when it is already gone."""
+    bridge = validate_network_bridge_name(args.bridge)
+    cidr = validate_cidr(args.cidr)
+    proc = _run_capture([IP_BIN, "-o", "-4", "addr", "show", "dev", bridge])
+    if proc.returncode != 0:
+        if "does not exist" in (proc.stderr or ""):
+            return 0  # the bridge went, and its addresses with it
+        print(proc.stderr or f"ip addr show dev {bridge} failed", file=sys.stderr, end="")
+        return 1
+    present = any(
+        len(parts) >= 4 and parts[2] == "inet" and parts[3] == cidr
+        for parts in (line.split() for line in (proc.stdout or "").splitlines())
+    )
+    if not present:
+        return 0
+    return _ip("addr", "del", cidr, "dev", bridge)
 
 
 def cmd_default_egress(args: argparse.Namespace) -> int:
@@ -745,6 +786,97 @@ def cmd_forward_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+# Isolated-bridge guard (#325). A bridge that runs DHCP carries a host
+# address, so the host would answer anything that reaches it through the
+# bridge and route between the bridge and its other interfaces. These chains
+# accept only DHCP from the bridge and drop routed traffic both ways. They sit
+# in their own table, one input and one forward chain per bridge, so removal
+# is exact and cannot touch Docker's or NAT-Cloud's rules. A drop in any base
+# chain is final, so running before Docker's chains (priority 0) keeps a
+# later accept elsewhere from letting traffic through.
+GUARD_TABLE = "nova_ve_bridge_guard"
+GUARD_PRIORITY = "-10"
+
+
+def _guard_chains(bridge: str) -> tuple[str, str]:
+    return f"in_{bridge}", f"fwd_{bridge}"
+
+
+def _guard_lock_path() -> Path:
+    return RUNTIME_ROOT / "bridge-guard.lock"
+
+
+def _guard_locked(fn: Callable[[str], int], bridge: str) -> int:
+    """Serialize guard edits: removal deletes the table once it is empty."""
+    lock_path = _guard_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "a+") as fh:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+        try:
+            return fn(bridge)
+        finally:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _guard_script(bridge: str) -> str:
+    chain_in, chain_fwd = _guard_chains(bridge)
+    table = f"inet {GUARD_TABLE}"
+    quoted = f'"{bridge}"'
+    return "\n".join(
+        [
+            f"add table {table}",
+            f"add chain {table} {chain_in} {{ type filter hook input priority {GUARD_PRIORITY}; policy accept; }}",
+            f"add chain {table} {chain_fwd} {{ type filter hook forward priority {GUARD_PRIORITY}; policy accept; }}",
+            f"flush chain {table} {chain_in}",
+            f"flush chain {table} {chain_fwd}",
+            # DHCP from clients is the only host input the bridge may carry.
+            f"add rule {table} {chain_in} iifname {quoted} meta nfproto ipv4 udp sport 68 udp dport 67 accept",
+            # Everything else is dropped: IPv6 (link-local included), and
+            # traffic for any host address, not just the bridge's own.
+            f"add rule {table} {chain_in} iifname {quoted} drop",
+            # Frames bridged between lab nodes reach this hook only when
+            # br_netfilter is loaded, with the bridge as both devices: let
+            # them pass to the remaining chains unchanged.
+            f"add rule {table} {chain_fwd} iifname {quoted} oifname {quoted} accept",
+            f"add rule {table} {chain_fwd} iifname {quoted} drop",
+            f"add rule {table} {chain_fwd} oifname {quoted} drop",
+            "",
+        ]
+    )
+
+
+def _guard_apply(bridge: str) -> int:
+    # One transaction: the chains are never half-filled.
+    return _run_input([NFT_BIN, "-f", "-"], _guard_script(bridge))
+
+
+def _guard_remove(bridge: str) -> int:
+    table = f"inet {GUARD_TABLE}"
+    for chain in _guard_chains(bridge):
+        if _run_capture([NFT_BIN, "list", "chain", "inet", GUARD_TABLE, chain]).returncode != 0:
+            continue  # absent already
+        rc = _run_input(
+            [NFT_BIN, "-f", "-"],
+            f"flush chain {table} {chain}\ndelete chain {table} {chain}\n",
+        )
+        if rc != 0:
+            return rc
+    listing = _run_capture([NFT_BIN, "list", "table", "inet", GUARD_TABLE])
+    if listing.returncode == 0 and not re.search(r"^\s*chain ", listing.stdout or "", re.M):
+        return _nft("delete", "table", "inet", GUARD_TABLE)
+    return 0
+
+
+def cmd_bridge_guard_apply(args: argparse.Namespace) -> int:
+    bridge = validate_network_bridge_name(args.bridge)
+    return _guard_locked(_guard_apply, bridge)
+
+
+def cmd_bridge_guard_remove(args: argparse.Namespace) -> int:
+    bridge = validate_network_bridge_name(args.bridge)
+    return _guard_locked(_guard_remove, bridge)
+
+
 def _dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
     root = RUNTIME_ROOT / "nat-cloud" / bridge
     return root / "dnsmasq.conf", root / "dnsmasq.pid", root / "leases"
@@ -788,13 +920,37 @@ def _dnsmasq_stop_bridge(bridge: str) -> bool:
     return False
 
 
+def _dnsmasq_options(gateway: str, dhcp_start: str, dhcp_end: str, *, no_router: bool) -> list[str]:
+    if no_router:
+        # Isolated bridge (#325): the host is no gateway and serves no DNS.
+        # An option with no value tells dnsmasq not to send it at all. Not
+        # authoritative: a lab router may legitimately serve this segment too.
+        return [
+            f"dhcp-range={dhcp_start},{dhcp_end},12h",
+            "dhcp-option=3",
+            "dhcp-option=6",
+        ]
+    return [
+        "dhcp-authoritative",
+        f"dhcp-range={dhcp_start},{dhcp_end},12h",
+        f"dhcp-option=option:router,{gateway}",
+    ]
+
+
 def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
-    bridge = validate_bridge_name(args.bridge)
+    no_router = bool(getattr(args, "no_router", False))
+    bridge = (validate_network_bridge_name if no_router else validate_bridge_name)(args.bridge)
     gateway = validate_ipv4(args.gateway, label="gateway")
     dhcp_start = validate_ipv4(args.dhcp_start, label="dhcp_start")
     dhcp_end = validate_ipv4(args.dhcp_end, label="dhcp_end")
     if int(ipaddress.IPv4Address(dhcp_start)) > int(ipaddress.IPv4Address(dhcp_end)):
         raise _ValidationError("dhcp_start>dhcp_end")
+    if no_router and (
+        int(ipaddress.IPv4Address(dhcp_start))
+        <= int(ipaddress.IPv4Address(gateway))
+        <= int(ipaddress.IPv4Address(dhcp_end))
+    ):
+        raise _ValidationError("server inside dhcp range")
 
     if not _dnsmasq_stop_bridge(bridge):
         return 1
@@ -807,9 +963,7 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
                 f"interface={bridge}",
                 f"listen-address={gateway}",
                 "port=0",
-                "dhcp-authoritative",
-                f"dhcp-range={dhcp_start},{dhcp_end},12h",
-                f"dhcp-option=option:router,{gateway}",
+                *_dnsmasq_options(gateway, dhcp_start, dhcp_end, no_router=no_router),
                 f"dhcp-leasefile={leases}",
                 f"pid-file={pidfile}",
                 "",
@@ -1073,6 +1227,9 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "link-netns": cmd_link_netns,
     "link-up": cmd_link_up,
     "bridge-addr-add": cmd_bridge_addr_add,
+    "bridge-addr-del": cmd_bridge_addr_del,
+    "bridge-guard-apply": cmd_bridge_guard_apply,
+    "bridge-guard-remove": cmd_bridge_guard_remove,
     "default-egress": cmd_default_egress,
     "ipv4-forward-enable": cmd_ipv4_forward_enable,
     "nat-apply": cmd_nat_apply,
@@ -1149,6 +1306,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("bridge")
     p.add_argument("cidr")
 
+    p = sub.add_parser(
+        "bridge-addr-del", help="ip addr del <cidr> dev <bridge> (no-op when absent)"
+    )
+    p.add_argument("bridge")
+    p.add_argument("cidr")
+
+    p = sub.add_parser(
+        "bridge-guard-apply",
+        help="limit host input from <bridge> to DHCP and drop forwarding to/from it",
+    )
+    p.add_argument("bridge")
+
+    p = sub.add_parser("bridge-guard-remove", help="remove the guard rules for <bridge>")
+    p.add_argument("bridge")
+
     sub.add_parser("default-egress", help="print the host default-route interface")
 
     sub.add_parser("ipv4-forward-enable", help="enable /proc/sys/net/ipv4/ip_forward")
@@ -1176,6 +1348,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("gateway")
     p.add_argument("dhcp_start")
     p.add_argument("dhcp_end")
+    p.add_argument(
+        "--no-router",
+        action="store_true",
+        help="isolated bridge: send no router and no DNS option (lab bridges only)",
+    )
 
     p = sub.add_parser("dnsmasq-stop", help="stop per-bridge dnsmasq DHCP/DNS")
     p.add_argument("bridge")
