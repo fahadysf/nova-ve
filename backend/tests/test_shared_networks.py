@@ -702,6 +702,39 @@ async def test_info_reports_dhcp_scope_server_and_leases(settings, labs_dir, mon
 
 
 @pytest.mark.asyncio
+async def test_info_names_docker_nodes_from_learned_macs(settings, labs_dir, monkeypatch):
+    svc = NetworkService()
+    links = [
+        {"id": f"l{n}", "from": {"node_id": n, "interface_index": 0}, "to": {"network_id": 1}} for n in (1, 2)
+    ]
+    nodes = {str(n): {**_node(None, name=f"host-{n}", kind="docker"), "id": n} for n in (1, 2)}
+    lab = _lab(labs_dir, "nat.json", "lab-nat", nodes=nodes, links=links)
+    bridge = (await svc.create_network(lab, {"name": "inet", "type": "nat_cloud"}))["runtime"]["bridge_name"]
+    one, two = (host_net.veth_host_name("lab-nat", n, 0) for n in (1, 2))
+    output = (
+        f"AA:00:00:00:00:01 dev {one} master {bridge}\n"
+        f"aa:00:00:00:00:02 dev {two} master {bridge}\n"
+        f"aa:00:00:00:00:03 dev {two} master {bridge}\n"
+        f"aa:00:00:00:00:ff dev {one} master {bridge} permanent\n"
+        f"33:33:00:00:00:01 dev {bridge} self permanent\n"
+    )
+    monkeypatch.setattr(
+        network_info_service.subprocess, "run",
+        lambda *a, **k: SimpleNamespace(returncode=0, stdout=output),
+    )
+    root = labs_dir.parent / "nat-cloud" / bridge
+    root.mkdir(parents=True)
+    (root / "leases").write_text("0 aa:00:00:00:00:01 10.255.0.101 * *\n0 aa:00:00:00:00:03 10.255.0.102 * *\n")
+
+    info = build_network_info(lab, 1, lambda path: True)
+    assert [(e["node_name"], e["mac"]) for e in info["endpoints"]] == [
+        ("host-1", "aa:00:00:00:00:01"), ("host-2", None),
+    ]
+    assert [l["node_name"] for l in info["ip"]["dhcp"]["leases"]] == ["host-1", "host-2"]
+    assert all("_ports" not in e for e in info["endpoints"])
+
+
+@pytest.mark.asyncio
 async def test_info_survives_missing_host_state(settings, labs_dir):
     svc = NetworkService()
     lab = _lab(labs_dir, "nat.json", "lab-nat")

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import shutil
+import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +93,28 @@ def _bridge_state(bridge: str | None, driver: Any) -> dict[str, Any]:
     except OSError:
         pass
     return state
+
+
+def _learned_macs(bridge: str | None) -> dict[str, str]:
+    """``{mac: port}`` the bridge has learned from traffic (unprivileged read)."""
+    if not bridge or not host_net.RE_BRIDGE_NAME.match(bridge):
+        return {}
+    try:
+        proc = subprocess.run(
+            [shutil.which("bridge") or "/usr/sbin/bridge", "fdb", "show", "br", bridge],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    learned: dict[str, str] = {}
+    for line in proc.stdout.splitlines() if proc.returncode == 0 else []:
+        # "<mac> dev <port> master <bridge> [permanent]"; permanent = host side
+        parts = line.split()
+        if len(parts) >= 3 and parts[1] == "dev" and "permanent" not in parts:
+            learned[parts[0].lower()] = parts[2]
+    return learned
 
 
 def _dnsmasq_pid(root: Path) -> int | None:
@@ -193,9 +217,35 @@ def _endpoints(item: LabNetwork) -> list[dict[str, Any]]:
                 "node_name": str(node.get("name") or f"node {node_end.get('node_id')}"),
                 "interface": str(interface.get("name") or f"eth{index}"),
                 "mac": _endpoint_mac(node, interface, index),
+                "_ports": _host_ports(item.lab_id, node_end.get("node_id"), index),
             }
         )
     return out
+
+
+def _host_ports(lab_id: str, node_id: Any, index: int) -> set[str]:
+    """Host interface names this endpoint can have on its bridge."""
+    try:
+        return {
+            host_net.tap_name(lab_id, int(node_id), index),
+            host_net.veth_host_name(lab_id, int(node_id), index),
+        }
+    except Exception:  # noqa: BLE001 - no instance id, or an id out of range
+        return set()
+
+
+def _apply_learned_macs(endpoints: list[dict[str, Any]], learned: dict[str, str]) -> dict[str, str]:
+    """Fill in MACs only the running node knows; returns ``{mac: node name}``."""
+    names = {end["mac"]: end["node_name"] for end in endpoints if end["mac"]}
+    for end in endpoints:
+        ports = end.pop("_ports")
+        macs = [mac for mac, port in learned.items() if port in ports]
+        # Several MACs mean a switch or a router behind the port.
+        if end["mac"] is None and len(macs) == 1:
+            end["mac"] = macs[0]
+        for mac in macs:
+            names.setdefault(mac, end["node_name"])
+    return names
 
 
 def _mac_conflicts(endpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -210,7 +260,7 @@ def _mac_conflicts(endpoints: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
-def _ip_settings(network: dict, bridge: str | None, endpoints: list[dict[str, Any]]) -> dict | None:
+def _ip_settings(network: dict, bridge: str | None, node_by_mac: dict[str, str]) -> dict | None:
     """Subnet, gateway and address use; ``None`` for a pure layer 2 network."""
     config = _dict(network.get("config"))
     runtime = _dict(network.get("runtime"))
@@ -262,7 +312,6 @@ def _ip_settings(network: dict, bridge: str | None, endpoints: list[dict[str, An
     if bridge and host_net.RE_BRIDGE_NAME.match(bridge):
         root = _base_data_dir() / "nat-cloud" / bridge
         leases = _leases(root, time.time())
-        node_by_mac = {e["mac"]: e["node_name"] for e in endpoints if e["mac"]}
         for lease in leases:
             lease["node_name"] = node_by_mac.get(lease["mac"])
         dhcp["lease_time"] = _lease_time(root)
@@ -328,6 +377,8 @@ def build_network_info(
 
     runtime = _dict(network.get("runtime"))
     bridge = source.bridge_name or current.bridge_name
+    mac_conflicts = _mac_conflicts(endpoints)
+    node_by_mac = _apply_learned_macs(endpoints, _learned_macs(bridge))
     network_type = str(network.get("type") or "linux_bridge")
     reason = unshareable_reason(network)
     return {
@@ -343,9 +394,9 @@ def build_network_info(
             if network_type == BRIDGE_CLOUD_TYPE
             else None
         ),
-        "ip": _ip_settings(source.network, bridge, endpoints),
+        "ip": _ip_settings(source.network, bridge, node_by_mac),
         "endpoints": endpoints,
-        "mac_conflicts": _mac_conflicts(endpoints),
+        "mac_conflicts": mac_conflicts,
         "sharing": {
             "role": "member" if joined else "owner" if current.shared or len(lab_rows) > 1 else "none",
             "shareable": reason is None,
