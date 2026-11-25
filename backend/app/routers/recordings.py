@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.routers.labs import _read_lab_data, _recording_lab_file, _scoped_lab_path
+from app.routers.labs import LAB_ACCESS, _read_lab_data, _recording_lab_file, _scoped_lab_path
 from app.schemas.user import UserRead
 from app.services import audit_service
 from app.services.console_recording import _slug, get_console_recorder, lab_recordings_dir, recording_lab_id
@@ -240,7 +240,7 @@ def _delete_recording_files(cast: Path) -> None:
             staging_dir.rmdir()
 
 
-@router.delete("/{lab_path:path}/recordings/{recording_id}")
+@router.delete("/{lab_path:path}/recordings/{recording_id}", dependencies=[LAB_ACCESS])
 async def delete_recording(
     lab_path: str,
     recording_id: str,
@@ -293,7 +293,7 @@ async def delete_recording(
     return {"code": 200, "status": "success", "message": "Recording deleted.", "data": {"id": recording_id}}
 
 
-@router.get("/{lab_path:path}/recordings")
+@router.get("/{lab_path:path}/recordings", dependencies=[LAB_ACCESS])
 async def list_recordings(
     lab_path: str,
     node_id: int | None = None,
@@ -353,7 +353,7 @@ async def _download_recording(
     )
 
 
-@router.get("/{lab_path:path}/recordings/{recording_id}/cast")
+@router.get("/{lab_path:path}/recordings/{recording_id}/cast", dependencies=[LAB_ACCESS])
 async def download_cast(
     lab_path: str,
     recording_id: str,
@@ -363,7 +363,7 @@ async def download_cast(
     return await _download_recording(current_user, lab_path, recording_id, ".cast", "application/x-asciicast", db)
 
 
-@router.get("/{lab_path:path}/recordings/{recording_id}/log")
+@router.get("/{lab_path:path}/recordings/{recording_id}/log", dependencies=[LAB_ACCESS])
 async def download_log(
     lab_path: str,
     recording_id: str,
@@ -373,7 +373,7 @@ async def download_log(
     return await _download_recording(current_user, lab_path, recording_id, ".log", "text/plain", db)
 
 
-@router.get("/{lab_path:path}/recordings/{recording_id}/content")
+@router.get("/{lab_path:path}/recordings/{recording_id}/content", dependencies=[LAB_ACCESS])
 async def recording_content(
     lab_path: str,
     recording_id: str,
@@ -409,7 +409,7 @@ def _session_for(current_user: UserRead, lab_path: str, node_id: int, console: s
     )
 
 
-@router.get("/{lab_path:path}/nodes/{node_id}/recording")
+@router.get("/{lab_path:path}/nodes/{node_id}/recording", dependencies=[LAB_ACCESS])
 async def node_recording_status(
     lab_path: str,
     node_id: int,
@@ -427,7 +427,7 @@ async def node_recording_status(
     return {"code": 200, "status": "success", "message": "OK", "data": data}
 
 
-@router.post("/{lab_path:path}/nodes/{node_id}/recording")
+@router.post("/{lab_path:path}/nodes/{node_id}/recording", dependencies=[LAB_ACCESS])
 async def node_recording_control(
     lab_path: str,
     node_id: int,

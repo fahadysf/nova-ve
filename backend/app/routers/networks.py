@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
-from app.routers.labs import _scoped_lab_path
+from app.routers.labs import LAB_ACCESS, _scoped_lab_path
 from app.schemas.network import NATCloudValidate, NetworkCreate, NetworkSharingUpdate, NetworkUpdate
 from app.schemas.user import UserRead
 from app.services import audit_service
@@ -70,7 +70,7 @@ def _can_open(user: UserRead, lab_path: str) -> bool:
     return True
 
 
-@router.get("/{lab_path:path}/networks")
+@router.get("/{lab_path:path}/networks", dependencies=[LAB_ACCESS])
 async def list_networks(
     lab_path: str,
     include_hidden: bool = Query(default=False),
@@ -88,7 +88,7 @@ async def list_networks(
     }
 
 
-@router.post("/{lab_path:path}/networks")
+@router.post("/{lab_path:path}/networks", dependencies=[LAB_ACCESS])
 async def create_network(
     lab_path: str,
     request: NetworkCreate,
@@ -142,15 +142,12 @@ async def create_network(
     )
 
 
-@router.post("/{lab_path:path}/networks/validate-nat-cloud")
+@router.post("/{lab_path:path}/networks/validate-nat-cloud", dependencies=[LAB_ACCESS])
 async def validate_nat_cloud_config(
     lab_path: str,
     request: NATCloudValidate,
     current_user: UserRead = Depends(get_current_user),
 ):
-    # It reports host subnets and stored settings, so it needs lab access.
-    if not _can_open(current_user, lab_path):
-        return _access_denied()
     _data, err = _read_lab_or_error(lab_path)
     if err is not None:
         return err
@@ -177,7 +174,7 @@ async def validate_nat_cloud_config(
     }
 
 
-@router.delete("/{lab_path:path}/networks/{network_id}")
+@router.delete("/{lab_path:path}/networks/{network_id}", dependencies=[LAB_ACCESS])
 async def delete_network(
     lab_path: str,
     network_id: int,
@@ -214,7 +211,7 @@ async def delete_network(
     }
 
 
-@router.patch("/{lab_path:path}/networks/{network_id}")
+@router.patch("/{lab_path:path}/networks/{network_id}", dependencies=[LAB_ACCESS])
 async def patch_network(
     lab_path: str,
     network_id: int,
@@ -272,14 +269,7 @@ def _service_error_response(exc: NetworkServiceError) -> JSONResponse:
     return JSONResponse(status_code=exc.code, content=body)
 
 
-def _access_denied() -> JSONResponse:
-    return JSONResponse(
-        status_code=403,
-        content={"code": 403, "status": "fail", "message": "Access denied."},
-    )
-
-
-@router.get("/{lab_path:path}/networks/{network_id}/info")
+@router.get("/{lab_path:path}/networks/{network_id}/info", dependencies=[LAB_ACCESS])
 async def get_network_info(
     lab_path: str,
     network_id: int,
@@ -290,9 +280,6 @@ async def get_network_info(
     Read-only. Combines the stored record with live host state, and degrades
     field by field when the bridge, DHCP server or lease file is absent.
     """
-
-    if not _can_open(current_user, lab_path):
-        return _access_denied()
     _data, err = _read_lab_or_error(lab_path)
     if err is not None:
         return err
@@ -313,7 +300,7 @@ async def get_network_info(
     }
 
 
-@router.put("/{lab_path:path}/networks/{network_id}/sharing")
+@router.put("/{lab_path:path}/networks/{network_id}/sharing", dependencies=[LAB_ACCESS])
 async def set_network_sharing(
     lab_path: str,
     network_id: int,
@@ -321,10 +308,6 @@ async def set_network_sharing(
     current_user: UserRead = Depends(get_current_user),
 ):
     """Offer a network to other labs, or stop offering it (#319)."""
-    try:
-        _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-    except PermissionError:
-        return _access_denied()
     data, err = _read_lab_or_error(lab_path)
     if err is not None:
         return err
@@ -357,7 +340,7 @@ async def set_network_sharing(
     }
 
 
-@router.post("/{lab_path:path}/runtime/reconcile")
+@router.post("/{lab_path:path}/runtime/reconcile", dependencies=[LAB_ACCESS])
 async def reconcile_runtime(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),

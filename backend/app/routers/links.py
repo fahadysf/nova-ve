@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
+from app.routers.labs import LAB_ACCESS
 from app.schemas.user import UserRead
 from app.services import audit_service, host_net
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
@@ -58,7 +59,7 @@ def _read_lab_or_error(lab_path: str):
         )
 
 
-@router.get("/{lab_path:path}/links")
+@router.get("/{lab_path:path}/links", dependencies=[LAB_ACCESS])
 async def list_links(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
@@ -74,7 +75,7 @@ async def list_links(
     }
 
 
-@router.post("/{lab_path:path}/links")
+@router.post("/{lab_path:path}/links", dependencies=[LAB_ACCESS])
 async def create_link(
     lab_path: str,
     body: Dict[str, Any] = Body(...),
@@ -195,7 +196,7 @@ async def create_link(
     return JSONResponse(status_code=200 if replayed else 201, content=response)
 
 
-@router.delete("/{lab_path:path}/links/{link_id}")
+@router.delete("/{lab_path:path}/links/{link_id}", dependencies=[LAB_ACCESS])
 async def delete_link(
     lab_path: str,
     link_id: str,
@@ -259,7 +260,7 @@ async def delete_link(
     }
 
 
-@router.patch("/{lab_path:path}/links/{link_id}")
+@router.patch("/{lab_path:path}/links/{link_id}", dependencies=[LAB_ACCESS])
 async def patch_link(
     lab_path: str,
     link_id: str,

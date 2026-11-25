@@ -4,6 +4,7 @@
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.database import get_db
+from app.routers.labs import _scoped_lab_path
 from app.services.ws_hub import ws_hub
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeService
@@ -34,6 +35,14 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
         pass
 
     if user is None:
+        await websocket.close(code=1008)
+        return
+
+    # #327: the event stream and resnapshot carry the lab's topology, so the
+    # caller must be able to open the lab, as on the HTTP lab routes.
+    try:
+        _scoped_lab_path(user, lab, treat_as_absolute=True)
+    except PermissionError:
         await websocket.close(code=1008)
         return
 
