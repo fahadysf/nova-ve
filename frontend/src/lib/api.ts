@@ -15,9 +15,15 @@ export class ApiError extends Error {
   statusCode: number;
   responseCode?: number;
   unauthorized: boolean;
+  /** Request field the server blames, e.g. ``config.cidr`` (#320). */
+  field?: string;
 
-  constructor(message: string, options?: { statusCode?: number; responseCode?: number; unauthorized?: boolean }) {
+  constructor(
+    message: string,
+    options?: { statusCode?: number; responseCode?: number; unauthorized?: boolean; field?: string }
+  ) {
     super(message);
+    this.field = options?.field;
     this.name = 'ApiError';
     this.statusCode = options?.statusCode ?? 0;
     this.responseCode = options?.responseCode;
@@ -95,7 +101,8 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
       if (!response.ok || payload.code >= 400 || payload.status === 'fail' || payload.status === 'error') {
         throw new ApiError(payload.message || 'Request failed.', {
           statusCode: response.status,
-          responseCode: payload.code
+          responseCode: payload.code,
+          field: (payload as { field?: string }).field
         });
       }
 

@@ -461,6 +461,56 @@ describe('TopologyCanvas lab controls', () => {
     expect(toggle).toHaveAttribute('aria-checked', 'true');
   });
 
+  const natConfig = {
+    cidr: '10.20.0.0/24', gateway: '10.20.0.1', dhcp: true,
+    dhcp_start: '10.20.0.100', dhcp_end: '10.20.0.254',
+  };
+
+  it('saves NAT-Cloud edits with PATCH and adopts the response (#320)', async () => {
+    const network = makeSharingNetwork({ type: 'nat_cloud', config: natConfig });
+    renderCanvas({}, { '7': network });
+    await openNetworkMenu();
+    await fireEvent.click(screen.getByTestId('network-menu-configure'));
+    await fireEvent.click(screen.getByLabelText('Enable DHCP'));
+    vi.mocked(apiRequest).mockClear();
+    vi.mocked(apiRequest)
+      .mockResolvedValueOnce({ data: {} } as never)
+      .mockRejectedValueOnce(new Error('Could not apply the DHCP settings.'));
+
+    await fireEvent.click(screen.getByTestId('network-confirm-button'));
+    // A failed save keeps the dialog open with the reason.
+    expect(await screen.findByText('Could not apply the DHCP settings.')).toBeInTheDocument();
+
+    vi.mocked(apiRequest)
+      .mockResolvedValueOnce({ data: {} } as never)
+      .mockResolvedValueOnce({
+        network: { ...network, config: { ...natConfig, dhcp: false } }, revision: 51,
+      } as never);
+    await fireEvent.click(screen.getByTestId('network-confirm-button'));
+
+    await waitFor(() => expect(screen.queryByTestId('network-config-modal')).toBeNull());
+    expect(apiRequest).toHaveBeenLastCalledWith('/labs/lab-hotplug/networks/7', {
+      method: 'PATCH', body: { config: { dhcp: false } }, suppressToast: true,
+    });
+    expect(get(labState).networks['7'].config?.dhcp).toBe(false);
+    expect(get(labState).revision).toBe(51);
+  });
+
+  it('only offers Configure on NAT-Clouds, disabled for shared members (#320)', async () => {
+    renderCanvas({}, { '7': makeSharingNetwork() });
+    await openNetworkMenu();
+    expect(screen.queryByTestId('network-menu-configure')).toBeNull();
+    cleanup();
+
+    renderCanvas({}, {
+      '7': makeSharingNetwork({ type: 'nat_cloud', config: { ...natConfig, shared_cloud_id: 'nat-cloud:b:1' } }),
+    });
+    await openNetworkMenu();
+    const configure = screen.getByTestId('network-menu-configure');
+    expect(configure).toBeDisabled();
+    expect(configure).toHaveAttribute('title', expect.stringContaining('owns this network'));
+  });
+
   it('leaves Zen shortcuts available and preserves a pending link', async () => {
     const view = renderCanvas({
       '1': makeNode(1, 'edge-a', 0, capabilities, 2),

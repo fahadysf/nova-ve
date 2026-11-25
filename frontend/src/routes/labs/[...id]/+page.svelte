@@ -459,6 +459,7 @@
       reason === 'topology' ||
       reason === 'node-create' ||
       reason === 'network-create' ||
+      reason === 'network-update' ||
       reason === 'network-delete'
     ) {
       return;

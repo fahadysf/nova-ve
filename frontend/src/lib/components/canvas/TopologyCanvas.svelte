@@ -19,6 +19,7 @@
     Minus,
     Monitor,
     Pencil,
+    Settings2,
     Play,
     Plus,
     RotateCcw,
@@ -326,6 +327,10 @@
   let networkModalOpen = false;
   let networkModalDefaultName = '';
   let networkModalDefaultType: NetworkModalType = 'linux_bridge';
+  /** #320: set while the modal edits an existing NAT-Cloud. */
+  let editingNetwork: NetworkData | null = null;
+  let networkSaving = false;
+  let networkSaveError: { message: string; field?: string } | null = null;
   let pendingNetworkPosition: { x: number; y: number } | null = null;
   let zenDialog: 'node' | 'network' | null = null;
   $: if (!zenMode) zenDialog = null;
@@ -1736,6 +1741,8 @@
 
     if (item.kind === 'network') {
       pendingNetworkPosition = viewport;
+      editingNetwork = null;
+      networkSaveError = null;
       networkModalDefaultName = nextAvailableNetworkName();
       networkModalDefaultType = item.networkType;
       networkModalOpen = true;
@@ -1750,6 +1757,11 @@
   async function onNetworkModalConfirm(
     event: CustomEvent<{ name: string; type: NetworkType; config?: NetworkCreateConfig }>
   ) {
+    if (networkSaving) return;
+    if (editingNetwork) {
+      await saveNetworkEdit(editingNetwork, event.detail);
+      return;
+    }
     const position = pendingNetworkPosition ?? { x: 200, y: 200 };
     networkModalOpen = false;
     pendingNetworkPosition = null;
@@ -1760,9 +1772,57 @@
     }
   }
 
+  function handleNetworkConfigure(targetId: string) {
+    closeMenu();
+    const decoded = decodeId(targetId);
+    if (!decoded || decoded.type !== 'network') return;
+    const network = $labState.networks[String(decoded.id)];
+    if (!network) return;
+    editingNetwork = deepClone(network);
+    networkSaveError = null;
+    networkModalOpen = true;
+    if (zenMode) zenDialog = 'network';
+  }
+
+  /** The modal stays open until the server accepts the change (#320). */
+  async function saveNetworkEdit(
+    network: NetworkData,
+    detail: { name: string; config?: NetworkCreateConfig }
+  ) {
+    const body: Record<string, unknown> = {};
+    if (detail.name !== network.name) body.name = detail.name;
+    if (detail.config && Object.keys(detail.config).length > 0) body.config = detail.config;
+    networkSaving = true;
+    networkSaveError = null;
+    try {
+      const response = await apiRequest<NetworkData>(`/labs/${labId}/networks/${network.id}`, {
+        method: 'PATCH',
+        body,
+        suppressToast: true
+      });
+      const updated = (response as unknown as { network: NetworkData }).network;
+      adoptRevision(response);
+      labState.setNetworks({ ...$labState.networks, [String(updated.id)]: updated });
+      publishFlowState();
+      toastStore.push('NAT-Cloud settings saved.', 'success');
+      onNetworkModalCancel();
+      dispatchCanvasChange('network-update', {
+      });
+    } catch (error) {
+      networkSaveError = {
+        message: error instanceof Error ? error.message : String(error),
+        field: error instanceof ApiError ? error.field : undefined
+      };
+    } finally {
+      networkSaving = false;
+    }
+  }
+
   function onNetworkModalCancel() {
     networkModalOpen = false;
     pendingNetworkPosition = null;
+    editingNetwork = null;
+    networkSaveError = null;
   }
 
   setContext('nova-ve:connection-point-context-menu', (
@@ -2697,6 +2757,20 @@
         >
           <span>Network Info</span><Info class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
         </button>
+        {#if menuNetwork?.type === 'nat_cloud'}
+          <button
+            type="button"
+            class="menu-item disabled:cursor-not-allowed disabled:opacity-50"
+            data-testid="network-menu-configure"
+            disabled={menuSharing?.role === 'member'}
+            title={menuSharing?.role === 'member'
+              ? 'Settings are managed by the lab that owns this network.'
+              : 'DHCP and name settings'}
+            on:click|preventDefault|stopPropagation={() => handleNetworkConfigure(menu?.targetId ?? '')}
+          >
+            <span>Configure…</span><Settings2 class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+          </button>
+        {/if}
         {#if menuSharing}
           <button
             type="button"
@@ -2812,6 +2886,10 @@
       open={networkModalOpen}
       defaultName={networkModalDefaultName}
       defaultType={networkModalDefaultType}
+      mode={editingNetwork ? 'edit' : 'create'}
+      network={editingNetwork}
+      saving={networkSaving}
+      saveError={networkSaveError}
       on:confirm={onNetworkModalConfirm}
       on:cancel={onNetworkModalCancel}
     />
