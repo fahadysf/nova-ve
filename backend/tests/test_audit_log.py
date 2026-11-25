@@ -1603,7 +1603,7 @@ class TestFolderEvents:
         for name in ("create_folder_path", "rename_folder", "delete_folder"):
             monkeypatch.setattr(folders.FolderService, name, lambda *args: None)
         monkeypatch.setattr(
-            folders, "assert_no_external_nat_cloud_references_for_scope", lambda path: None
+            folders, "assert_no_external_members_for_scope", lambda path: None
         )
 
         class _NoLabs:
@@ -1658,7 +1658,7 @@ class TestFolderEvents:
 
         monkeypatch.setattr(folders.FolderService, "delete_folder", _refuse)
         monkeypatch.setattr(
-            folders, "assert_no_external_nat_cloud_references_for_scope", lambda path: None
+            folders, "assert_no_external_members_for_scope", lambda path: None
         )
 
         response = await folders.delete_folder("Courses", current_user=_admin(), db=_FakeDb())

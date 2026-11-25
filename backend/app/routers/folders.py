@@ -9,10 +9,8 @@ from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.folder import FolderCreateRequest, FolderRenameRequest
 from app.schemas.user import UserRead
-from app.services.cloud_inventory_service import (
-    SharedCloudReferenceError,
-    assert_no_external_nat_cloud_references_for_scope,
-)
+from app.services.cloud_inventory_service import SharedCloudReferenceError
+from app.services.shared_network_service import assert_no_external_members_for_scope
 from app.services.folder_service import FolderService
 from app.services import audit_service
 from app.services.lab_service import LabService
@@ -282,7 +280,7 @@ async def delete_folder(
 ):
     try:
         scoped_path = _scoped_folder_path(current_user, folder_path, treat_as_absolute=True)
-        assert_no_external_nat_cloud_references_for_scope(scoped_path)
+        assert_no_external_members_for_scope(scoped_path)
         FolderService.delete_folder(scoped_path)
     except SharedCloudReferenceError as e:
         return {

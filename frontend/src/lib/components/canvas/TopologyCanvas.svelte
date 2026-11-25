@@ -6,8 +6,10 @@
   import { onMount } from 'svelte';
   import { writable, get } from 'svelte/store';
   import {
+    Check,
     ChevronLeft,
     Eraser,
+    Info,
     ListVideo,
     LocateFixed,
     LoaderCircle,
@@ -20,6 +22,7 @@
     Play,
     Plus,
     RotateCcw,
+    Share2,
     Square,
     Trash2,
     ZoomIn,
@@ -47,6 +50,8 @@
   import PortInfoPopover from '$lib/components/canvas/PortInfoPopover.svelte';
   import { selectedPortInfoStore, type SelectedPortInfo } from '$lib/stores/portInfo';
   import { canvasPrefs } from '$lib/stores/canvasPrefs';
+  import { infoPanels } from '$lib/stores/infoPanels';
+  import { networkSharing, type NetworkModalType } from '$lib/services/networkSharing';
   import { toastStore } from '$lib/stores/toasts';
   import {
     createLayoutDebouncer,
@@ -102,17 +107,19 @@
     kind: 'network';
     title: string;
     subtitle: string;
-    networkType: NetworkType;
+    networkType: NetworkModalType;
   };
   type PaletteItem = PaletteNetworkItem;
 
   // Single source of truth for the network palette. Add new entries here as
   // more network types ship; ``networkType`` is the wire value posted to
-  // ``POST /api/labs/{path}/networks`` and must match ``NetworkType``.
+  // ``POST /api/labs/{path}/networks`` and must match ``NetworkType``, except
+  // ``shared_network`` (#319), which posts the type of the network it joins.
   const NETWORK_PALETTE: PaletteNetworkItem[] = [
     { kind: 'network', title: 'Bridge Network', subtitle: 'linux_bridge', networkType: 'linux_bridge' },
     { kind: 'network', title: 'NAT-Cloud', subtitle: 'DHCP + outbound NAT', networkType: 'nat_cloud' },
-    { kind: 'network', title: 'Bridge-Cloud', subtitle: 'Transparent host bridge', networkType: 'bridge_cloud' }
+    { kind: 'network', title: 'Bridge-Cloud', subtitle: 'Transparent host bridge', networkType: 'bridge_cloud' },
+    { kind: 'network', title: 'Shared network', subtitle: 'Offered by another lab', networkType: 'shared_network' }
   ];
   type ConsoleSelectorWindow = {
     id: number;
@@ -317,7 +324,7 @@
 
   let networkModalOpen = false;
   let networkModalDefaultName = '';
-  let networkModalDefaultType: NetworkType = 'linux_bridge';
+  let networkModalDefaultType: NetworkModalType = 'linux_bridge';
   let pendingNetworkPosition: { x: number; y: number } | null = null;
   let zenDialog: 'node' | 'network' | null = null;
   $: if (!zenMode) zenDialog = null;
@@ -350,6 +357,14 @@
     if (!decoded) return null;
     return $labState.nodes[String(decoded.id)] ?? null;
   })();
+
+  $: menuNetwork = (() => {
+    if (!menu || menu.targetType !== 'network') return null;
+    const decoded = decodeId(menu.targetId);
+    if (!decoded) return null;
+    return $labState.networks[String(decoded.id)] ?? null;
+  })();
+  $: menuSharing = menuNetwork ? networkSharing(menuNetwork) : null;
 
   const nodeColor = (node: Node) => {
     if (node.type === 'network') return '#3b82f6';
@@ -933,6 +948,7 @@
           type: 'network',
           count: network.count ?? 0,
           networkId: network.id,
+          sharingRole: networkSharing(network).role,
           linkIds: networkLinkIds,
           portPositionsByLinkId: connectionPointPositions.network.get(network.id) ?? {},
           portRefsByLinkId: connectionPointPositions.networkRefs.get(network.id) ?? {},
@@ -1589,6 +1605,41 @@
 
   function handleEditNode(targetId: string) {
     openEditNodeModal(targetId);
+  }
+
+  function handleNetworkInfo(targetId: string) {
+    closeMenu();
+    const decoded = decodeId(targetId);
+    if (decoded?.type === 'network') {
+      infoPanels.open('network', decoded.id);
+    }
+  }
+
+  async function handleNetworkSharing(targetId: string, shared: boolean) {
+    closeMenu();
+    const decoded = decodeId(targetId);
+    if (!decoded || decoded.type !== 'network') {
+      return;
+    }
+    try {
+      const response = await apiRequest(`/labs/${labId}/networks/${decoded.id}/sharing`, {
+        method: 'PUT',
+        body: { shared }
+      });
+      adoptRevision(response);
+      const updated = (response as unknown as { network: NetworkData }).network;
+      const current = $labState.networks[String(decoded.id)];
+      if (current) {
+        labState.setNetworks({
+          ...$labState.networks,
+          [String(decoded.id)]: { ...current, shared: updated.shared === true }
+        });
+        publishFlowState();
+      }
+      toastStore.push(response.message, 'success');
+    } catch (_error) {
+      // apiRequest already surfaced a toast; nothing else to do here.
+    }
   }
 
   async function handleNetworkDelete(targetId: string) {
@@ -2637,6 +2688,34 @@
           <span>Delete Node</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
       {:else if menu?.targetType === 'network'}
+        <button
+          type="button"
+          class="menu-item"
+          data-testid="network-menu-info"
+          on:click|preventDefault|stopPropagation={() => handleNetworkInfo(menu?.targetId ?? '')}
+        >
+          <span>Network Info</span><Info class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+        </button>
+        {#if menuSharing}
+          <button
+            type="button"
+            class="menu-item disabled:cursor-not-allowed disabled:opacity-50"
+            role="menuitemcheckbox"
+            aria-checked={menuSharing.role !== null}
+            data-testid="network-menu-sharing"
+            disabled={!menuSharing.canToggle}
+            title={menuSharing.hint}
+            on:click|preventDefault|stopPropagation={() =>
+              handleNetworkSharing(menu?.targetId ?? '', menuSharing?.role !== 'owner')}
+          >
+            <span>{menuSharing.role === 'member' ? 'Shared from another lab' : 'Make shared'}</span>
+            {#if menuSharing.role}
+              <Check class="h-3.5 w-3.5 text-sky-300" aria-hidden="true" />
+            {:else}
+              <Share2 class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+            {/if}
+          </button>
+        {/if}
         <button type="button" class="menu-item text-red-200" on:click|preventDefault|stopPropagation={() => handleNetworkDelete(menu?.targetId ?? '')}>
           <span>Delete Network</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
@@ -2727,6 +2806,7 @@
   </div>
   <div hidden={hideNetworkModal} inert={hideNetworkModal}>
     <NetworkConfigModal
+      {labId}
       suspended={hideNetworkModal}
       open={networkModalOpen}
       defaultName={networkModalDefaultName}

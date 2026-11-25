@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import shutil
 import uuid
 from pathlib import Path
 
@@ -10,8 +12,9 @@ from app.config import get_settings
 from app.models.lab import LabMeta
 from app.services import host_net
 from app.services.console_recording import RECORDINGS_FOLDER
-from app.services.cloud_inventory_service import (
-    assert_no_external_nat_cloud_references_for_scope,
+from app.services.shared_network_service import (
+    assert_no_external_members_for_scope,
+    is_member,
 )
 
 
@@ -51,6 +54,25 @@ def _lab_file_path(relative_path: str) -> Path:
     if not str(filepath).startswith(str(labs_dir)):
         raise ValueError("Invalid lab path: directory traversal detected")
     return filepath
+
+
+def _replace_json(filepath: Path, data: dict) -> None:
+    """Write a lab file in one step.
+
+    #319: other labs read this file without its lock to decide whether a
+    shared bridge is in use, so it must never be seen empty or half-written.
+    """
+    # Not ``*.json``: lab scans must not pick the temporary file up.
+    tmp_path = filepath.with_name(f".{uuid.uuid4().hex}.tmp")
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+        if filepath.exists():
+            shutil.copymode(filepath, tmp_path)
+        os.replace(tmp_path, filepath)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _safe_lab_filename(name: str) -> str:
@@ -250,17 +272,9 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
                 bridge,
             )
             continue
-        config = network.get("config") or {}
-        if (
-            str(network.get("type", "")) == NAT_CLOUD_TYPE
-            and isinstance(config, dict)
-            and config.get("shared_cloud_id")
-        ):
-            logger.info(
-                "delete_lab: shared NAT-Cloud reference %s preserved owner bridge %s",
-                config.get("shared_cloud_id"),
-                bridge,
-            )
+        # #319: a joined network uses another lab's bridge.
+        if is_member(network):
+            logger.info("delete_lab: joined network preserved owner bridge %s", bridge)
             continue
         # Defense-in-depth: refuse to delete anything that LOOKS like a
         # host bridge even if the record's type/driver was stripped.  The
@@ -568,7 +582,7 @@ class LabService:
 
     async def delete_lab(self, lab: LabMeta) -> None:
         filepath = _lab_file_path(lab.filename)
-        assert_no_external_nat_cloud_references_for_scope(lab.filename)
+        assert_no_external_members_for_scope(lab.filename)
         if filepath.exists():
             try:
                 data = LabService.read_lab_json_static(lab.filename)
@@ -656,5 +670,4 @@ class LabService:
                 revision_meta["revision"] = 1
             cleaned["meta"] = revision_meta
 
-        with open(filepath, "w") as f:
-            json.dump(cleaned, f, indent=2)
+        _replace_json(filepath, cleaned)

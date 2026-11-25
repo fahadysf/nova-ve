@@ -1353,9 +1353,12 @@
     </div>
   {:else}
     <div class="relative flex flex-1 overflow-hidden px-3 pb-3">
-      <div hidden={zenMode} class:contents={!zenMode}>
-        <InfoPanelStack nodesById={$labState.nodes} networksById={$labState.networks} />
-      </div>
+      <InfoPanelStack
+        {labId}
+        {zenMode}
+        nodesById={$labState.nodes}
+        networksById={$labState.networks}
+      />
       <div bind:this={canvasContainerEl} class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
         <SvelteFlowProvider>
           <TopologyCanvas

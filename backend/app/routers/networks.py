@@ -19,11 +19,13 @@ from fastapi.responses import JSONResponse
 
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
-from app.schemas.network import NetworkCreate, NetworkUpdate
+from app.routers.labs import _scoped_lab_path
+from app.schemas.network import NetworkCreate, NetworkSharingUpdate, NetworkUpdate
 from app.schemas.user import UserRead
 from app.services import audit_service
 from app.services.host_net import HostNetBridgeOwnershipError
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
+from app.services.network_info_service import build_network_info
 from app.services.network_service import NetworkServiceError, network_service
 
 
@@ -89,7 +91,12 @@ async def create_network(
         return err
 
     try:
-        payload = await network_service.create_network(lab_path, request.model_dump())
+        payload = await network_service.create_network(
+            lab_path,
+            request.model_dump(),
+            # Same audience as the NAT-Cloud inventory in /api/system/clouds.
+            allow_unshared_clouds=current_user.role == "admin",
+        )
     except HostNetBridgeOwnershipError as exc:
         return JSONResponse(
             status_code=409,
@@ -209,6 +216,99 @@ async def patch_network(
         "status": "success",
         "message": "Network updated successfully.",
         "event": event_type,
+        "network": payload,
+        # #248: post-write revision for the editor's next If-Match write.
+        "revision": LabService.read_meta_revision_static(lab_path),
+    }
+
+
+def _service_error_response(exc: NetworkServiceError) -> JSONResponse:
+    body: Dict[str, Any] = {"code": exc.code, "status": "fail", "message": exc.message}
+    body.update(exc.extra)
+    return JSONResponse(status_code=exc.code, content=body)
+
+
+def _access_denied() -> JSONResponse:
+    return JSONResponse(
+        status_code=403,
+        content={"code": 403, "status": "fail", "message": "Access denied."},
+    )
+
+
+@router.get("/{lab_path:path}/networks/{network_id}/info")
+async def get_network_info(
+    lab_path: str,
+    network_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Everything the info panel shows for one network (#318).
+
+    Read-only. Combines the stored record with live host state, and degrades
+    field by field when the bridge, DHCP server or lease file is absent.
+    """
+
+    def can_open(other_path: str) -> bool:
+        try:
+            _scoped_lab_path(current_user, other_path, treat_as_absolute=True)
+        except PermissionError:
+            return False
+        return True
+
+    if not can_open(lab_path):
+        return _access_denied()
+    _data, err = _read_lab_or_error(lab_path)
+    if err is not None:
+        return err
+    try:
+        info = await asyncio.to_thread(build_network_info, lab_path, network_id, can_open)
+    except NetworkServiceError as exc:
+        return _service_error_response(exc)
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "Network details loaded.",
+        "data": info,
+    }
+
+
+@router.put("/{lab_path:path}/networks/{network_id}/sharing")
+async def set_network_sharing(
+    lab_path: str,
+    network_id: int,
+    request: NetworkSharingUpdate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Offer a network to other labs, or stop offering it (#319)."""
+    try:
+        _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError:
+        return _access_denied()
+    data, err = _read_lab_or_error(lab_path)
+    if err is not None:
+        return err
+    try:
+        payload, changed = await network_service.set_sharing(lab_path, network_id, request.shared)
+    except NetworkServiceError as exc:
+        return _service_error_response(exc)
+    if changed:
+        await audit_service.record(
+            "network.update",
+            actor=current_user.username,
+            **audit_service.network_context(
+                data,
+                payload,
+                lab_path,
+                detail={"changes": {"shared": {"from": not request.shared, "to": request.shared}}},
+            ),
+        )
+    return {
+        "code": 200,
+        "status": "success",
+        "message": (
+            "Network is now shared with other labs."
+            if request.shared
+            else "Network is no longer shared."
+        ),
         "network": payload,
         # #248: post-write revision for the editor's next If-Match write.
         "revision": LabService.read_meta_revision_static(lab_path),

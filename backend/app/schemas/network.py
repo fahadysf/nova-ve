@@ -44,6 +44,9 @@ class NetworkConfig(BaseModel):
     # type=="nat_cloud", the record is a reference to the owner cloud and
     # shares owner runtime/IPAM instead of creating a new subnet.
     shared_cloud_id: Optional[str] = None
+    # #319: opaque ID returned by /api/system/shared-networks. The new record
+    # joins that network; its type and settings come from the owner.
+    shared_network_id: Optional[str] = None
 
 
 class NetworkRuntime(BaseModel):
@@ -92,6 +95,8 @@ class NetworkBase(BaseModel):
     label: str = Field(default="")
     visibility: bool = True
     implicit: bool = False
+    # #319: other labs may join this network. Set through PUT .../sharing only.
+    shared: bool = False
     smart: int = -1
     config: Dict[str, Any] = Field(default_factory=dict)
     runtime: Dict[str, Any] = Field(default_factory=dict)
@@ -131,6 +136,10 @@ class NetworkCreate(BaseModel):
                     "config.host_bridge is required when type == 'bridge_cloud'"
                 )
         return self
+
+
+class NetworkSharingUpdate(BaseModel):
+    shared: bool
 
 
 class NetworkUpdate(BaseModel):

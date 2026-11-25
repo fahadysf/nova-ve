@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.dependencies import get_current_admin, get_current_user
 from app.openapi import COMMON_RESPONSES
+from app.routers.labs import _scoped_lab_path
 from app.schemas.user import UserRead
 from app.services.cloud_inventory_service import list_nat_clouds
 from app.services.bridge_cloud_service import list_bridge_clouds
+from app.services.shared_network_service import list_shared_networks
 from app.services import audit_service, iourc_service, qemu_versions
 from app.services.node_runtime_service import NodeRuntimeService
 import ipaddress
@@ -386,8 +388,35 @@ async def get_clouds(
         "data": {
             "nat_clouds": list_nat_clouds(),
             "bridge_clouds": await list_bridge_clouds(),
-            "shared_bridges": [],
+            "shared_bridges": list_shared_networks(),
         },
+    }
+
+
+@router.get("/system/shared-networks")
+async def get_shared_networks(
+    for_lab: str | None = Query(
+        default=None, description="Leave out networks this lab owns or already uses."
+    ),
+    current_user: UserRead = Depends(get_current_user),
+):
+    """Networks other labs offer for sharing (#319).
+
+    Open to every signed-in user: the owner opted in, and the listing carries
+    only what is needed to pick a network.
+    """
+    try:
+        if for_lab:
+            for_lab = _scoped_lab_path(current_user, for_lab, treat_as_absolute=True)
+        shared = list_shared_networks(for_lab)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "code": 200,
+        "status": "success",
+        "data": shared,
     }
 
 

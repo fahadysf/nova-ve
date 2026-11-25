@@ -3,8 +3,10 @@
 
 import asyncio
 import copy
+import hashlib
 import json
 import logging
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -36,9 +38,10 @@ from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
-from app.services.cloud_inventory_service import (
-    SharedCloudReferenceError,
-    assert_no_external_nat_cloud_references_for_scope,
+from app.services.cloud_inventory_service import SharedCloudReferenceError
+from app.services.shared_network_service import (
+    assert_no_external_members_for_scope,
+    patch_violation,
 )
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import (
@@ -234,8 +237,44 @@ def _resize_interfaces(existing: list[dict], node_type: str, ethernet_count: int
     return resized
 
 
-def _first_mac_for_node(node_id: int) -> str:
-    return f"50:00:00:{node_id:02x}:00:00"
+def _first_mac_for_node(lab_id: str, node_id: int) -> str:
+    """Default first MAC, distinct per (lab, node).
+
+    #319: the lab hash keeps same-numbered nodes of different labs apart when
+    they meet on a shared network. The last octet is left for the NIC index.
+    """
+    digest = hashlib.blake2b(str(lab_id).encode("utf-8"), digest_size=2).digest()
+    return (
+        f"50:{digest[0]:02x}:{digest[1]:02x}:"
+        f"{node_id & 0xFF:02x}:{(node_id >> 8) & 0xFF:02x}:00"
+    )
+
+
+_MAC_RE = re.compile(r"[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}")
+
+
+def _apply_first_mac_edit(before: dict, node: dict) -> None:
+    """Make an edited first MAC take effect (#319).
+
+    Boot reads the top-level ``firstmac`` stamped at creation; the dialog edits
+    ``extras.firstmac``. Addresses nova-ve derived from the old value are
+    cleared so they are derived again.
+    """
+    if node.get("type") != "qemu":
+        return
+    old_extras = before.get("extras") if isinstance(before.get("extras"), dict) else {}
+    new_extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
+    new_mac = new_extras.get("firstmac")
+    if not new_mac or new_mac == old_extras.get("firstmac"):
+        return
+    old_mac = before.get("firstmac") or old_extras.get("firstmac")
+    node["firstmac"] = str(new_mac).lower()
+    for index, interface in enumerate(node.get("interfaces") or []):
+        planned = interface.get("planned_mac") if isinstance(interface, dict) else None
+        if not planned or not _MAC_RE.fullmatch(str(old_mac or "")):
+            continue
+        if str(planned).lower() == NodeRuntimeService._mac_for_index(str(old_mac), index).lower():
+            interface["planned_mac"] = None
 
 
 def _html5_launcher_url(lab_path: str, node_id: int) -> str:
@@ -328,6 +367,7 @@ def _node_position(index: int, left: int, top: int, placement: str) -> tuple[int
 
 def _build_node_payload(
     *,
+    lab_id: str = "",
     node_id: int,
     request: NodeCreate | NodeBatchCreate,
     template,
@@ -349,7 +389,7 @@ def _build_node_payload(
         if not merged_extras.get("uuid"):
             merged_extras["uuid"] = str(uuid.uuid4())
         if not merged_extras.get("firstmac"):
-            merged_extras["firstmac"] = _first_mac_for_node(node_id)
+            merged_extras["firstmac"] = _first_mac_for_node(lab_id, node_id)
 
     return {
         "id": node_id,
@@ -881,6 +921,7 @@ async def create_node(
         }
 
     node = _build_node_payload(
+        lab_id=str(data.get("id") or scoped_path),
         node_id=next_id,
         request=request,
         template=template,
@@ -1032,6 +1073,7 @@ def _resolve_iface_index(node: dict, iface_name: str) -> int:
 
 def _build_paired_child_payload(
     *,
+    lab_id: str = "",
     node_id: int,
     template_key: str,
     child: dict,
@@ -1063,7 +1105,7 @@ def _build_paired_child_payload(
         if not extras.get("uuid"):
             extras["uuid"] = str(uuid.uuid4())
         if not extras.get("firstmac"):
-            extras["firstmac"] = _first_mac_for_node(node_id)
+            extras["firstmac"] = _first_mac_for_node(lab_id, node_id)
 
     template_iface_naming = child.get("interface_naming")
     if not isinstance(template_iface_naming, dict):
@@ -1219,6 +1261,7 @@ async def create_nodes_from_paired_template(
                     index, request.base_left, request.base_top, "row"
                 )
                 payload = _build_paired_child_payload(
+                    lab_id=str(data.get("id") or scoped_path),
                     node_id=next_id,
                     template_key=request.template_key,
                     child=child,
@@ -1496,6 +1539,7 @@ async def create_nodes_batch(
         node_id = next_id + index
         left, top = _node_position(index, request.left, request.top, request.placement)
         node = _build_node_payload(
+            lab_id=str(data.get("id") or scoped_path),
             node_id=node_id,
             request=request,
             template=template,
@@ -1670,6 +1714,19 @@ async def update_node(
             "message": validation_error,
         }
 
+    new_mac = (request.extras or {}).get("firstmac")
+    old_extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
+    if (
+        new_mac
+        and new_mac != old_extras.get("firstmac")
+        and not _MAC_RE.fullmatch(str(new_mac))
+    ):
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": "First MAC address must look like 50:00:00:01:00:00.",
+        }
+
     # #297: shallow snapshot — the trail reports only what actually changed.
     before = dict(node)
 
@@ -1684,6 +1741,7 @@ async def update_node(
         node.get("type", "qemu"),
         int(node.get("ethernet", 0)),
     )
+    _apply_first_mac_edit(before, node)
     LabService.write_lab_json_static(scoped_path, data)
 
     # A save that changed nothing (the edit dialog re-submits every field)
@@ -2596,6 +2654,10 @@ async def update_network(
             ),
         }
 
+    violation = patch_violation(network, patch)
+    if violation:
+        return {"code": 422, "status": "fail", "message": violation}
+
     before = dict(network)
     for field, value in patch.items():
         if value is not None:
@@ -3242,7 +3304,7 @@ async def delete_lab(
                 "message": "Access denied.",
             }
         try:
-            assert_no_external_nat_cloud_references_for_scope(scoped_path)
+            assert_no_external_members_for_scope(scoped_path)
         except SharedCloudReferenceError as exc:
             return {
                 "code": 409,

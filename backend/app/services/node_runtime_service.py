@@ -29,6 +29,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -43,6 +44,7 @@ import psutil
 
 from app.config import get_settings
 from app.services import host_net, qemu_versions, runtime_pids
+from app.services.shared_network_service import bridge_identity
 
 
 _DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
@@ -1553,7 +1555,7 @@ class NodeRuntimeService:
             if not bridge:
                 # US-401 may not have populated this yet — derive on the fly.
                 try:
-                    bridge = host_net.bridge_name(lab_id, network_id)
+                    bridge = host_net.bridge_name(*bridge_identity(lab_id, network_id, network))
                 except Exception:
                     continue
 
@@ -1571,6 +1573,10 @@ class NodeRuntimeService:
 
             for iface in members:
                 if iface in declared:
+                    continue
+                # #319: on a shared bridge, another lab's TAPs and veths are
+                # not links this lab could declare.
+                if cls._belongs_to_other_lab(lab_id, iface):
                     continue
                 # Decode the peer node from the iface name when possible so
                 # the frontend can render a hint.  Failures degrade to None.
@@ -1764,6 +1770,17 @@ class NodeRuntimeService:
             if raw:
                 names.append(raw)
         return names
+
+    @staticmethod
+    def _belongs_to_other_lab(lab_id: str, iface: str) -> bool:
+        """True for an ``nve<hash>d...`` iface whose hash is not this lab's."""
+        match = re.match(r"nve[0-9a-f]{4}(?=d\d)", iface)
+        if match is None:
+            return False
+        try:
+            return not host_net.tap_name(lab_id, 0, 0).startswith(match.group(0))
+        except Exception:  # noqa: BLE001 - no instance id: keep reporting
+            return False
 
     @staticmethod
     def _parse_iface_node_id(iface: str) -> int | None:
@@ -2506,7 +2523,7 @@ class NodeRuntimeService:
             runtime_record = network.get("runtime") or {}
             bridge = runtime_record.get("bridge_name")
             if not bridge:
-                bridge = host_net.bridge_name(lab_id, network_id)
+                bridge = host_net.bridge_name(*bridge_identity(lab_id, network_id, network))
             seen_indices.add(interface_index)
             attachments.append(
                 {
@@ -2534,7 +2551,7 @@ class NodeRuntimeService:
             runtime_record = network.get("runtime") or {}
             bridge = runtime_record.get("bridge_name")
             if not bridge:
-                bridge = host_net.bridge_name(lab_id, network_id)
+                bridge = host_net.bridge_name(*bridge_identity(lab_id, network_id, network))
             seen_indices.add(interface_index)
             attachments.append(
                 {
@@ -4622,10 +4639,10 @@ class NodeRuntimeService:
                     network_id = int(peer["network_id"])
                 except (TypeError, ValueError):
                     continue
-                bridge = host_net.bridge_name(lab_id, network_id)
-                # Allow per-network override.
                 networks = lab_data.get("networks") or {}
                 net = networks.get(str(network_id)) or {}
+                bridge = host_net.bridge_name(*bridge_identity(lab_id, network_id, net))
+                # Allow per-network override.
                 rt = net.get("runtime") or {}
                 if isinstance(rt.get("bridge_name"), str) and rt["bridge_name"]:
                     bridge = rt["bridge_name"]
@@ -5383,7 +5400,7 @@ class NodeRuntimeService:
             bridge = runtime_record.get("bridge_name")
             if not bridge:
                 # Pre-Wave-6 lab.json — derive the canonical name on the fly.
-                bridge = host_net.bridge_name(lab_id, network_id)
+                bridge = host_net.bridge_name(*bridge_identity(lab_id, network_id, network))
             seen_indices.add(interface_index)
             attachments.append(
                 {

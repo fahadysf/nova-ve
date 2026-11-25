@@ -43,6 +43,23 @@ describe('NetworkNode', () => {
     expect(screen.getByTestId('network-node').querySelector('svg.h-5.w-5')).toBeInTheDocument();
   });
 
+  it.each([
+    ['owner', 'Shared with other labs'],
+    ['member', 'Shared network from another lab'],
+  ] as const)('marks a network shared as %s (#319)', (sharingRole, label) => {
+    render(NetworkNode, {
+      props: { id: 'network7', data: { label: 'core', networkId: 7, linkIds: [], sharingRole } },
+    });
+    expect(screen.getByRole('img', { name: label })).toBeInTheDocument();
+  });
+
+  it('shows no sharing mark on a private network', () => {
+    render(NetworkNode, {
+      props: { id: 'network7', data: { label: 'core', networkId: 7, linkIds: [], sharingRole: null } },
+    });
+    expect(screen.queryByTestId('network-shared-badge')).toBeNull();
+  });
+
   it('places the info button at the bottom-right corner inside the network box', () => {
     render(NetworkNode, {
       props: {

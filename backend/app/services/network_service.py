@@ -29,13 +29,26 @@ from app.services import host_net
 from app.services.cloud_inventory_service import (
     find_nat_cloud_owner,
     list_nat_clouds,
+    nat_cloud_id,
     nat_cloud_ipam_lock,
     owner_cidrs,
-    references_to_cloud,
 )
-from app.services.lab_lock import lab_lock
+from app.services.lab_lock import LabLockTimeout, lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.link_service import _refcount, _recompute_mac_registry
+from app.services.shared_network_service import (
+    MEMBERSHIP_CONFIG_KEYS,
+    LabNetwork,
+    find_owner,
+    find_shared_owner,
+    is_member,
+    lab_names,
+    member_key,
+    members_of,
+    patch_violation,
+    reclaim_fingerprint,
+    unshareable_reason,
+)
 from app.services.ws_hub import ws_hub
 
 logger = logging.getLogger("nova-ve")
@@ -246,6 +259,54 @@ def _normalize_shared_nat_cloud_config(shared_cloud_id: str) -> tuple[dict, dict
     config["shared_cloud_id"] = shared_cloud_id
     runtime = dict(owner.network.get("runtime") or {})
     return config, runtime
+
+
+def _joinable_owner(shared_id: str, lab_id: str, networks: dict) -> LabNetwork:
+    """Owner behind a ``shared_network_id`` that this lab may join (#319)."""
+    owner = find_shared_owner(shared_id)
+    if owner is None or unshareable_reason(owner.network):
+        raise NetworkServiceError(
+            404,
+            "That shared network does not exist or is no longer shared.",
+            extra={"shared_network_id": shared_id},
+        )
+    if owner.lab_id == lab_id:
+        raise NetworkServiceError(409, "That shared network already belongs to this lab.")
+    for network in networks.values():
+        if member_key(network) == owner.key:
+            raise NetworkServiceError(
+                409,
+                f"This lab already uses that shared network as {network.get('name')!r}.",
+            )
+    return owner
+
+
+def _member_summaries(members: List[LabNetwork]) -> List[dict]:
+    return [
+        {
+            "lab_path": member.lab_path,
+            "network_id": member.network_id,
+            "network_name": member.name,
+        }
+        for member in members
+    ]
+
+
+def _ensure_shared_bridge(owner: LabNetwork, bridge: str) -> None:
+    """Provision a shared bridge under its owner's identity if it is missing."""
+    if not host_net.bridge_exists(bridge):
+        try:
+            host_net.bridge_add(bridge)
+        except host_net.HostNetEEXIST:
+            pass  # the other lab was opened at the same moment
+        host_net.bridge_fingerprint_write(bridge, owner.lab_id, owner.network_id)
+        return
+    if host_net.bridge_fingerprint_check(
+        bridge, owner.lab_id, owner.network_id
+    ) == "mismatch" and not reclaim_fingerprint(bridge, owner.lab_id, owner.network_id):
+        raise host_net.HostNetBridgeOwnershipError(
+            _bridge_ownership_message(bridge, owner.lab_id, owner.network_id)
+        )
 
 
 def _bridge_gateway_cidr(config: dict) -> str:
@@ -547,6 +608,9 @@ class NetworkService:
         raised: List[str] = []
         nat_cloud: List[Dict[str, Any]] = []
         nic_link_state: List[Dict[str, Any]] = []
+        # Reconciled after this lab's lock is released: two labs that join
+        # each other's NAT-Clouds must not wait on each other's locks.
+        foreign_nat_owners: List[Tuple[int, str, Any, str]] = []
 
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
@@ -589,25 +653,16 @@ class NetworkService:
                     owner_bridge = owner.bridge_name or host_net.bridge_name(
                         owner.lab_id, owner.network_id
                     )
+                    if owner.lab_path != normalized:
+                        foreign_nat_owners.append(
+                            (network_id, shared_cloud_id, owner, owner_bridge)
+                        )
+                        continue
                     try:
-                        if owner.lab_path == normalized:
-                            owner_network = networks.get(str(owner.network_id))
-                            if isinstance(owner_network, dict):
-                                if self._ensure_nat_cloud_runtime(owner_network, owner_bridge):
-                                    dirty = True
-                        else:
-                            with lab_lock(owner.lab_path, labs_dir):
-                                owner_data = LabService.read_lab_json_static(owner.lab_path)
-                                owner_networks = owner_data.get("networks") or {}
-                                owner_network = owner_networks.get(str(owner.network_id))
-                                if isinstance(owner_network, dict):
-                                    if self._ensure_nat_cloud_runtime(owner_network, owner_bridge):
-                                        owner_networks[str(owner.network_id)] = owner_network
-                                        owner_data["networks"] = owner_networks
-                                        # #248: reconcile bookkeeping, not an edit.
-                                        LabService.write_lab_json_static(
-                                            owner.lab_path, owner_data, bump_revision=False
-                                        )
+                        owner_network = networks.get(str(owner.network_id))
+                        if isinstance(owner_network, dict):
+                            if self._ensure_nat_cloud_runtime(owner_network, owner_bridge):
+                                dirty = True
                         nat_cloud.append(
                             {
                                 "network_id": network_id,
@@ -625,6 +680,26 @@ class NetworkService:
                             }
                         )
                     continue
+
+                # #319: a joined bridge is provisioned under its owner's
+                # identity, so either lab can restore it after a reboot.
+                bridge_lab_id, bridge_network_id = lab_id, network_id
+                if is_member(network):
+                    shared_owner = find_owner(member_key(network))
+                    if shared_owner is None or not shared_owner.shared:
+                        skipped.append(
+                            {
+                                "bridge": bridge,
+                                "network_id": network_id,
+                                "reason": "shared network owner is missing or no longer shares it",
+                            }
+                        )
+                        continue
+                    bridge_lab_id = shared_owner.lab_id
+                    bridge_network_id = shared_owner.network_id
+                    bridge = shared_owner.bridge_name or host_net.bridge_name(
+                        bridge_lab_id, bridge_network_id
+                    )
 
                 # Bridge-Cloud: host-owned bridge, NEVER fingerprint or add.
                 # Verify-only.  Distinguish via runtime.driver (set at create
@@ -656,30 +731,35 @@ class NetworkService:
                 try:
                     if host_net.bridge_exists(bridge):
                         status = host_net.bridge_fingerprint_check(
-                            bridge, lab_id, network_id
+                            bridge, bridge_lab_id, bridge_network_id
                         )
-                        if status == "mismatch":
+                        if status == "mismatch" and not reclaim_fingerprint(
+                            bridge, bridge_lab_id, bridge_network_id
+                        ):
                             skipped.append({
                                 "bridge": bridge,
                                 "network_id": network_id,
                                 "reason": _bridge_ownership_message(
-                                    bridge, lab_id, network_id
+                                    bridge, bridge_lab_id, bridge_network_id
                                 ),
                             })
                             continue
                         if status == "absent":
                             try:
                                 host_net.bridge_fingerprint_write(
-                                    bridge, lab_id, network_id
+                                    bridge, bridge_lab_id, bridge_network_id
                                 )
                             except host_net.HostNetError:
                                 pass
                         ensured.append(bridge)
                     else:
-                        host_net.bridge_add(bridge)
+                        try:
+                            host_net.bridge_add(bridge)
+                        except host_net.HostNetEEXIST:
+                            pass  # another lab on this bridge got there first
                         try:
                             host_net.bridge_fingerprint_write(
-                                bridge, lab_id, network_id
+                                bridge, bridge_lab_id, bridge_network_id
                             )
                         except host_net.HostNetError:
                             pass
@@ -737,6 +817,38 @@ class NetworkService:
                 # #248: bridge reconcile is bookkeeping, not an edit.
                 LabService.write_lab_json_static(normalized, data, bump_revision=False)
 
+        for network_id, shared_cloud_id, owner, owner_bridge in foreign_nat_owners:
+            try:
+                _ensure_shared_bridge(owner, owner_bridge)
+                with lab_lock(owner.lab_path, labs_dir):
+                    owner_data = LabService.read_lab_json_static(owner.lab_path)
+                    owner_network = (owner_data.get("networks") or {}).get(str(owner.network_id))
+                    if isinstance(owner_network, dict) and self._ensure_nat_cloud_runtime(
+                        owner_network, owner_bridge
+                    ):
+                        # #248: reconcile bookkeeping, not an edit.
+                        LabService.write_lab_json_static(
+                            owner.lab_path, owner_data, bump_revision=False
+                        )
+                nat_cloud.append(
+                    {
+                        "network_id": network_id,
+                        "bridge": owner_bridge,
+                        "shared_cloud_id": shared_cloud_id,
+                    }
+                )
+                ensured.append(owner_bridge)
+            except (
+                NetworkServiceError,
+                host_net.HostNetError,
+                LabLockTimeout,
+                OSError,
+                ValueError,
+            ) as exc:
+                skipped.append(
+                    {"bridge": owner_bridge, "network_id": network_id, "reason": str(exc)}
+                )
+
         # QMP set_link calls are idempotent and read-only w.r.t. lab.json —
         # run outside the lock to avoid holding it for O(nodes × NICs × 2s).
         nic_link_state = _reconcile_qemu_nic_link_state(lab_id, data)
@@ -750,7 +862,14 @@ class NetworkService:
             "nic_link_state": nic_link_state,
         }
 
-    async def create_network(self, lab_path: str, request: dict) -> dict:
+    async def create_network(
+        self, lab_path: str, request: dict, *, allow_unshared_clouds: bool = False
+    ) -> dict:
+        """Create a network in a lab.
+
+        ``allow_unshared_clouds`` lets an administrator reuse any NAT-Cloud by
+        ``shared_cloud_id``; everyone else can join only what is shared (#319).
+        """
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
@@ -769,7 +888,19 @@ class NetworkService:
         if not raw_name:
             raise NetworkServiceError(422, "Network name must be non-empty.")
 
-        create_lock = nat_cloud_ipam_lock() if network_type == NAT_CLOUD_TYPE else nullcontext()
+        shared_network_id = str(raw_config.get("shared_network_id") or "").strip()
+        requested_cloud_id = str(raw_config.get("shared_cloud_id") or "").strip()
+        # #319: the record becomes a member only of what is resolved below.
+        raw_config = {k: v for k, v in raw_config.items() if k not in MEMBERSHIP_CONFIG_KEYS}
+        if requested_cloud_id and not shared_network_id and network_type != NAT_CLOUD_TYPE:
+            raise NetworkServiceError(
+                422, "config.shared_cloud_id is only valid on nat_cloud networks."
+            )
+        create_lock = (
+            nat_cloud_ipam_lock()
+            if network_type == NAT_CLOUD_TYPE or shared_network_id
+            else nullcontext()
+        )
         with create_lock:
             with lab_lock(normalized, labs_dir):
                 data = LabService.read_lab_json_static(normalized)
@@ -781,11 +912,33 @@ class NetworkService:
                         f"A network named {raw_name!r} already exists in this lab.",
                         extra={"name": raw_name},
                     )
+                shared_owner: Optional[LabNetwork] = None
+                if shared_network_id:
+                    # #319: the owner decides type and settings. A NAT-Cloud
+                    # is joined through its existing reference path.
+                    shared_owner = _joinable_owner(shared_network_id, lab_id, networks)
+                    network_type = shared_owner.type
+                    if network_type == NAT_CLOUD_TYPE:
+                        requested_cloud_id = nat_cloud_id(
+                            shared_owner.lab_id, shared_owner.network_id
+                        )
+                    else:
+                        requested_cloud_id = ""
+                        raw_config = {
+                            **(shared_owner.network.get("config") or {}),
+                            "shared_network_id": shared_network_id,
+                        }
+                elif requested_cloud_id and not allow_unshared_clouds:
+                    cloud = find_nat_cloud_owner(requested_cloud_id)
+                    if cloud is None or cloud.network.get("shared") is not True:
+                        raise NetworkServiceError(
+                            404,
+                            "NAT-Cloud shared_cloud_id does not reference a shared owner.",
+                            extra={"shared_cloud_id": requested_cloud_id},
+                        )
                 shared_cloud_id = ""
                 if network_type == NAT_CLOUD_TYPE:
-                    requested_shared = raw_config.get("shared_cloud_id")
-                    if requested_shared is not None:
-                        shared_cloud_id = str(requested_shared).strip()
+                    shared_cloud_id = requested_cloud_id
                     if shared_cloud_id:
                         normalized_config, owner_runtime = _normalize_shared_nat_cloud_config(shared_cloud_id)
                     else:
@@ -824,6 +977,9 @@ class NetworkService:
                     if network_type == BRIDGE_CLOUD_TYPE
                     else owner_runtime.get("bridge_name")
                     if network_type == NAT_CLOUD_TYPE and shared_cloud_id and owner_runtime.get("bridge_name")
+                    else shared_owner.bridge_name
+                    or host_net.bridge_name(shared_owner.lab_id, shared_owner.network_id)
+                    if shared_owner is not None
                     else host_net.bridge_name(lab_id, next_id)
                 )
                 network = {
@@ -878,6 +1034,8 @@ class NetworkService:
                             "shared_reference": bool(shared_cloud_id),
                         }
                     )
+                if shared_owner is not None:
+                    network["runtime"]["shared_reference"] = True
                 networks[str(next_id)] = network
                 data.pop("topology", None)
                 # Persist BEFORE provisioning so on-disk state never leads the
@@ -893,6 +1051,8 @@ class NetworkService:
                         # Reference records attach to the owner bridge and
                         # mutate owner IPAM only. Runtime exists on owner.
                         pass
+                    elif shared_owner is not None:
+                        _ensure_shared_bridge(shared_owner, bridge)
                     elif host_net.bridge_exists(bridge):
                         status = host_net.bridge_fingerprint_check(bridge, lab_id, next_id)
                         if status != "match":
@@ -991,40 +1151,17 @@ class NetworkService:
                         extra={"count": count},
                     )
                 config = network.get("config") or {}
-                shared_cloud_id = (
-                    str(config.get("shared_cloud_id") or "").strip()
-                    if isinstance(config, dict)
-                    else ""
-                )
                 is_nat_cloud = str(network.get("type", "")) == NAT_CLOUD_TYPE
-                if is_nat_cloud and not shared_cloud_id:
-                    owner_id = None
-                    for item in list_nat_clouds():
-                        if (
-                            item.get("lab_path") == normalized
-                            and int(item.get("network_id") or 0) == int(network_id)
-                            and not item.get("is_reference")
-                        ):
-                            owner_id = str(item.get("id"))
-                            break
-                    if owner_id:
-                        refs = references_to_cloud(owner_id)
-                        if refs:
-                            raise NetworkServiceError(
-                                409,
-                                "Cannot delete NAT-Cloud owner while it is used by another lab.",
-                                extra={
-                                    "shared_cloud_id": owner_id,
-                                    "references": [
-                                        {
-                                            "lab_path": ref.lab_path,
-                                            "network_id": ref.network_id,
-                                            "network_name": ref.network_name,
-                                        }
-                                        for ref in refs
-                                    ],
-                                },
-                            )
+                joined = is_member(network)
+                if not joined:
+                    members = members_of(f"{data.get('id') or normalized}:{int(network_id)}")
+                    if members:
+                        raise NetworkServiceError(
+                            409,
+                            f"Cannot delete {network.get('name')!r} while it is used by "
+                            f"another lab ({lab_names(members)}).",
+                            extra={"references": _member_summaries(members)},
+                        )
                 removed = dict(network)
                 networks.pop(str(network_id), None)
                 data["networks"] = networks
@@ -1058,10 +1195,9 @@ class NetworkService:
                             "delete_network: host-owned bridge %s preserved (driver=bridge_cloud)",
                             bridge,
                         )
-                    elif is_nat_cloud and shared_cloud_id:
+                    elif joined:
                         logger.info(
-                            "delete_network: shared NAT-Cloud reference %s removed; owner bridge %s preserved",
-                            shared_cloud_id,
+                            "delete_network: joined network removed; owner bridge %s preserved",
                             bridge,
                         )
                     else:
@@ -1101,20 +1237,14 @@ class NetworkService:
         network = networks.get(str(network_id))
         if not isinstance(network, dict):
             raise NetworkServiceError(404, "Network does not exist.")
-        config = network.get("config") or {}
-        shared_cloud_id = (
-            str(config.get("shared_cloud_id") or "").strip()
-            if isinstance(config, dict)
-            else ""
-        )
-        if not shared_cloud_id:
+        key = member_key(network)
+        if key is None:
             return normalized, int(network_id)
-        owner = find_nat_cloud_owner(shared_cloud_id)
+        owner = find_owner(key)
         if owner is None:
             raise NetworkServiceError(
                 409,
-                "NAT-Cloud owner is missing; cannot allocate from shared cloud.",
-                extra={"shared_cloud_id": shared_cloud_id},
+                "The owner of this shared network is missing; cannot allocate an address.",
             )
         return owner.lab_path, owner.network_id
 
@@ -1239,14 +1369,9 @@ class NetworkService:
             network = networks.get(str(network_id))
             if not isinstance(network, dict):
                 return False
-            config = network.get("config") or {}
-            shared_cloud_id = (
-                str(config.get("shared_cloud_id") or "").strip()
-                if isinstance(config, dict)
-                else ""
-            )
-            if shared_cloud_id:
-                owner = find_nat_cloud_owner(shared_cloud_id)
+            key = member_key(network)
+            if key is not None:
+                owner = find_owner(key)
                 if owner is None:
                     return False
                 target_lab_path = owner.lab_path
@@ -1380,6 +1505,10 @@ class NetworkService:
                     "Cannot mutate config on a bridge_cloud network; "
                     "delete and recreate to retarget the host bridge.",
                 )
+            # #319: same for joined networks, whose settings live in another lab.
+            violation = patch_violation(network, patch)
+            if violation:
+                raise NetworkServiceError(422, violation)
             # Service-managed fields MUST NOT be mutated via PATCH.
             for forbidden in ("runtime", "id", "implicit"):
                 if forbidden in patch:
@@ -1402,6 +1531,44 @@ class NetworkService:
 
         await ws_hub.publish(normalized, event_type, {"network": dict(payload)})
         return payload, event_type
+
+    async def set_sharing(self, lab_path: str, network_id: int, shared: bool) -> Tuple[dict, bool]:
+        """Offer a network to other labs, or stop (#319).
+
+        Returns ``(payload, changed)``. Stopping is refused while another lab
+        still uses the network.
+        """
+        normalized = _normalize_relative_lab_path(lab_path)
+        labs_dir = get_settings().LABS_DIR
+
+        with nat_cloud_ipam_lock():
+            with lab_lock(normalized, labs_dir):
+                data = LabService.read_lab_json_static(normalized)
+                network = (data.get("networks") or {}).get(str(network_id))
+                if not isinstance(network, dict) or network.get("implicit") is True:
+                    raise NetworkServiceError(404, "Network does not exist.")
+                reason = unshareable_reason(network)
+                if reason:
+                    raise NetworkServiceError(422, reason)
+                if not shared:
+                    members = members_of(f"{data.get('id') or normalized}:{int(network_id)}")
+                    if members:
+                        raise NetworkServiceError(
+                            409,
+                            f"Cannot stop sharing {network.get('name')!r} while it is used by "
+                            f"another lab ({lab_names(members)}).",
+                            extra={"references": _member_summaries(members)},
+                        )
+                changed = (network.get("shared") is True) != shared
+                if changed:
+                    network["shared"] = shared
+                    data.pop("topology", None)
+                    LabService.write_lab_json_static(normalized, data)
+                payload = _serialize_network(network, _refcount(data, int(network_id)))
+
+        if changed:
+            await ws_hub.publish(normalized, "network_updated", {"network": dict(payload)})
+        return payload, changed
 
 
 network_service = NetworkService()

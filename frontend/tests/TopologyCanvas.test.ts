@@ -105,6 +105,7 @@ vi.mock('$lib/stores/labWs', () => ({
 import TopologyCanvas from '$lib/components/canvas/TopologyCanvas.svelte';
 import CanvasChangedHarness from './mocks/CanvasChangedHarness.svelte';
 import { apiRequest } from '$lib/api';
+import { infoPanels } from '$lib/stores/infoPanels';
 import { labState } from '$lib/stores/labState';
 import { toastStore } from '$lib/stores/toasts';
 import { tick } from 'svelte';
@@ -207,6 +208,22 @@ function renderCanvas(
       consoleMinimizedWindows: [],
     },
   });
+}
+
+function makeSharingNetwork(overrides: Partial<NetworkData> = {}): NetworkData {
+  return {
+    id: 7, name: 'core', type: 'linux_bridge', left: 100, top: 100, icon: '',
+    visibility: true, count: 0, config: {}, ...overrides,
+  };
+}
+
+async function openNetworkMenu() {
+  await fireEvent(screen.getByTestId('svelte-flow-mock'), new CustomEvent('mock-flow-event', {
+    detail: {
+      type: 'nodecontextmenu',
+      detail: { node: { id: 'network7' }, event: new MouseEvent('contextmenu') },
+    },
+  }));
 }
 
 function driveConfirm(source: DragEndpoint, target: DragEndpoint) {
@@ -396,6 +413,52 @@ describe('TopologyCanvas lab controls', () => {
     await fireEvent.click(screen.getByRole('button', { name: /network container type/i }));
     await fireEvent.click(screen.getByRole('button', { name: /bridge network/i }));
     expect(screen.getByTestId('network-config-modal')).toBeVisible();
+  });
+
+  it.each([false, true])('opens network info from the context menu (zen: %s, #318)', async (zenMode) => {
+    const view = renderCanvas({}, { '7': makeSharingNetwork() });
+    await view.rerender({ zenMode });
+    await openNetworkMenu();
+    await fireEvent.click(screen.getByTestId('network-menu-info'));
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(infoPanels._peek()).toMatchObject([{ kind: 'network', refId: 7 }]);
+    infoPanels.reset();
+  });
+
+  it('toggles sharing from the context menu and adopts the revision (#319)', async () => {
+    renderCanvas({}, { '7': makeSharingNetwork() });
+    vi.mocked(apiRequest).mockClear();
+    for (const shared of [true, false]) {
+      vi.mocked(apiRequest).mockResolvedValueOnce({
+        message: 'ok', network: { ...makeSharingNetwork(), shared }, revision: shared ? 41 : 42,
+      } as never);
+      await openNetworkMenu();
+      const toggle = screen.getByRole('menuitemcheckbox', { name: 'Make shared' });
+      expect(toggle).toHaveAttribute('aria-checked', String(!shared));
+      await fireEvent.click(toggle);
+      await waitFor(() => expect(get(labState).networks['7'].shared).toBe(shared));
+      expect(apiRequest).toHaveBeenLastCalledWith('/labs/lab-hotplug/networks/7/sharing', {
+        method: 'PUT', body: { shared },
+      });
+      expect(get(labState).revision).toBe(shared ? 41 : 42);
+    }
+  });
+
+  it('keeps the network shared when the server refuses to stop (#319)', async () => {
+    renderCanvas({}, { '7': makeSharingNetwork({ shared: true }) });
+    vi.mocked(apiRequest).mockRejectedValueOnce(new Error('in use by lab-b'));
+    await openNetworkMenu();
+    await fireEvent.click(screen.getByTestId('network-menu-sharing'));
+    await tick();
+    expect(get(labState).networks['7'].shared).toBe(true);
+  });
+
+  it('does not offer the toggle on a network joined from another lab (#319)', async () => {
+    renderCanvas({}, { '7': makeSharingNetwork({ config: { shared_network_id: 'shared-net:b:1' } }) });
+    await openNetworkMenu();
+    const toggle = screen.getByRole('menuitemcheckbox', { name: 'Shared from another lab' });
+    expect(toggle).toBeDisabled();
+    expect(toggle).toHaveAttribute('aria-checked', 'true');
   });
 
   it('leaves Zen shortcuts available and preserves a pending link', async () => {

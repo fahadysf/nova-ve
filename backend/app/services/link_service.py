@@ -24,6 +24,7 @@ from app.services.lab_lock import lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.link_utils import _endpoint_key, _link_pair_key  # noqa: F401 — re-exported
 from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
+from app.services.shared_network_service import bridge_identity, find_owner, is_member, member_key
 from app.services.ws_hub import ws_hub
 
 
@@ -833,11 +834,31 @@ class LinkService:
                     )
                 continue
             if not host_net.bridge_exists(bridge):
-                host_net.bridge_add(bridge)
-                provisioned_bridges.append(bridge)
-                # Stamp ownership so future reconciliations recognise it as ours.
+                # #319: never rebuild a joined bridge whose owner is gone, and
+                # never roll back a bridge another lab may already be using.
+                joined = is_member(net_record)
+                if joined and find_owner(member_key(net_record)) is None:
+                    raise host_net.HostNetError(
+                        f"bridge {bridge!r} is missing and the lab that shares it no longer exists."
+                    )
                 try:
-                    host_net.bridge_fingerprint_write(bridge, lab_id, network_id)
+                    host_net.bridge_add(bridge)
+                    created = True
+                except host_net.HostNetEEXIST:
+                    created = False  # a concurrent reconcile got there first
+                if created and not (
+                    joined
+                    or net_record.get("shared") is True
+                    or net_record.get("type") == "nat_cloud"
+                ):
+                    provisioned_bridges.append(bridge)
+                # Stamp ownership so future reconciliations recognise it. A
+                # joined network (#319) recreates the bridge on behalf of the
+                # lab that owns it.
+                try:
+                    host_net.bridge_fingerprint_write(
+                        bridge, *bridge_identity(lab_id, network_id, net_record)
+                    )
                 except host_net.HostNetError:
                     pass
 
@@ -1117,7 +1138,7 @@ class LinkService:
             bridge = runtime_record.get("bridge_name")
             if isinstance(bridge, str) and bridge:
                 return bridge
-        return host_net.bridge_name(lab_id, network_id)
+        return host_net.bridge_name(*bridge_identity(lab_id, network_id, record))
 
     async def delete_link(
         self,

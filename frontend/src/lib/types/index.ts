@@ -327,6 +327,8 @@ export interface NetworkCreateConfig {
   egress_interface?: string;
   /** NAT-Cloud only — ID of an existing owner returned by /api/system/clouds. */
   shared_cloud_id?: string;
+  /** ID from /api/system/shared-networks — joins another lab's network (#319). */
+  shared_network_id?: string;
   /** Bridge-Cloud only — name of the host-owned br-eth* bridge. */
   host_bridge?: string;
 }
@@ -534,7 +536,91 @@ export interface NetworkData {
   smart?: number;
   width?: number;
   implicit?: boolean;
+  /** Offered to other labs (#319). */
+  shared?: boolean;
   config?: Record<string, unknown>;
+  runtime?: Record<string, unknown>;
+}
+
+/** GET /system/shared-networks entry (#319). */
+export interface SharedNetwork {
+  id: string;
+  type: NetworkType;
+  name: string;
+  lab_id: string;
+  lab_name: string;
+  cidr: string | null;
+}
+
+/** GET /labs/{path}/networks/{id}/info (#318). */
+export interface NetworkInfo {
+  id: number;
+  name: string;
+  type: string;
+  type_label: string;
+  visible: boolean;
+  created_at: string | null;
+  bridge: {
+    name: string | null;
+    driver: string | null;
+    exists: boolean;
+    admin_up: boolean | null;
+    oper_state: string | null;
+    mac: string | null;
+    mtu: number | null;
+    ports: number | null;
+  };
+  host_bridge: string | null;
+  ip: {
+    cidr: string;
+    gateway: string | null;
+    egress_interface: string | null;
+    nat: boolean;
+    static_start: string | null;
+    static_end: string | null;
+    used_ips: string[];
+    dhcp: {
+      enabled: boolean;
+      start: string | null;
+      end: string | null;
+      size: number | null;
+      lease_time: string | null;
+      running: boolean;
+      pid: number | null;
+      lease_count: number;
+      leases: Array<{
+        ip: string;
+        mac: string;
+        hostname: string | null;
+        node_name: string | null;
+        expires_at: string | null;
+      }>;
+    } | null;
+  } | null;
+  endpoints: Array<{
+    lab_name: string;
+    current_lab: boolean;
+    node_id: number;
+    node_name: string;
+    interface: string;
+    mac: string | null;
+  }>;
+  mac_conflicts: Array<{ mac: string; endpoints: string[] }>;
+  sharing: {
+    role: 'none' | 'owner' | 'member';
+    shareable: boolean;
+    reason: string | null;
+    owner_lab: string | null;
+    owner_missing: boolean;
+    labs: Array<{
+      lab_name: string;
+      lab_path: string | null;
+      network_name: string;
+      role: 'owner' | 'member';
+      current_lab: boolean;
+      connections: number;
+    }>;
+  };
 }
 
 /**

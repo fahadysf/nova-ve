@@ -3,19 +3,25 @@
 
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte';
-  import type { NetworkCreateConfig, NetworkType } from '$lib/types';
+  import { apiGetData } from '$lib/api';
+  import type { NetworkModalType } from '$lib/services/networkSharing';
+  import type { NetworkCreateConfig, NetworkType, SharedNetwork } from '$lib/types';
 
   export let open = false;
   export let suspended = false;
   export let defaultName = '';
-  export let defaultType: NetworkType = 'linux_bridge';
+  /** #319: shared networks this lab owns or already uses are not offered. */
+  export let labId = '';
+  export let defaultType: NetworkModalType = 'linux_bridge';
 
   // Add new entries as more network types are productized; the wire value
   // must be a member of ``NetworkType`` so the backend POST accepts it.
-  const TYPE_OPTIONS: { value: NetworkType; label: string }[] = [
+  // ``shared_network`` (#319) is the exception: it submits the owner's type.
+  const TYPE_OPTIONS: { value: NetworkModalType; label: string }[] = [
     { value: 'linux_bridge', label: 'Bridge (linux_bridge)' },
     { value: 'nat_cloud', label: 'NAT-Cloud (nat_cloud)' },
-    { value: 'bridge_cloud', label: 'Bridge-Cloud (host bridge)' }
+    { value: 'bridge_cloud', label: 'Bridge-Cloud (host bridge)' },
+    { value: 'shared_network', label: 'Shared network (from another lab)' }
   ];
 
   interface HostBridge {
@@ -46,7 +52,12 @@
   }>();
 
   let name = defaultName;
-  let type: NetworkType = defaultType;
+  let type: NetworkModalType = defaultType;
+  let sharedNetworks: SharedNetwork[] = [];
+  let selectedSharedId = '';
+  let sharedLoading = false;
+  let sharedLoaded = false;
+  let sharedError: string | null = null;
   let cidr = '';
   let gateway = '';
   let dhcp = true;
@@ -91,6 +102,10 @@
       natCloudsLoaded = false;
       hostBridgesError = null;
       hostBridgesLoaded = false;
+      sharedNetworks = [];
+      selectedSharedId = '';
+      sharedLoaded = false;
+      sharedError = null;
       void focusName();
     }
     wasOpen = open;
@@ -107,6 +122,11 @@
     void loadHostBridges();
   }
 
+  $: if (open && type === 'shared_network' && !sharedLoaded && !sharedLoading) {
+    void loadSharedNetworks();
+  }
+  $: selectedShared = sharedNetworks.find((entry) => entry.id === selectedSharedId) ?? null;
+
   $: reusableNatClouds = natClouds.filter((cloud) => !cloud.is_reference && cloud.safe_for_reuse !== false);
   $: if (type === 'nat_cloud' && natCloudMode === 'existing' && !selectedNatCloudId && reusableNatClouds.length > 0) {
     selectedNatCloudId = reusableNatClouds[0].id;
@@ -115,7 +135,8 @@
   $: canSubmit =
     trimmedName.length > 0 &&
     (type !== 'nat_cloud' || natCloudMode !== 'existing' || selectedNatCloudId.length > 0) &&
-    (type !== 'bridge_cloud' || selectedHostBridge.length > 0);
+    (type !== 'bridge_cloud' || selectedHostBridge.length > 0) &&
+    (type !== 'shared_network' || selectedShared !== null);
 
   async function loadCloudInventory() {
     natCloudsLoading = true;
@@ -140,6 +161,24 @@
       // Terminal state — empty results and errors both count as
       // "loaded" so the reactive fetch trigger does not refire.
       natCloudsLoaded = true;
+    }
+  }
+
+  async function loadSharedNetworks() {
+    sharedLoading = true;
+    sharedError = null;
+    try {
+      sharedNetworks = await apiGetData<SharedNetwork[]>(
+        `/system/shared-networks?for_lab=${encodeURIComponent(labId)}`,
+        { suppressToast: true }
+      );
+      selectedSharedId = sharedNetworks[0]?.id ?? '';
+    } catch (err) {
+      sharedError = err instanceof Error ? err.message : String(err);
+      sharedNetworks = [];
+    } finally {
+      sharedLoading = false;
+      sharedLoaded = true;
     }
   }
 
@@ -192,6 +231,11 @@
       }
     } else if (type === 'bridge_cloud') {
       config.host_bridge = selectedHostBridge;
+    } else if (type === 'shared_network') {
+      if (!selectedShared) return;
+      config.shared_network_id = selectedShared.id;
+      dispatch('confirm', { name: trimmedName, type: selectedShared.type, config });
+      return;
     }
     dispatch('confirm', { name: trimmedName, type, config });
   }
@@ -387,6 +431,43 @@
                 </label>
               </div>
             {/if}
+          </div>
+        {/if}
+
+        {#if type === 'shared_network'}
+          <div class="space-y-3 rounded-xl border border-slate-800 bg-slate-900/30 p-3">
+            <div class="text-xs text-slate-400">
+              Nodes attached here share one layer 2 segment with nodes in the other lab.
+            </div>
+            <label class="block space-y-1.5">
+              <span class="text-[10px] uppercase tracking-[0.05em] text-slate-500">Network</span>
+              {#if sharedLoading}
+                <div class="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-400">
+                  Loading shared networks…
+                </div>
+              {:else if sharedError}
+                <div class="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-200">
+                  Failed to list shared networks: {sharedError}
+                </div>
+              {:else if sharedNetworks.length === 0}
+                <div class="rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs text-slate-400">
+                  No other lab offers a network this lab can join. Right-click a network in that lab and choose
+                  <strong>Make shared</strong>.
+                </div>
+              {:else}
+                <select
+                  bind:value={selectedSharedId}
+                  class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-2 text-sm text-slate-100 outline-none transition focus:border-blue-500/40 focus:ring-1 focus:ring-blue-500/30"
+                  data-testid="network-shared-select"
+                >
+                  {#each sharedNetworks as entry}
+                    <option value={entry.id}>
+                      {entry.lab_name} / {entry.name}{entry.cidr ? ` (${entry.cidr})` : ''}
+                    </option>
+                  {/each}
+                </select>
+              {/if}
+            </label>
           </div>
         {/if}
 

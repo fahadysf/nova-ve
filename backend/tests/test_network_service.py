@@ -326,6 +326,7 @@ async def test_create_nat_cloud_reference_reuses_owner_bridge_without_provisioni
             "type": "nat_cloud",
             "config": {"shared_cloud_id": shared_cloud_id},
         },
+        allow_unshared_clouds=True,
     )
 
     assert ref["config"]["shared_cloud_id"] == shared_cloud_id
@@ -353,6 +354,7 @@ async def test_shared_nat_cloud_allocates_and_releases_on_owner_ipam(
             "type": "nat_cloud",
             "config": {"shared_cloud_id": "nat-cloud:lab-nat-ipam-owner:1"},
         },
+        allow_unshared_clouds=True,
     )
     svc = NetworkService()
 
@@ -390,6 +392,7 @@ async def test_shared_nat_cloud_release_with_lab_lock_held_same_lab_owner(
             "type": "nat_cloud",
             "config": {"shared_cloud_id": "nat-cloud:lab-nat-same-lab-ref:1"},
         },
+        allow_unshared_clouds=True,
     )
     svc = NetworkService()
     ip = svc._allocate_ip(lab_name, 2)
@@ -422,6 +425,7 @@ async def test_delete_nat_cloud_owner_rejects_external_references(
             "type": "nat_cloud",
             "config": {"shared_cloud_id": "nat-cloud:lab-nat-delete-owner:1"},
         },
+        allow_unshared_clouds=True,
     )
 
     with pytest.raises(NetworkServiceError) as exc:

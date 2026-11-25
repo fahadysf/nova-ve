@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import NetworkPort from './NetworkPort.svelte';
-  import { Info, Waypoints } from 'lucide-svelte';
+  import { Info, Share2, Waypoints } from 'lucide-svelte';
   import { assignNetworkSlots, slotPosition } from '$lib/services/canvasEdges';
   import { infoPanels } from '$lib/stores/infoPanels';
 
@@ -15,6 +15,8 @@
     icon?: string;
     count?: number;
     networkId?: number;
+    /** #319: offered to other labs, or joined from one. */
+    sharingRole?: 'owner' | 'member' | null;
     linkIds?: string[];
     portPositionsByLinkId?: Record<string, { side: 'top' | 'right' | 'bottom' | 'left'; offset: number }>;
     portRefsByLinkId?: Record<string, NetworkConnectionPointRef>;
@@ -104,6 +106,20 @@
       </div>
     </div>
   </div>
+
+  {#if data.sharingRole}
+    {@const sharingLabel =
+      data.sharingRole === 'owner' ? 'Shared with other labs' : 'Shared network from another lab'}
+    <span
+      class="absolute right-1.5 top-1.5 text-sky-300"
+      role="img"
+      aria-label={sharingLabel}
+      title={sharingLabel}
+      data-testid="network-shared-badge"
+    >
+      <Share2 class="h-3 w-3" aria-hidden="true" />
+    </span>
+  {/if}
 
   <button
     type="button"

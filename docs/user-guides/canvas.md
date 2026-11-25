@@ -18,14 +18,16 @@ The pills update in real time as you add / remove / start / stop things.
 Every node and every network has a small `(i)` button:
 
 - **Nodes** — bottom-right corner of the node card.
-- **Networks** — inline next to the connection count badge.
+- **Networks** — bottom-right corner of the network box, or right-click the network and choose **Network Info**.
 
 Click it to open an **info panel** — a floating, draggable panel anchored to the top-left of the canvas. Panels stack vertically with a 12 px gap. You can have **up to 4 panels open at once**; opening a fifth evicts the oldest (LRU drop).
 
 | Panel kind | Fields shown |
 |---|---|
 | Node | ID, Type, Template, Console, Image, CPU, RAM, NICs, Status, PID, IPs |
-| Network | ID, Type, Links, Visible, Bridge name, Driver, Created at, Position |
+| Network | Type, creation time, addressing, DHCP scope and leases, sharing, connected interfaces, host bridge state |
+
+A network panel refreshes every 10 seconds while it is open. NAT-Cloud panels add the subnet, gateway, internet interface, reserved static range, DHCP scope, DHCP server state, and current leases. Panels open before you enter Zen mode are hidden until you leave it; panels opened in Zen mode stay visible.
 
 Drag a panel by its header. The pointer-capture model keeps the drag alive even when the pointer crosses other elements. Viewport clamping ensures at least 48 px of the panel header stays on-screen so you can always grab it back.
 

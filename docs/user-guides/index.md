@@ -9,4 +9,5 @@ Hands-on workflows for the things you will do most often as an operator.
 5. [Dynamips nodes](dynamips-nodes.md) — Cisco IOS routers and IOL/IOU license handling
 6. [The lab canvas](canvas.md) — info panels, top-bar metrics, minimap, hover focus, pinned port labels
 7. [NAT-Cloud networks](nat-cloud-networks.md) — DHCP and outbound NAT for lab clients
-8. [Lab lifecycle](lab-lifecycle.md) — start, stop, save, delete
+8. [Shared networks](shared-networks.md) — one network for nodes in several labs
+9. [Lab lifecycle](lab-lifecycle.md) — start, stop, save, delete

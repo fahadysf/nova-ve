@@ -2,12 +2,16 @@
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
 <script lang="ts">
+  import InfoFields from './InfoFields.svelte';
   import InfoPanel from './InfoPanel.svelte';
+  import NetworkInfoContent from './NetworkInfoContent.svelte';
   import { infoPanels, type InfoPanelEntry } from '$lib/stores/infoPanels';
   import type { NodeData, NetworkData } from '$lib/types';
 
   export let nodesById: Record<string, NodeData> = {};
   export let networksById: Record<string, NetworkData> = {};
+  export let labId = '';
+  export let zenMode = false;
 
   function nodeFields(node: NodeData): Array<{ label: string; value: string }> {
     const runtime = (node as unknown as Record<string, unknown>).runtime as
@@ -33,23 +37,15 @@
     ];
   }
 
-  function networkFields(network: NetworkData): Array<{ label: string; value: string }> {
-    const runtime = (network as unknown as Record<string, unknown>).runtime as
-      | Record<string, unknown>
-      | undefined;
-    const bridge = runtime?.['bridge_name'];
-    const driver = runtime?.['driver'];
-    const createdAt = runtime?.['created_at'];
-    return [
-      { label: 'ID', value: String(network.id) },
-      { label: 'Type', value: String(network.type ?? '—') },
-      { label: 'Links', value: String(network.count ?? 0) },
-      { label: 'Visible', value: network.visibility === false ? 'no' : 'yes' },
-      ...(bridge ? [{ label: 'Bridge', value: String(bridge) }] : []),
-      ...(driver ? [{ label: 'Driver', value: String(driver) }] : []),
-      ...(createdAt ? [{ label: 'Created', value: String(createdAt) }] : []),
-      { label: 'Position', value: `${network.left ?? 0}, ${network.top ?? 0}` },
-    ];
+  // #318: entering Zen hides the panels that were already open. Opening one
+  // from a menu while in Zen raises it above this mark, which shows it.
+  let zenBaseline = Infinity;
+  let wasZen = false;
+  $: {
+    if (zenMode && !wasZen) {
+      zenBaseline = Math.max(0, ...$infoPanels.map((entry) => entry.zIndex));
+    }
+    wasZen = zenMode;
   }
 
   function titleFor(entry: InfoPanelEntry): { title: string; subtitle: string } {
@@ -65,41 +61,34 @@
 <div class="pointer-events-none fixed inset-0 z-30">
   {#each $infoPanels as entry (entry.id)}
     {@const meta = titleFor(entry)}
-    <InfoPanel
-      id={entry.id}
-      title={meta.title}
-      subtitle={meta.subtitle}
-      position={entry.position}
-      zIndex={entry.zIndex}
-      onClose={(id) => infoPanels.close(id)}
-      onMove={(id, x, y) => infoPanels.move(id, x, y)}
-      onFocus={(id) => infoPanels.bringToFront(id)}
-    >
-      {#if entry.kind === 'node'}
-        {@const node = nodesById[String(entry.refId)]}
-        {#if node}
-          <dl class="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5">
-            {#each nodeFields(node) as field}
-              <dt class="text-[10px] uppercase tracking-[0.05em] text-gray-500">{field.label}</dt>
-              <dd class="truncate font-mono text-[11px] text-gray-200" title={field.value}>{field.value}</dd>
-            {/each}
-          </dl>
+    {@const concealed = zenMode && entry.zIndex <= zenBaseline}
+    <div hidden={concealed} class:contents={!concealed}>
+      <InfoPanel
+        id={entry.id}
+        title={meta.title}
+        subtitle={meta.subtitle}
+        position={entry.position}
+        zIndex={entry.zIndex}
+        onClose={(id) => infoPanels.close(id)}
+        onMove={(id, x, y) => infoPanels.move(id, x, y)}
+        onFocus={(id) => infoPanels.bringToFront(id)}
+      >
+        {#if entry.kind === 'node'}
+          {@const node = nodesById[String(entry.refId)]}
+          {#if node}
+            <InfoFields fields={nodeFields(node)} />
+          {:else}
+            <div class="text-gray-500">Node no longer exists.</div>
+          {/if}
         {:else}
-          <div class="text-[11px] text-gray-500">Node no longer exists.</div>
+          {@const network = networksById[String(entry.refId)]}
+          {#if network}
+            <NetworkInfoContent {labId} {network} />
+          {:else}
+            <div class="text-gray-500">Network no longer exists.</div>
+          {/if}
         {/if}
-      {:else}
-        {@const network = networksById[String(entry.refId)]}
-        {#if network}
-          <dl class="grid grid-cols-[5.5rem_1fr] gap-x-3 gap-y-1.5">
-            {#each networkFields(network) as field}
-              <dt class="text-[10px] uppercase tracking-[0.05em] text-gray-500">{field.label}</dt>
-              <dd class="truncate font-mono text-[11px] text-gray-200" title={field.value}>{field.value}</dd>
-            {/each}
-          </dl>
-        {:else}
-          <div class="text-[11px] text-gray-500">Network no longer exists.</div>
-        {/if}
-      {/if}
-    </InfoPanel>
+      </InfoPanel>
+    </div>
   {/each}
 </div>

@@ -85,7 +85,7 @@
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
 <div
-  class="pointer-events-auto absolute w-[18rem] overflow-hidden rounded-xl border border-gray-700 bg-gray-950/95 text-gray-100 shadow-xl shadow-black/40 backdrop-blur"
+  class="pointer-events-auto absolute w-[20rem] overflow-hidden rounded-xl border border-gray-700 bg-gray-950/95 text-gray-100 shadow-xl shadow-black/40 backdrop-blur"
   style="left: {position.x}px; top: {position.y}px; z-index: {zIndex};"
   role="dialog"
   aria-label={title}
@@ -119,7 +119,7 @@
     </button>
   </div>
 
-  <div class="max-h-[calc(100vh-12rem)] overflow-y-auto px-3 py-2 text-[11px] text-gray-200">
+  <div class="max-h-[calc(100vh-12rem)] overflow-y-auto px-3 py-2.5 text-[12px] leading-snug text-gray-200">
     <slot />
   </div>
 </div>
