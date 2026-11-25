@@ -65,6 +65,7 @@ def host(monkeypatch, tmp_path):
         monkeypatch.setattr(host_net, name, lambda *a, **k: None)
     monkeypatch.setattr(host_net, "nat_apply", lambda bridge, cidr, egress: state.nat.append(bridge))
     monkeypatch.setattr(host_net, "default_egress_iface", lambda: "eth0")
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [])
     monkeypatch.setattr(host_net, "dnsmasq_start", lambda *a: 4321)
     return state
 

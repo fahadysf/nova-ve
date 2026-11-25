@@ -441,3 +441,90 @@ async def test_validate_nat_cloud_config_returns_normalized_config_without_mutat
     }
     saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
     assert saved["networks"] == {}
+
+
+@pytest.mark.asyncio
+async def test_validate_nat_cloud_edit_excludes_current_network(
+    patched_route_settings, auth_override, monkeypatch
+):
+    network = _explicit_network(1, "internet")
+    network.update(
+        {
+            "type": "nat_cloud",
+            "config": {
+                "cidr": "10.82.0.0/24",
+                "gateway": "10.82.0.1",
+                "dhcp": False,
+                "dhcp_start": "10.82.0.100",
+                "dhcp_end": "10.82.0.254",
+            },
+            "runtime": {"bridge_name": "nove0001n1"},
+        }
+    )
+    lab_name = _seed_lab(patched_route_settings.LABS_DIR, networks={"1": network})
+    monkeypatch.setattr(
+        "app.services.cloud_inventory_service.get_settings",
+        lambda: patched_route_settings,
+    )
+    before = (patched_route_settings.LABS_DIR / lab_name).read_text()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/labs/{lab_name}/networks/validate-nat-cloud",
+            json={"network_id": 1, "config": {"dhcp": True}},
+        )
+
+    assert resp.status_code == 200, resp.text
+    config = resp.json()["data"]["config"]
+    assert config["cidr"] == "10.82.0.0/24"
+    assert config["dhcp"] is True
+    assert (patched_route_settings.LABS_DIR / lab_name).read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_patch_and_put_reject_nat_cloud_cidr_change(
+    patched_route_settings, auth_override
+):
+    network = _explicit_network(1, "internet")
+    network.update(
+        {
+            "type": "nat_cloud",
+            "config": {
+                "cidr": "10.80.0.0/24",
+                "gateway": "10.80.0.1",
+                "dhcp": True,
+                "dhcp_start": "10.80.0.100",
+                "dhcp_end": "10.80.0.254",
+            },
+            "runtime": {"bridge_name": "nove0001n1", "dhcp": True},
+        }
+    )
+    lab_name = _seed_lab(patched_route_settings.LABS_DIR, networks={"1": network})
+    before = (patched_route_settings.LABS_DIR / lab_name).read_text()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for method in (c.patch, c.put):
+            resp = await method(
+                f"/api/labs/{lab_name}/networks/1",
+                json={"config": {"cidr": "10.81.0.0/24"}},
+            )
+            assert resp.status_code == 422, f"{method}: {resp.text}"
+            assert resp.json()["field"] == "config.cidr"
+            assert "delete and recreate" in resp.json()["message"].lower()
+            assert (patched_route_settings.LABS_DIR / lab_name).read_text() == before
+
+
+@pytest.mark.asyncio
+async def test_put_rejects_nat_cloud_type_change_without_config(
+    patched_route_settings, auth_override
+):
+    network = _explicit_network(1, "internet")
+    network.update({"type": "nat_cloud", "config": {"cidr": "10.83.0.0/24"}})
+    lab_name = _seed_lab(patched_route_settings.LABS_DIR, networks={"1": network})
+    before = (patched_route_settings.LABS_DIR / lab_name).read_text()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.put(f"/api/labs/{lab_name}/networks/1", json={"type": "linux_bridge"})
+
+    assert resp.status_code == 422, resp.text
+    assert (patched_route_settings.LABS_DIR / lab_name).read_text() == before

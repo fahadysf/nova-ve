@@ -119,6 +119,37 @@ def _validate_ipv4(value: Any, field: str) -> ipaddress.IPv4Address:
         raise NetworkServiceError(422, f"{field} is not a valid IPv4 address: {exc}") from exc
 
 
+def _reconcile_nat_cloud_dhcp(bridge: str, config: dict) -> int:
+    if config.get("dhcp", True):
+        return host_net.dnsmasq_start(
+            bridge,
+            str(config["gateway"]),
+            str(config["dhcp_start"]),
+            str(config["dhcp_end"]),
+        )
+    host_net.dnsmasq_stop(bridge)
+    return 0
+
+
+def _field_error(field: str, message: str, code: int = 422) -> "NetworkServiceError":
+    return NetworkServiceError(code, message, extra={"field": field})
+
+
+def _nat_address(value: Any, field: str) -> ipaddress.IPv4Address:
+    try:
+        return _validate_ipv4(value, field)
+    except NetworkServiceError as exc:
+        raise _field_error(field, exc.message) from exc
+
+
+def _restore_nat_cloud_dhcp(bridge: str, config: dict) -> None:
+    """Best-effort return to the previous DHCP state after a failed edit."""
+    try:
+        _reconcile_nat_cloud_dhcp(bridge, config)
+    except Exception:
+        logger.exception("patch_network: failed to restore DHCP on %s", bridge)
+
+
 def _settings_nat_cloud_pool() -> ipaddress.IPv4Network:
     raw = getattr(get_settings(), "NAT_CLOUD_POOL", "10.255.0.0/16")
     try:
@@ -154,7 +185,13 @@ def _host_ipv4_networks(
     *, exclude_bridge: str | None = None
 ) -> list[tuple[str, ipaddress.IPv4Network]]:
     occupied: list[tuple[str, ipaddress.IPv4Network]] = []
-    for iface, raw_cidr in host_net.list_ipv4_addrs():
+    try:
+        host_addrs = host_net.list_ipv4_addrs()
+    except host_net.HostNetError as exc:
+        raise NetworkServiceError(
+            503, f"Could not read host interfaces to check for subnet conflicts: {exc}"
+        ) from exc
+    for iface, raw_cidr in host_addrs:
         if iface == exclude_bridge:
             continue
         try:
@@ -207,9 +244,15 @@ def _normalize_nat_cloud_config(
     *,
     host_used: list[ipaddress.IPv4Network] | None = None,
     occupied: list[tuple[str, ipaddress.IPv4Network]] | None = None,
+    check_overlap: bool = True,
 ) -> dict:
     occupied = occupied or []
     occupied_networks = [network for _source, network in occupied]
+    if raw_config.get("cidr"):
+        try:
+            _validate_cidr(raw_config["cidr"])
+        except NetworkServiceError as exc:
+            raise _field_error("config.cidr", exc.message) from exc
     cidr = (
         _validate_cidr(raw_config["cidr"])
         if raw_config.get("cidr")
@@ -218,8 +261,8 @@ def _normalize_nat_cloud_config(
         )
     )
     if cidr.prefixlen > 24:
-        raise NetworkServiceError(422, "NAT-Cloud CIDR must be /24 or larger")
-    for source, existing in occupied:
+        raise _field_error("config.cidr", "NAT-Cloud CIDR must be /24 or larger")
+    for source, existing in occupied if check_overlap else []:
         if cidr.overlaps(existing):
             raise NetworkServiceError(
                 409,
@@ -230,43 +273,48 @@ def _normalize_nat_cloud_config(
                     "source": source,
                 },
             )
-    for existing in [*_existing_network_cidrs(networks), *(host_used or [])]:
+    in_use = [*_existing_network_cidrs(networks), *(host_used or [])]
+    for existing in in_use if check_overlap else []:
         if cidr.overlaps(existing):
-            raise NetworkServiceError(
-                409,
+            raise _field_error(
+                "config.cidr",
                 f"NAT-Cloud CIDR {cidr} overlaps existing network CIDR {existing}.",
+                409,
             )
 
     gateway = (
-        _validate_ipv4(raw_config["gateway"], "config.gateway")
+        _nat_address(raw_config["gateway"], "config.gateway")
         if raw_config.get("gateway")
         else ipaddress.IPv4Address(int(cidr.network_address) + 1)
     )
     if gateway not in cidr:
-        raise NetworkServiceError(422, "config.gateway must be inside config.cidr")
+        raise _field_error("config.gateway", "config.gateway must be inside config.cidr")
     if gateway in (cidr.network_address, cidr.broadcast_address):
-        raise NetworkServiceError(422, "config.gateway cannot be the network or broadcast address")
+        raise _field_error(
+            "config.gateway", "config.gateway cannot be the network or broadcast address"
+        )
 
     default_start = ipaddress.IPv4Address(int(cidr.network_address) + NAT_CLOUD_DHCP_FIRST_OFFSET)
     default_end = ipaddress.IPv4Address(int(cidr.broadcast_address) - 1)
     dhcp_start = (
-        _validate_ipv4(raw_config["dhcp_start"], "config.dhcp_start")
+        _nat_address(raw_config["dhcp_start"], "config.dhcp_start")
         if raw_config.get("dhcp_start")
         else default_start
     )
     dhcp_end = (
-        _validate_ipv4(raw_config["dhcp_end"], "config.dhcp_end")
+        _nat_address(raw_config["dhcp_end"], "config.dhcp_end")
         if raw_config.get("dhcp_end")
         else default_end
     )
-    if dhcp_start not in cidr or dhcp_end not in cidr:
-        raise NetworkServiceError(422, "DHCP range must be inside config.cidr")
+    for field, address in (("config.dhcp_start", dhcp_start), ("config.dhcp_end", dhcp_end)):
+        if address not in cidr:
+            raise _field_error(field, "DHCP range must be inside config.cidr")
     if int(dhcp_start) > int(dhcp_end):
-        raise NetworkServiceError(422, "config.dhcp_start must be <= config.dhcp_end")
+        raise _field_error("config.dhcp_end", "config.dhcp_start must be <= config.dhcp_end")
     static_last = ipaddress.IPv4Address(int(cidr.network_address) + NAT_CLOUD_STATIC_LAST_OFFSET)
     if int(dhcp_start) <= int(static_last):
-        raise NetworkServiceError(
-            422,
+        raise _field_error(
+            "config.dhcp_start",
             "NAT-Cloud DHCP range must start after the reserved static range ending at offset .99",
         )
 
@@ -283,6 +331,24 @@ def _normalize_nat_cloud_config(
     if raw_config.get("egress_interface"):
         config["egress_interface"] = str(raw_config["egress_interface"]).strip()
     return config
+
+
+def _normalize_nat_cloud_edit(current: dict, changes: dict) -> dict:
+    """Merge a partial edit into an existing NAT-Cloud config.
+
+    Only DHCP settings are editable. Overlap checks are skipped on purpose: the
+    CIDR cannot change, and a conflict that appeared on the host later must not
+    stop the owner from, say, disabling DHCP.
+    """
+    for key in ("cidr", "gateway", "egress_interface", *MEMBERSHIP_CONFIG_KEYS):
+        if key in changes and (changes[key] or None) != (current.get(key) or None):
+            raise _field_error(
+                f"config.{key}",
+                f"Cannot change a NAT-Cloud {'CIDR' if key == 'cidr' else key} after creation; "
+                "delete and recreate the NAT-Cloud with the correct settings.",
+            )
+    merged = {**current, **{k: v for k, v in changes.items() if k in ("dhcp", "dhcp_start", "dhcp_end")}}
+    return _normalize_nat_cloud_config(merged, {}, check_overlap=False)
 
 
 def _normalize_shared_nat_cloud_config(shared_cloud_id: str) -> tuple[dict, dict]:
@@ -598,14 +664,30 @@ class NetworkService:
         except host_net.HostNetError:
             logger.warning("cleanup_nat_cloud: nat_remove(%s) failed", bridge)
 
-    def validate_nat_cloud_config(self, lab_path: str, raw_config: dict) -> dict:
+    def validate_nat_cloud_config(
+        self, lab_path: str, raw_config: dict, *, network_id: int | None = None
+    ) -> dict:
         normalized = _normalize_relative_lab_path(lab_path)
         data = LabService.read_lab_json_static(normalized)
-        return _normalize_nat_cloud_config(
-            raw_config,
-            data.get("networks") or {},
-            occupied=[*_nat_cloud_owner_networks(), *_host_ipv4_networks()],
-        )
+        networks = data.get("networks") or {}
+        if network_id is None:
+            return _normalize_nat_cloud_config(
+                raw_config,
+                networks,
+                occupied=[
+                    *_nat_cloud_owner_networks(),
+                    *_host_ipv4_networks(),
+                ],
+            )
+
+        network = networks.get(str(network_id))
+        if not isinstance(network, dict) or network.get("type") != NAT_CLOUD_TYPE:
+            raise NetworkServiceError(404, "NAT-Cloud does not exist.")
+        if is_member(network):
+            raise NetworkServiceError(
+                422, "Shared NAT-Cloud settings are managed by the owning lab."
+            )
+        return _normalize_nat_cloud_edit(dict(network.get("config") or {}), raw_config)
 
     def list_networks(self, lab_path: str, *, include_hidden: bool = False) -> Dict[str, dict]:
         """Return networks keyed by string id, mirroring legacy router shape.
@@ -1581,13 +1663,64 @@ class NetworkService:
                         f"PATCH cannot mutate {forbidden!r} (service-managed).",
                     )
 
+            if new_type is not None and new_type != current_type and NAT_CLOUD_TYPE in (new_type, current_type):
+                raise NetworkServiceError(
+                    422,
+                    "Cannot change a network type to or from NAT-Cloud; delete and recreate the network.",
+                )
+            normalized_nat_config: dict | None = None
+            current_nat_config: dict = {}
+            if current_type == NAT_CLOUD_TYPE and isinstance(new_config, dict):
+                current_nat_config = dict(network.get("config") or {})
+                normalized_nat_config = _normalize_nat_cloud_edit(current_nat_config, new_config)
+
             for field in ("type", "left", "top", "icon", "visibility", "config"):
                 if field in patch and patch[field] is not None:
-                    network[field] = patch[field]
+                    if field == "config" and normalized_nat_config is not None:
+                        network[field] = normalized_nat_config
+                    else:
+                        network[field] = patch[field]
+
+            dhcp_rollback: tuple[str, dict] | None = None
+            if normalized_nat_config is not None:
+                runtime = network.setdefault("runtime", {})
+                bridge = runtime.get("bridge_name") or host_net.bridge_name(
+                    str(data.get("id") or normalized), int(network_id)
+                )
+                dhcp_changed = any(
+                    current_nat_config.get(key) != normalized_nat_config.get(key)
+                    for key in ("dhcp", "dhcp_start", "dhcp_end")
+                )
+                if dhcp_changed:
+                    # Fill keys that older records may not carry, so a
+                    # rollback always has a complete scope to restore.
+                    previous = {**normalized_nat_config, **current_nat_config}
+                    try:
+                        dhcp_pid = _reconcile_nat_cloud_dhcp(bridge, normalized_nat_config)
+                    except host_net.HostNetError as exc:
+                        # dnsmasq-start stops the old server first: put it back.
+                        _restore_nat_cloud_dhcp(bridge, previous)
+                        raise NetworkServiceError(
+                            500, f"Could not apply the DHCP settings: {exc}"
+                        ) from exc
+                    dhcp_rollback = (bridge, previous)
+                    runtime.update(
+                        {
+                            "dhcp": normalized_nat_config["dhcp"],
+                            "dhcp_start": normalized_nat_config["dhcp_start"],
+                            "dhcp_end": normalized_nat_config["dhcp_end"],
+                            "dhcp_pid": dhcp_pid,
+                        }
+                    )
 
             networks[str(network_id)] = network
             data.pop("topology", None)
-            LabService.write_lab_json_static(normalized, data)
+            try:
+                LabService.write_lab_json_static(normalized, data)
+            except Exception:
+                if dhcp_rollback is not None:
+                    _restore_nat_cloud_dhcp(*dhcp_rollback)
+                raise
             _recompute_mac_registry(normalized, data)
             count = _refcount(data, int(network_id))
             payload = _serialize_network(network, count)

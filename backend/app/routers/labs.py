@@ -38,6 +38,7 @@ from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock
 from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService, _lab_file_path, _normalize_relative_lab_path
+from app.services.network_service import NetworkServiceError, network_service
 from app.services.cloud_inventory_service import SharedCloudReferenceError
 from app.services.shared_network_service import (
     assert_no_external_members_for_scope,
@@ -2659,6 +2660,39 @@ async def update_network(
         return {"code": 422, "status": "fail", "message": violation}
 
     before = dict(network)
+    retype = new_type is not None and new_type != current_type
+    if (current_type == "nat_cloud" and (isinstance(new_config, dict) or retype)) or (
+        retype and new_type == "nat_cloud"
+    ):
+        try:
+            updated, _event_type = await network_service.patch_network(
+                scoped_path, network_id, patch
+            )
+        except NetworkServiceError as exc:
+            body = {
+                "code": exc.code,
+                "status": "fail",
+                "message": exc.message,
+                **exc.extra,
+            }
+            return JSONResponse(status_code=exc.code, content=body)
+        changes = audit_service.field_changes(before, updated)
+        if changes:
+            await audit_service.record(
+                "network.update",
+                actor=current_user.username,
+                **audit_service.network_context(
+                    data, updated, scoped_path, detail={"changes": changes}
+                ),
+            )
+        return {
+            "code": 200,
+            "status": "success",
+            "message": "Network updated successfully.",
+            "data": updated,
+            "revision": LabService.read_meta_revision_static(scoped_path),
+        }
+
     for field, value in patch.items():
         if value is not None:
             network[field] = value

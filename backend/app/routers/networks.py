@@ -143,7 +143,9 @@ async def validate_nat_cloud_config(
     if err is not None:
         return err
     try:
-        normalized = network_service.validate_nat_cloud_config(lab_path, request.config)
+        normalized = network_service.validate_nat_cloud_config(
+            lab_path, request.config, network_id=request.network_id
+        )
     except NetworkServiceError as exc:
         body: Dict[str, Any] = {
             "code": exc.code,
