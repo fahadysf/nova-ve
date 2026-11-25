@@ -488,7 +488,8 @@ reconcile_nat_cloud_runtime() {
 }
 
 # #325: isolated bridges that run DHCP get their guard rules, server address
-# and dnsmasq back after a deploy; bridges with DHCP off lose any leftovers.
+# and dnsmasq back after a deploy; bridges switched off whose runtime still
+# records DHCP lose the leftovers. A bridge with only a CIDR is never touched.
 # Like NAT-Cloud reconciliation, only bridges that already exist are touched.
 reconcile_bridge_dhcp_runtime() {
   local helper="/opt/nova-ve/bin/nova-ve-net.py"
@@ -531,15 +532,17 @@ reconcile_bridge_dhcp_runtime() {
         | select((.value.type // "linux_bridge") == "linux_bridge" and .value.implicit != true)
         | select((.value.config.shared_network_id // "") == "" and .value.runtime.shared_reference != true)
         | (.value.config // {}) as $c
-        | select($c.dhcp == true or .value.runtime.dhcp == true or ($c.dhcp_server // "") != "")
+        | ($c.dhcp == true and ([$c.cidr, $c.dhcp_server, $c.dhcp_start, $c.dhcp_end] | all(. != null and . != ""))) as $on
+        | select($on or .value.runtime.dhcp == true)
         | [
             (.value.runtime.bridge_name // ""),
             ($c.cidr // ""),
-            (if $c.dhcp == true and ([$c.cidr, $c.dhcp_server, $c.dhcp_start, $c.dhcp_end] | all(. != null and . != ""))
-              then "true" else "false" end),
-            ($c.dhcp_server // .value.runtime.dhcp_server // ""),
+            (if $on then "true" else "false" end),
+            ($c.dhcp_server // ""),
             ($c.dhcp_start // ""),
-            ($c.dhcp_end // "")
+            ($c.dhcp_end // ""),
+            # The address the host carries: what was applied, else the setting.
+            (.value.runtime.dhcp_server // $c.dhcp_server // "")
           ]
         | map(tostring) | join("\u001f")
       ' "${lab_file}" 2>/dev/null || true
@@ -548,19 +551,19 @@ reconcile_bridge_dhcp_runtime() {
       continue
     fi
 
-    while IFS=$'\x1f' read -r bridge cidr dhcp_enabled server dhcp_start dhcp_end; do
+    while IFS=$'\x1f' read -r bridge cidr dhcp_enabled server dhcp_start dhcp_end applied_server; do
       if [[ -z "${bridge}" ]] || ! ip link show "${bridge}" >/dev/null 2>&1; then
         skipped=$((skipped + 1))
         continue
       fi
-      local address=""
-      if [[ -n "${server}" && "${cidr}" == */* ]]; then
-        address="${server}/${cidr##*/}"
+      local prefix=""
+      if [[ "${cidr}" == */* ]]; then
+        prefix="${cidr##*/}"
       fi
       if [[ "${dhcp_enabled}" == "true" ]]; then
         # Guard first: the server address is never reachable unguarded.
         if ! "${helper}" bridge-guard-apply "${bridge}" \
-          || ! "${helper}" bridge-addr-add "${bridge}" "${address}" \
+          || ! "${helper}" bridge-addr-add "${bridge}" "${server}/${prefix}" \
           || ! "${helper}" link-up "${bridge}" \
           || ! "${helper}" dnsmasq-start "${bridge}" "${server}" "${dhcp_start}" "${dhcp_end}" --no-router; then
           echo "WARN: failed to restore DHCP for bridge ${bridge}." >&2
@@ -570,10 +573,13 @@ reconcile_bridge_dhcp_runtime() {
       else
         local cleanup_failed=0
         "${helper}" dnsmasq-stop "${bridge}" || cleanup_failed=1
-        if [[ -n "${address}" ]]; then
-          "${helper}" bridge-addr-del "${bridge}" "${address}" || cleanup_failed=1
+        if [[ -n "${applied_server}" && -n "${prefix}" ]] \
+          && ! "${helper}" bridge-addr-del "${bridge}" "${applied_server}/${prefix}"; then
+          cleanup_failed=1
+        else
+          # Only once the address is gone: never leave it unguarded.
+          "${helper}" bridge-guard-remove "${bridge}" || cleanup_failed=1
         fi
-        "${helper}" bridge-guard-remove "${bridge}" || cleanup_failed=1
         if [[ "${cleanup_failed}" -eq 1 ]]; then
           echo "WARN: failed to remove disabled DHCP state from bridge ${bridge}." >&2
           failed=$((failed + 1))

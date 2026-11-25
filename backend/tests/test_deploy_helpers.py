@@ -568,10 +568,10 @@ def test_provisioner_counts_failed_dnsmasq_stop_without_egress_as_failed(tmp_pat
 
 @pytest.mark.skipif(shutil.which("jq") is None, reason="needs jq")
 def test_provisioner_reconciles_bridge_dhcp(tmp_path):
-    """#325: deploys restore DHCP bridges and clear disabled ones; members and
-    plain bridges are left alone."""
+    """#325: deploys restore DHCP bridges and clear ones switched off; members,
+    bridges with only a CIDR and never-applied flags are left alone."""
 
-    def bridge(name, dhcp, **extra):
+    def bridge(name, dhcp, runtime=None, **extra):
         config = {
             "cidr": "10.40.1.0/24",
             "dhcp": dhcp,
@@ -580,7 +580,12 @@ def test_provisioner_reconciles_bridge_dhcp(tmp_path):
             "dhcp_end": "10.40.1.253",
         }
         config.update(extra.pop("config", {}))
-        return {"type": "linux_bridge", "runtime": {"bridge_name": name}, "config": config, **extra}
+        return {
+            "type": "linux_bridge",
+            "runtime": {"bridge_name": name, **(runtime or {})},
+            "config": config,
+            **extra,
+        }
 
     labs = tmp_path / "labs"
     labs.mkdir()
@@ -589,7 +594,8 @@ def test_provisioner_reconciles_bridge_dhcp(tmp_path):
             {
                 "networks": {
                     "1": bridge("nove0001n1", True),
-                    "2": bridge("nove0001n2", False),
+                    # Switched off while applied: the applied address goes.
+                    "2": bridge("nove0001n2", False, {"dhcp": True, "dhcp_server": "10.40.1.200"}),
                     # Legacy ``dhcp: true`` without a server was never applied.
                     "3": bridge("nove0001n3", True, config={"dhcp_server": None}),
                     "4": bridge("nove0001n4", True, config={"shared_network_id": "shared-net:x:1"}),
@@ -599,6 +605,10 @@ def test_provisioner_reconciles_bridge_dhcp(tmp_path):
                         "runtime": {"bridge_name": "nove0001n6"},
                         "config": {"cidr": "10.40.6.0/24"},
                     },
+                    # A CIDR only, with the stored DHCP defaults: never touched.
+                    "7": bridge("nove0001n7", False),
+                    # Off, applied, runtime without a server: the setting is used.
+                    "8": bridge("nove0001n8", False, {"dhcp": True}),
                 }
             }
         )
@@ -625,10 +635,11 @@ def test_provisioner_reconciles_bridge_dhcp(tmp_path):
         "link-up nove0001n1",
         "dnsmasq-start nove0001n1 10.40.1.254 10.40.1.128 10.40.1.253 --no-router",
         "dnsmasq-stop nove0001n2",
-        "bridge-addr-del nove0001n2 10.40.1.254/24",
+        "bridge-addr-del nove0001n2 10.40.1.200/24",
         "bridge-guard-remove nove0001n2",
-        "dnsmasq-stop nove0001n3",
-        "bridge-guard-remove nove0001n3",
+        "dnsmasq-stop nove0001n8",
+        "bridge-addr-del nove0001n8 10.40.1.254/24",
+        "bridge-guard-remove nove0001n8",
     ]
 
     # A failing step is reported and nothing after it runs for that bridge.
@@ -638,6 +649,13 @@ def test_provisioner_reconciles_bridge_dhcp(tmp_path):
     assert "applied=2 skipped=0 failed=1" in result.stdout
     assert "failed to restore DHCP for bridge nove0001n1" in result.stderr
     assert not any(line.startswith("dnsmasq-start") for line in log.read_text().splitlines())
+
+    # An address that will not go keeps its guard.
+    helper.write_text(f'#!/bin/bash\necho "$@" >> "{log}"\n[[ "$1" != bridge-addr-del ]]\n')
+    log.unlink()
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert "applied=1 skipped=0 failed=2" in result.stdout
+    assert not any(line.startswith("bridge-guard-remove") for line in log.read_text().splitlines())
 
 
 def test_predictable_ifaces_sorted_handles_ens_enp_names(tmp_path):

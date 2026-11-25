@@ -278,6 +278,11 @@ def _cleanup_bridge_dhcp_runtime(bridge: str, network: dict, context: str) -> No
             step()
         except host_net.HostNetError as exc:
             logger.warning("%s: %s(%s) failed (%s)", context, name, bridge, exc)
+            if name == "bridge_addr_del":
+                # Never leave an address unguarded. Rules for a bridge that
+                # is gone match nothing; the next DHCP enable replaces them.
+                logger.warning("%s: keeping the guard on %s", context, bridge)
+                return
 
 
 def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:

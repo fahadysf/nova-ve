@@ -427,8 +427,8 @@ def bridge_dhcp_capable(cidr: ipaddress.IPv4Network) -> bool:
 def bridge_dhcp_defaults(cidr: ipaddress.IPv4Network) -> dict[str, str]:
     """Server at the last usable address, scope over the upper half before it.
 
-    Fits every size from /22 to /29: a /29 gets server .6 and scope .4-.5,
-    leaving .1-.3 for static addresses.
+    Fits every size from /22 to /29: a /29 gets server .6 and scope .4-.5.
+    Of .1-.3, nova-ve's own address allocation uses .2-.3 (``first_offset``).
     """
     base = int(cidr.network_address)
     last = int(cidr.broadcast_address)
@@ -520,7 +520,9 @@ def _normalize_bridge_edit(current: dict, changes: dict) -> dict:
         raise _field_error(
             "config.cidr", "CIDR cannot be changed; delete and recreate the network."
         )
-    merged = {**current, "dhcp": current.get("dhcp") is True}
+    # A bare ``dhcp: true`` from before #325 was never on; an unrelated edit
+    # must not switch it on. Only an explicit ``dhcp`` in the edit does.
+    merged = {**current, "dhcp": bridge_dhcp_config_on(current)}
     merged.update(changes)
     return _normalize_bridge_config(merged)
 
@@ -631,7 +633,7 @@ def _apply_bridge_dhcp(bridge: str, old: dict, new: dict) -> int:
     The guard goes on before the address and comes off after it, so the
     address is never reachable unguarded. Returns the server pid (0 when off).
     """
-    old_addr = _bridge_server_cidr(old) if bridge_dhcp_config_on(old) else None
+    old_addr = _bridge_server_addr(old) if old.get("dhcp") is True else None
     if bridge_dhcp_config_on(new):
         new_addr = _bridge_server_cidr(new)
         host_net.bridge_guard_apply(bridge)
@@ -648,6 +650,16 @@ def _apply_bridge_dhcp(bridge: str, old: dict, new: dict) -> int:
         host_net.bridge_addr_del(bridge, old_addr)
     host_net.bridge_guard_remove(bridge)
     return 0
+
+
+def _bridge_server_addr(config: dict) -> str | None:
+    """``server/prefix`` when the settings name one, else ``None``."""
+    if not config.get("cidr") or not config.get("dhcp_server"):
+        return None
+    try:
+        return _bridge_server_cidr(config)
+    except ValueError:
+        return None
 
 
 def _switch_bridge_dhcp(bridge: str, old: dict, new: dict) -> int:
@@ -1040,7 +1052,10 @@ class NetworkService:
                 host_net.bridge_addr_del(bridge, _bridge_server_cidr(applied))
             return _record_bridge_dhcp(runtime, config, pid or 0)
         if applied["dhcp"] or (config.get("cidr") and dhcp_server_pid(bridge) is not None):
-            _apply_bridge_dhcp(bridge, {**applied, "dhcp": True}, {})
+            # The address goes before the guard; the saved server is the
+            # best guess when the runtime does not record one.
+            server = applied["dhcp_server"] or config.get("dhcp_server")
+            _apply_bridge_dhcp(bridge, {**applied, "dhcp": True, "dhcp_server": server}, {})
             return _record_bridge_dhcp(runtime, {}, 0)
         return False
 

@@ -20,7 +20,8 @@ kept when `dhcp` goes back to `false` so that turning it on again reuses them.
 A record counts as running DHCP only when `dhcp` is `true` and all of `cidr`,
 `dhcp_server`, `dhcp_start` and `dhcp_end` are set
 (`cloud_inventory_service.bridge_dhcp_enabled`); a bare `dhcp: true` from
-before this feature is never applied. Members of a shared bridge never run a
+before this feature is never applied, and an edit switches it on only when it
+sends `dhcp` itself. Members of a shared bridge never run a
 server.
 
 `Network.runtime` records what was applied: `dhcp`, `dhcp_server`,
@@ -52,7 +53,8 @@ open.
 Turning DHCP on runs, in order: `bridge-guard-apply`, `bridge-addr-add`
 (`server/prefix`), `link-up`, `dnsmasq-start ... --no-router`. Turning it off
 runs `dnsmasq-stop`, `bridge-addr-del`, `bridge-guard-remove`. The guard is in
-place before the address exists and stays until it is gone. A failing step
+place before the address exists and stays until it is gone: if removing the
+address fails, the guard stays too. A failing step
 puts the previous state back and leaves `lab.json` unchanged.
 
 Toggling DHCP never recreates the bridge or detaches links. Delete and lab
@@ -76,6 +78,7 @@ with NAT-Cloud allocation.
 ```
 chain in_<bridge> { type filter hook input priority -10; policy accept;
   iifname "<bridge>" meta nfproto ipv4 udp sport 68 udp dport 67 accept
+  iifname "<bridge>" icmp type echo-reply accept
   iifname "<bridge>" drop
 }
 chain fwd_<bridge> { type filter hook forward priority -10; policy accept;
@@ -85,7 +88,11 @@ chain fwd_<bridge> { type filter hook forward priority -10; policy accept;
 }
 ```
 
-Input from the bridge is DHCP only; IPv6 is dropped with everything else. A
+Input from the bridge is DHCP only, plus ICMP echo replies so that dnsmasq's
+check that an address is free before offering it works; IPv6 is dropped with
+everything else. Apply also sets `net.ipv4.conf.<bridge>.arp_ignore=1`, so
+the host answers ARP on the bridge only for the server address instead of
+every local address; remove resets it to `0`. A
 drop is final in nftables whatever later chains decide, so routed traffic is
 blocked both ways regardless of the host's forward policy. Frames bridged
 between nodes on the same bridge reach the forward hook only when
@@ -94,7 +101,10 @@ forward rule lets them continue unchanged. There are no NAT rules.
 
 `bridge-guard-remove <bridge>` deletes exactly that bridge's two chains, and
 the table once no chain is left. Both verbs are idempotent and serialized by a
-file lock.
+file lock (`/run/nova-ve-bridge-guard.lock`, opened without following
+links). The helper writes `dnsmasq.conf` through a fresh temporary file and
+a rename, refusing symlinked directories under the state root, because that
+directory belongs to the unprivileged service account.
 
 ## dnsmasq
 

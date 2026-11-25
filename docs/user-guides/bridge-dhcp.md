@@ -34,15 +34,17 @@ nothing else, so traffic stays inside the lab unless a lab node routes it.
 The server address is the host's own address on the bridge. It must be a usable
 address in the subnet and outside the range. Blank fields use these defaults:
 
-| CIDR | Server | Range | Left for static addresses |
+| CIDR | Server | Range | Outside the range |
 | --- | --- | --- | --- |
 | `x.x.x.0/29` | `.6` | `.4` – `.5` | `.1` – `.3` |
 | `x.x.x.0/24` | `.254` | `.128` – `.253` | `.1` – `.127` |
 | `x.x.0.0/22` | `x.x.3.254` | `x.x.2.0` – `x.x.3.253` | `x.x.0.1` – `x.x.1.255` |
 
-Addresses nova-ve assigns to nodes itself (for example Docker interfaces)
-never come from the range or the server address. DHCP cannot be turned on
-while such an address is already inside the range.
+Addresses outside the range are yours for static configuration. Addresses
+nova-ve assigns to nodes itself (for example Docker interfaces) start at the
+second address of the subnet (`.2`; `.1` is left for a lab gateway) and never
+come from the range or the server address. DHCP cannot be turned on while
+such an address is already inside the range or on the server address.
 
 ### Subnet rules
 
@@ -59,8 +61,10 @@ NAT-Clouds, in turn, never get a subnet that overlaps a bridge with DHCP.
 
 With DHCP on, the bridge carries a host address, so nova-ve also guards it:
 
-- from the bridge, the host accepts DHCP requests and nothing else; SSH, the
-  web UI and every other host service stay unreachable through the bridge;
+- from the bridge, the host accepts DHCP requests (and replies to its own
+  pings) and nothing else; SSH, the web UI and every other host service stay
+  unreachable through the bridge, and the host answers ARP there only for the
+  server address;
 - the host does not forward traffic into or out of the bridge;
 - traffic between nodes on the bridge is not affected.
 

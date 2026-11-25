@@ -927,3 +927,77 @@ async def test_api_patch_conflict_hides_labs_the_user_cannot_open(api, host, lab
     assert resp.status_code == 409
     assert resp.json()["source"] == "a DHCP bridge in another lab"
     assert "private" not in resp.json()["message"]
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups: legacy flags, off-path order, stray servers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unrelated_edit_does_not_switch_on_a_legacy_dhcp_flag(host, labs_dir):
+    lab = _lab(labs_dir, "a.json", LAB_A, {"1": _bridge(1, config={"cidr": "10.40.1.0/24", "dhcp": True})})
+    svc = NetworkService()
+    payload, _ = await svc.patch_network(lab, 1, {"config": {"dhcp_start": "10.40.1.200"}})
+    assert payload["config"]["dhcp"] is False
+    assert host.calls == []
+    # Asking for it explicitly still works.
+    payload, _ = await svc.patch_network(lab, 1, {"config": {"dhcp": True}})
+    assert payload["config"]["dhcp"] is True
+    assert "dnsmasq_start_isolated" in host.names()
+
+
+@pytest.mark.asyncio
+async def test_explicit_off_stops_a_stray_server(host, labs_dir, monkeypatch):
+    """Drift repair: DHCP is off, yet a server runs on the bridge."""
+    config = {**_dhcp_config(), "dhcp": False}
+    lab = _lab(labs_dir, "a.json", LAB_A, {"1": _bridge(1, config=config)})
+    bridge = host_net.bridge_name(LAB_A, 1)
+    monkeypatch.setattr("app.services.network_info_service.dhcp_server_pid", lambda b: 4242)
+    payload, _ = await NetworkService().patch_network(lab, 1, {"config": {"dhcp": False}})
+    assert host.calls == [
+        ("dnsmasq_stop", bridge),
+        ("bridge_addr_del", bridge, "10.40.1.254/24"),
+        ("bridge_guard_remove", bridge),
+    ]
+    assert payload["runtime"]["dhcp"] is False and payload["runtime"]["dhcp_pid"] == 0
+
+
+def test_reconcile_stops_a_stray_server_on_a_bridge_with_dhcp_off(host, labs_dir, monkeypatch):
+    lab = _lab(labs_dir, "a.json", LAB_A, {"1": _bridge(1, config={**_dhcp_config(), "dhcp": False})})
+    bridge = host_net.bridge_name(LAB_A, 1)
+    host.existing.add(bridge)
+    monkeypatch.setattr("app.services.network_info_service.dhcp_server_pid", lambda b: 4242)
+    NetworkService().ensure_lab_bridges(lab)
+    # No runtime server recorded: the saved one is removed before the guard.
+    assert host.dhcp_calls() == [
+        ("dnsmasq_stop", bridge),
+        ("bridge_addr_del", bridge, "10.40.1.254/24"),
+        ("bridge_guard_remove", bridge),
+    ]
+
+
+def test_reconcile_keeps_the_guard_while_the_address_stays(host, labs_dir):
+    lab = _lab(
+        labs_dir,
+        "a.json",
+        LAB_A,
+        {"1": _bridge(1, config={**_dhcp_config(), "dhcp": False}, runtime={"dhcp": True})},
+    )
+    host.existing.add(host_net.bridge_name(LAB_A, 1))
+    host.fail["bridge_addr_del"] = host_net.HostNetUnknown("busy")
+    summary = NetworkService().ensure_lab_bridges(lab)
+    assert "bridge_guard_remove" not in host.names()
+    assert summary["skipped"] and "busy" in summary["skipped"][0]["reason"]
+
+
+def test_lab_cleanup_keeps_the_guard_when_the_address_stays(host, labs_dir):
+    data = {"id": LAB_A, "networks": {"1": _bridge(1, config=_dhcp_config(), runtime={"dhcp": True})}}
+    host.fail["bridge_addr_del"] = host_net.HostNetUnknown("busy")
+    _cleanup_lab_network_runtime(data, "a.json")
+    b1 = host_net.bridge_name(LAB_A, 1)
+    assert host.calls == [
+        ("dnsmasq_stop", b1),
+        ("bridge_addr_del", b1, "10.40.1.254/24"),
+        ("bridge_del", b1),
+    ]
