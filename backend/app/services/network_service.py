@@ -31,7 +31,6 @@ from app.services.cloud_inventory_service import (
     list_nat_clouds,
     nat_cloud_id,
     nat_cloud_ipam_lock,
-    owner_cidrs,
 )
 from app.services.lab_lock import LabLockTimeout, lab_lock
 from app.services.lab_service import LabService, _normalize_relative_lab_path
@@ -151,6 +150,43 @@ def _existing_network_cidrs(networks: dict) -> list[ipaddress.IPv4Network]:
     return out
 
 
+def _host_ipv4_networks(
+    *, exclude_bridge: str | None = None
+) -> list[tuple[str, ipaddress.IPv4Network]]:
+    occupied: list[tuple[str, ipaddress.IPv4Network]] = []
+    for iface, raw_cidr in host_net.list_ipv4_addrs():
+        if iface == exclude_bridge:
+            continue
+        try:
+            network = ipaddress.ip_network(raw_cidr, strict=False)
+        except ValueError:
+            continue
+        if isinstance(network, ipaddress.IPv4Network):
+            occupied.append((f"host interface {iface}", network))
+    return occupied
+
+
+def _nat_cloud_owner_networks(
+    *, exclude_cloud_id: str | None = None
+) -> list[tuple[str, ipaddress.IPv4Network]]:
+    occupied: list[tuple[str, ipaddress.IPv4Network]] = []
+    for item in list_nat_clouds():
+        if item.get("is_reference") or item.get("id") == exclude_cloud_id:
+            continue
+        try:
+            network = ipaddress.ip_network(str(item.get("cidr") or ""), strict=True)
+        except ValueError:
+            continue
+        if not isinstance(network, ipaddress.IPv4Network):
+            continue
+        source = (
+            f"NAT-Cloud {item.get('network_name')!r} in lab "
+            f"{item.get('lab_name')!r} ({item.get('lab_path')})"
+        )
+        occupied.append((source, network))
+    return occupied
+
+
 def _allocate_nat_cloud_cidr(networks: dict, extra_used: list[ipaddress.IPv4Network] | None = None) -> ipaddress.IPv4Network:
     used = _existing_network_cidrs(networks)
     if extra_used:
@@ -170,14 +206,30 @@ def _normalize_nat_cloud_config(
     networks: dict,
     *,
     host_used: list[ipaddress.IPv4Network] | None = None,
+    occupied: list[tuple[str, ipaddress.IPv4Network]] | None = None,
 ) -> dict:
+    occupied = occupied or []
+    occupied_networks = [network for _source, network in occupied]
     cidr = (
         _validate_cidr(raw_config["cidr"])
         if raw_config.get("cidr")
-        else _allocate_nat_cloud_cidr(networks, host_used)
+        else _allocate_nat_cloud_cidr(
+            networks, [*(host_used or []), *occupied_networks]
+        )
     )
     if cidr.prefixlen > 24:
         raise NetworkServiceError(422, "NAT-Cloud CIDR must be /24 or larger")
+    for source, existing in occupied:
+        if cidr.overlaps(existing):
+            raise NetworkServiceError(
+                409,
+                f"NAT-Cloud CIDR {cidr} overlaps {source} CIDR {existing}.",
+                extra={
+                    "field": "config.cidr",
+                    "conflicting_cidr": str(existing),
+                    "source": source,
+                },
+            )
     for existing in [*_existing_network_cidrs(networks), *(host_used or [])]:
         if cidr.overlaps(existing):
             raise NetworkServiceError(
@@ -545,6 +597,15 @@ class NetworkService:
             host_net.nat_remove(bridge)
         except host_net.HostNetError:
             logger.warning("cleanup_nat_cloud: nat_remove(%s) failed", bridge)
+
+    def validate_nat_cloud_config(self, lab_path: str, raw_config: dict) -> dict:
+        normalized = _normalize_relative_lab_path(lab_path)
+        data = LabService.read_lab_json_static(normalized)
+        return _normalize_nat_cloud_config(
+            raw_config,
+            data.get("networks") or {},
+            occupied=[*_nat_cloud_owner_networks(), *_host_ipv4_networks()],
+        )
 
     def list_networks(self, lab_path: str, *, include_hidden: bool = False) -> Dict[str, dict]:
         """Return networks keyed by string id, mirroring legacy router shape.
@@ -945,7 +1006,10 @@ class NetworkService:
                         normalized_config = _normalize_nat_cloud_config(
                             raw_config,
                             networks,
-                            host_used=owner_cidrs(),
+                            occupied=[
+                                *_nat_cloud_owner_networks(),
+                                *_host_ipv4_networks(),
+                            ],
                         )
                         owner_runtime = {}
                 else:

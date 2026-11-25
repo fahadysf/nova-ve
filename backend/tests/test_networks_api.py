@@ -142,6 +142,7 @@ def patched_route_settings(monkeypatch, tmp_path, route_settings):
     monkeypatch.setattr("app.services.host_net.forward_remove", lambda bridge, cidr=None, egress_iface=None: None)
     monkeypatch.setattr("app.services.host_net.dnsmasq_start", lambda bridge, gateway, start, end: 4321)
     monkeypatch.setattr("app.services.host_net.dnsmasq_stop", lambda bridge: None)
+    monkeypatch.setattr("app.services.host_net.list_ipv4_addrs", lambda: [])
     return route_settings
 
 
@@ -404,3 +405,39 @@ async def test_patch_network_rename_duplicate_returns_409(
             f"/api/labs/{lab_name}/networks/6", json={"name": "wan"},
         )
     assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_validate_nat_cloud_config_returns_normalized_config_without_mutation(
+    patched_route_settings, auth_override, monkeypatch
+):
+    lab_name = _seed_lab(patched_route_settings.LABS_DIR)
+    monkeypatch.setattr(
+        "app.services.cloud_inventory_service.get_settings",
+        lambda: patched_route_settings,
+    )
+    monkeypatch.setattr(
+        "app.services.host_net.bridge_add",
+        lambda _name: pytest.fail("preflight must not create a bridge"),
+    )
+    monkeypatch.setattr(
+        "app.services.host_net.dnsmasq_start",
+        lambda *_args: pytest.fail("preflight must not start DHCP"),
+    )
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/labs/{lab_name}/networks/validate-nat-cloud",
+            json={"config": {"cidr": "192.168.50.0/24", "dhcp": False}},
+        )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["data"]["config"] == {
+        "cidr": "192.168.50.0/24",
+        "gateway": "192.168.50.1",
+        "dhcp": False,
+        "dhcp_start": "192.168.50.100",
+        "dhcp_end": "192.168.50.254",
+    }
+    saved = json.loads((patched_route_settings.LABS_DIR / lab_name).read_text())
+    assert saved["networks"] == {}

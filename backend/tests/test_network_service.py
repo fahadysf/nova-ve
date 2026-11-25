@@ -122,6 +122,7 @@ def helper_mocks(monkeypatch):
     monkeypatch.setattr(host_net, "forward_remove", lambda bridge, cidr=None, egress_iface=None: calls["forward_remove"].append((bridge, cidr, egress_iface)))
     monkeypatch.setattr(host_net, "dnsmasq_start", lambda bridge, gateway, start, end: calls["dnsmasq_start"].append((bridge, gateway, start, end)) or 1234)
     monkeypatch.setattr(host_net, "dnsmasq_stop", lambda bridge: calls["dnsmasq_stop"].append(bridge))
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [])
     return calls
 
 
@@ -303,6 +304,82 @@ async def test_create_nat_cloud_skips_host_wide_existing_cidr(
 
     assert first["config"]["cidr"] == "10.255.0.0/24"
     assert second["config"]["cidr"] == "10.255.1.0/24"
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_overlap_identifies_existing_owner(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    owner_lab = _seed_lab(labs_dir, lab_id="lab-nat-source-a", name="owner-a.json")
+    other_lab = _seed_lab(labs_dir, lab_id="lab-nat-source-b", name="other-b.json")
+    await NetworkService().create_network(
+        owner_lab,
+        {
+            "name": "owner-net",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.60.0.0/24"},
+        },
+    )
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().create_network(
+            other_lab,
+            {
+                "name": "conflicting-net",
+                "type": "nat_cloud",
+                "config": {"cidr": "10.60.0.0/24"},
+            },
+        )
+
+    assert exc.value.code == 409
+    assert exc.value.extra["field"] == "config.cidr"
+    assert "owner-net" in exc.value.message
+    assert "owner-a.json" in exc.value.message
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_rejects_host_subnet_overlap(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-host-overlap")
+    monkeypatch.setattr(
+        host_net,
+        "list_ipv4_addrs",
+        lambda: [("br-eth0", "172.20.50.10/24")],
+    )
+
+    with pytest.raises(NetworkServiceError) as exc:
+        await NetworkService().create_network(
+            lab_name,
+            {
+                "name": "internet",
+                "type": "nat_cloud",
+                "config": {"cidr": "172.20.50.0/24"},
+            },
+        )
+
+    assert exc.value.code == 409
+    assert exc.value.extra["field"] == "config.cidr"
+    assert exc.value.extra["conflicting_cidr"] == "172.20.50.0/24"
+    assert "br-eth0" in exc.value.message
+    assert helper_mocks["bridge_add"] == []
+
+
+@pytest.mark.asyncio
+async def test_create_nat_cloud_auto_allocation_skips_host_subnet(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-host-allocation")
+    monkeypatch.setattr(
+        host_net, "list_ipv4_addrs", lambda: [("eth0", "10.255.0.20/24")]
+    )
+
+    payload = await NetworkService().create_network(
+        lab_name,
+        {"name": "internet", "type": "nat_cloud", "config": {}},
+    )
+
+    assert payload["config"]["cidr"] == "10.255.1.0/24"
 
 
 @pytest.mark.asyncio

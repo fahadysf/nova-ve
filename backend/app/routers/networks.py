@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.routers.labs import _scoped_lab_path
-from app.schemas.network import NetworkCreate, NetworkSharingUpdate, NetworkUpdate
+from app.schemas.network import NATCloudValidate, NetworkCreate, NetworkSharingUpdate, NetworkUpdate
 from app.schemas.user import UserRead
 from app.services import audit_service
 from app.services.host_net import HostNetBridgeOwnershipError
@@ -131,6 +131,32 @@ async def create_network(
             "revision": LabService.read_meta_revision_static(lab_path),
         },
     )
+
+
+@router.post("/{lab_path:path}/networks/validate-nat-cloud")
+async def validate_nat_cloud_config(
+    lab_path: str,
+    request: NATCloudValidate,
+    current_user: UserRead = Depends(get_current_user),
+):
+    _data, err = _read_lab_or_error(lab_path)
+    if err is not None:
+        return err
+    try:
+        normalized = network_service.validate_nat_cloud_config(lab_path, request.config)
+    except NetworkServiceError as exc:
+        body: Dict[str, Any] = {
+            "code": exc.code,
+            "status": "fail",
+            "message": exc.message,
+        }
+        body.update(exc.extra)
+        return JSONResponse(status_code=exc.code, content=body)
+    return {
+        "code": 200,
+        "status": "success",
+        "data": {"config": normalized},
+    }
 
 
 @router.delete("/{lab_path:path}/networks/{network_id}")
