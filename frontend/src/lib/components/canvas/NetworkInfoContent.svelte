@@ -179,7 +179,7 @@
         <ul class="space-y-1">
           {#each info.sharing.labs as lab}
             <li class="flex items-baseline justify-between gap-3">
-              <span class="min-w-0 truncate text-gray-100" title={`${lab.lab_name} / ${lab.network_name}`}>
+              <span class="min-w-0 text-gray-100 [overflow-wrap:anywhere]">
                 {#if lab.lab_path && !lab.current_lab}
                   <!-- Full load: the canvas binds its save queue to the lab it was opened for. -->
                   <a data-sveltekit-reload class="underline decoration-gray-600 underline-offset-2 hover:decoration-gray-300" href={`/labs/${lab.lab_path}`}>{lab.lab_name}</a>
