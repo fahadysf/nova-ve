@@ -10,6 +10,8 @@ class FolderItem(BaseModel):
     spy: Optional[int] = -1
     lock: Optional[bool] = False
     shared: Optional[int] = 0
+    # Username, "*" (all users — the Shared space) or "system" (#322).
+    owner: Optional[str] = None
 
 
 class LabListItem(BaseModel):
@@ -20,6 +22,7 @@ class LabListItem(BaseModel):
     spy: Optional[int] = -1
     lock: Optional[bool] = False
     shared: Optional[int] = 0
+    owner: Optional[str] = None
 
 
 class FolderListResponse(BaseModel):
