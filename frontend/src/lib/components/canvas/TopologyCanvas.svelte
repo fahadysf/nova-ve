@@ -39,6 +39,7 @@
   } from '@xyflow/svelte';
   import '@xyflow/svelte/dist/style.css';
   import { apiRequest, ApiError } from '$lib/api';
+  import { anchoredMenu } from '$lib/services/menuPlacement';
   import { nodeIconSources } from '$lib/services/nodeIcons';
   import CustomNode from '$lib/components/canvas/CustomNode.svelte';
   import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
@@ -2621,7 +2622,7 @@
       role="menu"
       tabindex="-1"
       class="fixed z-30 min-w-44 rounded-lg border border-gray-700 bg-gray-900/95 p-1 shadow-xl shadow-black/30 backdrop-blur"
-      style={`left: ${menu.x}px; top: ${menu.y}px;`}
+      use:anchoredMenu={{ x: menu.x, y: menu.y }}
       on:keydown|stopPropagation={() => {}}
       on:mousedown|stopPropagation
       on:mouseup|stopPropagation
