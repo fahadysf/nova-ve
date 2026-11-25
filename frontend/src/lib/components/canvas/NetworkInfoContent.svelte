@@ -101,10 +101,11 @@
     ]);
   }
 
-  function dhcpFields(dhcp: DhcpInfo): Field[] {
+  function dhcpFields(dhcp: DhcpInfo, nat: boolean): Field[] {
     if (!dhcp.enabled) return [];
     return compact([
-      { label: 'Server address', value: dhcp.server ?? '' },
+      // A NAT-Cloud serves DHCP from its gateway, already shown above.
+      !nat && { label: 'Server address', value: dhcp.server ?? '' },
       { label: 'Scope', value: range(dhcp.start, dhcp.end) },
       dhcp.size !== null && { label: 'Addresses', value: `${dhcp.lease_count} of ${dhcp.size} leased` },
       { label: 'Lease time', value: dhcp.lease_time ?? '' }
@@ -171,7 +172,7 @@
             {status.problem} {status.fix}
           </p>
         {/if}
-        <InfoFields fields={dhcpFields(dhcp)} />
+        <InfoFields fields={dhcpFields(dhcp, info.ip?.nat === true)} />
       </section>
 
       {#if dhcp.enabled || dhcp.leases.length > 0}

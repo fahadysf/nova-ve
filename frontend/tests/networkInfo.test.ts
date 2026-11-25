@@ -66,6 +66,16 @@ describe('NetworkInfoContent (#318)', () => {
     }
   });
 
+  it('does not repeat the NAT-Cloud gateway as the DHCP server address (#325)', async () => {
+    const data = info();
+    data.ip!.dhcp!.server = '10.255.0.1';
+    apiGetData.mockResolvedValue(data);
+    render(NetworkInfoContent, { labId: 'a.json', network: network() });
+    expect(await screen.findByText('10.255.0.100 – 10.255.0.254')).toBeInTheDocument();
+    expect(screen.getAllByText('10.255.0.1')).toHaveLength(1);
+    expect(screen.queryByText('Server address')).toBeNull();
+  });
+
   it('says when DHCP is off instead of showing a scope', async () => {
     const data = info();
     Object.assign(data.ip!.dhcp!, { enabled: false, running: false });
