@@ -966,6 +966,25 @@ async def test_patch_nat_cloud_keeps_an_edit_made_while_dnsmasq_stops(
 
 
 @pytest.mark.asyncio
+async def test_create_nat_cloud_bumps_the_revision_once(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """The runtime write after the create must not undo the create's bump."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-revision")
+    data = json.loads((labs_dir / lab_name).read_text())
+    data["meta"]["revision"] = 4
+    (labs_dir / lab_name).write_text(json.dumps(data))
+
+    await NetworkService().create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": {"cidr": "10.92.0.0/24"}}
+    )
+
+    saved = json.loads((labs_dir / lab_name).read_text())
+    assert saved["networks"]["1"]["runtime"]["bridge_name"]
+    assert saved["meta"]["revision"] == 5
+
+
+@pytest.mark.asyncio
 async def test_create_nat_cloud_rejects_unknown_egress_interface(
     instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch, tmp_path
 ):

@@ -34,7 +34,12 @@ from app.services.cloud_inventory_service import (
     nat_cloud_ipam_lock,
 )
 from app.services.lab_lock import LabLockTimeout, lab_lock
-from app.services.lab_service import LabService, _normalize_relative_lab_path
+from app.services.lab_service import (
+    LabService,
+    _normalize_relative_lab_path,
+    keep_written_revision,
+    locked_lab,
+)
 from app.services.link_service import _refcount, _recompute_mac_registry
 from app.services.shared_network_service import (
     MEMBERSHIP_CONFIG_KEYS,
@@ -1226,7 +1231,7 @@ class NetworkService:
                 data.pop("topology", None)
                 # Persist BEFORE provisioning so on-disk state never leads the
                 # kernel state. Any provisioning or ownership failure rolls it back.
-                LabService.write_lab_json_static(normalized, data)
+                created_revision = LabService.write_lab_json_static(normalized, data)
                 try:
                     if network_type == BRIDGE_CLOUD_TYPE:
                         # Bridge-Cloud: host-owned bridge, existence validated
@@ -1308,7 +1313,8 @@ class NetworkService:
                     ) from exc
                 if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
                     # #248: runtime-info refresh after the create's real write
-                    # — bookkeeping, don't bump again.
+                    # — bookkeeping, don't bump again, nor undo the create's bump.
+                    keep_written_revision(data, created_revision)
                     LabService.write_lab_json_static(normalized, data, bump_revision=False)
                 _recompute_mac_registry(normalized, data)
                 payload = _serialize_network(network, 0)
@@ -1632,10 +1638,9 @@ class NetworkService:
         # Local import: network_info_service imports this module.
         from app.services.network_info_service import dhcp_server_pid
 
-        labs_dir = get_settings().LABS_DIR
-
-        with lab_lock(normalized, labs_dir):
-            data = LabService.read_lab_json_static(normalized)
+        # Runs in a worker thread (see patch_network).
+        with locked_lab(normalized) as lab:
+            data = lab.data
             networks = data.get("networks", {}) or {}
             network = networks.get(str(network_id))
             if not isinstance(network, dict):
@@ -1777,7 +1782,7 @@ class NetworkService:
             networks[str(network_id)] = network
             data.pop("topology", None)
             try:
-                LabService.write_lab_json_static(normalized, data)
+                lab.save()
             except Exception:
                 if dhcp_rollback is not None:
                     _restore_nat_cloud_dhcp(*dhcp_rollback)

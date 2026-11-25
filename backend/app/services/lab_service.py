@@ -449,6 +449,32 @@ def _strip_legacy_fields(data: dict) -> dict:
     return cleaned
 
 
+def keep_written_revision(data: dict, revision: int | None) -> None:
+    """Carry the revision a write landed into ``data``.
+
+    ``write_lab_json_static`` bumps a copy, so a later
+    ``bump_revision=False`` write of the same dict would put the old
+    revision back. Call this between the two writes.
+    """
+    if revision is None:
+        return
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        meta = data["meta"] = {}
+    meta["revision"] = revision
+
+
+async def unlink_lab_file(filename: str) -> None:
+    """Remove a lab file under its lock (#328).
+
+    A writer that read the lab before the delete finishes first; one that
+    comes after re-reads under the lock, finds no file and writes nothing.
+    """
+    normalized = _normalize_relative_lab_path(filename)
+    async with lab_lock_async(normalized, get_settings().LABS_DIR):
+        _lab_file_path(normalized).unlink(missing_ok=True)
+
+
 class LockedLab:
     """A lab file read under its ``lab_lock``; :meth:`save` writes it back."""
 
@@ -462,6 +488,8 @@ class LockedLab:
         self.revision = LabService.write_lab_json_static(
             self.path, self.data, bump_revision=bump_revision
         )
+        # A later save(bump_revision=False) must keep this revision.
+        keep_written_revision(self.data, self.revision)
         return self.revision
 
     def restore(self, snapshot: dict) -> None:
@@ -644,7 +672,7 @@ class LabService:
                 )
             else:
                 _cleanup_lab_network_runtime(data, lab.filename)
-            filepath.unlink()
+            await unlink_lab_file(lab.filename)
         await self.db.delete(lab)
         await self.db.commit()
 

@@ -17,11 +17,13 @@ from types import SimpleNamespace
 import pytest
 
 from app.routers import labs
+from app.schemas.lab import LabMoveRequest
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.services import network_service as network_service_mod
 from app.services.lab_lock import LabLockTimeout, lab_lock, lab_lock_async
 from app.services.lab_service import LabService, locked_lab
+from app.services.node_runtime_service import NodeRuntimeService
 from app.services.network_service import NetworkService
 
 LAB = "race.json"
@@ -435,3 +437,150 @@ async def test_lab_lock_async_times_out(tmp_path):
         with pytest.raises(LabLockTimeout):
             async with lab_lock_async("lab.json", tmp_path, timeout_s=0.1):
                 pass
+
+
+async def _ticks_while(coro):
+    """Run ``coro``; count how often the event loop got to run meanwhile."""
+    ticks = 0
+    finished = False
+
+    async def tick() -> None:
+        nonlocal ticks
+        while not finished:
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    ticker = asyncio.create_task(tick())
+    try:
+        result = await coro
+    finally:
+        finished = True
+        await ticker
+    return result, ticks
+
+
+class _FakeDb:
+    async def commit(self):
+        return None
+
+    async def refresh(self, _obj):
+        return None
+
+    async def delete(self, _obj):
+        return None
+
+
+def test_locked_lab_save_keeps_its_bump_for_a_later_bookkeeping_save(settings):
+    _seed(settings)
+
+    with locked_lab(LAB) as lab:
+        assert lab.save() == 1
+        lab.data["nodes"]["1"] = _docker_node(1, "stamp")
+        assert lab.save(bump_revision=False) == 1
+
+    assert _saved(settings)["meta"]["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_layout_and_topology_report_the_revision_they_wrote(settings):
+    _seed(settings, nodes={"1": _docker_node(1, "n1")})
+    request = SimpleNamespace(headers={})
+
+    layout = await labs.put_layout(
+        LAB, request, body={"nodes": [{"id": 1, "left": 5, "top": 6}]}, current_user=ADMIN
+    )
+    assert layout["revision"] == _saved(settings)["meta"]["revision"] == 1
+
+    topology = await labs.update_topology(
+        LAB, request, payload={"nodes": {"1": {"name": "renamed"}}}, current_user=ADMIN
+    )
+    assert topology["revision"] == _saved(settings)["meta"]["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_delete_node_returns_404_when_the_node_went_away_meanwhile(settings):
+    _seed(settings, nodes={"1": _docker_node(1, "doomed")})
+
+    def remove_node(data: dict) -> None:
+        data["nodes"].pop("1")
+
+    with _slow_locked_writer(remove_node) as writer:
+        response = await labs.delete_node(LAB, 1, current_user=ADMIN)
+
+    assert response["code"] == 404, response
+    assert _saved(settings)["meta"]["revision"] == writer["revision"]
+
+
+@pytest.mark.asyncio
+async def test_delete_node_keeps_a_new_node_that_reused_the_id(settings):
+    _seed(settings, nodes={"1": {**_docker_node(1, "doomed"), "uuid": "old-uuid"}})
+
+    def replace_node(data: dict) -> None:
+        data["nodes"]["1"] = {**_docker_node(1, "newcomer"), "uuid": "new-uuid"}
+
+    with _slow_locked_writer(replace_node):
+        response = await labs.delete_node(LAB, 1, current_user=ADMIN)
+
+    assert response["code"] == 404, response
+    assert _saved(settings)["nodes"]["1"]["name"] == "newcomer"
+
+
+@pytest.mark.asyncio
+async def test_delete_lab_is_not_undone_by_an_in_flight_writer(settings):
+    _seed(settings)
+    lab_row = SimpleNamespace(filename=LAB)
+
+    with _slow_locked_writer(_add_node_9):
+        await LabService(_FakeDb()).delete_lab(lab_row)
+
+    assert not (settings.LABS_DIR / LAB).exists()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_status_write_waits_off_the_loop_and_keeps_an_edit(settings, monkeypatch):
+    _seed(settings, nodes={"1": {**_docker_node(1, "n1"), "status": 2}})
+    NodeRuntimeService.reset_registry()
+    with NodeRuntimeService._lock:
+        NodeRuntimeService._registry["race-lab:1"] = {
+            "lab_id": "race-lab", "node_id": 1, "kind": "docker"
+        }
+        NodeRuntimeService._loaded = True
+    monkeypatch.setattr(
+        NodeRuntimeService, "_check_alive_sync", staticmethod(lambda *_args: False)
+    )
+    try:
+        with _slow_locked_writer(_add_network_9) as writer:
+            _, ticks = await _ticks_while(NodeRuntimeService._run_heartbeat_cycle())
+    finally:
+        NodeRuntimeService.reset_registry()
+
+    saved = _saved(settings)
+    assert saved["nodes"]["1"]["status"] == 0
+    assert "9" in saved["networks"]
+    # Bookkeeping: the writer's revision stands.
+    assert saved["meta"]["revision"] == writer["revision"]
+    assert ticks >= 10
+
+
+@pytest.mark.asyncio
+async def test_move_lab_waits_off_the_loop_and_moves_the_latest_file(settings, monkeypatch):
+    _seed(settings)
+
+    class NoRowLabService(LabService):
+        async def get_lab_by_filename(self, _filename):
+            return None
+
+    monkeypatch.setattr("app.routers.labs.LabService", NoRowLabService)
+
+    with _slow_locked_writer(_add_node_9):
+        response, ticks = await _ticks_while(
+            labs.move_lab(
+                LAB, LabMoveRequest(target_folder="/Shared"), current_user=ADMIN, db=_FakeDb()
+            )
+        )
+
+    assert response["code"] == 200, response
+    assert not (settings.LABS_DIR / LAB).exists()
+    moved = json.loads((settings.LABS_DIR / "Shared" / LAB).read_text())
+    assert "9" in moved["nodes"]
+    assert ticks >= 10

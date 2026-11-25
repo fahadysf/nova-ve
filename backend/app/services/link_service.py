@@ -21,7 +21,7 @@ from contextlib import AsyncExitStack, nullcontext
 from app.config import get_settings
 from app.services import host_net
 from app.services.lab_lock import lab_lock
-from app.services.lab_service import LabService, _normalize_relative_lab_path
+from app.services.lab_service import LabService, _normalize_relative_lab_path, keep_written_revision
 from app.services.link_utils import _endpoint_key, _link_pair_key  # noqa: F401 — re-exported
 from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
 from app.services.shared_network_service import bridge_identity, find_owner, is_member, member_key
@@ -486,6 +486,7 @@ class LinkService:
             # never start a node) do not pre-emptively blow up here.
             implicit_bridge_to_provision: Optional[Tuple[int, Optional[str]]] = None
             concrete_links_to_attach: List[dict] = []
+            created_revision: Optional[int] = None
 
             link_payload: dict
             network_payload: Optional[dict] = None
@@ -521,7 +522,7 @@ class LinkService:
                 # write_lab_json_static does not regenerate links[] from the
                 # synthesized topology[] shim added by read_lab_json_static.
                 data.pop("topology", None)
-                LabService.write_lab_json_static(normalized, data)
+                created_revision = LabService.write_lab_json_static(normalized, data)
                 _recompute_mac_registry(normalized, data)
 
                 link_payload = _link_with_state(first_link)
@@ -579,7 +580,7 @@ class LinkService:
                 # Strip the synthesized legacy topology shim so the writer
                 # does not regenerate links[] from it.
                 data.pop("topology", None)
-                LabService.write_lab_json_static(normalized, data)
+                created_revision = LabService.write_lab_json_static(normalized, data)
                 _recompute_mac_registry(normalized, data)
 
                 link_payload = _link_with_state(new_link)
@@ -626,7 +627,8 @@ class LinkService:
             if stamped:
                 data.pop("topology", None)
                 # #248: runtime-stamp refresh after the create's real write —
-                # bookkeeping, don't bump again.
+                # bookkeeping, don't bump again, nor undo the create's bump.
+                keep_written_revision(data, created_revision)
                 LabService.write_lab_json_static(normalized, data, bump_revision=False)
                 # ``link_payload`` was built before the generation was
                 # known; refresh it from the now-stamped link record so

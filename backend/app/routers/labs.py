@@ -44,6 +44,7 @@ from app.services.lab_service import (
     _lab_file_path,
     _normalize_relative_lab_path,
     locked_lab_async,
+    unlink_lab_file,
 )
 from app.services.network_service import NetworkServiceError, network_service
 from app.services.cloud_inventory_service import SharedCloudReferenceError
@@ -343,6 +344,15 @@ def _apply_first_mac_edit(before: dict, node: dict) -> None:
 def _html5_launcher_url(lab_path: str, node_id: int) -> str:
     quoted_path = quote(lab_path.strip("/"), safe="/")
     return f"/api/labs/{quoted_path}/nodes/{node_id}/html5"
+
+
+def _node_identity(node: dict) -> tuple:
+    """Fields that tell a node from a later one that reused its id.
+
+    Edits do not change them; ``uuid`` is random per QEMU node.
+    """
+    extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
+    return (node.get("type"), node.get("template"), node.get("uuid") or extras.get("uuid"))
 
 
 def _node_is_running(lab_data: dict, node_id: int) -> bool:
@@ -849,7 +859,7 @@ async def update_topology(
         "message": "Topology saved successfully.",
         # #245: post-write revision so the client can update its cached
         # token without a re-GET.
-        "revision": _lab_revision(data) + 1,
+        "revision": lab.revision,
         "data": data.get("topology", []),
     }
 
@@ -1862,7 +1872,15 @@ async def delete_node(
         if error is not None:
             return error
         data = lab.data
-        data.get("nodes", {}).pop(str(node_id), None)
+        # Deleted meanwhile, or the id now belongs to a node created since.
+        current = data.get("nodes", {}).get(str(node_id))
+        if not isinstance(current, dict) or _node_identity(current) != _node_identity(nodes[str(node_id)]):
+            return {
+                "code": 404,
+                "status": "fail",
+                "message": "Node does not exist.",
+            }
+        data["nodes"].pop(str(node_id))
         data["topology"] = [
             link
             for link in data.get("topology", [])
@@ -3217,7 +3235,7 @@ async def put_layout(
         "message": "Layout updated successfully.",
         # #245: post-write revision so the client can update its cached
         # token without a re-GET.
-        "revision": _lab_revision(data) + 1,
+        "revision": lab.revision,
         "data": {
             "node_ids": affected_nodes,
             "network_ids": affected_networks,
@@ -3384,7 +3402,7 @@ async def delete_lab(
                 "message": exc.message,
                 "data": {"references": exc.references},
             }
-        filepath.unlink()
+        await unlink_lab_file(scoped_path)
         # A lab.json with no database row — name it by its file stem.
         await audit_service.record(
             "lab.delete",
