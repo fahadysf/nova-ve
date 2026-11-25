@@ -118,13 +118,28 @@ def _learned_macs(bridge: str | None) -> dict[str, str]:
 
 
 def _dnsmasq_pid(root: Path) -> int | None:
-    """Pid of the bridge's dnsmasq if that process is really running."""
+    """Pid of the bridge's dnsmasq if that process is really running.
+
+    Same rule as the privileged helper: the process is identified by its exact
+    ``--conf-file`` argument. The pid file is only a shortcut (#320).
+    """
+    wanted = f"--conf-file={root / 'dnsmasq.conf'}".encode()
+
+    def serves(pid: str) -> bool:
+        try:
+            argv = (PROC_ROOT / pid / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            return False
+        return os.path.basename(argv[0]) == b"dnsmasq" and wanted in argv
+
+    recorded = (_read_text(root / "dnsmasq.pid") or "").strip()
+    if recorded.isdigit() and serves(recorded):
+        return int(recorded)
     try:
-        pid = int(_read_text(root / "dnsmasq.pid") or "")
-        cmdline = (PROC_ROOT / str(pid) / "cmdline").read_bytes()
-    except (ValueError, OSError):
+        candidates = [name for name in os.listdir(PROC_ROOT) if name.isdigit()]
+    except OSError:
         return None
-    return pid if b"dnsmasq" in cmdline and root.name.encode() in cmdline else None
+    return next((int(pid) for pid in candidates if serves(pid)), None)
 
 
 def _lease_time(root: Path) -> str | None:
