@@ -6,6 +6,7 @@ import hashlib
 import logging
 import secrets
 import time
+from dataclasses import dataclass
 from functools import lru_cache
 
 import asyncpg
@@ -23,6 +24,15 @@ class GuacamoleDatabaseError(Exception):
 logger = logging.getLogger("nova-ve.guacamole")
 
 _AUTH_TOKEN_CACHE: dict[tuple[str, str], str] = {}
+
+
+@dataclass(frozen=True)
+class _TokenRequest:
+    task: asyncio.Task[str]
+    warmup: bool
+
+
+_AUTH_TOKEN_REQUESTS: dict[tuple[asyncio.AbstractEventLoop, str, str], _TokenRequest] = {}
 # #282: last successful use per cache key — drives the keepalive loop so
 # only recently-active users stay warm.
 _AUTH_TOKEN_LAST_USE: dict[tuple[str, str], float] = {}
@@ -440,16 +450,50 @@ class GuacamoleDatabaseService:
             raise GuacamoleDatabaseError("Guacamole token exchange returned no auth token.")
         return auth_token
 
-    async def _auth_token(self, username: str, password: str) -> str:
+    async def _auth_token(self, username: str, password: str, *, warmup: bool = False) -> str:
         cache_key = (self.settings.GUACAMOLE_INTERNAL_URL.strip(), username)
+        request = self._token_request(cache_key, username, password, warmup=warmup)
+        try:
+            # Cancelling one caller must leave the shared request available.
+            auth_token = await asyncio.shield(request.task)
+        except Exception:
+            if warmup or not request.warmup:
+                raise
+            # The warm-up can run before the first console provisions its
+            # Guacamole user. Retry once after the foreground provisioning.
+            retry = self._token_request(cache_key, username, password, warmup=False)
+            auth_token = await asyncio.shield(retry.task)
+        _AUTH_TOKEN_LAST_USE[cache_key] = time.monotonic()
+        return auth_token
+
+    def _token_request(
+        self, cache_key: tuple[str, str], username: str, password: str, *, warmup: bool,
+    ) -> _TokenRequest:
+        request_key = (asyncio.get_running_loop(), *cache_key)
+        request = _AUTH_TOKEN_REQUESTS.get(request_key)
+        if request is None or request.task.done():
+            task = asyncio.create_task(self._load_auth_token(cache_key, username, password))
+            request = _TokenRequest(task=task, warmup=warmup)
+            _AUTH_TOKEN_REQUESTS[request_key] = request
+
+            def clear_request(finished: asyncio.Task[str]) -> None:
+                if _AUTH_TOKEN_REQUESTS.get(request_key) is request:
+                    _AUTH_TOKEN_REQUESTS.pop(request_key)
+                if not finished.cancelled():
+                    finished.exception()  # A caller may have disconnected before completion.
+
+            task.add_done_callback(clear_request)
+        return request
+
+    async def _load_auth_token(
+        self, cache_key: tuple[str, str], username: str, password: str,
+    ) -> str:
         cached = _AUTH_TOKEN_CACHE.get(cache_key)
         if cached and await self._token_is_valid(cached):
-            _AUTH_TOKEN_LAST_USE[cache_key] = time.monotonic()
             return cached
 
         auth_token = await self._request_auth_token(username, password)
         _AUTH_TOKEN_CACHE[cache_key] = auth_token
-        _AUTH_TOKEN_LAST_USE[cache_key] = time.monotonic()
         return auth_token
 
     async def warm_auth_token(self, username: str) -> None:
@@ -465,7 +509,7 @@ class GuacamoleDatabaseService:
             return
         try:
             password = self._token_password_for(username)
-            await self._auth_token(username, password)
+            await self._auth_token(username, password, warmup=True)
             logger.debug("guacamole token pre-warmed for %s", username)
         except Exception:  # noqa: BLE001 — best-effort warm-up
             logger.debug("guacamole token pre-warm failed for %s", username, exc_info=True)
