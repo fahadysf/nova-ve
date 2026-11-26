@@ -4,6 +4,7 @@
 
 import asyncio
 import json
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -232,6 +233,42 @@ async def test_dead_node_is_removed_even_with_no_status_to_flip(monkeypatch, tmp
     # Nothing changed in the lab, so nothing was written or announced.
     assert lab_path.read_text() == original
     assert published == []
+
+
+@pytest.mark.asyncio
+async def test_docker_heartbeat_observes_saved_id_and_retains_stopped_container(
+    monkeypatch, tmp_settings,
+):
+    lab_id = "lab-container-rename"
+    container_id = "a" * 64
+    _write_lab(tmp_settings.LABS_DIR, lab_id, {"1": {"id": 1, "type": "docker", "status": 2}})
+    _register_runtime(
+        tmp_settings, lab_id, 1, "docker",
+        container_name="old-name", container_id=container_id,
+    )
+    _patch_settings(monkeypatch, tmp_settings)
+    running = True
+    calls = []
+
+    def docker_fixture(args, **kwargs):
+        assert args[0] == "docker-fixture"
+        calls.append(args[-1])
+        if args[-1] != container_id:
+            return subprocess.CompletedProcess(args, 1, "", "No such container")
+        return subprocess.CompletedProcess(args, 0, str(running).lower(), "")
+
+    monkeypatch.setattr("app.services.node_runtime_service.shutil.which", lambda *_: "docker-fixture")
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", docker_fixture)
+    service = NodeRuntimeService()
+
+    await service._run_heartbeat_cycle()
+    assert service.running_nodes_by_lab() == {lab_id: 1}
+
+    running = False
+    await service._run_heartbeat_cycle()
+    assert service.running_nodes_by_lab() == {}
+    assert json.loads(service._state_path(lab_id, 1).read_text())["container_id"] == container_id
+    assert calls == [container_id, container_id]
 
 
 # ---------------------------------------------------------------------------

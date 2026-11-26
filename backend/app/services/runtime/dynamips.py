@@ -568,7 +568,7 @@ class DynamipsLauncher:
             self._persist_runtime(runtime)
             return runtime
 
-    def stop_node(self, runtime: dict[str, Any]) -> None:
+    def stop_node(self, runtime: dict[str, Any], *, confirm_stopped: bool = False) -> None:
         vm_name = str(runtime["vm_name"])
         # Older runtime records (pre-NIO-cleanup) don't carry ``nio_names``;
         # reconstruct from the lab/node/tap layout so stop is still safe.
@@ -582,9 +582,43 @@ class DynamipsLauncher:
                     for idx in range(len(runtime.get("tap_names") or []))
                 ]
         with self._lock:
-            client = self._client_locked()
-            self._destroy_vm_locked(client, vm_name, nio_names=nio_names)
+            if confirm_stopped:
+                # Query the hypervisor that owns the VM without reconnecting
+                # to an unknown process or starting a replacement.
+                if self._hypervisor_proc is None or runtime.get("hypervisor_port") != self._hypervisor_port:
+                    raise DynamipsError("The VM's hypervisor could not be verified.")
+                if self._hypervisor_running():
+                    if self._client is None:
+                        raise DynamipsError("The VM's hypervisor is unavailable.")
+                    client = self._client
+                    # Start with a fresh protocol stream so an earlier
+                    # timed-out command cannot be mistaken for a VM list.
+                    client.close()
+                    try:
+                        if self._vm_list_contains(client, vm_name):
+                            if client.request(f"vm get_status {vm_name}").lines[-1].strip() != "0":
+                                client.request(f"vm stop {vm_name}")
+                            client.request(f"vm delete {vm_name}")
+                            if self._vm_list_contains(client, vm_name):
+                                raise DynamipsError("The hypervisor still reports the VM.")
+                        for nio_name in nio_names:
+                            self._delete_nio_locked(client, nio_name)
+                    except (DynamipsError, OSError):
+                        client.close()
+                        raise
+            else:
+                client = self._client_locked()
+                self._destroy_vm_locked(client, vm_name, nio_names=nio_names)
             self._clear_runtime(runtime)
+
+    @staticmethod
+    def _vm_list_contains(client: HypervisorClient, vm_name: str) -> bool:
+        lines = client.request("vm list").lines
+        if not lines or lines[-1].strip() != "OK" or any(
+            " (" not in line or not line.endswith(")") for line in lines[:-1]
+        ):
+            raise DynamipsError("Could not verify the hypervisor's VM list.")
+        return any(line.partition(" (")[0] == vm_name for line in lines[:-1])
 
     def is_alive(self, runtime: dict[str, Any]) -> bool:
         vm_name = str(runtime.get("vm_name") or "")
@@ -592,7 +626,9 @@ class DynamipsLauncher:
             return False
         try:
             with self._lock:
-                client = self._client_locked()
+                if not self._hypervisor_running() or self._client is None or runtime.get("hypervisor_port") != self._hypervisor_port:
+                    return False
+                client = self._client
                 reply = client.request(f"vm get_status {vm_name}")
                 # Dynamips returns the status as the terminator payload:
                 # ``100-0`` (stopped), ``100-1`` (suspended), ``100-2``
@@ -601,7 +637,7 @@ class DynamipsLauncher:
                     text = reply.lines[-1].strip()
                     return text == "2"
                 return False
-        except DynamipsError:
+        except (DynamipsError, OSError):
             return False
 
     # ------------------------------------------------------------------

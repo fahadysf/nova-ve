@@ -79,6 +79,7 @@ class IolRecord:
     ubridge_bridges: list[str]
     udp_ports: list[int]
     iourc_path: Path | None = None
+    ubridge_create_time: float | None = None
 
     def as_runtime(self) -> dict[str, Any]:
         runtime = {
@@ -100,6 +101,7 @@ class IolRecord:
             "command": self.command,
             "tap_names": self.tap_names,
             "ubridge_pid": self.ubridge_pid,
+            "ubridge_create_time": self.ubridge_create_time,
             "ubridge_port": self.ubridge_port,
             "ubridge_bridges": self.ubridge_bridges,
             "udp_ports": self.udp_ports,
@@ -462,6 +464,10 @@ class IolLauncher:
                 pid_create_time = __import__("psutil").Process(process.pid).create_time()
             except Exception:
                 pid_create_time = None
+            try:
+                ubridge_create_time = __import__("psutil").Process(ubridge_proc.pid).create_time()
+            except Exception:
+                ubridge_create_time = None
             with cls._lock:
                 cls._bridges[process.pid] = bridge
 
@@ -485,6 +491,7 @@ class IolLauncher:
                 ubridge_bridges=ubridge_bridges,
                 udp_ports=udp_ports,
                 iourc_path=iourc_path,
+                ubridge_create_time=ubridge_create_time,
             )
         except Exception:
             if bridge is not None:
@@ -495,6 +502,12 @@ class IolLauncher:
             raise
         finally:
             client.close()
+
+    @classmethod
+    def owns_live_process(cls, pid: int) -> bool:
+        with cls._lock:
+            process = cls._processes.get(pid)
+            return process is not None and process.poll() is None
 
     @classmethod
     def stop_runtime(cls, runtime: dict[str, Any]) -> None:

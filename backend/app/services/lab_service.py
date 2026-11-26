@@ -6,7 +6,7 @@ import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, nullcontext
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 
 from sqlalchemy import select
@@ -22,8 +22,9 @@ from app.services.cloud_inventory_service import (
     nat_cloud_ipam_lock_async,
 )
 from app.services.console_recording import RECORDINGS_FOLDER
-from app.services.lab_lock import folder_namespace_lock_async, lab_lock, lab_lock_async
+from app.services.lab_lock import LabLockTimeout, folder_namespace_lock_async, lab_lock, lab_lock_async
 from app.services.lab_paths import FOLDER_DELETIONS, LabMembershipPathError
+from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
 from app.services.shared_network_service import (
     assert_no_external_members_for_scope,
     is_member,
@@ -405,54 +406,37 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
             _drop_bridge_guard_after_delete(bridge, "delete_lab")
 
 
-def _cleanup_lab_node_runtime(data: dict, lab_filename: str) -> None:
-    """Stop and wipe every node in a lab being deleted (#338).
+def _cleanup_lab_node_runtime(data: dict, lab_filename: str) -> Path:
+    """Confirm all node stops and return the lab's disk directory."""
+    from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 
-    Mirrors single-node delete: each node's work dir (disks, configs)
-    under ``TMP_DIR/<lab_id>/<node_id>`` is removed, then any leftover
-    per-lab work dir and runtime records are dropped. Best-effort per
-    node so one failing node does not block deleting the lab itself.
-    """
-    nodes = data.get("nodes", {}) or {}
-    if not isinstance(nodes, dict):
-        nodes = {}
     lab_id = str(data.get("id") or lab_filename).strip()
-    try:
-        from app.services.node_runtime_service import NodeRuntimeService
-
-        service = NodeRuntimeService()
-    except Exception as exc:  # noqa: BLE001 - best-effort cleanup path
-        logger.warning("delete_lab: node runtime unavailable (%s)", exc)
-        service = None
-    if service is not None:
-        for raw_node_id in list(nodes):
-            try:
-                node_id = int(raw_node_id)
-            except (TypeError, ValueError):
-                continue
-            try:
-                service.wipe_node(data, node_id)
-            except Exception as exc:  # noqa: BLE001 - best-effort cleanup path
-                logger.warning(
-                    "delete_lab: wipe_node(%s) failed during lab cleanup (%s)",
-                    node_id,
-                    exc,
-                )
     if not lab_id or "/" in lab_id or "\\" in lab_id or lab_id in {".", ".."}:
-        return
-    tmp_dir = get_settings().TMP_DIR
-    work_root = tmp_dir / lab_id
+        raise NodeRuntimeError("Lab runtime directory could not be identified.")
+
+    nodes = data.get("nodes") or {}
+    if not isinstance(nodes, dict):
+        raise NodeRuntimeError("Lab node inventory is invalid.")
     try:
-        if work_root.exists():
-            shutil.rmtree(work_root)
-    except OSError as exc:
-        logger.warning("delete_lab: rmtree(%s) failed (%s)", work_root, exc)
-    runtime_dir = tmp_dir / "node-runtime"
-    try:
-        for record in runtime_dir.glob(f"{lab_id}-*.json"):
-            record.unlink(missing_ok=True)
-    except OSError as exc:
-        logger.warning("delete_lab: runtime record cleanup failed (%s)", exc)
+        node_ids = {int(value) for value in nodes}
+    except (TypeError, ValueError) as exc:
+        raise NodeRuntimeError("Lab node inventory is invalid.") from exc
+
+    service = NodeRuntimeService()
+    node_ids.update(service.lab_runtime_node_ids(lab_id))
+    with ExitStack() as locks:
+        try:
+            for node_id in sorted(node_ids):
+                # Some reconcilers already hold a node lock. Never wait for
+                # that lock while holding the lab file and IPAM locks.
+                locks.enter_context(runtime_mutex.acquire_node_sync(lab_id, node_id, timeout=0))
+        except RuntimeMutexContention as exc:
+            raise LabLockTimeout("A lab node is busy. Retry the lab deletion.") from exc
+
+        for node_id in sorted(node_ids):
+            service.stop_node(data, node_id, confirm_stopped=True)
+
+    return get_settings().TMP_DIR / lab_id
 
 
 def _legacy_topology_to_links(data: dict) -> list[dict]:
@@ -742,8 +726,10 @@ def keep_high_water_marks(snapshot: dict, live: dict) -> None:
 def _cleanup_and_unlink_lab(filename: str, data: dict) -> None:
     """Clean up the lab while the caller holds its non-reentrant lock."""
     assert_no_external_members_for_scope(filename)
+    work_root = _cleanup_lab_node_runtime(data, filename)
     _cleanup_lab_network_runtime(data, filename)
-    _cleanup_lab_node_runtime(data, filename)
+    if work_root is not None and work_root.exists():
+        shutil.rmtree(work_root)
     _lab_file_path(filename).unlink(missing_ok=True)
 
 
@@ -1018,17 +1004,7 @@ class LabService:
                     raise FileNotFoundError(filename)
                 return await self.delete_lab(lab, locked=True)
 
-        filepath = _lab_file_path(filename)
-        cancelled = False
-        if filepath.exists():
-            try:
-                data = self.read_lab_json_static(filename)
-            except (OSError, ValueError) as exc:
-                # Only a lab that could not be read is removed without cleanup.
-                logger.warning("delete_lab: could not read %s for network cleanup (%s)", filename, exc)
-                await unlink_lab_file(filename, locked=True)
-            else:
-                _, cancelled = await run_mutation(_cleanup_and_unlink_lab, filename, data)
+        cancelled = await self.delete_lab_file(filename)
 
         async def delete_row() -> None:
             await self.db.delete(lab)
@@ -1036,6 +1012,20 @@ class LabService:
 
         _, cancelled_during_commit = await wait_for_mutation(asyncio.create_task(delete_row()))
         return cancelled or cancelled_during_commit
+
+    @classmethod
+    async def delete_lab_file(cls, filename: str) -> bool:
+        """Remove the file and owned runtime while the caller holds the membership lock."""
+        if not cls.file_exists(filename):
+            return False
+        try:
+            data = cls.read_lab_json_static(filename)
+        except (OSError, ValueError) as exc:
+            logger.warning("delete_lab: could not read %s for runtime cleanup (%s)", filename, exc)
+            await unlink_lab_file(filename, locked=True)
+            return False
+        _, cancelled = await run_mutation(_cleanup_and_unlink_lab, filename, data)
+        return cancelled
 
     @staticmethod
     def read_lab_json_static(filename: str) -> dict:
