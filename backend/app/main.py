@@ -6,6 +6,7 @@ import asyncio
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from app.services.lab_paths import iter_lab_json_files
 from app.routers import (
     auth,
     docker_images,
@@ -104,6 +105,7 @@ app.include_router(ws.router)
 
 app.add_exception_handler(LabLockTimeout, lab_lock_timeout_handler)
 app.add_exception_handler(labs.LabAccessDenied, labs.lab_access_denied_handler)
+app.add_exception_handler(labs.LabMembershipPathError, labs.lab_access_denied_handler)
 
 
 @app.on_event("startup")
@@ -196,7 +198,7 @@ async def startup():
             _known_lab_ids: set[str] = set()
             _labs_dir = settings.LABS_DIR
             if _labs_dir.exists():
-                for _lab_file in _labs_dir.rglob("*.json"):
+                for _lab_file in iter_lab_json_files(_labs_dir):
                     try:
                         import json as _json
                         _raw = _json.loads(_lab_file.read_text())

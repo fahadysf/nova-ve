@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import time
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -26,6 +27,7 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.dialects import postgresql
 
+from app.config import get_settings
 from app.core.security import hash_password
 from app.database import engine, get_db
 from app.dependencies import get_current_admin, get_current_user
@@ -52,6 +54,13 @@ from app.services.template_service import TemplateError
 
 # Captured at import time — before the autouse fixture swaps it out.
 _REAL_RECORD_BATCH = audit_service.record_batch
+
+
+@pytest.fixture(autouse=True)
+def _isolate_folder_locks(tmp_path, monkeypatch):
+    settings = get_settings().model_copy(update={"LABS_DIR": tmp_path / "labs", "BASE_DATA_DIR": tmp_path})
+    monkeypatch.setattr("app.services.lab_service.get_settings", lambda: settings)
+    monkeypatch.setattr("app.services.folder_service.get_settings", lambda: settings)
 
 
 def _real_writer(monkeypatch):
@@ -1434,7 +1443,7 @@ class _StubLabService:
     async def get_lab_by_filename(self, filename):
         return type(self).row
 
-    async def delete_lab(self, lab):
+    async def delete_lab(self, lab, *, locked=False):
         return None
 
 
@@ -1477,7 +1486,7 @@ class TestLabLifecycleEvents:
 
     async def test_a_refused_delete_leaves_no_row(self, audit_events, monkeypatch):
         class _Refusing(_StubLabService):
-            async def delete_lab(self, lab):
+            async def delete_lab(self, lab, *, locked=False):
                 raise SharedCloudReferenceError("still referenced", references=[{"lab": "y"}])
 
         _Refusing.row = SimpleNamespace(owner="alice", name="Training", path="/training.json", id="x")
@@ -1600,8 +1609,9 @@ class TestLabManagementEvents:
 class TestFolderEvents:
     @pytest.fixture()
     def folder_env(self, monkeypatch):
-        for name in ("create_folder_path", "rename_folder", "delete_folder"):
+        for name in ("create_folder_path", "rename_folder"):
             monkeypatch.setattr(folders.FolderService, name, lambda *args: None)
+        monkeypatch.setattr(folders.FolderService, "delete_folder", lambda *_: nullcontext())
         monkeypatch.setattr(
             folders, "assert_no_external_members_for_scope", lambda path: None
         )
@@ -2173,7 +2183,7 @@ class _SettingsLabService:
     async def get_lab_by_filename(self, filename):
         return type(self).row
 
-    async def update_lab(self, lab, **fields):
+    async def update_lab(self, lab, *, locked=False, **fields):
         for field, value in fields.items():
             setattr(lab, field, value)
         return lab

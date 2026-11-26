@@ -43,6 +43,7 @@ from typing import Any, Callable, Iterator, Optional
 
 import psutil
 
+from app.services.lab_paths import iter_lab_json_files
 from app.config import get_settings
 from app.services import host_net, qemu_versions, runtime_pids
 from app.services.shared_network_service import bridge_identity
@@ -426,7 +427,7 @@ class NodeRuntimeService:
 
                 lock_name = "mgmt-" + hashlib.sha256(lab_id.encode()).hexdigest()
                 try:
-                    with lab_lock(lock_name, self.runtime_dir, timeout_s=60):
+                    with lab_lock(lock_name, self.runtime_dir, timeout_s=60, namespace=False):
                         self._check_mgmt_address_available(lab_id, node_id)
                         runtime = self._start_docker_node(lab_data, node)
                 except LabLockTimeout as exc:
@@ -1118,7 +1119,7 @@ class NodeRuntimeService:
         # Build lab_id -> relative filename map by scanning LABS_DIR once per cycle.
         lab_id_to_filename: dict[str, str] = {}
         if labs_dir.exists():
-            for lab_file in labs_dir.rglob("*.json"):
+            for lab_file in iter_lab_json_files(labs_dir):
                 try:
                     raw = json.loads(lab_file.read_text())
                 except (OSError, json.JSONDecodeError):
@@ -1244,7 +1245,7 @@ class NodeRuntimeService:
             return stats
 
         known: dict[str, dict[int, dict]] = {}
-        for lab_file in labs_dir.rglob("*.json"):
+        for lab_file in iter_lab_json_files(labs_dir):
             try:
                 raw = json.loads(lab_file.read_text())
             except (OSError, json.JSONDecodeError):
@@ -1550,7 +1551,7 @@ class NodeRuntimeService:
         if not labs_dir.exists():
             return
 
-        for lab_file in labs_dir.rglob("*.json"):
+        for lab_file in iter_lab_json_files(labs_dir):
             try:
                 data = json.loads(lab_file.read_text())
             except (OSError, json.JSONDecodeError):
@@ -5083,7 +5084,7 @@ class NodeRuntimeService:
         # ``rglob`` (not ``glob``) so nested lab folders are discoverable —
         # consistent with the discovery scan at
         # :meth:`NodeRuntimeService.reconcile_qemu_node_links`.
-        for path in labs_dir.rglob("*.json"):
+        for path in iter_lab_json_files(labs_dir):
             try:
                 rel = path.relative_to(labs_dir).as_posix()
                 data = LabService.read_lab_json_static(rel)
@@ -5235,7 +5236,7 @@ class NodeRuntimeService:
         if target is None:
             return
 
-        with lab_lock(target.name, labs_dir):
+        with lab_lock(target.name, labs_dir, create_parent=False):
             data = LabService.read_lab_json_static(target.name)
             node = data.get("nodes", {}).get(str(int(node_id)))
             if not isinstance(node, dict):

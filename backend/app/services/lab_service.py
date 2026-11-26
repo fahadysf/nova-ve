@@ -6,7 +6,7 @@ import os
 import shutil
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 
 from sqlalchemy import select
@@ -22,7 +22,8 @@ from app.services.cloud_inventory_service import (
     nat_cloud_ipam_lock_async,
 )
 from app.services.console_recording import RECORDINGS_FOLDER
-from app.services.lab_lock import lab_lock, lab_lock_async
+from app.services.lab_lock import folder_namespace_lock_async, lab_lock, lab_lock_async
+from app.services.lab_paths import FOLDER_DELETIONS, LabMembershipPathError
 from app.services.shared_network_service import (
     assert_no_external_members_for_scope,
     is_member,
@@ -55,7 +56,7 @@ def _normalize_relative_lab_path(raw_path: str) -> str:
     """Normalize a LABS_DIR-relative path and reject traversal."""
     candidate = raw_path.strip().replace("\\", "/").strip("/")
     parts = [part for part in candidate.split("/") if part not in {"", "."}]
-    if not parts or any(part == ".." for part in parts):
+    if not parts or any(part in {"..", FOLDER_DELETIONS} for part in parts):
         raise ValueError("Invalid lab path: directory traversal detected")
     if RECORDINGS_FOLDER in parts:
         raise ValueError("The console recordings directory is reserved.")
@@ -66,7 +67,7 @@ def _lab_file_path(relative_path: str) -> Path:
     labs_dir = _labs_dir()
     normalized_relative_path = _normalize_relative_lab_path(relative_path)
     filepath = (labs_dir / normalized_relative_path).resolve()
-    if not str(filepath).startswith(str(labs_dir)):
+    if not filepath.is_relative_to(labs_dir):
         raise ValueError("Invalid lab path: directory traversal detected")
     return filepath
 
@@ -746,15 +747,48 @@ def _cleanup_and_unlink_lab(filename: str, data: dict) -> None:
     _lab_file_path(filename).unlink(missing_ok=True)
 
 
-async def unlink_lab_file(filename: str) -> None:
+def _validate_lab_membership_path(filename: str) -> None:
+    if _lab_file_path(filename) != _labs_dir() / filename:
+        raise LabMembershipPathError("Lab changes require a canonical path.")
+
+
+async def unlink_lab_file(filename: str, *, locked: bool = False) -> None:
     """Remove a lab file under its lock (#328).
 
     A writer that read the lab before the delete finishes first; one that
     comes after re-reads under the lock, finds no file and writes nothing.
     """
     normalized = _normalize_relative_lab_path(filename)
-    async with lab_lock_async(normalized, get_settings().LABS_DIR):
+    if locked:
         _lab_file_path(normalized).unlink(missing_ok=True)
+    else:
+        async with lab_membership_lock(normalized):
+            _lab_file_path(normalized).unlink(missing_ok=True)
+
+
+@asynccontextmanager
+async def lab_membership_lock(filename: str, *other_filenames: str, ipam: bool = False):
+    """Protect path lookups and file/DB changes in IPAM, namespace, lab order."""
+    settings = get_settings()
+    paths = sorted({_normalize_relative_lab_path(path) for path in (filename, *other_filenames)})
+    async with (nat_cloud_ipam_lock_async(settings) if ipam else nullcontext()):
+        async with AsyncExitStack() as stack:
+            await stack.enter_async_context(folder_namespace_lock_async(settings.LABS_DIR, shared=True))
+            for path in paths:
+                _validate_lab_membership_path(path)
+            try:
+                for path in paths:
+                    await stack.enter_async_context(
+                        lab_lock_async(path, settings.LABS_DIR, namespace=False, create_parent=False)
+                    )
+            except FileNotFoundError:
+                # A missing parent is valid for moves or ghost rows. Take
+                # exclusive namespace protection without creating a lock dir.
+                await stack.aclose()
+                await stack.enter_async_context(folder_namespace_lock_async(settings.LABS_DIR))
+                for path in paths:
+                    _validate_lab_membership_path(path)
+            yield
 
 
 class LockedLab:
@@ -795,7 +829,7 @@ def locked_lab(filename: str, *, reader: Callable[[str], dict] | None = None) ->
     and no other writer can land between the read and the write.
     """
     normalized = _normalize_relative_lab_path(filename)
-    with lab_lock(normalized, get_settings().LABS_DIR):
+    with lab_lock(normalized, get_settings().LABS_DIR, create_parent=False):
         yield LockedLab(normalized, (reader or LabService.read_lab_json_static)(normalized))
 
 
@@ -808,7 +842,7 @@ async def locked_lab_async(
     Keep the body free of awaits that need this lab's lock.
     """
     normalized = _normalize_relative_lab_path(filename)
-    async with lab_lock_async(normalized, get_settings().LABS_DIR):
+    async with lab_lock_async(normalized, get_settings().LABS_DIR, create_parent=False):
         yield LockedLab(normalized, (reader or LabService.read_lab_json_static)(normalized))
 
 
@@ -851,17 +885,18 @@ class LabService:
         orphan-QEMU sweep (#225). Returns the removed filenames.
         """
         removed: list[str] = []
-        for lab in await self.list_labs():
-            if LabService.file_exists(lab.filename):
-                continue
-            logger.warning(
-                "reconcile: lab row has no backing file — removing DB row (filename=%s)",
-                lab.filename,
-            )
-            await self.db.delete(lab)
-            removed.append(lab.filename)
-        if removed:
-            await self.db.commit()
+        async with folder_namespace_lock_async(get_settings().LABS_DIR):
+            for lab in await self.list_labs():
+                if LabService.file_exists(lab.filename):
+                    continue
+                logger.warning(
+                    "reconcile: lab row has no backing file — removing DB row (filename=%s)",
+                    lab.filename,
+                )
+                await self.db.delete(lab)
+                removed.append(lab.filename)
+            if removed:
+                await self.db.commit()
         return removed
 
     async def create_lab(
@@ -870,14 +905,13 @@ class LabService:
         name: str,
         path: str | None = None,
         filename: str | None = None,
+        *,
+        locked: bool = False,
         **meta_fields,
     ) -> LabMeta:
         """Create a new lab: DB record + JSON file."""
         lab_id = uuid.uuid4()
         relative_path = build_relative_lab_path(name=name, path=path, filename=filename)
-        filepath = _lab_file_path(relative_path)
-        if filepath.exists():
-            raise FileExistsError(f"Lab file already exists: {relative_path}")
 
         meta = {
             "name": name,
@@ -893,10 +927,6 @@ class LabService:
             "sat": meta_fields.get("sat", "-1"),
         }
         lab_json = _empty_lab_json(str(lab_id), meta)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, "w") as f:
-            json.dump(lab_json, f, indent=2)
-
         db_meta = {k: v for k, v in meta.items() if hasattr(LabMeta, k) and k != "name"}
         lab = LabMeta(
             id=lab_id,
@@ -906,18 +936,51 @@ class LabService:
             path=_api_lab_path(relative_path),
             **db_meta,
         )
-        self.db.add(lab)
-        await self.db.commit()
-        await self.db.refresh(lab)
+
+        async def write_and_commit() -> None:
+            filepath = _lab_file_path(relative_path)
+            if filepath.exists():
+                raise FileExistsError(f"Lab file already exists: {relative_path}")
+            filepath.parent.mkdir(parents=True, exist_ok=True)
+            _replace_json(filepath, lab_json)
+            self.db.add(lab)
+            await self.db.commit()
+            await self.db.refresh(lab)
+
+        if locked:
+            await write_and_commit()
+        else:
+            async with lab_membership_lock(relative_path):
+                _, cancelled = await wait_for_mutation(asyncio.create_task(write_and_commit()))
+            if cancelled:
+                raise asyncio.CancelledError
         return lab
 
     async def update_lab(
         self,
         lab: LabMeta,
+        *,
+        locked: bool = False,
         **updates,
     ) -> LabMeta:
         """Update lab metadata in both DB and JSON file."""
+        if not locked:
+            filename = lab.filename
+            async with lab_membership_lock(filename):
+                await self.db.refresh(lab)
+                if lab.filename != filename:
+                    raise FileNotFoundError(filename)
+                result, cancelled = await wait_for_mutation(
+                    asyncio.create_task(self.update_lab(lab, locked=True, **updates))
+                )
+            if cancelled:
+                raise asyncio.CancelledError
+            return result
+
         filepath = _lab_file_path(lab.filename)
+        lab_json = (
+            LockedLab(lab.filename, self.read_lab_json_static(lab.filename)) if filepath.exists() else None
+        )
         db_fields = {
             "name",
             "author",
@@ -937,41 +1000,36 @@ class LabService:
         await self.db.commit()
         await self.db.refresh(lab)
 
-        if filepath.exists():
-            async with locked_lab_async(lab.filename) as locked:
-                for field in db_fields:
-                    if field in updates and updates[field] is not None:
-                        locked.data["meta"][field] = updates[field]
-                locked.save()
+        if lab_json is not None:
+            for field in db_fields:
+                if field in updates and updates[field] is not None:
+                    lab_json.data["meta"][field] = updates[field]
+            lab_json.save()
 
         return lab
 
-    async def delete_lab(self, lab: LabMeta) -> bool:
+    async def delete_lab(self, lab: LabMeta, *, locked: bool = False) -> bool:
         """Delete the lab and report cancellation received after mutation started."""
         filename = lab.filename
+        if not locked:
+            async with lab_membership_lock(filename, ipam=True):
+                await self.db.refresh(lab)
+                if lab.filename != filename:
+                    raise FileNotFoundError(filename)
+                return await self.delete_lab(lab, locked=True)
+
         filepath = _lab_file_path(filename)
         cancelled = False
         if filepath.exists():
-            # Shared-network joins take IPAM before their lab lock. Keep
-            # them out from the reference check until the owner is gone.
-            async with nat_cloud_ipam_lock_async(get_settings()):
-                # #332: read, check, clean up and unlink under the lab lock.
-                loaded = False
-                try:
-                    async with locked_lab_async(filename) as locked:
-                        loaded = True
-                        # Keep the lock until the worker exits, even if the request is cancelled.
-                        _, cancelled = await run_mutation(_cleanup_and_unlink_lab, filename, locked.data)
-                except (OSError, ValueError, json.JSONDecodeError) as exc:
-                    if loaded:
-                        raise
-                    # Only a lab that could not be read is removed without cleanup.
-                    logger.warning(
-                        "delete_lab: could not read %s for network cleanup (%s)",
-                        filename,
-                        exc,
-                    )
-                    await unlink_lab_file(filename)
+            try:
+                data = self.read_lab_json_static(filename)
+            except (OSError, ValueError) as exc:
+                # Only a lab that could not be read is removed without cleanup.
+                logger.warning("delete_lab: could not read %s for network cleanup (%s)", filename, exc)
+                await unlink_lab_file(filename, locked=True)
+            else:
+                _, cancelled = await run_mutation(_cleanup_and_unlink_lab, filename, data)
+
         async def delete_row() -> None:
             await self.db.delete(lab)
             await self.db.commit()

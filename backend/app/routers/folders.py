@@ -10,9 +10,10 @@ from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.folder import FolderCreateRequest, FolderRenameRequest
 from app.schemas.user import UserRead
+from app.services.async_utils import notify_after_mutation, run_mutation, wait_for_mutation
 from app.services.cloud_inventory_service import SharedCloudReferenceError
 from app.services.shared_network_service import assert_no_external_members_for_scope
-from app.services.folder_service import FolderService
+from app.services.folder_service import FolderService, _normalize_folder_path, folder_mutation_lock
 from app.services import audit_service
 from app.services.lab_service import LabService
 
@@ -166,7 +167,7 @@ async def list_root(
 ):
     try:
         scoped_root = _scoped_folder_path(current_user, "", treat_as_absolute=False)
-        result = FolderService.list_folder(scoped_root, recursive=True, at_user_root=True)
+        result = await asyncio.to_thread(FolderService.list_folder, scoped_root, recursive=True, at_user_root=True)
         lab_ids: dict[str, str] = {}
         result = await _merge_db_labs(result, db, scoped_root, recursive=True, lab_ids=lab_ids)
         await _annotate_running(result, lab_ids)
@@ -199,7 +200,7 @@ async def list_folder(
 ):
     try:
         scoped_path = _scoped_folder_path(current_user, folder_path, treat_as_absolute=True)
-        result = FolderService.list_folder(scoped_path)
+        result = await asyncio.to_thread(FolderService.list_folder, scoped_path)
         lab_ids: dict[str, str] = {}
         result = await _merge_db_labs(result, db, scoped_path, lab_ids=lab_ids)
         await _annotate_running(result, lab_ids)
@@ -231,7 +232,7 @@ async def create_folder(
 ):
     try:
         scoped_path = _scoped_folder_path(current_user, request.path, treat_as_absolute=False)
-        FolderService.create_folder_path(scoped_path, request.name)
+        _, cancelled = await run_mutation(FolderService.create_folder_path, scoped_path, request.name)
     except FileExistsError as e:
         return {
             "code": 400,
@@ -255,12 +256,15 @@ async def create_folder(
         part for part in [scoped_path.strip("/"), (request.name or "").strip("/")] if part
     )
     created_path = f"/{target_path}" if target_path else "/"
-    await audit_service.record(
-        "folder.create",
-        actor=current_user.username,
-        target_type="folder",
-        target_id=created_path,
-        target_name=request.name or created_path,
+    await notify_after_mutation(
+        audit_service.record(
+            "folder.create",
+            actor=current_user.username,
+            target_type="folder",
+            target_id=created_path,
+            target_name=request.name or created_path,
+        ),
+        cancelled,
     )
     return {
         "code": 200,
@@ -277,17 +281,37 @@ async def rename_folder(
     current_user: UserRead = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    async def rename_and_commit(old_prefix: str, new_prefix: str) -> None:
+        descendants = [
+            lab for lab in await LabService(db).list_labs()
+            if lab.filename == old_prefix or lab.filename.startswith(f"{old_prefix}/")
+        ]
+        FolderService.rename_folder(old_prefix, new_prefix)
+        try:
+            for lab in descendants:
+                suffix = lab.filename[len(old_prefix) :].lstrip("/")
+                lab.filename = "/".join(part for part in [new_prefix, suffix] if part)
+                lab.path = f"/{lab.filename}"
+            await db.commit()
+        except BaseException:
+            try:
+                FolderService.rename_folder(new_prefix, old_prefix)
+            finally:
+                await db.rollback()
+            raise
+
     try:
-        scoped_old_path = _scoped_folder_path(current_user, folder_path, treat_as_absolute=True)
-        scoped_new_path = _scoped_folder_path(current_user, request.path, treat_as_absolute=False)
-        FolderService.rename_folder(scoped_old_path, scoped_new_path)
+        old_prefix = _normalize_folder_path(_scoped_folder_path(current_user, folder_path, treat_as_absolute=True))
+        new_prefix = _normalize_folder_path(_scoped_folder_path(current_user, request.path, treat_as_absolute=False))
+        async with folder_mutation_lock():
+            _, cancelled = await wait_for_mutation(asyncio.create_task(rename_and_commit(old_prefix, new_prefix)))
     except FileNotFoundError as e:
         return {
             "code": 404,
             "status": "fail",
             "message": str(e),
         }
-    except FileExistsError as e:
+    except (FileExistsError, NotADirectoryError) as e:
         return {
             "code": 400,
             "status": "fail",
@@ -306,24 +330,15 @@ async def rename_folder(
             "message": str(e),
         }
 
-    old_prefix = scoped_old_path.strip("/")
-    new_prefix = scoped_new_path.strip("/")
-    lab_service = LabService(db)
-    for lab in await lab_service.list_labs():
-        if lab.filename == old_prefix or lab.filename.startswith(f"{old_prefix}/"):
-            suffix = lab.filename[len(old_prefix) :].lstrip("/")
-            new_filename = "/".join(part for part in [new_prefix, suffix] if part)
-            lab.filename = new_filename
-            lab.path = f"/{new_filename}"
-
-    await db.commit()
-
-    await audit_service.record(
-        "folder.rename",
-        actor=current_user.username,
-        target_type="folder",
-        target_id=f"/{old_prefix}",
-        detail={"from": f"/{old_prefix}", "to": f"/{new_prefix}" if new_prefix else "/"},
+    await notify_after_mutation(
+        audit_service.record(
+            "folder.rename",
+            actor=current_user.username,
+            target_type="folder",
+            target_id=f"/{old_prefix}",
+            detail={"from": f"/{old_prefix}", "to": f"/{new_prefix}" if new_prefix else "/"},
+        ),
+        cancelled,
     )
     return {
         "code": 200,
@@ -339,10 +354,25 @@ async def delete_folder(
     current_user: UserRead = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    async def delete_and_commit(folder_prefix: str) -> None:
+        await asyncio.to_thread(assert_no_external_members_for_scope, folder_prefix)
+        descendants = [
+            lab for lab in await LabService(db).list_labs()
+            if lab.filename == folder_prefix or lab.filename.startswith(f"{folder_prefix}/")
+        ]
+        async with FolderService.delete_folder(folder_prefix):
+            try:
+                for lab in descendants:
+                    await db.delete(lab)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+
     try:
-        scoped_path = _scoped_folder_path(current_user, folder_path, treat_as_absolute=True)
-        assert_no_external_members_for_scope(scoped_path)
-        FolderService.delete_folder(scoped_path)
+        folder_prefix = _normalize_folder_path(_scoped_folder_path(current_user, folder_path, treat_as_absolute=True))
+        async with folder_mutation_lock():
+            _, cancelled = await wait_for_mutation(asyncio.create_task(delete_and_commit(folder_prefix)))
     except SharedCloudReferenceError as e:
         return {
             "code": 409,
@@ -375,19 +405,14 @@ async def delete_folder(
             "message": str(e),
         }
 
-    folder_prefix = scoped_path.strip("/")
-    lab_service = LabService(db)
-    for lab in await lab_service.list_labs():
-        if lab.filename == folder_prefix or lab.filename.startswith(f"{folder_prefix}/"):
-            await db.delete(lab)
-
-    await db.commit()
-
-    await audit_service.record(
-        "folder.delete",
-        actor=current_user.username,
-        target_type="folder",
-        target_id=f"/{folder_prefix}",
+    await notify_after_mutation(
+        audit_service.record(
+            "folder.delete",
+            actor=current_user.username,
+            target_type="folder",
+            target_id=f"/{folder_prefix}",
+        ),
+        cancelled,
     )
     return {
         "code": 200,

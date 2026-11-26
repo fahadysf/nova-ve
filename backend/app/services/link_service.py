@@ -423,7 +423,7 @@ class LinkService:
         network_payload: Optional[dict] = None
 
         lab_lock_cm = (
-            nullcontext() if _lab_lock_held else lab_lock_async(normalized, labs_dir)
+            nullcontext() if _lab_lock_held else lab_lock_async(normalized, labs_dir, create_parent=False)
         )
 
         async with lab_lock_cm:
@@ -1480,7 +1480,7 @@ class LinkService:
             # cancellation cannot leave an IP release without link cleanup.
             # ------------------------------------------------------------------
             delete_lab_lock_cm = (
-                nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
+                nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir, create_parent=False)
             )
             with delete_lab_lock_cm:
                 data = LabService.read_lab_json_static(normalized)
@@ -1614,7 +1614,7 @@ class LinkService:
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
-        async with lab_lock_async(normalized, labs_dir):
+        async with lab_lock_async(normalized, labs_dir, create_parent=False):
             data = LabService.read_lab_json_static(normalized)
             links = data.get("links", []) or []
 

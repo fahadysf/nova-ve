@@ -9,6 +9,8 @@ Standard locations for application state, configuration, and installed component
 | `/var/lib/nova-ve/labs/` | `nova-ve` service user | 0755 | Lab JSON files. |
 | `/var/lib/nova-ve/labs/<lab>.json` | `nova-ve` service user | 0644 (umask) | A single lab's topology. |
 | `/var/lib/nova-ve/labs/<lab>.json.lock` | `nova-ve` service user | 0644 (umask) | Cooperative write lock. |
+| `/var/lib/nova-ve/labs/.folder-namespace.lock` | `nova-ve` service user | 0644 (umask) | Coordinates folder rename and deletion with lab writes and moves. |
+| `/var/lib/nova-ve/labs/.folder-deletions/` | `nova-ve` service user | 0700 | Internal staging during folder deletion. A database failure restores the folder to its original path. |
 | `/var/lib/nova-ve/tmp/<lab>/<node-id>/` | `nova-ve` service user | 0755 | Per-node runtime state — qcow2 overlays, stdout/stderr logs, QMP sockets. |
 | `/var/lib/nova-ve/tmp/node-runtime/` | `nova-ve` service user | 0755 | Persisted per-node runtime records (`<lab>-<node>.json`). |
 | `/var/lib/nova-ve/runtime/pids.json` | `nova-ve` service user | 0644 | Registered process PIDs (survive backend restarts for re-adoption). |

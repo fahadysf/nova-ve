@@ -1,11 +1,12 @@
 import ast
+import asyncio
 import threading
 import time
 from pathlib import Path
 
 import pytest
 
-from app.services.lab_lock import LabLockTimeout, lab_lock
+from app.services.lab_lock import LabLockTimeout, folder_namespace_lock_async, lab_lock, lab_lock_async
 
 
 def test_concurrent_mutation_serialized(tmp_path):
@@ -84,6 +85,35 @@ def test_lock_released_on_handler_exception(tmp_path):
     with lab_lock(lab_id, tmp_path, timeout_s=1.0):
         acquired = True
     assert acquired
+
+
+def test_lab_locks_can_share_the_namespace(tmp_path):
+    with lab_lock("first.json", tmp_path):
+        with lab_lock("second.json", tmp_path, timeout_s=0):
+            assert (tmp_path / "second.json.lock").is_file()
+
+
+@pytest.mark.asyncio
+async def test_exclusive_folder_lock_blocks_lab_locks(tmp_path):
+    def attempt_sync_lock():
+        with pytest.raises(LabLockTimeout):
+            with lab_lock("nested/test.json", tmp_path, timeout_s=0):
+                pytest.fail("Lab lock acquired while the folder namespace was exclusive")
+
+    async with folder_namespace_lock_async(tmp_path):
+        await asyncio.to_thread(attempt_sync_lock)
+        with pytest.raises(LabLockTimeout):
+            async with lab_lock_async("nested/test.json", tmp_path, timeout_s=0):
+                pytest.fail("Lab lock acquired while the folder namespace was exclusive")
+        assert not (tmp_path / "nested").exists()
+
+
+@pytest.mark.asyncio
+async def test_existing_lab_lock_leaves_a_missing_parent_missing(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        async with lab_lock_async("old-folder/test.json", tmp_path, create_parent=False):
+            pytest.fail("A stale lab path acquired a lock")
+    assert not (tmp_path / "old-folder").exists()
 
 
 def test_lock_timeout_raises_LabLockTimeout(tmp_path):

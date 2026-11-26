@@ -1086,15 +1086,15 @@ async def test_208a_paired_create_acquires_lab_lock_around_phases(patched_split,
     from contextlib import asynccontextmanager, contextmanager
 
     @contextmanager
-    def counting_lab_lock(lab_id, labs_dir, timeout_s=5.0):
+    def counting_lab_lock(lab_id, labs_dir, timeout_s=5.0, **options):
         acquire_count["n"] += 1
-        with real_lab_lock(lab_id, labs_dir, timeout_s=timeout_s):
+        with real_lab_lock(lab_id, labs_dir, timeout_s=timeout_s, **options):
             yield
 
     @asynccontextmanager
-    async def counting_lab_lock_async(lab_id, labs_dir, timeout_s=5.0):
+    async def counting_lab_lock_async(lab_id, labs_dir, timeout_s=5.0, **options):
         acquire_count["n"] += 1
-        async with real_lab_lock_async(lab_id, labs_dir, timeout_s=timeout_s):
+        async with real_lab_lock_async(lab_id, labs_dir, timeout_s=timeout_s, **options):
             yield
 
     # Patch the symbol everywhere the routers and services import it from.

@@ -21,6 +21,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Tuple
 
+from app.services.lab_paths import iter_lab_json_files
 from app.services.lab_service import LabService
 
 
@@ -131,7 +132,7 @@ class MacRegistry:
         labs_path = Path(labs_dir)
         if not labs_path.exists():
             return
-        for lab_file in sorted(labs_path.rglob("*.json")):
+        for lab_file in sorted(iter_lab_json_files(labs_path)):
             try:
                 relative = lab_file.relative_to(labs_path).as_posix()
             except ValueError:

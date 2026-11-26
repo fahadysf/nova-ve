@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import uuid
@@ -33,21 +34,23 @@ from app.schemas.node import (
     validate_second_console_mode_for_type,
 )
 from app.schemas.user import UserRead
-from app.services.async_utils import notify_after_mutation
+from app.services.async_utils import notify_after_mutation, wait_for_mutation
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
 from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
-from app.services.lab_lock import lab_lock_async
 from app.services.lab_service import (
     HIGH_WATER_FIELDS,
     LEGACY_SCHEMA_ERROR,
     LabIdExhaustedError,
+    LabMembershipPathError,
     LabService,
     _lab_file_path,
     _normalize_relative_lab_path,
     allocate_network_id,
     allocate_node_id,
+    build_relative_lab_path,
+    lab_membership_lock,
     locked_lab_async,
     unlink_lab_file,
 )
@@ -554,22 +557,24 @@ async def create_lab(
     lab_service = LabService(db)
     try:
         scoped_path = _scoped_lab_path(current_user, request.path or "", treat_as_absolute=False)
-        lab = await lab_service.create_lab(
-            owner=current_user.username,
-            name=request.name,
-            path=scoped_path,
-            filename=request.filename,
-            author=request.author,
-            description=request.description,
-            body=request.body,
-            version=request.version,
-            scripttimeout=request.scripttimeout,
-            countdown=request.countdown,
-            linkwidth=request.linkwidth,
-            grid=request.grid,
-            lock=request.lock,
-            sat=request.sat,
-        )
+        filename = build_relative_lab_path(request.name, path=scoped_path, filename=request.filename)
+        async with lab_membership_lock(filename):
+            lab, cancelled = await wait_for_mutation(asyncio.create_task(lab_service.create_lab(
+                owner=current_user.username,
+                name=request.name,
+                filename=filename,
+                locked=True,
+                author=request.author,
+                description=request.description,
+                body=request.body,
+                version=request.version,
+                scripttimeout=request.scripttimeout,
+                countdown=request.countdown,
+                linkwidth=request.linkwidth,
+                grid=request.grid,
+                lock=request.lock,
+                sat=request.sat,
+            )))
     except FileExistsError as e:
         return {
             "code": 400,
@@ -583,14 +588,17 @@ async def create_lab(
             "message": str(e),
         }
 
-    await audit_service.record(
-        "lab.create",
-        actor=current_user.username,
-        target_type="lab",
-        target_id=lab.path,
-        target_name=lab.name,
-        lab_path=lab.path,
-        lab_name=lab.name,
+    await notify_after_mutation(
+        audit_service.record(
+            "lab.create",
+            actor=current_user.username,
+            target_type="lab",
+            target_id=lab.path,
+            target_name=lab.name,
+            lab_path=lab.path,
+            lab_name=lab.name,
+        ),
+        cancelled,
     )
     return {
         "code": 200,
@@ -632,44 +640,40 @@ async def update_lab(
             "status": "fail",
             "message": str(e),
         }
-    lab = await lab_service.get_lab_by_filename(scoped_path)
+    async with lab_membership_lock(scoped_path):
+        lab = await lab_service.get_lab_by_filename(scoped_path)
+        if not lab:
+            return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+        if lab.owner != current_user.username and current_user.role != "admin":
+            return {"code": 403, "status": "fail", "message": "Access denied."}
 
-    if not lab:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
-
-    if lab.owner != current_user.username and current_user.role != "admin":
-        return {
-            "code": 403,
-            "status": "fail",
-            "message": "Access denied.",
-        }
-
-    update_fields = request.model_dump(exclude_unset=True)
-    # #300: snapshot the fields about to change for the audit trail.
-    before = {field: getattr(lab, field) for field in update_fields if hasattr(lab, field)}
-    lab = await lab_service.update_lab(lab, **update_fields)
+        update_fields = request.model_dump(exclude_unset=True)
+        # #300: snapshot the fields about to change for the audit trail.
+        before = {field: getattr(lab, field) for field in update_fields if hasattr(lab, field)}
+        lab, cancelled = await wait_for_mutation(
+            asyncio.create_task(lab_service.update_lab(lab, locked=True, **update_fields))
+        )
     # A save that changed nothing is not an event worth a row. Description
     # and body are reported by length — that they changed is the fact.
     changes = audit_service.field_changes(
         before, {field: getattr(lab, field) for field in before}
     )
     if changes:
-        await audit_service.record(
-            "lab.update",
-            actor=current_user.username,
-            target_type="lab",
-            target_id=lab.path,
-            target_name=lab.name,
-            lab_path=lab.path,
-            lab_name=lab.name,
-            detail={
-                "changes": audit_service.text_lengths(changes, ("description", "body"))
-            },
+        await notify_after_mutation(
+            audit_service.record(
+                "lab.update",
+                actor=current_user.username,
+                target_type="lab",
+                target_id=lab.path,
+                target_name=lab.name,
+                lab_path=lab.path,
+                lab_name=lab.name,
+                detail={"changes": audit_service.text_lengths(changes, ("description", "body"))},
+            ),
+            cancelled,
         )
+    elif cancelled:
+        raise asyncio.CancelledError
     return {
         "code": 200,
         "status": "success",
@@ -3386,93 +3390,50 @@ async def delete_lab(
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
     except PermissionError as e:
-        return {
-            "code": 403,
-            "status": "fail",
-            "message": str(e),
-        }
-    lab = await lab_service.get_lab_by_filename(scoped_path)
+        return {"code": 403, "status": "fail", "message": str(e)}
 
-    if lab:
-        if lab.owner != current_user.username and current_user.role != "admin":
-            return {
-                "code": 403,
-                "status": "fail",
-                "message": "Access denied.",
-            }
-        try:
-            cancelled = await lab_service.delete_lab(lab)
-        except SharedCloudReferenceError as exc:
-            return {
-                "code": 409,
-                "status": "fail",
-                "message": exc.message,
-                "data": {"references": exc.references},
-            }
-        await notify_after_mutation(
-            audit_service.record(
-                "lab.delete",
-                actor=current_user.username,
-                target_type="lab",
-                target_id=lab.path,
-                target_name=lab.name,
-                lab_path=lab.path,
-                lab_name=lab.name,
-            ),
-            cancelled,
-        )
-        return {
-            "code": 200,
-            "status": "success",
-            "message": "Lab has been deleted (60023).",
-        }
-
-    # Filesystem orphan: lab.json exists in LABS_DIR but no DB row (e.g. left
-    # behind by a partial delete or imported via a non-API path). Admins may
-    # clean these up; non-admins fall back to the existing 404 response.
     try:
-        filepath = _lab_file_path(scoped_path)
-    except ValueError:
-        filepath = None
+        async with lab_membership_lock(scoped_path, ipam=True):
+            lab = await lab_service.get_lab_by_filename(scoped_path)
+            if lab is not None:
+                if lab.owner != current_user.username and current_user.role != "admin":
+                    return {"code": 403, "status": "fail", "message": "Access denied."}
+                path, name, audit_details = lab.path, lab.name, {}
+                cancelled = await lab_service.delete_lab(lab, locked=True)
+            else:
+                # An admin may remove a file imported outside the DB-backed API.
+                filepath = _lab_file_path(scoped_path)
+                if not filepath.is_file():
+                    return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+                if current_user.role != "admin":
+                    return {"code": 403, "status": "fail", "message": "Access denied."}
+                await asyncio.to_thread(assert_no_external_members_for_scope, scoped_path)
+                await unlink_lab_file(scoped_path, locked=True)
+                path, name = f"/{scoped_path}", Path(scoped_path).stem
+                audit_details = {"detail": {"orphan": True}}
+                cancelled = False
+    except SharedCloudReferenceError as e:
+        return {
+            "code": 409,
+            "status": "fail",
+            "message": e.message,
+            "data": {"references": e.references},
+        }
 
-    if filepath is not None and filepath.is_file():
-        if current_user.role != "admin":
-            return {
-                "code": 403,
-                "status": "fail",
-                "message": "Access denied.",
-            }
-        try:
-            assert_no_external_members_for_scope(scoped_path)
-        except SharedCloudReferenceError as exc:
-            return {
-                "code": 409,
-                "status": "fail",
-                "message": exc.message,
-                "data": {"references": exc.references},
-            }
-        await unlink_lab_file(scoped_path)
-        # A lab.json with no database row — name it by its file stem.
-        await audit_service.record(
+    await notify_after_mutation(
+        audit_service.record(
             "lab.delete",
             actor=current_user.username,
             target_type="lab",
-            target_id=f"/{scoped_path}",
-            target_name=Path(scoped_path).stem,
-            lab_path=f"/{scoped_path}",
-            detail={"orphan": True},
-        )
-        return {
-            "code": 200,
-            "status": "success",
-            "message": "Lab has been deleted (60023).",
-        }
-
-    return {
-        "code": 404,
-        "status": "fail",
-        "message": "Lab does not exist (60038).",
-    }
+            target_id=path,
+            target_name=name,
+            lab_path=path,
+            lab_name=name,
+            **audit_details,
+        ),
+        cancelled,
+    )
+    return {"code": 200, "status": "success", "message": "Lab has been deleted (60023)."}
 
 
 @router.post("/_/{lab_path:path}/move", dependencies=[LAB_ACCESS])
@@ -3493,10 +3454,9 @@ async def move_lab(
             "message": str(e),
         }
 
-    settings = get_settings()
     try:
         source = _lab_file_path(scoped_path)
-        new_relative = "/".join(part for part in [scoped_target, source.name] if part)
+        new_relative = "/".join(part for part in [scoped_target, Path(scoped_path).name] if part)
         target = _lab_file_path(new_relative)
     except ValueError as e:
         return {
@@ -3518,11 +3478,28 @@ async def move_lab(
             "message": f"Lab already exists at target: /{new_relative} (60039).",
         }
 
-    # Waits for the lock off the event loop: the body awaits the database.
-    async with lab_lock_async(_normalize_relative_lab_path(scoped_path), settings.LABS_DIR):
+    # Preserve deliberate creation of a missing directory, but do not
+    # recreate a destination ancestor that moved while this request waited.
+    target_ancestor = next(directory for directory in target.parents if directory.is_dir())
+    try:
+        original_directory = target_ancestor.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return {"code": 409, "status": "fail", "message": "The destination folder changed (60039)."}
+
+    # Re-resolve both paths under their membership locks after any folder move.
+    cancelled = False
+    async with lab_membership_lock(scoped_path, new_relative):
+        source = _lab_file_path(scoped_path)
+        target = _lab_file_path(new_relative)
         lab = await lab_service.get_lab_by_filename(scoped_path)
         if not source.is_file():
             return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+        try:
+            same_directory = os.path.samestat(original_directory, target_ancestor.stat())
+        except (FileNotFoundError, NotADirectoryError):
+            same_directory = False
+        if not same_directory:
+            return {"code": 409, "status": "fail", "message": "The destination folder changed (60039)."}
         try:
             with source.open(encoding="utf-8") as lab_json:
                 data = json.load(lab_json)
@@ -3555,7 +3532,7 @@ async def move_lab(
             if lab is not None:
                 lab.filename = new_relative
                 lab.path = f"/{new_relative}"
-                await db.commit()
+                _, cancelled = await wait_for_mutation(asyncio.create_task(db.commit()))
         except (Exception, asyncio.CancelledError) as exc:
             # A previously idle console can start a recording while the DB
             # commits. Move any directory it created back with the lab.
@@ -3575,16 +3552,18 @@ async def move_lab(
                 "message": "Lab move failed (60039).",
             }
 
-    await audit_service.record(
-        "lab.move",
-        actor=current_user.username,
-        target_type="lab",
-        target_id=f"/{new_relative}",
-        # The lab row's name, falling back to the file stem for labs that
-        # have no database row (filesystem imports).
-        target_name=getattr(lab, "name", None) or source.stem,
-        lab_path=f"/{new_relative}",
-        detail={"from": f"/{scoped_path}", "to": f"/{new_relative}"},
+    await notify_after_mutation(
+        audit_service.record(
+            "lab.move",
+            actor=current_user.username,
+            target_type="lab",
+            target_id=f"/{new_relative}",
+            # The lab row's name, falling back to the file stem for imports.
+            target_name=getattr(lab, "name", None) or source.stem,
+            lab_path=f"/{new_relative}",
+            detail={"from": f"/{scoped_path}", "to": f"/{new_relative}"},
+        ),
+        cancelled,
     )
     return {
         "code": 200,

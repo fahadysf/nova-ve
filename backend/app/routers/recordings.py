@@ -36,7 +36,7 @@ from app.routers.labs import LAB_ACCESS, _read_lab_data, _recording_lab_file, _s
 from app.schemas.user import UserRead
 from app.services import audit_service
 from app.services.console_recording import _slug, get_console_recorder, lab_recordings_dir, recording_lab_id
-from app.services.lab_service import LabService
+from app.services.lab_service import LabService, lab_membership_lock
 
 _logger = logging.getLogger(__name__)
 
@@ -436,26 +436,28 @@ async def node_recording_control(
 ):
     """On-demand record button (#291): start/stop a recording cycle."""
     try:
-        session = _session_for(current_user, lab_path, node_id, body.console)
+        scoped = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        async with lab_membership_lock(scoped):
+            session = _session_for(current_user, lab_path, node_id, body.console)
+            if session is None:
+                return {
+                    "code": 404,
+                    "status": "fail",
+                    "message": "No active console session for this node. Open the console first.",
+                }
+            status = session.status()
+            was_recording = bool(status.get("recording"))
+            try:
+                data = session.start_recording() if body.action == "start" else session.stop_recording()
+            except ValueError as exc:
+                return {"code": 400, "status": "fail", "message": str(exc)}
+            except OSError:
+                _logger.exception("Could not write console recording.")
+                return {"code": 500, "status": "fail", "message": "Could not save console recording."}
     except PermissionError as exc:
         return {"code": 403, "status": "fail", "message": str(exc)}
     except (FileNotFoundError, ValueError):
         return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
-    if session is None:
-        return {
-            "code": 404,
-            "status": "fail",
-        "message": "No active console session for this node. Open the console first.",
-    }
-    status = session.status()
-    was_recording = bool(status.get("recording"))
-    try:
-        data = session.start_recording() if body.action == "start" else session.stop_recording()
-    except ValueError as exc:
-        return {"code": 400, "status": "fail", "message": str(exc)}
-    except OSError:
-        _logger.exception("Could not write console recording.")
-        return {"code": 500, "status": "fail", "message": "Could not save console recording."}
     # #300: only a real change of state is an event. Starting a recording
     # that is already running — or stopping one that is not — is a no-op.
     if bool(data.get("recording")) != was_recording:

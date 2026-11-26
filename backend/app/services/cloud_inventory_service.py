@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.services.lab_paths import iter_lab_json_files
 from app.config import get_settings
 from app.services.lab_lock import LabLockTimeout, lab_lock_async
 
@@ -106,7 +107,7 @@ def nat_cloud_ipam_lock(timeout_s: float = 5.0) -> Iterator[None]:
 
 
 def nat_cloud_ipam_lock_async(settings: Any):
-    return lab_lock_async(_NAT_CLOUD_IPAM_LOCK, _base_data_dir(settings))
+    return lab_lock_async(_NAT_CLOUD_IPAM_LOCK, _base_data_dir(settings), namespace=False)
 
 
 def nat_cloud_id(lab_id: str, network_id: int) -> str:
@@ -119,7 +120,7 @@ def _lab_json_files(labs_dir: Path | None = None) -> list[Path]:
         return []
     return sorted(
         path
-        for path in root.rglob("*.json")
+        for path in iter_lab_json_files(root)
         if path.is_file() and not path.name.endswith(".lock")
     )
 

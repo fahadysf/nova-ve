@@ -27,6 +27,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from app.services.lab_paths import iter_lab_json_files
 from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
@@ -186,7 +187,7 @@ def list_managed_labs(
 
     labs: list[dict[str, Any]] = []
     if labs_dir.exists():
-        for lab_file in sorted(labs_dir.rglob("*.json")):
+        for lab_file in sorted(iter_lab_json_files(labs_dir)):
             relative = lab_file.relative_to(labs_dir).as_posix()
             if root and not relative.startswith(f"{root}/"):
                 continue
@@ -227,7 +228,7 @@ def _stop_or_wipe(lab_path: str, wipe: bool) -> dict:
     wiped: list[int] = []
     failed: list[dict[str, Any]] = []
     try:
-        with lab_lock(lab_file.relative_to(labs_dir).as_posix(), labs_dir):
+        with lab_lock(lab_file.relative_to(labs_dir).as_posix(), labs_dir, create_parent=False):
             data = LabService.read_lab_json_static(
                 lab_file.relative_to(labs_dir).as_posix()
             )
@@ -354,7 +355,7 @@ async def list_managed_nodes(
 
     rows: list[dict[str, Any]] = []
     if labs_dir.exists():
-        for lab_file in sorted(labs_dir.rglob("*.json")):
+        for lab_file in sorted(iter_lab_json_files(labs_dir)):
             try:
                 data = json.loads(lab_file.read_text())
             except (OSError, json.JSONDecodeError):

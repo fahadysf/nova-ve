@@ -1230,7 +1230,7 @@ class NetworkService:
         foreign_dhcp_owners: List[Tuple[int, LabNetwork, str]] = []
         dhcp_bridges: List[Dict[str, Any]] = []
 
-        with lab_lock(normalized, labs_dir):
+        with lab_lock(normalized, labs_dir, create_parent=False):
             data = LabService.read_lab_json_static(normalized)
             lab_id = str(data.get("id") or normalized)
             networks = data.get("networks") or {}
@@ -1459,7 +1459,7 @@ class NetworkService:
         for network_id, shared_cloud_id, owner, owner_bridge in foreign_nat_owners:
             try:
                 _ensure_shared_bridge(owner, owner_bridge)
-                with lab_lock(owner.lab_path, labs_dir):
+                with lab_lock(owner.lab_path, labs_dir, create_parent=False):
                     owner_data = LabService.read_lab_json_static(owner.lab_path)
                     owner_network = (owner_data.get("networks") or {}).get(str(owner.network_id))
                     if isinstance(owner_network, dict) and self._ensure_nat_cloud_runtime(
@@ -1490,7 +1490,7 @@ class NetworkService:
 
         for network_id, owner, owner_bridge in foreign_dhcp_owners:
             try:
-                with lab_lock(owner.lab_path, labs_dir):
+                with lab_lock(owner.lab_path, labs_dir, create_parent=False):
                     owner_data = LabService.read_lab_json_static(owner.lab_path)
                     owner_network = (owner_data.get("networks") or {}).get(str(owner.network_id))
                     if bridge_dhcp_enabled(owner_network) and self._ensure_bridge_dhcp_runtime(
@@ -1615,7 +1615,7 @@ class NetworkService:
             else nullcontext()
         )
         with create_lock:
-            with lab_lock(normalized, labs_dir):
+            with lab_lock(normalized, labs_dir, create_parent=False):
                 data = LabService.read_lab_json_static(normalized)
                 lab_id = str(data.get("id") or normalized)
                 networks = data.setdefault("networks", {})
@@ -1875,7 +1875,7 @@ class NetworkService:
         labs_dir = get_settings().LABS_DIR
 
         with nat_cloud_ipam_lock():
-            with lab_lock(normalized, labs_dir):
+            with lab_lock(normalized, labs_dir, create_parent=False):
                 data = LabService.read_lab_json_static(normalized)
                 networks = data.get("networks", {}) or {}
                 network = networks.get(str(network_id))
@@ -2015,9 +2015,9 @@ class NetworkService:
 
         with nat_cloud_ipam_lock():
             target_lab_path = _normalize_relative_lab_path(lab_path)
-            with lab_lock(target_lab_path, labs_dir):
+            with lab_lock(target_lab_path, labs_dir, create_parent=False):
                 owner_lab_path, owner_network_id = self._ipam_target(target_lab_path, network_id)
-            with lab_lock(owner_lab_path, labs_dir):
+            with lab_lock(owner_lab_path, labs_dir, create_parent=False):
                 data = LabService.read_lab_json_static(owner_lab_path)
                 networks = data.get("networks", {}) or {}
                 network = networks.get(str(owner_network_id))
@@ -2135,7 +2135,7 @@ class NetworkService:
                 target_lock_cm = (
                     nullcontext()
                     if target_lab_path == normalized
-                    else lab_lock(target_lab_path, labs_dir)
+                    else lab_lock(target_lab_path, labs_dir, create_parent=False)
                 )
             else:
                 target_lab_path = normalized
@@ -2145,9 +2145,9 @@ class NetworkService:
                 return self._release_ip_from_owner(target_lab_path, target_network_id, ip)
 
         with nat_cloud_ipam_lock():
-            with lab_lock(normalized, labs_dir):
+            with lab_lock(normalized, labs_dir, create_parent=False):
                 target_lab_path, target_network_id = self._ipam_target(normalized, network_id)
-            with lab_lock(target_lab_path, labs_dir):
+            with lab_lock(target_lab_path, labs_dir, create_parent=False):
                 return self._release_ip_from_owner(target_lab_path, target_network_id, ip)
 
     def _release_ip_from_owner(self, lab_path: str, network_id: int, ip: str) -> bool:
@@ -2458,7 +2458,7 @@ class NetworkService:
         labs_dir = get_settings().LABS_DIR
 
         with nat_cloud_ipam_lock():
-            with lab_lock(normalized, labs_dir):
+            with lab_lock(normalized, labs_dir, create_parent=False):
                 data = LabService.read_lab_json_static(normalized)
                 network = (data.get("networks") or {}).get(str(network_id))
                 if not isinstance(network, dict) or network.get("implicit") is True:
