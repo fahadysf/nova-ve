@@ -103,14 +103,21 @@ forward rule lets them continue unchanged. There are no NAT rules.
 the table once no chain is left. Both verbs are idempotent and serialized by a
 file lock (`/run/nova-ve-bridge-guard.lock`, opened without following
 links). The helper writes `dnsmasq.conf` through a fresh temporary file and
-a rename, refusing symlinked directories under the state root, because that
-directory belongs to the unprivileged service account.
+a rename, and refuses symlinked directories under its own root: a second
+line of defence behind the root-owned location described below.
 
 ## dnsmasq
 
-The server reuses the NAT-Cloud state directory
-`/var/lib/nova-ve/nat-cloud/<bridge>/` (configuration, pid file, leases), so
-the info panel reads leases and the live process the same way. In
+The server shares the NAT-Cloud state directory
+`/run/nova-ve/dnsmasq/<bridge>/` (configuration, pid file, leases), so the
+info panel reads leases and the live process the same way for both. The tree
+belongs to root, because dnsmasq runs as root and must not read its
+configuration, or write its leases, where the service account can replace
+files. `/run` is tmpfs, so the helper recreates the tree on every start.
+Upgrading from a release that kept this state under
+`/var/lib/nova-ve/nat-cloud/<bridge>/` needs the new helper installed. The
+first start for a bridge stops the server the old helper started and carries
+its leases over; the old files stay behind unread. In
 `--no-router` mode the configuration has `port=0` (no DNS service),
 `listen-address=<server>`, and empty `dhcp-option=3` and `dhcp-option=6`,
 which tell dnsmasq to send no router and no DNS server. It is not

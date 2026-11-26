@@ -21,6 +21,7 @@ Standard locations for application state, configuration, and installed component
 | `/var/lib/nova-ve/templates/<vendor>/<key>.json` | `nova-ve` service user | 0644 | One template. |
 | `/var/lib/nova-ve/www/` | `nova-ve` service user | 0755 | SvelteKit static build, served by Caddy. |
 | `/var/lib/nova-ve/import-manifest.json` | root | 0644 | Last EVE-NG importer run summary. |
+| `/run/nova-ve/dnsmasq/<bridge>/` | root | 0755 | DHCP server state for a NAT-Cloud or bridge network: `dnsmasq.conf`, `dnsmasq.pid`, `leases`. Written by the privileged helper and read by the backend; recreated on every start because `/run` is tmpfs. |
 
 ## Console terminal fonts
 
