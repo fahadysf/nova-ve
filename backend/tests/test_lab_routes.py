@@ -53,6 +53,68 @@ def patched_route_settings(monkeypatch, route_settings):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("request_path", ["/api/labs/", "/api/labs/.recordings"])
+async def test_get_lab_rejects_invalid_or_absent_path(request_path, patched_route_settings):
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        username="admin", role="admin", html5=True, folder="/"
+    )
+    app.dependency_overrides[get_db] = _stub_db
+    try:
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get(request_path)
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 400
+    assert response.json() == {
+        "code": 400,
+        "status": "fail",
+        "message": "Invalid or absent lab path.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_lab_valid_path_remains_unchanged(monkeypatch, patched_route_settings):
+    async def _no_db_row(self, filename):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.lab_service.LabService.get_lab_by_filename", _no_db_row
+    )
+    (patched_route_settings.LABS_DIR / "valid.json").write_text(
+        json.dumps(
+            {
+                "schema": 2,
+                "id": "valid",
+                "meta": {"name": "Valid Lab"},
+                "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+                "nodes": {},
+                "networks": {},
+                "links": [],
+                "defaults": {"link_style": "orthogonal"},
+            }
+        )
+    )
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+        username="admin", role="admin", html5=True, folder="/"
+    )
+    app.dependency_overrides[get_db] = _stub_db
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+            response = await client.get("/api/labs/valid.json")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["code"] == 200
+    assert payload["data"]["filename"] == "valid.json"
+    assert payload["data"]["name"] == "Valid Lab"
+
+
+@pytest.mark.asyncio
 async def test_delete_node_route_is_not_shadowed_by_delete_lab(monkeypatch, patched_route_settings):
     monkeypatch.setattr(
         "app.services.template_service.TemplateService._docker_image_catalog",
