@@ -353,6 +353,8 @@ def _default_docker_inspect(docker_binary: str, docker_host: str, container_name
 class NodeRuntimeService:
     _registry: dict[str, dict[str, Any]] = {}
     _observed_inactive: set[str] = set()
+    _reserved_console_ports: set[int] = set()
+    _console_port_scope = threading.local()
     _loaded = False
     _lock = threading.Lock()
     _runtime_loop: asyncio.AbstractEventLoop | None = None
@@ -422,8 +424,23 @@ class NodeRuntimeService:
 
     def start_node(self, lab_data: dict[str, Any], node_id: int) -> dict[str, Any]:
         lab_id = self._lab_id(lab_data)
-        with self._node_lifecycle_lock(lab_id, node_id):
+        with self._node_lifecycle_lock(lab_id, node_id), self._reserve_console_ports():
             return self._start_node(lab_data, lab_id, node_id)
+
+    @contextmanager
+    def _reserve_console_ports(self):
+        """Keep first-free choices reserved until this synchronous launch exits."""
+        if getattr(self._console_port_scope, "ports", None) is not None:
+            yield
+            return
+        ports: set[int] = set()
+        self._console_port_scope.ports = ports
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._reserved_console_ports.difference_update(ports)
+            del self._console_port_scope.ports
 
     def _start_node(self, lab_data: dict[str, Any], lab_id: str, node_id: int) -> dict[str, Any]:
         node = self._node_data(lab_data, node_id)
@@ -5485,6 +5502,11 @@ class NodeRuntimeService:
         if state["network_mode"] != "none":
             raise NodeRuntimeError(self.legacy_docker_message(node, state))
 
+        console_mode = node.get("console", "rdp")
+        console_port = self._allocate_console_port(console_mode)
+        second_console_mode = node.get("second_console") or None
+        second_console_port = self._allocate_console_port(second_console_mode) if second_console_mode else None
+
         pid = state["pid"]
 
         try:
@@ -5500,8 +5522,6 @@ class NodeRuntimeService:
         except psutil.Error:
             pid_create_time = None
 
-        console_mode = node.get("console", "rdp")
-        console_port = self._allocate_console_port(console_mode)
         console_proxy_pid: int | None = None
         try:
             console_proxy_pid = host_net.console_proxy_start(
@@ -5520,11 +5540,8 @@ class NodeRuntimeService:
         # Secondary console proxy (#268): re-spawned on adoption since the
         # netns-spliced forwarder from the original start is gone after a
         # backend restart.
-        second_console_mode = node.get("second_console") or None
-        second_console_port: int | None = None
         second_console_proxy_pid: int | None = None
-        if second_console_mode:
-            second_console_port = self._allocate_console_port(second_console_mode)
+        if second_console_port is not None:
             try:
                 second_console_proxy_pid = host_net.console_proxy_start(
                     node_pid=pid,
@@ -6567,8 +6584,22 @@ class NodeRuntimeService:
         freed when the node stops.
         """
         lo, hi = _console_port_range(console_mode)
-        for port in range(lo, hi + 1):
-            if self._port_available(port, "0.0.0.0"):
+        scope = getattr(self._console_port_scope, "ports", None)
+        with self._lock:
+            # A listener may still be opening after runtime publication.
+            claimed = self._reserved_console_ports | {
+                port
+                for key, runtime in self._registry.items()
+                if key not in self._observed_inactive
+                for port in (runtime.get("console_port"), runtime.get("second_console_port"))
+                if type(port) is int
+            }
+            for port in range(lo, hi + 1):
+                if port in claimed or not self._port_available(port, "0.0.0.0"):
+                    continue
+                if scope is not None:
+                    self._reserved_console_ports.add(port)
+                    scope.add(port)
                 return port
         raise NodeRuntimeError(
             f"No {console_mode} console ports available in {lo}-{hi}."
