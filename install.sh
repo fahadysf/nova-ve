@@ -151,21 +151,71 @@ REPO_DIR="${NOVA_VE_REPO_DIR:-${DEFAULT_REPO_DIR}}"
 log "Service account: ${APP_OWNER}:${APP_GROUP} (home=${APP_HOME})"
 log "Repo destination: ${REPO_DIR} (owner=${APP_OWNER}:${APP_GROUP})"
 
-if [[ -d "${REPO_DIR}/.git" ]]; then
-  log "Repo already at ${REPO_DIR}; fetching ${REPO_REF}..."
-  chown -R "${APP_OWNER}:${APP_GROUP}" "${REPO_DIR}"
-  sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" fetch --tags --prune origin
-  sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" checkout "${REPO_REF}"
-  if ! sudo -u "${APP_OWNER}" git -C "${REPO_DIR}" pull --ff-only origin "${REPO_REF}"; then
-    log "WARN: fast-forward pull failed (local divergence?); continuing with current HEAD"
-  fi
-else
-  log "Cloning ${REPO_URL} -> ${REPO_DIR} (ref ${REPO_REF})..."
-  install -d -o "${APP_OWNER}" -g "${APP_GROUP}" "$(dirname "${REPO_DIR}")"
-  sudo -u "${APP_OWNER}" git clone --branch "${REPO_REF}" "${REPO_URL}" "${REPO_DIR}"
-fi
+prepare_release_checkout() {
+  local trusted_source="$1" release_commit fetched_commit dirty entries existing=0
+  local deploy_dir="${trusted_source}/deploy"
+  local scripts_dir="${deploy_dir}/scripts"
+  local provisioner="${scripts_dir}/provision-ubuntu-2604.sh"
+  local -a app_git=(sudo -u "${APP_OWNER}" -H git)
 
-PROVISIONER="${REPO_DIR}/deploy/scripts/provision-ubuntu-2604.sh"
+  # Use an independent Git clone for the inputs passed to root provisioning.
+  # Never load the application's Git configuration under root.
+  git -C "$(dirname "${trusted_source}")" init --quiet -- "${trusted_source}" || return
+  git -C "${trusted_source}" fetch --no-tags -- "${REPO_URL}" "${REPO_REF}" || return
+  release_commit="$(git -C "${trusted_source}" rev-parse --verify 'FETCH_HEAD^{commit}')" || return
+  git -C "${trusted_source}" checkout --quiet --detach "${release_commit}" || return
+  if [[ ! -d "${deploy_dir}" || -L "${deploy_dir}" || ! -d "${scripts_dir}" || -L "${scripts_dir}" ||
+        ! -f "${provisioner}" || -L "${provisioner}" || ! -x "${provisioner}" ]] ||
+    ! grep -Fxq '# Provisioning source layout: split checkout v1' "${provisioner}"; then
+    echo "install.sh: the selected revision does not support separate provisioning and application checkouts." >&2
+    return 1
+  fi
+
+  if [[ -d "${REPO_DIR}/.git" ]]; then
+    log "Checking the application checkout at ${REPO_DIR}..."
+    chown -hR -- "${APP_OWNER}:${APP_GROUP}" "${REPO_DIR}" || return
+    dirty="$("${app_git[@]}" -C "${REPO_DIR}" status --porcelain --untracked-files=no)" || return
+    if [[ -n "${dirty}" ]]; then
+      echo "install.sh: commit or set aside local changes before upgrading the application checkout." >&2
+      return 1
+    fi
+    if "${app_git[@]}" -C "${REPO_DIR}" rev-parse --verify --quiet 'HEAD^{commit}' >/dev/null; then
+      existing=1
+    fi
+  else
+    if [[ -e "${REPO_DIR}" || -L "${REPO_DIR}" ]]; then
+      entries="$(sudo -u "${APP_OWNER}" -H find "${REPO_DIR}/." -mindepth 1 -maxdepth 1 -print -quit)" || return
+      if [[ -n "${entries}" ]]; then
+        echo "install.sh: the application destination is not an empty directory or Git checkout." >&2
+        return 1
+      fi
+    fi
+    install -d -o "${APP_OWNER}" -g "${APP_GROUP}" "$(dirname "${REPO_DIR}")" || return
+    "${app_git[@]}" init --quiet -- "${REPO_DIR}" || return
+    "${app_git[@]}" -C "${REPO_DIR}" remote add origin "${REPO_URL}" || return
+  fi
+
+  "${app_git[@]}" -C "${REPO_DIR}" fetch --no-tags -- "${REPO_URL}" "${REPO_REF}" || return
+  fetched_commit="$("${app_git[@]}" -C "${REPO_DIR}" rev-parse --verify 'FETCH_HEAD^{commit}')" || return
+  if [[ "${fetched_commit}" != "${release_commit}" ]]; then
+    echo "install.sh: the upstream ref changed during preparation; retry the install." >&2
+    return 1
+  fi
+  if (( existing )) && ! "${app_git[@]}" -C "${REPO_DIR}" merge-base --is-ancestor HEAD "${release_commit}"; then
+    echo "install.sh: the application checkout cannot fast-forward to the selected release." >&2
+    return 1
+  fi
+  "${app_git[@]}" -C "${REPO_DIR}" checkout --detach --no-overwrite-ignore "${release_commit}"
+}
+
+TRUSTED_RELEASE_DIR="$(mktemp -d /tmp/nova-ve-release.XXXXXXXX)"
+trap 'rm -rf -- "${TRUSTED_RELEASE_DIR}"' EXIT
+TRUSTED_SOURCE="${TRUSTED_RELEASE_DIR}/source"
+prepare_release_checkout "${TRUSTED_SOURCE}"
+RELEASE_COMMIT="$(git -C "${TRUSTED_SOURCE}" rev-parse --verify 'HEAD^{commit}')"
+REPO_DIR="$(cd "${REPO_DIR}" && pwd -P)"
+
+PROVISIONER="${TRUSTED_SOURCE}/deploy/scripts/provision-ubuntu-2604.sh"
 if [[ ! -x "${PROVISIONER}" ]]; then
   echo "install.sh: provisioner missing or not executable: ${PROVISIONER}" >&2
   exit 1
@@ -177,13 +227,19 @@ log "Running ${PROVISIONER} (this can take 10-20 min on a fresh box)..."
 # write the install summary (the only on-disk copy of the generated admin
 # password) and print the credentials banner before the host goes down.
 REBOOT_SENTINEL="/run/nova-ve-bridge-cloud-reboot-pending"
-NOVA_VE_SERVICE_USER="${APP_OWNER}" \
-NOVA_VE_OWNER="${APP_OWNER}" \
-NOVA_VE_REPO_DIR="${REPO_DIR}" \
-NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT=1 \
-NOVA_VE_BRIDGE_CLOUD_REBOOT_SENTINEL="${REBOOT_SENTINEL}" \
-SUDO_USER="${APP_OWNER}" \
-bash "${PROVISIONER}"
+run_staged_provisioner() (
+  cd -- "${TRUSTED_SOURCE}"
+  unset BASH_ENV ENV PYTHONPATH PYTHONHOME
+  NOVA_VE_SERVICE_USER="${APP_OWNER}" \
+  NOVA_VE_OWNER="${APP_OWNER}" \
+  NOVA_VE_REPO_DIR="${REPO_DIR}" \
+  NOVA_VE_RELEASE_COMMIT="${RELEASE_COMMIT}" \
+  NOVA_VE_BRIDGE_CLOUD_DEFER_REBOOT=1 \
+  NOVA_VE_BRIDGE_CLOUD_REBOOT_SENTINEL="${REBOOT_SENTINEL}" \
+  SUDO_USER="${APP_OWNER}" \
+  bash "${PROVISIONER}"
+)
+run_staged_provisioner
 
 # Side-by-side QEMU version pack (#278): per-image emulator generations
 # installed under /opt/nova-ve/qemu/<version>/ by the companion
