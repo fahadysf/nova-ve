@@ -182,7 +182,11 @@ async def test_legacy_docker_link_rejected_before_host_changes(
     assert "legacy networking" in resp.json()["message"]
     assert "Verify its ownership" in resp.json()["message"]
     assert "tap_name" not in resp.text
-    assert json.loads(path.read_text()) == before
+    saved = json.loads(path.read_text())
+    # Failed allocations remain consumed, while the topology is rolled back.
+    assert saved["meta"].pop("last_network_id") == 1
+    assert saved["meta"].pop("last_link_id") == 2
+    assert saved == before
     assert calls == []
     assert ws_recorder == []
 
