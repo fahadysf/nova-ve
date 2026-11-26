@@ -227,7 +227,7 @@ def _stop_or_wipe(lab_path: str, wipe: bool) -> dict:
     wiped: list[int] = []
     failed: list[dict[str, Any]] = []
     try:
-        with lab_lock(lab_file.relative_to(labs_dir).as_posix(), labs_dir):
+        with lab_lock(lab_file.relative_to(labs_dir).as_posix(), labs_dir, create_parent=False):
             data = LabService.read_lab_json_static(
                 lab_file.relative_to(labs_dir).as_posix()
             )

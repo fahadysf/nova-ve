@@ -95,6 +95,12 @@ class TestSharedListing:
         assert (empty_labs_dir / "Shared").is_dir()
         assert result == {"folders": [], "labs": []}
 
+    def test_entering_missing_shared_child_does_not_recreate_it(self, empty_labs_dir):
+        (empty_labs_dir / "Shared").mkdir()
+        result = FolderService.list_folder("Shared/old-folder")
+        assert result == {"folders": [], "labs": []}
+        assert not (empty_labs_dir / "Shared/old-folder").exists()
+
     def test_at_user_root_default_false_keeps_nested_listings_unchanged(self, empty_labs_dir):
         (empty_labs_dir / "lanes" / "alpha").mkdir(parents=True)
         result = FolderService.list_folder("lanes/alpha", recursive=True)

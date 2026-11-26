@@ -111,3 +111,12 @@ async def folder_namespace_lock_async(labs_dir: Path, timeout_s: float = 5.0, *,
     mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
     async with _file_lock_async(_namespace_path(labs_dir), mode, "folder namespace", timeout_s, deadline):
         yield
+
+
+@contextmanager
+def folder_namespace_lock(labs_dir: Path, timeout_s: float = 5.0, *, shared: bool = False):
+    """Use the same namespace lock from a synchronous worker."""
+    deadline = time.monotonic() + timeout_s
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+    with _file_lock(_namespace_path(labs_dir), mode, "folder namespace", timeout_s, deadline):
+        yield

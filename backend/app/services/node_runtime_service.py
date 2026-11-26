@@ -5225,7 +5225,7 @@ class NodeRuntimeService:
         if target is None:
             return
 
-        with lab_lock(target.name, labs_dir):
+        with lab_lock(target.name, labs_dir, create_parent=False):
             data = LabService.read_lab_json_static(target.name)
             node = data.get("nodes", {}).get(str(int(node_id)))
             if not isinstance(node, dict):

@@ -10,7 +10,7 @@ from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.folder import FolderCreateRequest, FolderRenameRequest
 from app.schemas.user import UserRead
-from app.services.async_utils import notify_after_mutation, wait_for_mutation
+from app.services.async_utils import notify_after_mutation, run_mutation, wait_for_mutation
 from app.services.cloud_inventory_service import SharedCloudReferenceError
 from app.services.shared_network_service import assert_no_external_members_for_scope
 from app.services.folder_service import FolderService, _normalize_folder_path, folder_mutation_lock
@@ -167,7 +167,7 @@ async def list_root(
 ):
     try:
         scoped_root = _scoped_folder_path(current_user, "", treat_as_absolute=False)
-        result = FolderService.list_folder(scoped_root, recursive=True, at_user_root=True)
+        result = await asyncio.to_thread(FolderService.list_folder, scoped_root, recursive=True, at_user_root=True)
         lab_ids: dict[str, str] = {}
         result = await _merge_db_labs(result, db, scoped_root, recursive=True, lab_ids=lab_ids)
         await _annotate_running(result, lab_ids)
@@ -200,7 +200,7 @@ async def list_folder(
 ):
     try:
         scoped_path = _scoped_folder_path(current_user, folder_path, treat_as_absolute=True)
-        result = FolderService.list_folder(scoped_path)
+        result = await asyncio.to_thread(FolderService.list_folder, scoped_path)
         lab_ids: dict[str, str] = {}
         result = await _merge_db_labs(result, db, scoped_path, lab_ids=lab_ids)
         await _annotate_running(result, lab_ids)
@@ -232,7 +232,7 @@ async def create_folder(
 ):
     try:
         scoped_path = _scoped_folder_path(current_user, request.path, treat_as_absolute=False)
-        FolderService.create_folder_path(scoped_path, request.name)
+        _, cancelled = await run_mutation(FolderService.create_folder_path, scoped_path, request.name)
     except FileExistsError as e:
         return {
             "code": 400,
@@ -256,12 +256,15 @@ async def create_folder(
         part for part in [scoped_path.strip("/"), (request.name or "").strip("/")] if part
     )
     created_path = f"/{target_path}" if target_path else "/"
-    await audit_service.record(
-        "folder.create",
-        actor=current_user.username,
-        target_type="folder",
-        target_id=created_path,
-        target_name=request.name or created_path,
+    await notify_after_mutation(
+        audit_service.record(
+            "folder.create",
+            actor=current_user.username,
+            target_type="folder",
+            target_id=created_path,
+            target_name=request.name or created_path,
+        ),
+        cancelled,
     )
     return {
         "code": 200,
@@ -298,7 +301,7 @@ async def rename_folder(
             "status": "fail",
             "message": str(e),
         }
-    except FileExistsError as e:
+    except (FileExistsError, NotADirectoryError) as e:
         return {
             "code": 400,
             "status": "fail",

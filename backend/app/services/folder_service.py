@@ -8,7 +8,7 @@ from pathlib import Path
 from app.config import get_settings
 from app.services.cloud_inventory_service import nat_cloud_ipam_lock_async
 from app.services.console_recording import RECORDINGS_FOLDER, get_console_recorder
-from app.services.lab_lock import folder_namespace_lock_async
+from app.services.lab_lock import folder_namespace_lock, folder_namespace_lock_async
 
 # Static virtual folders that always appear at root. Shared moved out of the
 # pure-stub set in #285: it is a real directory, listed by the file scan once
@@ -47,7 +47,7 @@ def _safe_folder_path(folder_path: str) -> Path:
     labs_dir = _labs_dir()
     clean = _normalize_folder_path(folder_path)
     target = (labs_dir / clean).resolve()
-    if not str(target).startswith(str(labs_dir)):
+    if not target.is_relative_to(labs_dir):
         raise ValueError("Invalid folder path: outside labs directory")
     return target
 
@@ -93,8 +93,10 @@ class FolderService:
         # Lazy-create the Shared space on first use (entering it directly),
         # so hosts provisioned before #285 grow it without re-provisioning.
         normalized = _normalize_folder_path(folder_path)
-        if normalized == "Shared" or normalized.startswith("Shared/"):
-            target_dir.mkdir(parents=True, exist_ok=True)
+        if normalized == "Shared":
+            with folder_namespace_lock(labs_dir, shared=True):
+                target_dir = _safe_folder_path(normalized)
+                target_dir.mkdir(parents=True, exist_ok=True)
 
         folders = []
         labs = []
@@ -197,11 +199,12 @@ class FolderService:
     @staticmethod
     def create_folder(folder_path: str) -> Path:
         """Create a new folder."""
-        target = _safe_folder_path(folder_path)
-        if target.exists():
-            raise FileExistsError(f"Folder already exists: {folder_path}")
-        target.mkdir(parents=True, exist_ok=False)
-        return target
+        with folder_namespace_lock(_labs_dir(), shared=True):
+            target = _safe_folder_path(folder_path)
+            if target.exists():
+                raise FileExistsError(f"Folder already exists: {folder_path}")
+            target.mkdir(parents=True, exist_ok=False)
+            return target
 
     @staticmethod
     def create_folder_path(base_path: str, name: str | None) -> Path:
@@ -217,14 +220,18 @@ class FolderService:
     @staticmethod
     def rename_folder(old_path: str, new_path: str) -> Path:
         """Rename a folder."""
-        if not _normalize_folder_path(old_path) or not _normalize_folder_path(new_path):
-            raise ValueError("The labs root cannot be renamed.")
         source = _safe_folder_path(old_path)
         dest = _safe_folder_path(new_path)
+        if _labs_dir() in (source, dest):
+            raise ValueError("The labs root cannot be renamed.")
         if not source.exists():
             raise FileNotFoundError(f"Folder not found: {old_path}")
+        if not source.is_dir():
+            raise NotADirectoryError(f"Not a folder: {old_path}")
         if dest.exists():
             raise FileExistsError(f"Folder already exists: {new_path}")
+        if dest.is_relative_to(source):
+            raise ValueError("A folder cannot be moved into itself.")
         shutil.move(str(source), str(dest))
         get_console_recorder().relocate_folder(source, dest)
         return dest
@@ -232,9 +239,9 @@ class FolderService:
     @staticmethod
     def delete_folder(folder_path: str) -> None:
         """Delete a folder and all nested contents."""
-        if not _normalize_folder_path(folder_path):
-            raise ValueError("The labs root cannot be deleted.")
         target = _safe_folder_path(folder_path)
+        if target == _labs_dir():
+            raise ValueError("The labs root cannot be deleted.")
         if not target.exists():
             raise FileNotFoundError(f"Folder not found: {folder_path}")
         if not target.is_dir():
