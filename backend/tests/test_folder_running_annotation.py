@@ -94,6 +94,34 @@ def test_running_nodes_by_lab_counts_live_records_grouped_by_lab(tmp_path, monke
         NodeRuntimeService.reset_registry()
 
 
+def test_a_record_with_invalid_liveness_data_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """#356 keeps one bad runtime file from taking a tally down; the per-lab
+    aggregation shares that guard."""
+    service = object.__new__(NodeRuntimeService)
+    service.runtime_dir = tmp_path
+
+    def is_alive(runtime):
+        if runtime["node_id"] == 7:
+            raise ValueError("Invalid process data")
+        return True
+
+    monkeypatch.setattr(service, "_is_runtime_alive", is_alive)
+    NodeRuntimeService.reset_registry()
+    with NodeRuntimeService._lock:
+        NodeRuntimeService._registry.update(
+            {
+                "lab-a:1": {"lab_id": "lab-a", "node_id": 1, "kind": "qemu"},
+                "lab-c:7": {"lab_id": "lab-c", "node_id": 7, "kind": "qemu"},
+            }
+        )
+        NodeRuntimeService._loaded = True
+    try:
+        assert service.running_nodes_by_lab() == {"lab-a": 1}
+        assert service.runtime_counts() == {**LIVE, "qemu": 1}
+    finally:
+        NodeRuntimeService.reset_registry()
+
+
 def test_labs_with_a_db_row_are_resolved_without_parsing_a_lab_file(labs, monkeypatch):
     _lab(labs, "tracked.json", "id-tracked")
     _lab(labs, "nested/idle.json", "id-idle")
