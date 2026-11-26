@@ -302,6 +302,9 @@
   $: liveDhcp = liveInfo?.ip?.dhcp ?? null;
   $: liveStatus = liveDhcp ? dhcpStatus(liveDhcp) : null;
   $: ownerLab = liveInfo?.sharing?.owner_lab || 'the lab that owns this network';
+  // The live-state warning describes the saved setting; once the user flips
+  // the DHCP toggle it no longer applies to what will be saved.
+  $: showLiveProblem = editing && !!liveStatus?.problem && liveDhcp?.enabled === currentDhcp;
   $: kindLabel = type === 'nat_cloud' ? 'NAT-Cloud' : type === 'linux_bridge' ? 'bridge' : 'network';
   // The saved setting is right but the server is not in that state.
   // Never combined with a rename, which must not fail because DHCP cannot start.
@@ -777,7 +780,7 @@
                     </span>
                   {/if}
                 </div>
-                {#if editing && liveStatus?.problem}
+                {#if showLiveProblem}
                   <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
                     {liveStatus.problem}
                   </p>
@@ -898,7 +901,7 @@
               {#if errors.dhcp}
                 <p id="bridge-dhcp-error" class="text-xs text-red-300 sm:col-span-2" role="alert">{errors.dhcp}</p>
               {/if}
-              {#if editing && liveStatus?.problem}
+              {#if showLiveProblem}
                 <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
                   {liveStatus.problem}
                 </p>

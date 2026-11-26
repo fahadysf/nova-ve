@@ -232,6 +232,18 @@ describe('NetworkConfigModal NAT-Cloud (#320)', () => {
     );
   });
 
+  it('drops the live-state warning once the DHCP toggle is flipped', async () => {
+    vi.mocked(apiGetData).mockResolvedValueOnce({
+      ip: { dhcp: { enabled: true, running: false, lease_count: 0, leases: [] } }
+    } as never);
+    const { show } = open({ mode: 'edit', network: nat() });
+    await show();
+    await screen.findByText('DHCP is enabled, but its server is not running.');
+    await fireEvent.click(screen.getByLabelText('Enable DHCP'));
+    expect(screen.queryByText('DHCP is enabled, but its server is not running.')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeEnabled();
+  });
+
   it('renames a drifted network without touching its DHCP server', async () => {
     vi.mocked(apiGetData).mockResolvedValueOnce({
       ip: { dhcp: { enabled: true, running: false, lease_count: 0, leases: [] } }
