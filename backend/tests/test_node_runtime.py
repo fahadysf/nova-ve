@@ -2895,13 +2895,10 @@ async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_setting
     }
     lab_path.write_text(json.dumps(lab_data))
 
-    captured: list[dict] = []
+    from app.services.ws_hub import WsHub
 
-    async def _capture_publish(lab_id, event_type, payload, rev=""):
-        captured.append({"lab_id": lab_id, "type": event_type, "payload": payload, "rev": rev})
-        return SimpleNamespace(seq=1, type=event_type, rev=rev, payload=payload)
-
-    monkeypatch.setattr("app.routers.labs.ws_hub.publish", _capture_publish)
+    hub = WsHub()
+    monkeypatch.setattr(labs, "ws_hub", hub)
 
     fixed_result = {
         "state": "confirmed",
@@ -2923,16 +2920,16 @@ async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_setting
     )
 
     assert response == fixed_result
-    assert len(captured) == 1
-    event = captured[0]
-    assert event["lab_id"] == lab_filename
-    assert event["rev"] == lab_data["id"]
-    assert event["type"] == "interface_live_mac"
-    assert event["payload"]["node_id"] == 1
-    assert event["payload"]["interface_index"] == 0
-    assert event["payload"]["state"] == "confirmed"
-    assert event["payload"]["planned_mac"] == "aa:bb:cc:dd:ee:01"
-    assert event["payload"]["live_mac"] == "aa:bb:cc:dd:ee:01"
+    events, _ = hub.replay_since(lab_filename, 0, identity=lab_data["id"])
+    assert len(events) == 1
+    event = events[0]
+    assert event.rev == lab_data["id"]
+    assert event.type == "interface_live_mac"
+    assert event.payload["node_id"] == 1
+    assert event.payload["interface_index"] == 0
+    assert event.payload["state"] == "confirmed"
+    assert event.payload["planned_mac"] == "aa:bb:cc:dd:ee:01"
+    assert event.payload["live_mac"] == "aa:bb:cc:dd:ee:01"
 
 
 # ---------------------------------------------------------------------------

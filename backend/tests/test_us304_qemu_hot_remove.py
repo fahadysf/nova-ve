@@ -515,7 +515,8 @@ def test_us304_bounded_poll_at_most_16_query_pci_calls(
 # ---------------------------------------------------------------------------
 
 
-def test_us304_forced_fallback_when_device_persists_past_timeout(
+@pytest.mark.asyncio
+async def test_us304_forced_fallback_when_device_persists_past_timeout(
     lab_settings, monkeypatch, _instance_id
 ):
     """Plan §US-304: when ``query-pci`` still shows the device after 8s,
@@ -547,11 +548,18 @@ def test_us304_forced_fallback_when_device_persists_past_timeout(
     svc._qmp_client = fake_qmp
     calls = _patch_host_net(monkeypatch)
 
-    # Capture WS publishes.
-    published: list[tuple[str, str, dict]] = []
+    import asyncio
 
-    async def _capture_publish(lab, event_type, payload, rev=""):
-        published.append((lab, event_type, payload))
+    # Model the backend-owned event loop and the synchronous QEMU worker.
+    published: list[tuple[str, str, dict]] = []
+    warning_received = asyncio.Event()
+    monkeypatch.setattr(NodeRuntimeService, "_runtime_loop", asyncio.get_running_loop())
+
+    async def _capture_publish(lab, event_type, payload, rev="", *, guard, identity):
+        async with guard as valid:
+            if valid:
+                published.append((lab, event_type, payload))
+                warning_received.set()
 
     monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _capture_publish)
     monkeypatch.setattr(
@@ -559,7 +567,8 @@ def test_us304_forced_fallback_when_device_persists_past_timeout(
     )
 
     expected_tap = host_net.tap_name(lab_id, 1, 2)
-    result = svc.detach_qemu_interface(lab_id, 1, 2)
+    result = await asyncio.to_thread(svc.detach_qemu_interface, lab_id, 1, 2)
+    await asyncio.wait_for(warning_received.wait(), timeout=3)
 
     assert result["state"] == "forced", result
 
@@ -583,7 +592,8 @@ def test_us304_forced_fallback_when_device_persists_past_timeout(
         f"forced fallback must publish a node_warning event; "
         f"published={published!r}"
     )
-    _lab_arg, _event_type, payload = warning_events[0]
+    lab_path, _event_type, payload = warning_events[0]
+    assert lab_path == f"{lab_id}.json"
     assert payload["node_id"] == 1
     assert payload["interface_index"] == 2
     assert "restart" in payload["message"].lower()

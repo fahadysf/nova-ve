@@ -8,7 +8,8 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.database import get_db
 from app.routers.labs import _scoped_lab_path
 from app.services.ws_hub import ws_hub
-from app.services.lab_service import LabService, _normalize_relative_lab_path
+from app.services.lab_paths import lab_identity, read_canonical_lab
+from app.services.lab_service import LabService, _labs_dir, _normalize_relative_lab_path
 from app.services.node_runtime_service import NodeRuntimeService
 
 # WebSocket routes don't carry HTTP response codes the way REST routes do
@@ -53,6 +54,8 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
         lab = _normalize_relative_lab_path(scoped)
         if not await asyncio.to_thread(LabService.file_exists, lab):
             raise FileNotFoundError(lab)
+        labs_dir = _labs_dir()
+        identity = lab_identity(await asyncio.to_thread(read_canonical_lab, labs_dir, labs_dir / lab))
     except (OSError, ValueError):
         await websocket.close(code=1008)
         return
@@ -63,12 +66,15 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
     try:
         while True:
             head = ws_hub.head_seq(lab)
-            events, needs_resnap = ws_hub.replay_since(lab, last_seq)
+            events, needs_resnap = ws_hub.replay_since(lab, last_seq, identity=identity)
             if needs_resnap:
                 await websocket.send_json({"type": "force_resnapshot"})
                 try:
                     data = await asyncio.to_thread(LabService.read_lab_json_static, lab)
                 except (OSError, ValueError):
+                    await websocket.close(code=1008)
+                    return
+                if lab_identity(data) != identity:
                     await websocket.close(code=1008)
                     return
                 await websocket.send_json({
@@ -86,7 +92,7 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
 
             # An event can land while sending the handshake or replay. Catch it
             # before handing the connection over to live publication.
-            if await ws_hub.subscribe(lab, websocket, after_seq=head):
+            if await ws_hub.subscribe(lab, websocket, after_seq=head, identity=identity):
                 break
             last_seq = head
 

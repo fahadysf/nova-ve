@@ -383,6 +383,26 @@ def test_subscription_catches_event_published_during_replay(monkeypatch, lab_fil
         assert ws.receive_json()["type"] == "network_created"
 
 
+def test_replacement_lab_does_not_replay_previous_runtime_events(monkeypatch, lab_files):
+    hub = _fresh_hub()
+    _patch_auth_ok(monkeypatch)
+    lab = "team/replaced.json"
+    lab_files(lab)
+
+    async def publish_runtime_events():
+        await hub.publish(lab, "node_warning", {"node_id": 1}, identity="previous-lab")
+        await hub.publish(lab, "node_warning", {"node_id": 2}, identity=lab)
+
+    asyncio.run(publish_runtime_events())
+    client = TestClient(app)
+    client.cookies.update(_cookies_with_session())
+    with client.websocket_connect(f"/ws/labs/{lab}") as ws:
+        assert ws.receive_json() == {"type": "hello", "seq": 2}
+        event = ws.receive_json()
+        assert event["payload"] == {"node_id": 2}
+        assert event["seq"] == 2
+
+
 def test_ring_evicts_oldest():
     """Publishing 250 events to a 200-ring leaves exactly 200 events (seq 51..250)."""
     hub = _fresh_hub()

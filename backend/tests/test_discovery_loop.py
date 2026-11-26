@@ -109,9 +109,11 @@ class _RecordingHub:
         self.events: list[tuple[str, str, dict]] = []
 
     async def publish(
-        self, lab_id: str, event_type: str, payload: dict, rev: str = ""
+        self, lab_id: str, event_type: str, payload: dict, rev: str = "", *, guard, identity
     ) -> None:
-        self.events.append((lab_id, event_type, payload))
+        async with guard as valid:
+            if valid:
+                self.events.append((lab_id, event_type, payload))
 
 
 def _patch_ws_hub(monkeypatch) -> _RecordingHub:
@@ -173,6 +175,22 @@ async def test_unknown_bridge_member_triggers_discovered_link(
     assert payload["iface"] == rogue_iface
     assert payload["peer_node_id"] == 2
     assert isinstance(payload["generation"], int) and payload["generation"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_discovery_skips_ambiguous_runtime_identity(monkeypatch, discovery_settings, stub_instance_id):
+    lab_id = "duplicate-id"
+    root = discovery_settings.LABS_DIR
+    _write_lab(root, lab_id, [], "lab.json")
+    _write_lab(root, lab_id, [], "team/lab.json")
+    rogue_iface = host_net.veth_host_name(lab_id, 1, 0)
+    monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda bridge: [rogue_iface]))
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert hub.events == []
 
 
 @pytest.mark.asyncio

@@ -40,11 +40,18 @@ import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Coroutine, Iterator, Optional
 
 import psutil
 
-from app.services.lab_paths import iter_lab_json_files
+from app.services.lab_paths import (
+    find_runtime_lab_path,
+    iter_lab_json_files,
+    lab_identity,
+    publish_runtime_event,
+    read_canonical_lab,
+    runtime_lab_paths,
+)
 from app.config import get_settings
 from app.services import host_net, qemu_versions, runtime_pids
 from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
@@ -348,6 +355,7 @@ class NodeRuntimeService:
     _observed_inactive: set[str] = set()
     _loaded = False
     _lock = threading.Lock()
+    _runtime_loop: asyncio.AbstractEventLoop | None = None
     # Maps (lab_id, node_id) -> monotonic timestamp of last deliberate start/stop.
     # Heartbeat skips reconciliation for entries younger than _TRANSITION_SUPPRESS_S.
     _transition_timestamps: dict[tuple[str, int], float] = {}
@@ -481,22 +489,33 @@ class NodeRuntimeService:
         node_id: int,
         interfaces: list[dict[str, Any]],
     ) -> None:
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-
         async def _run_cadence() -> None:
             for delay in (1.0, 3.0, 8.0):
                 await asyncio.sleep(delay)
+                path = await find_runtime_lab_path(self.settings.LABS_DIR, lab_id)
+                if path is None:
+                    continue
                 for index, iface in enumerate(interfaces):
                     if not isinstance(iface, dict):
                         continue
                     interface_index = int(iface.get("index", index))
-                    result = self.read_live_mac(lab_id, node_id, interface_index, lab_data=lab_data)
-                    await self._publish_live_mac(lab_id, node_id, interface_index, result)
+                    result = await asyncio.to_thread(
+                        self.read_live_mac, lab_id, node_id, interface_index, lab_data=lab_data
+                    )
+                    await self._publish_live_mac(lab_id, node_id, interface_index, result, path=path)
 
-        loop.create_task(_run_cadence())
+        self._schedule_runtime_task(_run_cadence)
+
+    @classmethod
+    def _schedule_runtime_task(cls, make_task: Callable[[], Coroutine[Any, Any, None]]) -> None:
+        loop = cls._runtime_loop
+        if loop is None or not loop.is_running():
+            return
+        try:
+            loop.call_soon_threadsafe(lambda: loop.create_task(make_task()))
+        except RuntimeError:
+            # The backend loop shut down before the callback could be queued.
+            return
 
     async def _publish_live_mac(
         self,
@@ -504,6 +523,8 @@ class NodeRuntimeService:
         node_id: int,
         interface_index: int,
         result: dict[str, Any],
+        *,
+        path: str | None = None,
     ) -> None:
         try:
             from app.services.ws_hub import ws_hub  # local import to avoid cycles
@@ -518,7 +539,10 @@ class NodeRuntimeService:
             "reason": result.get("reason"),
         }
         try:
-            await ws_hub.publish(lab_id, "interface_live_mac", payload, rev=str(lab_id))
+            await publish_runtime_event(
+                ws_hub, self.settings.LABS_DIR, lab_id, "interface_live_mac", payload,
+                path=path, rev=lab_id,
+            )
         except Exception:
             return
 
@@ -1150,6 +1174,7 @@ class NodeRuntimeService:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             return
+        cls._runtime_loop = loop
         loop.create_task(cls._heartbeat_loop())
 
     @classmethod
@@ -1179,20 +1204,7 @@ class NodeRuntimeService:
             return
 
         # Build lab_id -> relative filename map by scanning LABS_DIR once per cycle.
-        lab_id_to_filename: dict[str, str] = {}
-        if labs_dir.exists():
-            for lab_file in iter_lab_json_files(labs_dir):
-                try:
-                    raw = json.loads(lab_file.read_text())
-                except (OSError, json.JSONDecodeError):
-                    continue
-                file_lab_id = str(raw.get("id", "")).strip()
-                if file_lab_id and file_lab_id not in lab_id_to_filename:
-                    try:
-                        relative = lab_file.relative_to(labs_dir).as_posix()
-                    except ValueError:
-                        continue
-                    lab_id_to_filename[file_lab_id] = relative
+        lab_id_to_filename = await runtime_lab_paths(labs_dir)
 
         for _key, runtime in registry_snapshot:
             lab_id = str(runtime.get("lab_id", "")).strip()
@@ -1229,6 +1241,8 @@ class NodeRuntimeService:
             try:
                 # Waits for the lock without blocking the event loop.
                 async with locked_lab_async(filename) as lab:
+                    if lab_identity(lab.data) != lab_id:
+                        continue
                     with cls._lock:
                         if cls._registry.get(_key) is not runtime:
                             continue
@@ -1272,11 +1286,14 @@ class NodeRuntimeService:
 
             if reconciled:
                 try:
-                    await ws_hub.publish(
+                    await publish_runtime_event(
+                        ws_hub,
+                        labs_dir,
                         lab_id,
                         "node_status_reconciled",
                         {"node_id": node_id, "status": expected_status},
-                        rev=str(lab_id),
+                        path=filename,
+                        rev=lab_id,
                     )
                 except Exception:
                     _logger.exception(
@@ -1613,26 +1630,16 @@ class NodeRuntimeService:
         compare against ``links[]``, and publish ``discovered_link`` events
         for kernel-side members with no declared link.
         """
-        from app.services.lab_service import LabService  # avoid cycles
         from app.services.ws_hub import ws_hub
 
         settings = get_settings()
-        labs_dir = settings.LABS_DIR
-        if not labs_dir.exists():
-            return
-
-        for lab_file in iter_lab_json_files(labs_dir):
-            if lab_file.is_symlink():
+        labs_dir = settings.LABS_DIR.resolve()
+        for lab_id, lab_path in (await runtime_lab_paths(labs_dir)).items():
+            data = await asyncio.to_thread(read_canonical_lab, labs_dir, labs_dir / lab_path)
+            if data is None or lab_identity(data) != lab_id:
                 continue
             try:
-                data = json.loads(lab_file.read_text())
-            except (OSError, json.JSONDecodeError):
-                continue
-            lab_id = str(data.get("id", "")).strip()
-            if not lab_id:
-                continue
-            try:
-                await cls._discover_lab(lab_id, data, ws_hub, lab_file.relative_to(labs_dir).as_posix())
+                await cls._discover_lab(lab_id, data, ws_hub, lab_path)
             except Exception:
                 _discovery_logger.exception(
                     "discovery: failed lab=%s", lab_id
@@ -1746,7 +1753,9 @@ class NodeRuntimeService:
                     "generation": gen,
                 }
                 try:
-                    await ws_hub.publish(lab_path, "discovered_link", payload)
+                    await publish_runtime_event(
+                        ws_hub, get_settings().LABS_DIR, lab_id, "discovered_link", payload, path=lab_path,
+                    )
                 except Exception:
                     _discovery_logger.exception(
                         "discovery: ws publish failed lab=%s iface=%s",
@@ -1848,7 +1857,9 @@ class NodeRuntimeService:
                 "generation": generation,
             }
             try:
-                await ws_hub.publish(lab_path, "link_divergent", payload)
+                await publish_runtime_event(
+                    ws_hub, get_settings().LABS_DIR, lab_id, "link_divergent", payload, path=lab_path,
+                )
             except Exception:
                 _discovery_logger.exception(
                     "discovery: ws publish failed lab=%s link_id=%s",
@@ -4690,15 +4701,7 @@ class NodeRuntimeService:
         interface_index: int,
         message: str,
     ) -> None:
-        """US-304 forced-fallback: publish a ``node_warning`` WS event so
-        the UI can surface the "guest did not eject" condition.
-
-        Goes through :class:`app.services.ws_hub.ws_hub` (the existing
-        per-lab event hub) — there is no separate ``ws_manager`` service.
-        Fire-and-forget: we schedule the coroutine on the running event
-        loop if one is available, otherwise we fall back to
-        ``asyncio.run`` so sync callers still get the broadcast.
-        """
+        """Send a forced-detach warning on the backend's WebSocket loop."""
         from app.services.ws_hub import ws_hub  # local import — cycle-free
 
         payload = {
@@ -4706,16 +4709,15 @@ class NodeRuntimeService:
             "interface_index": int(interface_index),
             "message": message,
         }
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if loop is not None and loop.is_running():
-            loop.create_task(ws_hub.publish(lab_id, "node_warning", payload))
-            return
-        # No running loop — synchronous caller. Run the publish in a
-        # short-lived loop so the event still goes out.
-        asyncio.run(ws_hub.publish(lab_id, "node_warning", payload))
+        async def publish() -> None:
+            try:
+                await publish_runtime_event(
+                    ws_hub, self.settings.LABS_DIR, lab_id, "node_warning", payload,
+                )
+            except Exception:
+                _logger.exception("Could not publish the node runtime warning")
+
+        self._schedule_runtime_task(publish)
 
     def _qmp_command(
         self, socket_path: str, command: str, arguments: dict[str, Any] | None = None
