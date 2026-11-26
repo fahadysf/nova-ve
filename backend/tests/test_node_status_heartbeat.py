@@ -181,6 +181,60 @@ async def test_no_write_when_status_matches(monkeypatch, tmp_settings):
 
 
 # ---------------------------------------------------------------------------
+# Test #373: dead workload with no status to flip → the record is still removed
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param({"id": 1, "name": "alpine", "type": "docker", "status": 0}, id="stored-status-already-stopped"),
+        pytest.param(None, id="node-gone-from-the-lab"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_dead_node_is_removed_even_with_no_status_to_flip(monkeypatch, tmp_settings, stored):
+    """The backend's start path never writes status=2 to lab.json, so a node
+    started through the API alone reaches the heartbeat with the stored status
+    already 0 — or no longer in the lab at all. Its record must not outlive
+    its workload."""
+    lab_id = "lab-dead-noflip"
+    node_id = 1
+    nodes = (
+        {str(node_id): stored}
+        if stored
+        else {"2": {"id": 2, "name": "other", "type": "docker", "status": 2}}
+    )
+    filename = _write_lab(tmp_settings.LABS_DIR, lab_id, nodes)
+    _register_runtime(tmp_settings, lab_id, node_id, "docker", container_name="c1")
+    state_path = tmp_settings.TMP_DIR / "node-runtime" / f"{lab_id}-{node_id}.json"
+
+    _patch_settings(monkeypatch, tmp_settings)
+    monkeypatch.setattr(
+        NodeRuntimeService, "_check_alive_sync", staticmethod(lambda runtime, kind, settings: False)
+    )
+    published = []
+
+    async def fake_publish(*args, **kwargs):
+        published.append(args)
+
+    from app.services import ws_hub as ws_hub_mod
+    monkeypatch.setattr(ws_hub_mod.ws_hub, "publish", fake_publish)
+
+    lab_path = tmp_settings.LABS_DIR / filename
+    original = lab_path.read_text()
+
+    await NodeRuntimeService._run_heartbeat_cycle()
+
+    # The workload is gone, so its record is gone with it.
+    assert f"{lab_id}:{node_id}" not in NodeRuntimeService._registry
+    assert not state_path.exists()
+    # Nothing changed in the lab, so nothing was written or announced.
+    assert lab_path.read_text() == original
+    assert published == []
+
+
+# ---------------------------------------------------------------------------
 # Test: QEMU node — process alive, status=0 in lab → flips to 2
 # ---------------------------------------------------------------------------
 

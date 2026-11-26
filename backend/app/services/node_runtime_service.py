@@ -1161,6 +1161,7 @@ class NodeRuntimeService:
 
             # status: 2 = running, 0 = stopped
             expected_status = 2 if is_alive else 0
+            reconciled = False
 
             try:
                 # Waits for the lock without blocking the event loop.
@@ -1168,40 +1169,49 @@ class NodeRuntimeService:
                     nodes: dict = lab.data.get("nodes") or {}
                     node = nodes.get(str(node_id))
                     if not isinstance(node, dict):
-                        continue
-                    current_status = int(node.get("status", -1))
-                    if current_status == expected_status:
-                        continue
-                    node["status"] = expected_status
-                    # #248: status reconcile is bookkeeping, not an edit —
-                    # don't invalidate editors' If-Match tokens.
-                    lab.save(bump_revision=False)
+                        # A node the lab no longer defines has no status to reconcile.
+                        current_status = expected_status
+                    else:
+                        current_status = int(node.get("status", -1))
+                        if current_status != expected_status:
+                            node["status"] = expected_status
+                            # #248: status reconcile is bookkeeping, not an edit —
+                            # don't invalidate editors' If-Match tokens.
+                            lab.save(bump_revision=False)
+                            reconciled = True
             except Exception:
                 _logger.exception(
                     "heartbeat: failed to reconcile lab=%s node=%s", lab_id, node_id
                 )
                 continue
 
-            _logger.info(
-                "heartbeat reconciled: lab=%s node=%s status %d -> %d",
-                lab_id, node_id, current_status, expected_status,
-            )
+            if reconciled:
+                _logger.info(
+                    "heartbeat reconciled: lab=%s node=%s status %d -> %d",
+                    lab_id, node_id, current_status, expected_status,
+                )
 
-            # If the process is dead according to reality, clean up the registry entry.
+            # If the process is dead according to reality, clean up the registry
+            # entry — whether or not there was a status to flip (#373). The
+            # backend's own start path never writes status=2 to lab.json, so a
+            # node started through the API alone gets here with the stored
+            # status already 0; skipping the cleanup on that path left a dead
+            # record in the registry until something happened to probe that node.
             if not is_alive:
                 cls._delete_runtime_class(lab_id, node_id, settings)
 
-            try:
-                await ws_hub.publish(
-                    lab_id,
-                    "node_status_reconciled",
-                    {"node_id": node_id, "status": expected_status},
-                    rev=str(lab_id),
-                )
-            except Exception:
-                _logger.exception(
-                    "heartbeat: ws publish failed for lab=%s node=%s", lab_id, node_id
-                )
+            if reconciled:
+                try:
+                    await ws_hub.publish(
+                        lab_id,
+                        "node_status_reconciled",
+                        {"node_id": node_id, "status": expected_status},
+                        rev=str(lab_id),
+                    )
+                except Exception:
+                    _logger.exception(
+                        "heartbeat: ws publish failed for lab=%s node=%s", lab_id, node_id
+                    )
 
     # ------------------------------------------------------------------
     # Issue #225 — orphan-process reconciliation
