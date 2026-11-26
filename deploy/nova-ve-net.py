@@ -37,6 +37,7 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import signal
 import stat
 import subprocess
@@ -947,7 +948,7 @@ def _write_private_file(
             raise OSError(f"refusing to write through {current}: not a plain directory")
         if check_dir is not None:
             check_dir(current)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp = path.with_name(f".{path.name}.{secrets.token_hex(16)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
