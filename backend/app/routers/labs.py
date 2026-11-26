@@ -39,10 +39,14 @@ from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_lock import lab_lock_async
 from app.services.lab_service import (
+    HIGH_WATER_FIELDS,
     LEGACY_SCHEMA_ERROR,
+    LabIdExhaustedError,
     LabService,
     _lab_file_path,
     _normalize_relative_lab_path,
+    allocate_network_id,
+    allocate_node_id,
     locked_lab_async,
     unlink_lab_file,
 )
@@ -89,6 +93,12 @@ def _legacy_schema_response(error: LegacyLabSchemaError) -> dict:
 
 def _json_error(status_code: int, content: dict) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=content)
+
+
+def _id_exhausted_response(exc: LabIdExhaustedError) -> JSONResponse:
+    """The lab has used every id of a kind the host layer can name (#332)."""
+    return _json_error(exc.code, {"code": exc.code, "status": "fail", "message": exc.message})
+
 
 NODE_FIELDS_EDITABLE_WHILE_RUNNING = {"name", "icon", "left", "top", "interface_naming_scheme"}
 NODE_FIELDS_EDITABLE_WHILE_STOPPED = {"image", "cpu", "ram", "ethernet", "console", "second_console", "delay", "extras"}
@@ -995,7 +1005,11 @@ async def create_node(
             return error
         data = lab.data
         nodes = data.setdefault("nodes", {})
-        next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
+        try:
+            next_id = allocate_node_id(data)
+        except LabIdExhaustedError as exc:
+            # Unsaved, so the lab file is exactly as it was.
+            return _id_exhausted_response(exc)
         node = _build_node_payload(
             lab_id=str(data.get("id") or scoped_path),
             node_id=next_id,
@@ -1304,7 +1318,6 @@ async def create_nodes_from_paired_template(
 
         snapshot = copy.deepcopy(data)
         nodes_map = data.setdefault("nodes", {})
-        next_id = max((int(node_key) for node_key in nodes_map.keys()), default=0) + 1
 
         child_id_to_node_id: dict[str, int] = {}
 
@@ -1323,6 +1336,7 @@ async def create_nodes_from_paired_template(
                 left, top = _node_position(
                     index, request.base_left, request.base_top, "row"
                 )
+                next_id = allocate_node_id(data)
                 payload = _build_paired_child_payload(
                     lab_id=str(data.get("id") or scoped_path),
                     node_id=next_id,
@@ -1336,9 +1350,11 @@ async def create_nodes_from_paired_template(
                 nodes_map[str(next_id)] = payload
                 child_id_to_node_id[child_id] = next_id
                 created_nodes.append(payload)
-                next_id += 1
 
             lab.save()
+        except LabIdExhaustedError as exc:
+            # Nothing was saved, so there is nothing to roll back.
+            return _id_exhausted_response(exc)
         except (ValueError, TemplateError) as exc:
             # #208-MEDIUM — bad child scalars (e.g. ``ethernet: "not-an-int"``)
             # and malformed-child entries are template defects, not server
@@ -1485,6 +1501,9 @@ async def create_nodes_from_paired_template(
                         "message": f"Paired link blocked by concurrent attach/detach: {exc}",
                     },
                 )
+            # A paired link between two new nodes needs an implicit network.
+            if isinstance(exc, LabIdExhaustedError):
+                return _id_exhausted_response(exc)
             if isinstance(exc, (NodeRuntimeError, host_net.HostNetError)):
                 return _json_error(
                     422,
@@ -1603,10 +1622,13 @@ async def create_nodes_batch(
             return error
         data = lab.data
         nodes = data.setdefault("nodes", {})
-        next_id = max((int(node_key) for node_key in nodes.keys()), default=0) + 1
         created_nodes = []
         for index in range(request.count):
-            node_id = next_id + index
+            try:
+                node_id = allocate_node_id(data)
+            except LabIdExhaustedError as exc:
+                # No partial batch: nothing is saved until every id is taken.
+                return _id_exhausted_response(exc)
             left, top = _node_position(index, request.left, request.top, request.placement)
             node = _build_node_payload(
                 lab_id=str(data.get("id") or scoped_path),
@@ -2628,7 +2650,11 @@ async def create_network(
             return error
         data = lab.data
         networks = data.setdefault("networks", {})
-        next_id = max((int(network_key) for network_key in networks.keys()), default=0) + 1
+        try:
+            next_id = allocate_network_id(data)
+        except LabIdExhaustedError as exc:
+            # Unsaved, so the lab file is exactly as it was.
+            return _id_exhausted_response(exc)
         network = {
             "id": next_id,
             "name": request.name,
@@ -3332,7 +3358,9 @@ async def get_lab(
         }
 
     relative_path = lab_path.strip("/").replace("\\", "/")
-    meta = data.get("meta", {})
+    # The branch above lists what it returns; this one passes the file's
+    # meta through, minus the server's own id bookkeeping (#332).
+    meta = {k: v for k, v in data.get("meta", {}).items() if k not in HIGH_WATER_FIELDS}
     meta["id"] = data.get("id")
     meta["filename"] = relative_path
     meta["path"] = f"/{relative_path}"

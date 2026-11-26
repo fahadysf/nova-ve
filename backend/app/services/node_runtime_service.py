@@ -52,6 +52,9 @@ _DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
 # US-287: truthy spellings accepted for the docker node ``mgmt_access``
 # extras flag (opt-in per-lab management attachment, ``mgmt0``).
 _MGMT_ACCESS_TRUTHY = {"1", "true", "yes", "on"}
+# ``mgmt0`` host octets handed to nodes start at 2 (``.1`` is the gateway).
+_MGMT_FIRST_OCTET = 2
+_MGMT_OCTET_COUNT = 250
 _HEARTBEAT_INTERVAL_S: float = 5.0
 _TRANSITION_SUPPRESS_S: float = 30.0
 
@@ -125,6 +128,21 @@ def _extra_bool(extras: dict[str, Any], key: str, default: bool = False) -> bool
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _mgmt_access_enabled(node: dict[str, Any]) -> bool:
+    """Whether a docker node opted into the per-lab ``mgmt0`` attachment (#287)."""
+    extras = _node_extras(node)
+    return _extra_str(extras, "mgmt_access").strip().lower() in _MGMT_ACCESS_TRUTHY
+
+
+def _mgmt_host_octet(node_id: int) -> int:
+    """A node's preferred ``mgmt0`` host octet: its number, folded into the range.
+
+    The bridge gateway keeps ``.1``, and ``.0`` and ``.255`` are the network
+    and broadcast addresses, so 250 octets are left.
+    """
+    return _MGMT_FIRST_OCTET + (max(int(node_id), 1) - 1) % _MGMT_OCTET_COUNT
 
 
 _PLATFORM_DESKTOP_IMAGES = {
@@ -334,7 +352,6 @@ class NodeRuntimeService:
     # it.  lab_topology snapshots include the current value so the frontend can
     # reject events from older generations (gen <= topology_generation is stale).
     _discovery_generation: dict[str, int] = {}
-
     def __init__(self) -> None:
         self.settings = get_settings()
         self.runtime_dir = self.settings.TMP_DIR / "node-runtime"
@@ -403,7 +420,18 @@ class NodeRuntimeService:
         if node.get("type") == "qemu":
             runtime = self._start_qemu_node(lab_data, node)
         elif node.get("type") == "docker":
-            runtime = self._start_docker_node(lab_data, node)
+            if _mgmt_access_enabled(node):
+                from app.services.lab_lock import lab_lock, LabLockTimeout
+
+                lock_name = "mgmt-" + hashlib.sha256(lab_id.encode()).hexdigest()
+                try:
+                    with lab_lock(lock_name, self.runtime_dir, timeout_s=60):
+                        self._check_mgmt_address_available(lab_id, node_id)
+                        runtime = self._start_docker_node(lab_data, node)
+                except LabLockTimeout as exc:
+                    raise NodeRuntimeError("Timed out waiting for management address allocation") from exc
+            else:
+                runtime = self._start_docker_node(lab_data, node)
         elif node.get("type") in ("iol", "iou"):
             runtime = self._start_iol_node(lab_data, node)
         elif node.get("type") == "dynamips":
@@ -2662,9 +2690,7 @@ class NodeRuntimeService:
         container_name = self._container_name(lab_id, node["id"])
         network_specs = self._docker_network_specs(lab_data, node)
         extras = _node_extras(node)
-        mgmt_enabled = (
-            _extra_str(extras, "mgmt_access").strip().lower() in _MGMT_ACCESS_TRUTHY
-        )
+        mgmt_enabled = _mgmt_access_enabled(node)
         container_console_port = self._docker_container_console_port(console_mode, extras)
         # Optional second console (#268): publish and proxy a second host port
         # into the container's secondary console service, mirroring the
@@ -2701,7 +2727,7 @@ class NodeRuntimeService:
         # roll back.  Yields the node's static mgmt0 address.
         mgmt_runtime: dict[str, Any] | None = None
         if mgmt_enabled:
-            mgmt_runtime = self._ensure_docker_mgmt_bridge(lab_id, node_id)
+            mgmt_runtime = self._ensure_docker_mgmt_bridge(lab_id, node_id, lab_data)
 
         # ----- Build the docker run command (no networking flags) ----------
         # No ``--rm``: it conflicts with ``--restart`` (docker rejects with
@@ -2975,7 +3001,7 @@ class NodeRuntimeService:
     # ------------------------------------------------------------------
 
     def _ensure_docker_mgmt_bridge(
-        self, lab_id: str, node_id: int
+        self, lab_id: str, node_id: int, lab_data: dict[str, Any]
     ) -> dict[str, Any]:
         """Ensure the per-lab ``mgmt`` bridge exists and pick the node's address.
 
@@ -2989,10 +3015,11 @@ class NodeRuntimeService:
 
         Returns ``{bridge_name, gateway_cidr, container_ip_cidr}`` where
         ``container_ip_cidr`` is the static address handed to the node's
-        ``mgmt0`` (``172.16.X.{2 + (node_id - 1) % 250}/24`` — the bridge
-        gateway ``.1`` is never handed to a node).
+        ``mgmt0``: ``172.16.X.<host octet>/24``, the node's deterministic octet. The bridge
+        gateway ``.1`` is never handed to a node.
 
-        Raises ``NodeRuntimeError`` when no candidate subnet is free.
+        Raises ``NodeRuntimeError`` when no candidate subnet is free, or when
+        another running container may hold the node's address.
         """
         bridge = host_net.mgmt_bridge_name(lab_id)
         owned: dict[str, str] = {}
@@ -3011,13 +3038,33 @@ class NodeRuntimeService:
             host_net.bridge_addr_add(bridge, gateway_cidr)
 
         subnet = ipaddress.ip_network(gateway_cidr, strict=False)
-        host_octet = 2 + (max(int(node_id), 1) - 1) % 250
+        host_octet = _mgmt_host_octet(node_id)
         container_ip = f"{subnet.network_address + host_octet}/24"
         return {
             "bridge_name": bridge,
             "gateway_cidr": str(gateway_cidr),
             "container_ip_cidr": container_ip,
         }
+
+    def _check_mgmt_address_available(self, lab_id: str, node_id: int) -> None:
+        """Fail closed if a running lab container could use the same address."""
+        binary = self._resolve_binary("docker")
+        if not binary:
+            raise NodeRuntimeError("Docker binary not found")
+        try:
+            result = subprocess.run(
+                [binary, "--host", self.settings.DOCKER_HOST, "ps", "--format", "{{.Names}}"],
+                capture_output=True, text=True,
+            )
+        except OSError as exc:
+            raise NodeRuntimeError("Could not inspect running containers") from exc
+        if result.returncode != 0 or not isinstance(result.stdout, str):
+            raise NodeRuntimeError("Could not inspect running containers")
+        names = set(result.stdout.splitlines())
+        for other_id in range(1, host_net.MAX_NODE_ID + 1):
+            if other_id != node_id and _mgmt_host_octet(other_id) == _mgmt_host_octet(node_id):
+                if self._container_name(lab_id, other_id) in names:
+                    raise NodeRuntimeError("A running node may already use this management address")
 
     def _pick_mgmt_gateway_cidr(
         self,
