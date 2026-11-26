@@ -134,6 +134,10 @@ apt-get install -y --no-install-recommends ca-certificates curl git sudo
 APP_OWNER="${NOVA_VE_SERVICE_USER:-${NOVA_VE_OWNER:-nova-ve}}"
 APP_HOME_DEFAULT="${NOVA_VE_SERVICE_HOME:-/var/lib/nova-ve}"
 ensure_service_account "${APP_OWNER}" "${APP_HOME_DEFAULT}"
+if [[ "$(id -u "${APP_OWNER}")" == "$(id -u nobody)" ]]; then
+  echo "install.sh: select a service account distinct from the DHCP runtime account." >&2
+  exit 1
+fi
 APP_GROUP="$(id -gn "${APP_OWNER}")"
 APP_HOME="$(getent passwd "${APP_OWNER}" | cut -d: -f6)"
 
