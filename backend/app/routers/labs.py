@@ -34,7 +34,7 @@ from app.schemas.node import (
     validate_second_console_mode_for_type,
 )
 from app.schemas.user import UserRead
-from app.services.async_utils import notify_after_mutation, wait_for_mutation
+from app.services.async_utils import notify_after_mutation, run_mutation, wait_for_mutation
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
 from app.services import audit_service
@@ -52,14 +52,10 @@ from app.services.lab_service import (
     build_relative_lab_path,
     lab_membership_lock,
     locked_lab_async,
-    unlink_lab_file,
 )
 from app.services.network_service import NetworkServiceError, network_service
 from app.services.cloud_inventory_service import SharedCloudReferenceError
-from app.services.shared_network_service import (
-    assert_no_external_members_for_scope,
-    patch_violation,
-)
+from app.services.shared_network_service import patch_violation
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import (
     TemplateError,
@@ -1956,19 +1952,13 @@ async def start_node(
 ):
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
-        data = _read_lab_data(scoped_path)
-    except FileNotFoundError:
-        return {
-            "code": 404,
-            "status": "fail",
-            "message": "Lab does not exist (60038).",
-        }
-    try:
-        # The runtime backends are synchronous and can block for tens
-        # of seconds (Dynamips IOS boot, QEMU image-copy at first boot,
-        # Docker image pull). Run them in a worker thread so the
-        # event loop stays free for the rest of the request mix.
-        await asyncio.to_thread(NodeRuntimeService().start_node, data, node_id)
+        async with _locked_lab(scoped_path) as (lab, error):
+            if error is not None:
+                return error
+            data = lab.data
+            # Keep deletion out until the worker publishes its runtime record,
+            # including when the client disconnects while starting the node.
+            _, cancelled = await run_mutation(NodeRuntimeService().start_node, data, node_id)
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
     except FileNotFoundError as e:
@@ -1990,10 +1980,13 @@ async def start_node(
             "message": str(e),
         }
 
-    await audit_service.record(
-        "node.start",
-        actor=current_user.username,
-        **audit_service.node_context(data, node_id, scoped_path),
+    await notify_after_mutation(
+        audit_service.record(
+            "node.start",
+            actor=current_user.username,
+            **audit_service.node_context(data, node_id, scoped_path),
+        ),
+        cancelled,
     )
     return {
         "code": 200,
@@ -3407,11 +3400,9 @@ async def delete_lab(
                     return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
                 if current_user.role != "admin":
                     return {"code": 403, "status": "fail", "message": "Access denied."}
-                await asyncio.to_thread(assert_no_external_members_for_scope, scoped_path)
-                await unlink_lab_file(scoped_path, locked=True)
+                cancelled = await lab_service.delete_lab_file(scoped_path)
                 path, name = f"/{scoped_path}", Path(scoped_path).stem
                 audit_details = {"detail": {"orphan": True}}
-                cancelled = False
     except SharedCloudReferenceError as e:
         return {
             "code": 409,
@@ -3419,6 +3410,8 @@ async def delete_lab(
             "message": e.message,
             "data": {"references": e.references},
         }
+    except NodeRuntimeError as e:
+        return {"code": 409, "status": "fail", "message": str(e)}
 
     await notify_after_mutation(
         audit_service.record(

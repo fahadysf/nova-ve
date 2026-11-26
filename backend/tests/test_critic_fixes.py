@@ -169,8 +169,6 @@ async def test_delete_lab_cleans_nat_cloud_runtime(monkeypatch, patched_settings
 @pytest.mark.asyncio
 async def test_delete_lab_wipes_node_work_dirs(monkeypatch, patched_settings):
     # #338: lab delete must remove every node's disks/data, like node delete.
-    import shutil
-
     from app.services.node_runtime_service import NodeRuntimeService
 
     db = FakeDB()
@@ -196,18 +194,19 @@ async def test_delete_lab_wipes_node_work_dirs(monkeypatch, patched_settings):
     stale_record = runtime_dir / "lab-wipe-nodes-1.json"
     stale_record.write_text('{"lab_id": "lab-wipe-nodes", "node_id": 1, "kind": "qemu"}')
 
-    wiped: list[int] = []
+    stopped: list[int] = []
 
-    def fake_wipe(self, lab_data, node_id):
-        wiped.append(node_id)
-        shutil.rmtree(patched_settings.TMP_DIR / lab_data["id"] / str(node_id), ignore_errors=True)
+    def fake_stop(self, lab_data, node_id, *, confirm_stopped):
+        assert confirm_stopped
+        stopped.append(node_id)
+        self._delete_runtime(lab_data["id"], node_id)
 
-    monkeypatch.setattr(NodeRuntimeService, "wipe_node", fake_wipe)
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", fake_stop)
 
     lab = SimpleNamespace(filename="wipe-nodes.json")
     await service.delete_lab(lab)
 
-    assert wiped == [1, 2]
+    assert stopped == [1, 2]
     assert not work_root.exists()
     assert not stale_record.exists()
     assert not lab_path.exists()

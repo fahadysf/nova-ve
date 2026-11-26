@@ -63,6 +63,7 @@ def settings(tmp_path, monkeypatch):
         return None
 
     monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", no_publish)
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", lambda *_args, **_kwargs: None)
     return s
 
 
@@ -538,6 +539,23 @@ async def test_delete_lab_is_not_undone_by_an_in_flight_writer(settings):
         await LabService(_FakeDb()).delete_lab(lab_row)
 
     assert not (settings.LABS_DIR / LAB).exists()
+
+
+@pytest.mark.asyncio
+async def test_start_waiting_for_a_lab_deletion_does_not_use_the_old_lab(settings, monkeypatch):
+    _seed(settings, nodes={"1": _docker_node(1, "deleting")})
+    started = []
+    monkeypatch.setattr(NodeRuntimeService, "start_node", lambda *args: started.append(args))
+    file = settings.LABS_DIR / LAB
+
+    async with lab_membership_lock(LAB, ipam=True):
+        start = asyncio.create_task(labs.start_node(LAB, 1, current_user=ADMIN))
+        await asyncio.sleep(0.05)
+        file.unlink()
+
+    response = await asyncio.wait_for(start, timeout=2)
+    assert response["code"] == 404
+    assert started == []
 
 
 class _RecordingDeleteDb(_FakeDb):
