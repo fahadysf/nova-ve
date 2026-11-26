@@ -217,7 +217,7 @@
 </script>
 
 <div
-  class="absolute z-10"
+  class="port-affordance absolute z-10"
   style={stylePosition}
   data-network-port-id={networkId}
   data-network-port-link-id={linkId ?? ''}

@@ -17,13 +17,31 @@ vi.mock('@xyflow/svelte', async () => {
 });
 
 import CustomNode from '$lib/components/canvas/CustomNode.svelte';
+import { dragLinkStore } from '$lib/stores/dragLink';
 import { nodeIconSources } from '$lib/services/nodeIcons';
 
 afterEach(() => {
+  dragLinkStore.cancel();
   vi.restoreAllMocks();
 });
 
 describe('CustomNode', () => {
+  it('keeps its connection anchors mounted and reveals them during a link gesture', async () => {
+    const { container } = render(CustomNode, { props: { data: {
+      label: 'edge', nodeId: 1, interfaces: [{ index: 0, name: 'eth0', network_id: 0 }],
+    } } });
+    const card = screen.getByTestId('custom-node-card');
+    const port = container.querySelector('[data-port-new-connection="true"]');
+    expect(port).toHaveClass('port-affordance');
+    expect(card).toHaveAttribute('data-link-dragging', 'false');
+    dragLinkStore.start({ source: { kind: 'node-slot', nodeId: 2, port: { side: 'right', offset: 0.5 } } });
+    await tick();
+    expect(card).toHaveAttribute('data-link-dragging', 'true');
+    expect(container.querySelector('[data-port-new-connection="true"]')).toBe(port);
+    dragLinkStore.cancel();
+    await tick();
+    expect(card).toHaveAttribute('data-link-dragging', 'false');
+  });
   it('tries the registered node icon, then the template icon, and falls back to a larger glyph', async () => {
     const assets = new Set(['custom node.png', 'template.png']);
     const iconSources = nodeIconSources('custom node.png', 'template.png', assets);

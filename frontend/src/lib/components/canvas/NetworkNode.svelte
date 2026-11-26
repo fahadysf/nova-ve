@@ -6,6 +6,8 @@
   import { Info, Share2, Waypoints } from 'lucide-svelte';
   import { assignNetworkSlots, slotPosition } from '$lib/services/canvasEdges';
   import { infoPanels } from '$lib/stores/infoPanels';
+  import { dragLinkStore } from '$lib/stores/dragLink';
+  import { FRAME_ROW_LIMIT, type NetworkFrameRow } from '$lib/services/networkFrame';
 
   type NetworkConnectionPointRef = { endpointKey: 'from' | 'to' };
 
@@ -22,6 +24,10 @@
     portRefsByLinkId?: Record<string, NetworkConnectionPointRef>;
     /** Canvas-computed position for the dotted open slot (#258). */
     openSlotPosition?: { side: 'top' | 'right' | 'bottom' | 'left'; offset: number } | null;
+    frameRows?: NetworkFrameRow[];
+    frameExpanded?: boolean;
+    frameRequested?: boolean;
+    toggleFrame?: () => void;
   };
 
   function openInfo(event: MouseEvent) {
@@ -65,10 +71,11 @@
 </script>
 
 <div
-  class="group relative min-w-[8rem] rounded-lg border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:bg-[var(--card-canvas-bg-hover)]"
+  class="network-card group relative min-w-[8rem] rounded-lg border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:bg-[var(--card-canvas-bg-hover)]"
   data-testid="network-node"
   data-network-id={networkId}
   data-network-slot-count={slotCount}
+  data-link-dragging={['port_pressed', 'dragging', 'near_target'].includes($dragLinkStore.state)}
 >
   {#each slots as slot (slot.idx)}
     <NetworkPort
@@ -86,7 +93,7 @@
   <!-- Frame-header look (#254): quiet band, name in the primary role and the
        connection count as a secondary line — network pills stay neutral
        grays, color is reserved for link state. -->
-  <div class="flex items-center justify-between gap-2 py-2.5 pl-3.5 pr-4">
+  <div class={`flex items-center justify-between gap-2 py-2.5 pl-3.5 pr-4 ${data.frameExpanded ? 'box-border h-[54px]' : ''}`}>
     <div class="flex min-w-0 items-center gap-2">
       <div
         class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--card-canvas-icon-bg)] text-[var(--card-canvas-sub-fg)] transition-colors group-hover:bg-[var(--card-canvas-icon-bg-hover)] group-hover:text-[var(--card-canvas-name-fg)]"
@@ -106,6 +113,29 @@
       </div>
     </div>
   </div>
+
+  {#if data.toggleFrame && (data.frameRows?.length ?? 0) > 0}
+    <button type="button" class="nodrag absolute right-2 top-2 text-[10px] text-gray-400 hover:text-white"
+      aria-label={data.frameRequested ? 'Close network connections' : 'Show network connections'}
+      aria-expanded={data.frameExpanded ?? false}
+      title={data.frameRequested && !data.frameExpanded ? 'Zoom in to see connections' : undefined}
+      data-testid="network-frame-toggle"
+      on:pointerdown|stopPropagation on:click|stopPropagation={data.toggleFrame}>
+      {data.frameRequested ? '−' : '+'}
+    </button>
+  {/if}
+
+  {#if data.frameExpanded}
+    <div class="border-t border-[var(--card-canvas-border)]" data-testid="network-frame-rows">
+      {#each (data.frameRows ?? []).slice(0, FRAME_ROW_LIMIT) as row (row.linkId)}
+        <div class="h-[28px] truncate px-3 text-[11px] leading-[28px] text-[var(--card-canvas-sub-fg)]" title={row.label} data-link-id={row.linkId}>{row.label}</div>
+      {/each}
+      {#if (data.frameRows?.length ?? 0) > FRAME_ROW_LIMIT}
+        <button type="button" class="nodrag block h-[28px] w-full px-3 text-left text-[11px] text-blue-300 hover:text-white"
+          on:pointerdown|stopPropagation on:click={openInfo}>+{(data.frameRows?.length ?? 0) - FRAME_ROW_LIMIT} more</button>
+      {/if}
+    </div>
+  {/if}
 
   {#if data.sharingRole}
     {@const sharingLabel =
@@ -133,3 +163,14 @@
     <Info class="h-2 w-2" />
   </button>
 </div>
+
+<style>
+  @media (hover: hover) and (pointer: fine) {
+    .network-card:where(:not(:hover):not(:focus-within):not([data-link-dragging='true'])) :global(.port-affordance) {
+      opacity: 0;
+    }
+    :global(.svelte-flow__node:focus-within) .network-card :global(.port-affordance) {
+      opacity: 1;
+    }
+  }
+</style>

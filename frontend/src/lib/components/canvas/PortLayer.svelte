@@ -72,7 +72,7 @@
 <div bind:this={layerEl} class="pointer-events-none absolute inset-0">
   {#each visibleInterfaceEntries as entry (entry.interfaceIndex)}
     {@const port = resolvedPorts[entry.index]}
-    <div class="pointer-events-auto absolute inset-0">
+    <div class="pointer-events-none absolute inset-0">
       <Port
         interfaceData={entry.iface}
         position={port}
@@ -92,7 +92,7 @@
   {#if firstAvailableEntry}
     {@const port =
       newConnectionPortPosition ?? resolvedPorts[firstAvailableEntry.index]}
-    <div class="pointer-events-auto absolute inset-0">
+    <div class="pointer-events-none absolute inset-0">
       <Port
         interfaceData={firstAvailableEntry.iface}
         position={port}

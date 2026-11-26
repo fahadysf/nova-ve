@@ -359,7 +359,7 @@
 </script>
 
 <div
-  class="absolute z-10"
+  class="port-affordance pointer-events-auto absolute z-10"
   style={stylePosition}
   data-port-node-id={nodeId}
   data-port-interface-index={interfaceIndex}
