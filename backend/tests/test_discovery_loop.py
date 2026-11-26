@@ -72,7 +72,7 @@ def stub_instance_id(monkeypatch, tmp_path):
     yield
 
 
-def _write_lab(labs_dir: Path, lab_id: str, links: list[dict]) -> str:
+def _write_lab(labs_dir: Path, lab_id: str, links: list[dict], filename: str | None = None) -> str:
     data = {
         "schema": 2,
         "id": lab_id,
@@ -95,8 +95,10 @@ def _write_lab(labs_dir: Path, lab_id: str, links: list[dict]) -> str:
         "links": links,
         "defaults": {"link_style": "orthogonal"},
     }
-    filename = f"{lab_id}.json"
-    (labs_dir / filename).write_text(json.dumps(data))
+    filename = filename or f"{lab_id}.json"
+    lab_file = labs_dir / filename
+    lab_file.parent.mkdir(parents=True, exist_ok=True)
+    lab_file.write_text(json.dumps(data))
     return filename
 
 
@@ -107,9 +109,11 @@ class _RecordingHub:
         self.events: list[tuple[str, str, dict]] = []
 
     async def publish(
-        self, lab_id: str, event_type: str, payload: dict, rev: str = ""
+        self, lab_id: str, event_type: str, payload: dict, rev: str = "", *, guard, identity
     ) -> None:
-        self.events.append((lab_id, event_type, payload))
+        async with guard as valid:
+            if valid:
+                self.events.append((lab_id, event_type, payload))
 
 
 def _patch_ws_hub(monkeypatch) -> _RecordingHub:
@@ -132,8 +136,9 @@ def _patch_settings(monkeypatch, settings) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["discovery.json", "team/project/discovery.json"])
 async def test_unknown_bridge_member_triggers_discovered_link(
-    monkeypatch, discovery_settings, stub_instance_id
+    monkeypatch, discovery_settings, stub_instance_id, filename
 ):
     """A kernel-side bridge member with no matching ``links[]`` entry must
     publish a ``discovered_link`` WS event."""
@@ -144,7 +149,7 @@ async def test_unknown_bridge_member_triggers_discovered_link(
         "from": {"node_id": 1, "interface_index": 0},
         "to": {"network_id": 1},
     }
-    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link], filename)
 
     bridge = host_net.bridge_name(lab_id, 1)
     declared_iface = host_net.veth_host_name(lab_id, 1, 0)
@@ -162,6 +167,7 @@ async def test_unknown_bridge_member_triggers_discovered_link(
 
     discovered = [e for e in hub.events if e[1] == "discovered_link"]
     assert len(discovered) == 1, hub.events
+    assert discovered[0][0] == filename
     payload = discovered[0][2]
     assert payload["lab_id"] == lab_id
     assert payload["network_id"] == 1
@@ -169,6 +175,22 @@ async def test_unknown_bridge_member_triggers_discovered_link(
     assert payload["iface"] == rogue_iface
     assert payload["peer_node_id"] == 2
     assert isinstance(payload["generation"], int) and payload["generation"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_discovery_skips_ambiguous_runtime_identity(monkeypatch, discovery_settings, stub_instance_id):
+    lab_id = "duplicate-id"
+    root = discovery_settings.LABS_DIR
+    _write_lab(root, lab_id, [], "lab.json")
+    _write_lab(root, lab_id, [], "team/lab.json")
+    rogue_iface = host_net.veth_host_name(lab_id, 1, 0)
+    monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda bridge: [rogue_iface]))
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert hub.events == []
 
 
 @pytest.mark.asyncio
@@ -308,8 +330,9 @@ async def test_discovery_loop_clamps_below_minimum(monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("filename", ["divergence.json", "team/project/divergence.json"])
 async def test_divergent_link_emits_link_divergent(
-    monkeypatch, discovery_settings, stub_instance_id
+    monkeypatch, discovery_settings, stub_instance_id, filename
 ):
     """A link declared in ``links[]`` whose veth/TAP host-side name is NOT
     present on any bridge for the lab MUST trigger a ``link_divergent`` WS
@@ -321,7 +344,7 @@ async def test_divergent_link_emits_link_divergent(
         "from": {"node_id": 1, "interface_index": 0},
         "to": {"network_id": 1},
     }
-    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link], filename)
 
     bridge = host_net.bridge_name(lab_id, 1)
     # Kernel reports an empty bridge — declared link is divergent.
@@ -337,6 +360,7 @@ async def test_divergent_link_emits_link_divergent(
 
     divergent = [e for e in hub.events if e[1] == "link_divergent"]
     assert len(divergent) == 1, hub.events
+    assert divergent[0][0] == filename
     payload = divergent[0][2]
     assert payload["link_id"] == "lnk_001"
     assert payload["lab_id"] == lab_id

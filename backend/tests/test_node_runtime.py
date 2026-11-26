@@ -2859,8 +2859,10 @@ def test_us204_hot_attach_symmetric_with_initial_attach(monkeypatch, patched_set
 
 
 @pytest.mark.asyncio
-async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_settings):
-    lab_path = patched_settings.LABS_DIR / "live-mac.json"
+@pytest.mark.parametrize("lab_filename", ["live-mac.json", "team/project/live-mac.json"])
+async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_settings, lab_filename):
+    lab_path = patched_settings.LABS_DIR / lab_filename
+    lab_path.parent.mkdir(parents=True, exist_ok=True)
     lab_data = {
         "schema": 2,
         "id": "lab-live-qemu",
@@ -2893,13 +2895,10 @@ async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_setting
     }
     lab_path.write_text(json.dumps(lab_data))
 
-    captured: list[dict] = []
+    from app.services.ws_hub import WsHub
 
-    async def _capture_publish(lab_id, event_type, payload, rev=""):
-        captured.append({"lab_id": lab_id, "type": event_type, "payload": payload, "rev": rev})
-        return SimpleNamespace(seq=1, type=event_type, rev=rev, payload=payload)
-
-    monkeypatch.setattr("app.routers.labs.ws_hub.publish", _capture_publish)
+    hub = WsHub()
+    monkeypatch.setattr(labs, "ws_hub", hub)
 
     fixed_result = {
         "state": "confirmed",
@@ -2914,21 +2913,23 @@ async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_setting
     )
 
     response = await labs.get_interface_live_mac(
-        "live-mac.json",
+        lab_filename,
         1,
         0,
         current_user=SimpleNamespace(username="admin"),
     )
 
     assert response == fixed_result
-    assert len(captured) == 1
-    event = captured[0]
-    assert event["type"] == "interface_live_mac"
-    assert event["payload"]["node_id"] == 1
-    assert event["payload"]["interface_index"] == 0
-    assert event["payload"]["state"] == "confirmed"
-    assert event["payload"]["planned_mac"] == "aa:bb:cc:dd:ee:01"
-    assert event["payload"]["live_mac"] == "aa:bb:cc:dd:ee:01"
+    events, _ = hub.replay_since(lab_filename, 0, identity=lab_data["id"])
+    assert len(events) == 1
+    event = events[0]
+    assert event.rev == lab_data["id"]
+    assert event.type == "interface_live_mac"
+    assert event.payload["node_id"] == 1
+    assert event.payload["interface_index"] == 0
+    assert event.payload["state"] == "confirmed"
+    assert event.payload["planned_mac"] == "aa:bb:cc:dd:ee:01"
+    assert event.payload["live_mac"] == "aa:bb:cc:dd:ee:01"
 
 
 # ---------------------------------------------------------------------------

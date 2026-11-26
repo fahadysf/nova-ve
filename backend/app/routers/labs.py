@@ -39,6 +39,7 @@ from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleD
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
 from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
+from app.services.lab_paths import find_runtime_lab_path, publish_runtime_event
 from app.services.lab_service import (
     HIGH_WATER_FIELDS,
     LEGACY_SCHEMA_ERROR,
@@ -46,6 +47,7 @@ from app.services.lab_service import (
     LabMembershipPathError,
     LabService,
     _lab_file_path,
+    _labs_dir,
     _normalize_relative_lab_path,
     allocate_network_id,
     allocate_node_id,
@@ -3108,7 +3110,13 @@ async def get_interface_live_mac(
     runtime_service = NodeRuntimeService()
     result = runtime_service.read_live_mac(lab_id, node_id, idx, lab_data=data)
 
-    await ws_hub.publish(
+    path = _normalize_relative_lab_path(scoped_path)
+    labs_dir = _labs_dir()
+    if await find_runtime_lab_path(labs_dir, lab_id) != path:
+        return result
+    await publish_runtime_event(
+        ws_hub,
+        labs_dir,
         lab_id,
         "interface_live_mac",
         {
@@ -3119,7 +3127,8 @@ async def get_interface_live_mac(
             "live_mac": result.get("live_mac"),
             "reason": result.get("reason"),
         },
-        rev=str(lab_id),
+        path=path,
+        rev=lab_id,
     )
 
     return result

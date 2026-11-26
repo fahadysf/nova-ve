@@ -120,8 +120,10 @@ async def test_docker_node_stopped_externally_triggers_reconcile(monkeypatch, tm
     # Capture WS publishes
     published = []
 
-    async def fake_publish(lab_id_arg, event_type, payload, rev=""):
-        published.append({"lab_id": lab_id_arg, "type": event_type, "payload": payload})
+    async def fake_publish(lab_id_arg, event_type, payload, rev="", *, guard, identity):
+        async with guard as valid:
+            if valid:
+                published.append({"lab_id": lab_id_arg, "type": event_type, "payload": payload})
 
     from app.services import ws_hub as ws_hub_mod
     monkeypatch.setattr(ws_hub_mod.ws_hub, "publish", fake_publish)
@@ -134,6 +136,7 @@ async def test_docker_node_stopped_externally_triggers_reconcile(monkeypatch, tm
 
     # WS event published
     assert len(published) == 1
+    assert published[0]["lab_id"] == f"{lab_id}.json"
     assert published[0]["type"] == "node_status_reconciled"
     assert published[0]["payload"]["node_id"] == node_id
     assert published[0]["payload"]["status"] == 0
@@ -299,7 +302,7 @@ async def test_qemu_node_started_externally_triggers_reconcile(monkeypatch, tmp_
 
     published = []
 
-    async def fake_publish(lab_id_arg, event_type, payload, rev=""):
+    async def fake_publish(lab_id_arg, event_type, payload, rev="", **kwargs):
         published.append({"type": event_type, "payload": payload})
 
     from app.services import ws_hub as ws_hub_mod
