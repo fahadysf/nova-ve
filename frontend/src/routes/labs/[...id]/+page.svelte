@@ -22,6 +22,7 @@
   } from 'lucide-svelte';
   import { authStore } from '$lib/stores/auth';
   import { apiGetData, apiRequest, ApiError } from '$lib/api';
+  import { createLabRefreshQueue } from '$lib/services/labRefreshQueue';
   import { toastStore } from '$lib/stores/toasts';
   import { buildExternalConsoleUrl, externalConsoleStore } from '$lib/stores/externalConsole';
   import { SvelteFlowProvider } from '@xyflow/svelte';
@@ -148,7 +149,9 @@
     | { startX: number; startY: number; originX: number; originY: number; windowId: number | null }
     | null = null;
   let resizeState: ConsoleResize | null = null;
-  let labRefreshInFlight = false;
+  let routeEpoch = 0;
+  let labRefreshQueue: ReturnType<typeof createLabRefreshQueue> | undefined;
+  let refreshFailureReported = false;
 
   const compactIconButtonClass =
     'inline-flex h-7 w-7 items-center justify-center rounded-md border border-gray-800 bg-gray-950/80 text-gray-300 transition hover:border-blue-500/50 hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
@@ -271,7 +274,11 @@
   });
   // Moving to another page inside the app destroys this component instead
   // of unloading the page.
-  onDestroy(reportOpenConsolesClosed);
+  onDestroy(() => {
+    routeEpoch += 1;
+    labRefreshQueue?.close();
+    reportOpenConsolesClosed();
+  });
 
   onMount(async () => {
     consoleMode = readConsoleModeCookie();
@@ -284,6 +291,10 @@
     const routeKey = isLabIndexRoute ? 'labs-index' : `lab:${labId}`;
     if ($authStore.authenticated && routeKey !== lastLoadedRoute) {
       lastLoadedRoute = routeKey;
+      routeEpoch += 1;
+      labRefreshQueue?.close();
+      labRefreshQueue = undefined;
+      refreshFailureReported = false;
       legacyNodes = [];
       legacyInspectionUnavailable = [];
       reconcileRequest += 1;
@@ -300,11 +311,13 @@
   }
 
   async function loadLabIndex() {
+    const epoch = routeEpoch;
     loading = true;
     error = '';
 
     try {
       const data = await apiGetData<FolderListing>('/folders/');
+      if (epoch !== routeEpoch || !isLabIndexRoute) return;
       rootLabs = [...(data.labs || [])].sort((left, right) => {
         const leftPreferred = left.path === preferredLabPath;
         const rightPreferred = right.path === preferredLabPath;
@@ -316,67 +329,90 @@
       labState.reset();
       consoleWorkspace = null;
     } catch (e) {
-      error = e instanceof ApiError ? e.message : 'Unable to load labs.';
+      if (epoch === routeEpoch) {
+        error = e instanceof ApiError ? e.message : 'Unable to load labs.';
+      }
     } finally {
-      loading = false;
+      if (epoch === routeEpoch) loading = false;
     }
   }
 
-  async function loadLab(options: { blocking?: boolean } = {}) {
-    const blocking = options.blocking ?? true;
-    if (labRefreshInFlight) return;
-    labRefreshInFlight = true;
+  function loadLab({ blocking = true, reconcileRuntime = true } = {}) {
+    const requestedLab = labId;
+    const epoch = routeEpoch;
+    labRefreshQueue ??= createLabRefreshQueue((options) =>
+      loadLabSnapshot(requestedLab, epoch, !!options.blocking, !!options.reconcileRuntime)
+    );
+    return labRefreshQueue.request({ blocking, reconcileRuntime });
+  }
+
+  async function loadLabSnapshot(
+    requestedLab: string, epoch: number, blocking: boolean, reconcileRuntime: boolean
+  ) {
+    const isCurrent = () => epoch === routeEpoch && requestedLab === labId;
+    if (!isCurrent()) return;
+    const fetchOptions = { suppressToast: !blocking && !reconcileRuntime };
     if (blocking) {
       loading = true;
       error = '';
     }
 
     try {
-      // Fire-and-forget host-state reconciliation — provisions any missing
-      // Linux bridges for this lab's networks. Restored labs and labs whose
-      // bridges were lost across a host reboot/manual cleanup find their
-      // host state already prepared by the time the user starts a node or
-      // creates a link.
-      const requestedLab = labId;
-      const requestId = ++reconcileRequest;
-      apiRequest<{
-        legacy_nodes?: { node_id: number; name: string }[];
-        legacy_inspection_unavailable?: { node_id: number; name: string }[];
-      }>(`/labs/${labId}/runtime/reconcile`, {
-        method: 'POST',
-        suppressToast: true
-      }).then((response) => {
-        if (requestedLab === labId && requestId === reconcileRequest) {
-          legacyNodes = response.data?.legacy_nodes ?? [];
-          legacyInspectionUnavailable = response.data?.legacy_inspection_unavailable ?? [];
-        }
-      }).catch(() => {
-        /* best-effort; surfacing the failure in a toast would be noisy
-           on every lab open and isn't actionable for the user. */
+      if (reconcileRuntime) {
+        // Reconcile restored labs on open. WebSocket refreshes only read state.
+        const requestId = ++reconcileRequest;
+        apiRequest<{
+          legacy_nodes?: { node_id: number; name: string }[];
+          legacy_inspection_unavailable?: { node_id: number; name: string }[];
+        }>(`/labs/${requestedLab}/runtime/reconcile`, {
+          method: 'POST',
+          suppressToast: true
+        }).then((response) => {
+          if (isCurrent() && requestId === reconcileRequest) {
+            legacyNodes = response.data?.legacy_nodes ?? [];
+            legacyInspectionUnavailable = response.data?.legacy_inspection_unavailable ?? [];
+          }
+        }).catch(() => {
+          /* Best-effort runtime reconciliation. */
+        });
+      }
+
+      function readSnapshot() {
+        const links = apiGetData<Link[]>(`/labs/${requestedLab}/links`, fetchOptions);
+        return Promise.all([
+          apiGetData<LabMeta>(`/labs/${requestedLab}`, fetchOptions),
+          apiGetData<Record<string, NodeData>>(`/labs/${requestedLab}/nodes`, fetchOptions),
+          apiGetData<Record<string, NetworkData>>(`/labs/${requestedLab}/networks?include_hidden=true`, fetchOptions),
+          apiGetData<TopologyLink[]>(`/labs/${requestedLab}/topology`, fetchOptions),
+          // A transient background lookup failure must not erase existing links.
+          blocking ? links.catch(() => [] as Link[]) : links
+        ]);
+      }
+      const [meta, nodeData, networkData, topologyData, linksData] = await readSnapshot().catch((failure) => {
+        if (fetchOptions.suppressToast && isCurrent() &&
+          (!(failure instanceof ApiError) || failure.statusCode >= 500)) return readSnapshot();
+        throw failure;
       });
+      await canvasRef?.waitForNodeDrag();
+      if (!isCurrent()) return;
+      // A local mutation may have completed while this snapshot was in flight.
+      if (
+        $labState.labId === requestedLab && $labState.meta?.id === meta.id &&
+        typeof meta.revision === 'number' && typeof $labState.revision === 'number' &&
+        meta.revision < $labState.revision
+      ) return;
 
-      const [meta, nodeData, networkData, topologyData, linksData] = await Promise.all([
-        apiGetData<LabMeta>(`/labs/${labId}`),
-        apiGetData<Record<string, NodeData>>(`/labs/${labId}/nodes`),
-        apiGetData<Record<string, NetworkData>>(`/labs/${labId}/networks?include_hidden=true`),
-        apiGetData<TopologyLink[]>(`/labs/${labId}/topology`),
-        // US-082: v2 links[] feeds the canvas edge derivation. Catch errors so
-        // an isolated /links failure doesn't block the rest of the lab load.
-        apiGetData<Link[]>(`/labs/${labId}/links`).catch(() => [] as Link[])
-      ]);
-
-      // One owner (#245): the snapshot lands in labState; the canvas and
-      // this page both read it. defaults stays whatever the store holds —
-      // the parallel GETs do not fetch it. Positions with a pending layout
-      // PUT (e.g. re-queued after a failed flush) survive the snapshot.
+      // Positions with a pending layout PUT survive the snapshot.
       labState.setLabId(labId);
+      refreshFailureReported = false;
       labState.applySnapshot(
         {
           meta,
           nodes: nodeData,
           networks: networkData,
           topology: topologyData ?? [],
-          links: linksData ?? []
+          links: linksData ?? [],
+          defaults: { link_style: meta.defaults?.link_style ?? 'orthogonal' }
         },
         canvasRef ? canvasRef.pendingLayoutIds() : undefined
       );
@@ -400,16 +436,19 @@
           : null;
       }
     } catch (e) {
+      if (!isCurrent()) return;
       if (blocking) {
         error = e instanceof ApiError ? e.message : 'Unable to load the lab.';
-      } else {
+      } else if (reconcileRuntime) {
         toastStore.push(e instanceof ApiError ? e.message : 'Unable to refresh the lab state.');
+      } else if (!refreshFailureReported) {
+        refreshFailureReported = true;
+        toastStore.push('Could not refresh live lab changes. Use Refresh to reload the lab.', 'error');
       }
     } finally {
-      if (blocking) {
+      if (blocking && isCurrent()) {
         loading = false;
       }
-      labRefreshInFlight = false;
     }
   }
 
@@ -1390,6 +1429,7 @@
       />
       <div bind:this={canvasContainerEl} class="min-w-0 flex-1 overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/70">
         <SvelteFlowProvider>
+          {#key labId}
           <TopologyCanvas
             bind:this={canvasRef}
             labId={labId}
@@ -1404,7 +1444,9 @@
             on:console-maximize={(event) => handleConsoleMaximizeFromBar(event.detail.tabId)}
             on:changed={refreshLabFromCanvas}
             on:link-change={handleLinkChange}
+            on:snapshot-needed={() => void loadLab({ blocking: false, reconcileRuntime: false })}
           />
+          {/key}
         </SvelteFlowProvider>
       </div>
 

@@ -342,6 +342,47 @@ def test_subscription_requires_a_lab_file(monkeypatch, lab_files, path):
     assert path not in hub._labs
 
 
+def test_reconnect_with_cursor_from_restarted_hub_resnapshots(monkeypatch, lab_files):
+    _fresh_hub()
+    _patch_auth_ok(monkeypatch)
+    lab = "team/restart.json"
+    lab_files(lab)
+    client = TestClient(app)
+    client.cookies.update(_cookies_with_session())
+    with client.websocket_connect(f"/ws/labs/{lab}?last_seq=99") as ws:
+        assert ws.receive_json() == {"type": "hello", "seq": 0}
+        assert ws.receive_json() == {"type": "force_resnapshot"}
+        snapshot = ws.receive_json()
+        assert snapshot["type"] == "lab_topology"
+        assert snapshot["seq"] == 0
+        assert snapshot["payload"]["id"] == lab
+
+
+def test_subscription_catches_event_published_during_replay(monkeypatch, lab_files):
+    hub = _fresh_hub()
+    _patch_auth_ok(monkeypatch)
+    lab = "team/replay.json"
+    lab_files(lab)
+    _publish(hub, lab, "node_created", {"node_id": 1})
+    subscribe = hub.subscribe
+    attempts = 0
+
+    async def subscribe_after_publish(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            await hub.publish(lab, "network_created", {"network": {"id": 1}})
+        return await subscribe(*args, **kwargs)
+
+    monkeypatch.setattr(hub, "subscribe", subscribe_after_publish)
+    client = TestClient(app)
+    client.cookies.update(_cookies_with_session())
+    with client.websocket_connect(f"/ws/labs/{lab}") as ws:
+        assert ws.receive_json() == {"type": "hello", "seq": 1}
+        assert ws.receive_json()["type"] == "node_created"
+        assert ws.receive_json()["type"] == "network_created"
+
+
 def test_ring_evicts_oldest():
     """Publishing 250 events to a 200-ring leaves exactly 200 events (seq 51..250)."""
     hub = _fresh_hub()

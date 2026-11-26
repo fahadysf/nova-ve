@@ -208,6 +208,30 @@ describe('labApi.createLayoutDebouncer', () => {
     expect(debouncer.pendingPositionIds().nodeIds.has(1)).toBe(false);
   });
 
+  it('serializes layout writes and keeps both positions protected as they drain', async () => {
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const first = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const second = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    const request = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const debouncer = createLayoutDebouncer('demo.json', { request });
+
+    debouncer.pushNodePosition(1, 10, 10);
+    const firstFlush = debouncer.flush();
+    debouncer.pushNetworkPosition(2, 20, 20);
+    const secondFlush = debouncer.flush();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(debouncer.pendingPositionIds()).toEqual({ nodeIds: new Set([1]), networkIds: new Set([2]) });
+
+    releaseFirst();
+    await firstFlush;
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(debouncer.pendingPositionIds()).toEqual({ nodeIds: new Set(), networkIds: new Set([2]) });
+    releaseSecond();
+    await secondFlush;
+    expect(debouncer.pending()).toBe(false);
+  });
+
   it('flushKeepalive fires the pending payload as a keepalive fetch', async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal('fetch', fetchMock);

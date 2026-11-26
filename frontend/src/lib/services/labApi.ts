@@ -254,6 +254,9 @@ export function createLayoutDebouncer(
   }
 
   async function send(): Promise<void> {
+    // Use the revision from the previous write and keep its IDs visible
+    // until that write finishes.
+    while (inflight) await inflight;
     if (!hasContent(state)) {
       return;
     }
@@ -266,7 +269,7 @@ export function createLayoutDebouncer(
       nodeIds: new Set((payload.nodes ?? []).map((entry) => entry.id)),
       networkIds: new Set((payload.networks ?? []).map((entry) => entry.id)),
     };
-    inflight = (async () => {
+    const apply = async () => {
       try {
         const result = await requester(path, {
           method: 'PUT',
@@ -283,12 +286,15 @@ export function createLayoutDebouncer(
         if (opts.onError) {
           opts.onError(error);
         }
-      } finally {
-        inflight = null;
-        inflightIds = { nodeIds: new Set(), networkIds: new Set() };
       }
-    })();
-    await inflight;
+    };
+    inflight = apply();
+    try {
+      await inflight;
+    } finally {
+      inflight = null;
+      inflightIds = { nodeIds: new Set(), networkIds: new Set() };
+    }
   }
 
   function keepaliveUrl(): string {
@@ -316,9 +322,6 @@ export function createLayoutDebouncer(
     async flush() {
       clearTimer();
       await send();
-      if (inflight) {
-        await inflight;
-      }
     },
     flushKeepalive() {
       if (!hasContent(state)) {

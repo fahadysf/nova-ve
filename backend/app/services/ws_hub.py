@@ -69,10 +69,13 @@ class WsHub:
 
         return event
 
-    async def subscribe(self, lab_id: str, ws: WebSocket) -> None:
+    async def subscribe(self, lab_id: str, ws: WebSocket, *, after_seq: int | None = None) -> bool:
         async with self._lock:
             state = self._get_or_create(lab_id)
+            if after_seq is not None and after_seq != state.next_seq - 1:
+                return False
             state.subscribers.add(ws)
+            return True
 
     async def unsubscribe(self, lab_id: str, ws: WebSocket) -> None:
         async with self._lock:
@@ -86,9 +89,11 @@ class WsHub:
         - If last_seq + 1 is in the ring, return the slice from that point.
         - If ring is non-empty and last_seq < head of ring - 1, ring overflow:
           return ([], True) to trigger force_resnapshot.
-        - If ring is empty or last_seq == 0 and ring is empty, return ([], False).
+        - If last_seq is ahead of this hub, its sequence was reset.
         """
         state = self._labs.get(lab_id)
+        if last_seq > self.head_seq(lab_id):
+            return [], True
         if not state or not state.events:
             return [], False
 
