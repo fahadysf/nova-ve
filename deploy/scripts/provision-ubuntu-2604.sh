@@ -356,6 +356,56 @@ install_nova_ve_net_helper() {
   rm -f "${sudoers_tmp}"
 }
 
+ensure_qemu_kvm_ksm() {
+  # Kernel Samepage Merging keeps hosts dense: guests share identical pages
+  # instead of each paying the full private copy. Stock Ubuntu ships the
+  # daemon off, and the qemu-kvm boot task keys off /etc/default/qemu-kvm:
+  # with the default KSM_ENABLED=AUTO on a virtualized host it forces
+  # run=0 again at every boot. Persist KSM_ENABLED=1 so the stock task does
+  # not undo us, and install the nova-ve tuner unit (measured scan rates,
+  # run last) so the scanner is on before the backend starts its first node.
+  local ksm_src="${REPO_ROOT}/deploy/scripts/nova-ve-ksm.sh"
+  local ksm_dst="/opt/nova-ve/bin/nova-ve-ksm.sh"
+  local unit_src="${REPO_ROOT}/deploy/scripts/nova-ve-ksm.service.tpl"
+  local unit_dst="/etc/systemd/system/nova-ve-ksm.service"
+  local defaults="/etc/default/qemu-kvm"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "+ ensure ${defaults} has KSM_ENABLED=1"
+    echo "+ install -m 0755 -o root -g root ${ksm_src} ${ksm_dst}"
+    echo "+ install -m 0644 -o root -g root ${unit_src} ${unit_dst}"
+    echo "+ systemctl daemon-reload"
+    echo "+ systemctl enable nova-ve-ksm.service"
+    echo "+ systemctl mask ksmtuned.service"
+    echo "+ systemctl restart qemu-kvm.service"
+    echo "+ systemctl restart nova-ve-ksm.service"
+    return 0
+  fi
+
+  if [[ -f "${defaults}" ]]; then
+    if grep -qE "^KSM_ENABLED=" "${defaults}"; then
+      sed -i -E "s|^KSM_ENABLED=.*|KSM_ENABLED=1|" "${defaults}"
+    else
+      printf 'KSM_ENABLED=1\n' >> "${defaults}"
+    fi
+  else
+    printf '# KSM: lab density lever; scan rates tuned by nova-ve-ksm (installed alongside).\nKSM_ENABLED=1\n' > "${defaults}"
+    chmod 0644 "${defaults}"
+  fi
+
+  install -d -o root -g root -m 0755 /opt/nova-ve/bin
+  install -m 0755 -o root -g root "${ksm_src}" "${ksm_dst}"
+  install -m 0644 -o root -g root "${unit_src}" "${unit_dst}"
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable nova-ve-ksm.service 2>/dev/null || true
+  # ksmtuned turns KSM off when memory is plentiful — the wrong shape for a
+  # lab host. Masking here keeps the tuner as the only voice on the run knob
+  # even if a later package pull reintroduces ksmtuned.
+  systemctl mask ksmtuned.service 2>/dev/null || true
+  systemctl restart qemu-kvm.service 2>/dev/null || true
+  systemctl restart nova-ve-ksm.service 2>/dev/null || true
+}
+
 reconcile_nat_cloud_runtime() {
   local helper="/opt/nova-ve/bin/nova-ve-net.py"
 
@@ -1156,6 +1206,7 @@ run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0755 /var/lib/nova-ve/labs
 run install -d -o "${APP_OWNER}" -g "${APP_GROUP}" -m 0700 /var/lib/nova-ve/iourc
 run chown -R "${APP_OWNER}:${APP_GROUP}" /var/lib/nova-ve
 install_nova_ve_net_helper
+ensure_qemu_kvm_ksm
 run systemctl enable docker
 run systemctl restart docker
 run usermod -aG docker "${APP_OWNER}"

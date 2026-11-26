@@ -15,6 +15,7 @@ from app.services.node_runtime_service import NodeRuntimeService
 import ipaddress
 import json
 import logging
+import os
 import platform
 import time
 from pathlib import Path
@@ -109,6 +110,59 @@ async def healthcheck(
     }
 
 
+KSM_SYSFS = Path("/sys/kernel/mm/ksm")
+
+
+def _ksm_facts(base_path: Path | None = None) -> dict:
+    """Live Kernel Samepage Merging state from the host sysfs interface.
+
+    QEMU marks guest RAM mergeable itself, so the only host knob is the
+    daemon scan: ``run`` starts it, ``pages_sharing``/``pages_shared`` say
+    how much it is saving. Never raises — status must not 500 because the
+    kernel lacks KSM or /sys is unreadable.
+    """
+    base = base_path or KSM_SYSFS
+    if not base.is_dir():
+        return {"available": False}
+
+    def read(name: str) -> int | None:
+        try:
+            return int((base / name).read_text().strip())
+        except (OSError, ValueError):
+            return None
+
+    run = read("run")
+    sharing, shared = read("pages_sharing"), read("pages_shared")
+    page_size = 4096
+    try:
+        page_size = os.sysconf("SC_PAGE_SIZE")  # type: ignore[attr-defined]
+    except (AttributeError, ValueError, OSError, RuntimeError):
+        pass
+
+    facts: dict = {
+        "available": True,
+        "enabled": run == 1,
+        "pages_to_scan": read("pages_to_scan"),
+        "sleep_millisecs": read("sleep_millisecs"),
+        "pages_sharing": sharing,
+        "pages_shared": shared,
+    }
+    if sharing is not None and shared is not None and shared > 0:
+        facts["dedup_ratio"] = round(sharing / shared, 1)
+        facts["saved_gb"] = round((sharing - shared) * page_size / 1024**3, 2)
+    if run != 1:
+        facts["note"] = "KSM is OFF — lab hosts waste most of their dedup capacity this way"
+    return facts
+
+
+def _ksm_status() -> str:
+    """Compact status string: enabled/disabled/unsupported."""
+    facts = _ksm_facts()
+    if not facts.get("available"):
+        return "unsupported"
+    return "enabled" if facts.get("enabled") else "disabled"
+
+
 @router.get("/status")
 async def get_status(
     current_user: UserRead = Depends(get_current_user),
@@ -118,6 +172,7 @@ async def get_status(
     disk = psutil.disk_usage("/")
     runtime_counts = NodeRuntimeService().runtime_counts()
     settings = get_settings()
+    ksm_facts = _ksm_facts()
     return {
         "code": 200,
         "status": "success",
@@ -127,7 +182,11 @@ async def get_status(
             # #278: the real distro QEMU version (was a hardcoded 8.0.0).
             "qemu_version": qemu_versions.default_version(),
             "uksm": "unsupported",
-            "ksm": "unsupported",
+            # Live host KSM (was hardcoded "unsupported"); see _ksm_facts.
+            "ksm": "unsupported" if not ksm_facts.get("available") else (
+                "enabled" if ksm_facts.get("enabled") else "disabled"
+            ),
+            "ksm_facts": ksm_facts,
             "cpulimit": "enabled",
             "cpu": str(psutil.cpu_count(logical=False)),
             "vCPU": str(psutil.cpu_count(logical=True)),

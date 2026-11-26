@@ -133,6 +133,32 @@ them only when an operator has a specific reason to deviate.
 | --- | --- | --- | --- |
 | `NOVA_VE_DISCOVERY_CADENCE_SECONDS` | `30` | `[5, 300]` | Period of the discovery loop that walks each lab network's Linux bridge (`bridge link show master <bridge>`) plus container netns and cross-references against `links[]`. Discrepancies emit a `discovered_link` WS event consumed by the canvas overlay. Out-of-range values fail backend startup. Also editable in the UI (System → Settings); edits persist to `system-settings.json` and apply at the next backend restart (`systemctl restart nova-ve-backend.service` — the unit has no reload action). |
 | `NOVA_VE_NAT_CLOUD_POOL` | `10.255.0.0/16` | IPv4 CIDR, prefix `/0`-`/24` | Root pool for auto-allocating one `/24` per NAT-Cloud network. |
+| `NOVA_VE_KSM_PAGES_TO_SCAN` | `1250` | positive int | KSM scanner pages per wake (see below). |
+| `NOVA_VE_KSM_SLEEP_MS` | `10` | positive int | KSM scanner sleep between wakes, in milliseconds (see below). |
+| `NOVA_VE_KSM_RUN` | `1` | `0` or `1` | Master KSM switch (see below). |
+
+## Kernel Samepage Merging (KSM)
+
+Running labs are the ideal case for KSM: many guests boot the same images, so
+identical guest pages can be deduplicated instead of each guest paying a
+private copy. Stock Ubuntu ships the daemon off, so provisioning turns it on.
+
+- QEMU marks guest RAM mergeable itself; no node or template change is needed.
+  Guests started before KSM was enabled deduplicate once the daemon runs, so
+  no restart is required for existing nodes to benefit.
+- `provision-ubuntu-2604.sh` persists `KSM_ENABLED=1` in
+  `/etc/default/qemu-kvm` (otherwise the stock boot task forces `run=0` again
+  at every boot), installs `/opt/nova-ve/bin/nova-ve-ksm.sh` with the
+  `nova-ve-ksm.service` boot unit (tuned scanner rates, `run` set last,
+  `ksmtuned` masked so nothing else toggles KSM), and enables the unit after
+  `qemu-kvm.service` and before `nova-ve-backend.service`.
+- The `NOVA_VE_KSM_*` overrides above are read from
+  `/etc/nova-ve/nova-ve.env` by the tuner script. Remove the overrides (or set
+  `NOVA_VE_KSM_RUN=0`) and restart `nova-ve-ksm.service` to turn KSM back off.
+- `/api/status` reports the live state in `ksm` plus `ksm_facts`
+  (`enabled`, `pages_sharing`/`pages_shared`, `dedup_ratio`, `saved_gb`).
+  `smoke-check.sh` fails when the KSM interface exists but the daemon is not
+  scanning.
 
 ## Health And Smoke Checks
 
