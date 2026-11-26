@@ -737,6 +737,59 @@ async def test_folder_mutation_waits_for_nested_lab_writer(settings, monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_folder_rename_waits_for_new_lab_database_commit(settings, monkeypatch):
+    committing = asyncio.Event()
+    allow_commit = asyncio.Event()
+    rename_started = asyncio.Event()
+    visible_labs = []
+
+    class SuspendedCreateDb(_FakeDb):
+        def add(self, row):
+            self.row = row
+
+        async def commit(self):
+            committing.set()
+            await allow_commit.wait()
+            visible_labs.append(self.row)
+
+    async def list_labs(_service):
+        return list(visible_labs)
+
+    async def no_audit(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(LabService, "list_labs", list_labs)
+    monkeypatch.setattr(folders.audit_service, "record", no_audit)
+
+    async def rename():
+        rename_started.set()
+        return await folders.rename_folder(
+            "group", FolderRenameRequest(path="renamed"), current_user=ADMIN, db=_FakeDb(),
+        )
+
+    create_task = asyncio.create_task(
+        LabService(SuspendedCreateDb()).create_lab(owner=ADMIN.username, name="child", path="group/nested")
+    )
+    rename_task = None
+    try:
+        await asyncio.wait_for(committing.wait(), timeout=3)
+        rename_task = asyncio.create_task(rename())
+        await asyncio.wait_for(rename_started.wait(), timeout=3)
+        await asyncio.sleep(0)
+        assert (settings.LABS_DIR / "group" / "nested" / "child.json").is_file()
+        assert not (settings.LABS_DIR / "renamed").exists()
+    finally:
+        allow_commit.set()
+        row = await asyncio.wait_for(create_task, timeout=5)
+        if rename_task is not None:
+            result = await asyncio.wait_for(rename_task, timeout=5)
+
+    assert result["code"] == 200
+    assert row.filename == "renamed/nested/child.json"
+    assert (settings.LABS_DIR / row.filename).is_file()
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_status_write_waits_off_the_loop_and_keeps_an_edit(settings, monkeypatch):
     _seed(settings, nodes={"1": {**_docker_node(1, "n1"), "status": 2}})
     NodeRuntimeService.reset_registry()

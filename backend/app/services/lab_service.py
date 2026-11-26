@@ -22,7 +22,7 @@ from app.services.cloud_inventory_service import (
     nat_cloud_ipam_lock_async,
 )
 from app.services.console_recording import RECORDINGS_FOLDER
-from app.services.lab_lock import lab_lock, lab_lock_async
+from app.services.lab_lock import folder_namespace_lock_async, lab_lock, lab_lock_async
 from app.services.shared_network_service import (
     assert_no_external_members_for_scope,
     is_member,
@@ -875,9 +875,6 @@ class LabService:
         """Create a new lab: DB record + JSON file."""
         lab_id = uuid.uuid4()
         relative_path = build_relative_lab_path(name=name, path=path, filename=filename)
-        filepath = _lab_file_path(relative_path)
-        if filepath.exists():
-            raise FileExistsError(f"Lab file already exists: {relative_path}")
 
         meta = {
             "name": name,
@@ -893,10 +890,6 @@ class LabService:
             "sat": meta_fields.get("sat", "-1"),
         }
         lab_json = _empty_lab_json(str(lab_id), meta)
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        with open(filepath, "w") as f:
-            json.dump(lab_json, f, indent=2)
-
         db_meta = {k: v for k, v in meta.items() if hasattr(LabMeta, k) and k != "name"}
         lab = LabMeta(
             id=lab_id,
@@ -906,9 +899,23 @@ class LabService:
             path=_api_lab_path(relative_path),
             **db_meta,
         )
-        self.db.add(lab)
-        await self.db.commit()
-        await self.db.refresh(lab)
+
+        async def write_and_commit() -> None:
+            filepath = _lab_file_path(relative_path)
+            if filepath.exists():
+                raise FileExistsError(f"Lab file already exists: {relative_path}")
+            _replace_json(filepath, lab_json)
+            self.db.add(lab)
+            await self.db.commit()
+            await self.db.refresh(lab)
+
+        labs_dir = get_settings().LABS_DIR
+        async with folder_namespace_lock_async(labs_dir, shared=True):
+            _lab_file_path(relative_path)
+            async with lab_lock_async(relative_path, labs_dir, namespace=False):
+                _, cancelled = await wait_for_mutation(asyncio.create_task(write_and_commit()))
+        if cancelled:
+            raise asyncio.CancelledError
         return lab
 
     async def update_lab(
