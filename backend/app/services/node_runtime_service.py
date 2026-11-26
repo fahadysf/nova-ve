@@ -35,6 +35,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -401,7 +402,7 @@ class NodeRuntimeService:
         lab_id = self._lab_id(lab_data)
         node = self._node_data(lab_data, node_id)
         key = self._key(lab_id, node_id)
-        runtime = self._runtime_record(lab_id, node_id)
+        runtime = self._runtime_record(lab_id, node_id, require_valid=True)
         if not runtime and node.get("type") == "docker":
             runtime = self._reconcile_docker_node_runtime(lab_data, node)
         if runtime:
@@ -776,7 +777,7 @@ class NodeRuntimeService:
 
     def stop_node(self, lab_data: dict[str, Any], node_id: int) -> None:
         lab_id = self._lab_id(lab_data)
-        runtime = self._runtime_record(lab_id, node_id)
+        runtime = self._runtime_record(lab_id, node_id, require_valid=True)
         if not runtime:
             node = self._node_data(lab_data, node_id)
             if node.get("type") == "docker":
@@ -839,11 +840,20 @@ class NodeRuntimeService:
         """Every registry record whose workload is alive right now.
 
         Shared by the registry aggregations below. Dead records are dropped
-        from the registry on the way (the ``_runtime_record`` side effect).
+        from the registry on the way (the ``_runtime_record`` side effect);
+        a record carrying invalid liveness data is skipped (#356) so one bad
+        runtime file cannot take the whole tally down.
         """
         live: list[dict[str, Any]] = []
         for runtime in list(self._registry.values()):
-            record = self._runtime_record(runtime["lab_id"], runtime["node_id"])
+            lab_id, node_id = runtime["lab_id"], runtime["node_id"]
+            try:
+                record = self._runtime_record(lab_id, node_id)
+            except (TypeError, ValueError, OverflowError):
+                _logger.warning(
+                    "Ignoring invalid liveness data in runtime file %r", self._state_path(lab_id, node_id).name
+                )
+                continue
             if record:
                 live.append(record)
         return live
@@ -1148,9 +1158,15 @@ class NodeRuntimeService:
                 continue
 
             kind = runtime.get("kind", "")
-            is_alive = await asyncio.get_running_loop().run_in_executor(
-                None, cls._check_alive_sync, runtime, kind, settings
-            )
+            try:
+                is_alive = await asyncio.get_running_loop().run_in_executor(
+                    None, cls._check_alive_sync, runtime, kind, settings
+                )
+            except (TypeError, ValueError, OverflowError):
+                _logger.warning(
+                    "Ignoring invalid liveness data in runtime file %r", f"{lab_id}-{node_id}.json"
+                )
+                continue
 
             # status: 2 = running, 0 = stopped
             expected_status = 2 if is_alive else 0
@@ -1910,14 +1926,44 @@ class NodeRuntimeService:
         except OSError:
             pass
 
+    def _read_runtime_record(self, state_path: Path, *, require_valid: bool = False) -> dict[str, Any] | None:
+        try:
+            runtime = json.loads(state_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, RecursionError):
+            runtime = None
+
+        if (
+            isinstance(runtime, dict)
+            and isinstance(runtime.get("lab_id"), str)
+            and runtime["lab_id"].strip()
+            and type(runtime.get("node_id")) is int
+            and state_path == self._state_path(runtime["lab_id"], runtime["node_id"])
+            and type(runtime.get("kind")) in (str, type(None))
+            and (runtime.get("pid") is None or type(runtime["pid"]) is int and runtime["pid"] >= 0)
+            and (
+                runtime.get("pid_create_time") is None
+                or type(runtime["pid_create_time"]) in (int, float)
+                and -sys.float_info.max <= runtime["pid_create_time"] <= sys.float_info.max
+            )
+            and type(runtime.get("container_name")) in (str, type(None))
+            and "\0" not in (runtime.get("container_name") or "")
+        ):
+            return runtime
+
+        _logger.warning("Ignoring malformed runtime state file %r", state_path.name)
+        if require_valid:
+            raise NodeRuntimeError("Repair the malformed runtime state before changing this node.")
+        return None
+
     def _load_registry(self) -> None:
         with self._lock:
             if self._loaded:
                 return
             for state_file in self.runtime_dir.glob("*.json"):
-                try:
-                    runtime = json.loads(state_file.read_text())
-                except (json.JSONDecodeError, OSError):
+                runtime = self._read_runtime_record(state_file)
+                if runtime is None:
                     continue
                 key = self._key(runtime["lab_id"], runtime["node_id"])
                 self._registry[key] = runtime
@@ -1945,13 +1991,16 @@ class NodeRuntimeService:
         lab_id: str,
         node_id: int,
         include_stopped: bool = False,
+        *,
+        require_valid: bool = False,
     ) -> dict[str, Any] | None:
         key = self._key(lab_id, node_id)
         runtime = self._registry.get(key)
         if not runtime:
-            state_path = self._state_path(lab_id, node_id)
-            if state_path.exists():
-                runtime = json.loads(state_path.read_text())
+            runtime = self._read_runtime_record(
+                self._state_path(lab_id, node_id), require_valid=require_valid
+            )
+            if runtime is not None:
                 with self._lock:
                     self._registry[key] = runtime
 
