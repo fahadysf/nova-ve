@@ -6,7 +6,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from app.database import get_db
 from app.routers.labs import _scoped_lab_path
 from app.services.ws_hub import ws_hub
-from app.services.lab_service import LabService
+from app.services.lab_service import LabService, _normalize_relative_lab_path
 from app.services.node_runtime_service import NodeRuntimeService
 
 # WebSocket routes don't carry HTTP response codes the way REST routes do
@@ -15,7 +15,7 @@ from app.services.node_runtime_service import NodeRuntimeService
 router = APIRouter(prefix="/ws", tags=["websocket"])
 
 
-@router.websocket("/labs/{lab}")
+@router.websocket("/labs/{lab:path}")
 async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
     # FastAPI Depends-based auth is unavailable for WebSocket; resolve manually from cookies.
     user = None
@@ -40,9 +40,16 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
 
     # #327: the event stream and resnapshot carry the lab's topology, so the
     # caller must be able to open the lab, as on the HTTP lab routes.
+    # #330: subscribe, replay and resnapshot under the same normalized key
+    # publishers use, not the raw route value.
     try:
-        _scoped_lab_path(user, lab, treat_as_absolute=True)
-    except PermissionError:
+        # ``{lab:path}`` also matches an empty path. A folder-scoped user
+        # would otherwise be subscribed to their folder itself.
+        if not lab.strip().replace("\\", "/").strip("/"):
+            raise ValueError("empty lab path")
+        scoped = _scoped_lab_path(user, lab, treat_as_absolute=True)
+        lab = _normalize_relative_lab_path(scoped)
+    except (PermissionError, ValueError):
         await websocket.close(code=1008)
         return
 
