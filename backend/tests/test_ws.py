@@ -180,6 +180,80 @@ def test_seq_monotonic_per_lab():
     assert hub.head_seq("B") == 2
 
 
+def test_nested_folder_lab_connects_and_replays(monkeypatch):
+    """#330: a lab inside a folder must connect and replay its events.
+
+    Publishers key the hub by the normalized lab path, so the socket for
+    ``team/project/lab.json`` must subscribe under that same key.
+    """
+    hub = _fresh_hub()
+    _patch_auth_ok(monkeypatch)
+    lab = "team/project/lab.json"
+
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(hub.publish(lab, "node_created", {"x": 1}))
+    finally:
+        loop.close()
+
+    client = TestClient(app, raise_server_exceptions=True)
+    with client.websocket_connect(
+        f"/ws/labs/{lab}?last_seq=0", cookies=_cookies_with_session()
+    ) as ws:
+        hello = ws.receive_json()
+        assert hello["type"] == "hello"
+        assert hello["seq"] == 1
+        ev = ws.receive_json()
+        assert ev["type"] == "node_created"
+
+        loop2 = asyncio.new_event_loop()
+        try:
+            loop2.run_until_complete(hub.publish(lab, "node_created", {"x": 2}))
+        finally:
+            loop2.close()
+        assert ws.receive_json()["seq"] == 2
+
+
+def test_nested_folder_lab_out_of_scope_closes_1008(monkeypatch):
+    """#330/#327: a scoped user must not open another folder's lab."""
+    _fresh_hub()
+    scoped = SimpleNamespace(
+        id=2, username="scoped", role="user", email="s@example.com",
+        name="Scoped", html5=True, folder="/teamA",
+    )
+
+    async def fake_validate_session(self, token, username):
+        return scoped
+
+    monkeypatch.setattr(
+        "app.services.auth_service.AuthService.validate_session",
+        fake_validate_session,
+    )
+    monkeypatch.setattr(
+        "app.schemas.user.UserRead.model_validate", lambda obj: obj
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            "/ws/labs/teamB/lab.json", cookies=_cookies_with_session()
+        ):
+            pass
+    assert exc_info.value.code == 1008
+
+
+def test_nested_lab_dotdot_closes_1008(monkeypatch):
+    """#330/#327: ``..`` segments in a nested lab path stay refused."""
+    _fresh_hub()
+    _patch_auth_ok(monkeypatch)
+    client = TestClient(app, raise_server_exceptions=False)
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(
+            "/ws/labs/team%2F..%2Fsecret%2Flab.json", cookies=_cookies_with_session()
+        ):
+            pass
+    assert exc_info.value.code == 1008
+
+
 def test_ring_evicts_oldest():
     """Publishing 250 events to a 200-ring leaves exactly 200 events (seq 51..250)."""
     hub = _fresh_hub()
