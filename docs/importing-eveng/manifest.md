@@ -49,8 +49,8 @@ sudo find /opt/unetlab/addons -type l -exec sh -c \
 sudo rm -rf /var/lib/nova-ve/images /var/lib/nova-ve/templates
 sudo install -d -o nova-ve -g nova-ve /var/lib/nova-ve/images /var/lib/nova-ve/templates
 
-# Re-run the provisioner (idempotent) to re-create directory perms:
-sudo bash deploy/scripts/provision-ubuntu-2604.sh
+# Re-run the installer to recreate directory permissions:
+curl -fsSL https://raw.githubusercontent.com/fahadysf/nova-ve/main/install.sh | sudo bash
 ```
 
 Option B only makes sense after Option A has restored the source files (otherwise the source paths are symlinks into the tree you just deleted — check with `find /opt/unetlab/addons -type l` first).
