@@ -214,6 +214,32 @@ async def test_create_node_takes_the_next_id_from_the_locked_read(settings, dock
 
 
 @pytest.mark.asyncio
+async def test_create_node_notifies_subscribers_of_a_nested_lab(settings, docker_template, monkeypatch):
+    _seed(settings)
+    path = settings.LABS_DIR / "team" / LAB
+    path.parent.mkdir()
+    (settings.LABS_DIR / LAB).rename(path)
+    events = []
+
+    async def publish(lab_path, event_type, payload):
+        saved = json.loads(path.read_text())
+        assert saved["nodes"]["1"]["name"] == "new"
+        events.append((lab_path, event_type, payload))
+
+    monkeypatch.setattr("app.routers.labs.ws_hub.publish", publish)
+    response = await labs.create_node(
+        f"/team/{LAB}",
+        NodeCreate(
+            name="new", type="docker", template="docker", image="nova-ve/alpine-telnet:latest"
+        ),
+        current_user=ADMIN,
+    )
+
+    assert response["code"] == 200
+    assert events == [(f"team/{LAB}", "node_created", {"node_id": 1, "revision": response["revision"]})]
+
+
+@pytest.mark.asyncio
 async def test_create_nodes_batch_keeps_a_concurrent_locked_edit(settings, docker_template):
     _seed(settings)
 

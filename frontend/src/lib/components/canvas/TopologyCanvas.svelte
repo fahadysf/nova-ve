@@ -179,6 +179,7 @@
     // links[] without a full loadLab(). Cascade deletes (e.g. orphan
     // implicit-bridge halves) deliver one event per link_id.
     'link-change': LinkChangeEvent;
+    'snapshot-needed': void;
   }>();
 
   const nodeTypes = {
@@ -193,22 +194,34 @@
   // #248: every mutating endpoint response carries the post-write lab
   // revision; adopting it keeps the If-Match token fresh without a reload,
   // so single-session edits no longer spuriously 412 on the next write.
-  function adoptRevision(response: unknown): void {
+  function adoptRevision(response: unknown): boolean {
+    if (canvasDestroyed || ($labState.labId && $labState.labId !== labId)) return false;
     const revision = (response as { revision?: unknown } | null)?.revision;
     if (typeof revision === 'number') {
+      if ($labState.revision !== null && revision < $labState.revision) {
+        dispatch('snapshot-needed');
+        return false;
+      }
       labState.setRevision(revision);
     }
+    return true;
   }
+
+  let layoutRevision: number | null = null;
+  $: if (!canvasDestroyed && $labState.labId === labId) layoutRevision = $labState.revision;
 
   const layoutDebouncer: LayoutDebouncer = createLayoutDebouncer(labId, {
     delayMs: 500,
     // #245: guard writes with the store's revision; the response carries the
     // post-write revision so the next write is checked against fresh state.
-    versionProvider: () => $labState.revision,
+    versionProvider: () => layoutRevision,
     onApplied: (result) => {
-      adoptRevision(result);
+      const revision = (result as { revision?: unknown } | null)?.revision;
+      if (typeof revision === 'number') layoutRevision = Math.max(layoutRevision ?? revision, revision);
+      if (!canvasDestroyed && $labState.labId === labId) adoptRevision(result);
     },
     onError: (err) => {
+      if (canvasDestroyed || $labState.labId !== labId) return;
       if (err instanceof LayoutConflictError) {
         // The payload requeued; the page re-adopts the server snapshot
         // (keeping our pending positions) and retries the flush with the
@@ -329,8 +342,6 @@
   const nodesStore = writable<Node[]>([]);
   const edgesStore = writable<Edge[]>([]);
 
-  let saveTimer: ReturnType<typeof setTimeout> | null = null;
-  let saveState: 'idle' | 'saving' | 'saved' = 'idle';
   let selectedEdgeId: string | null = null;
   let paletteLoading = true;
   let paletteItems: PaletteItem[] = [];
@@ -642,6 +653,7 @@
   }
 
   function publishFlowState() {
+    if (activeNodeDrag) return;
     if (requestedFrameId !== null && frameRows(requestedFrameId).length === 0) requestedFrameId = null;
     // Compute the expanded obstacle once per projection, not once per edge.
     activeFrameBox = requestedFrameId !== null && frameZoomHigh && frameHasSpace(requestedFrameId)
@@ -1264,52 +1276,6 @@
     }
   });
 
-  function scheduleSave() {
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-    }
-
-    saveState = 'saving';
-    saveTimer = setTimeout(async () => {
-      try {
-        const expected = $labState.revision;
-        const result = await apiRequest<{ revision?: number }>(`/labs/${labId}/topology`, {
-          method: 'PUT',
-          headers:
-            expected !== null && expected !== undefined
-              ? { 'If-Match': String(expected) }
-              : undefined,
-          // Topology-only payload. Node/network deletion is already
-          // persisted by DELETE /nodes/{id} and DELETE /networks/{id}
-          // (both filter topology[] server-side). Echoing full
-          // $labState.nodes/$labState.networks here re-sent positions captured
-          // before a racing loadLab() reload, reverting layout saves
-          // that PUT /layout had already persisted. Positions travel
-          // exclusively via layoutDebouncer → PUT /layout.
-          body: {
-            topology: $labState.topology
-          }
-        });
-        if (typeof result?.revision === 'number') {
-          labState.setRevision(result.revision);
-        }
-        saveState = 'saved';
-      } catch (error) {
-        if (error instanceof ApiError && error.statusCode === 412) {
-          // #245: lab changed elsewhere. Surface it and let the page
-          // re-adopt the server snapshot, then retry the (queued) layout
-          // flush; the topology payload itself is re-sent by the next
-          // mutation, so no retry here.
-          saveState = 'idle';
-          toastStore.push('Lab changed in another session — reloading latest state.', 'error');
-          dispatchCanvasChange('layout-conflict');
-          return;
-        }
-        saveState = 'idle';
-      }
-    }, 500);
-  }
-
   function decodeId(elementId: string): { type: 'node' | 'network'; id: number } | null {
     if (elementId.startsWith('node')) {
       return { type: 'node', id: Number(elementId.slice(4)) };
@@ -1343,7 +1309,25 @@
     labState.setNetworks(nextNetworks);
   }
 
+  let activeNodeDrag: Promise<void> | undefined;
+  let resolveNodeDrag: (() => void) | undefined;
+
+  function beginNodeDrag() {
+    activeNodeDrag ??= new Promise<void>((resolve) => { resolveNodeDrag = resolve; });
+  }
+
+  function finishNodeDrag() {
+    activeNodeDrag = undefined;
+    resolveNodeDrag?.();
+    resolveNodeDrag = undefined;
+  }
+
+  export async function waitForNodeDrag() {
+    while (activeNodeDrag) await activeNodeDrag;
+  }
+
   function handleNodeDragStop(event: CustomEvent<{ targetNode: Node | null }>) {
+    finishNodeDrag();
     const movedNode = event.detail.targetNode;
     if (!movedNode) {
       return;
@@ -1460,11 +1444,11 @@
         body: { from: fromEndpoint, to: toEndpoint },
         suppressToast: true,
       });
+      if (!adoptRevision(response)) return;
       const created = createdFromLinkResponse(response);
       if (created.link) {
         labState.applyCreatedLink(created.link, created.network);
       }
-      adoptRevision(response);
       // Optimistically remove the discovered overlay immediately (HIGH-1).
       // The next discovery cycle would also clear it, but removing it now
       // avoids a duplicate amber+gray edge flash while the cycle completes.
@@ -1496,12 +1480,6 @@
     const linksToDelete = indexes
       .map((index) => $labState.links[index])
       .filter((link): link is Link => !!link?.id);
-    // Capture pre-mutation snapshot for rollback on API failure.
-    const previousLinks = $labState.links;
-    const previousNodes = $labState.nodes;
-    const previousNetworks = $labState.networks;
-    const previousTopology = $labState.topology;
-
     for (const v2Link of linksToDelete) {
       if (
         typeof v2Link.from?.node_id === 'number' &&
@@ -1550,13 +1528,8 @@
       );
       responses.forEach(adoptRevision);
     } catch (error) {
-      labState.setLinks(previousLinks);
-      labState.setNodes(previousNodes);
-      labState.setNetworks(previousNetworks);
-      labState.setTopology(previousTopology);
-      publishFlowState();
-      dispatchCanvasChange('topology', {
-      });
+      if (canvasDestroyed || $labState.labId !== labId) return;
+      dispatch('snapshot-needed');
       const message =
         error instanceof ApiError
           ? error.message
@@ -1577,7 +1550,6 @@
       .filter((link): link is Link => !!link?.id);
     if (targets.length === 0) return;
 
-    const previousStyles = new Map(targets.map((link) => [link.id, link.style_override ?? null]));
     labState.setLinks($labState.links.map((link, i) =>
       updateIndexes.has(i) ? { ...link, style_override: style } : link
     ));
@@ -1600,10 +1572,8 @@
       );
       responses.forEach(adoptRevision);
     } catch (error) {
-      labState.setLinks($labState.links.map((link, i) =>
-        updateIndexes.has(i) ? { ...link, style_override: previousStyles.get(link.id) ?? null } : link
-      ));
-      publishFlowState();
+      if (canvasDestroyed || $labState.labId !== labId) return;
+      dispatch('snapshot-needed');
       const message = error instanceof Error ? error.message : 'Failed to update link style';
       toastStore.push(message, 'error');
     }
@@ -1739,7 +1709,7 @@
     nodeDeleteBusy = true;
     try {
       const response = await apiRequest(`/labs/${labId}/nodes/${nodeId}`, { method: 'DELETE' });
-      adoptRevision(response);
+      if (!adoptRevision(response)) return;
       const nextNodes = { ...$labState.nodes };
       delete nextNodes[String(nodeId)];
       labState.setNodes(nextNodes);
@@ -1750,7 +1720,6 @@
       );
       recalculateNetworks();
       publishFlowState();
-      scheduleSave();
       dispatchCanvasChange('node-delete', { nodeId });
       nodeDeleteConfirm = null;
     } finally {
@@ -1787,7 +1756,7 @@
         method: 'PUT',
         body: { shared }
       });
-      adoptRevision(response);
+      if (!adoptRevision(response)) return;
       const updated = (response as unknown as { network: NetworkData }).network;
       const current = $labState.networks[String(decoded.id)];
       if (current) {
@@ -1811,7 +1780,7 @@
     }
 
     const response = await apiRequest(`/labs/${labId}/networks/${decoded.id}`, { method: 'DELETE' });
-    adoptRevision(response);
+    if (!adoptRevision(response)) return;
     const nextNetworks = { ...$labState.networks };
     delete nextNetworks[String(decoded.id)];
     labState.setNetworks(nextNetworks);
@@ -1825,7 +1794,6 @@
     }
     labState.setNodes({ ...$labState.nodes });
     publishFlowState();
-    scheduleSave();
     dispatchCanvasChange('network-delete', {
     });
   }
@@ -1858,7 +1826,7 @@
     // single-record envelope chosen for write routes. List routes still use
     // ``data:``; ApiResponse<T>.data is therefore unset here.
     const created = (response as unknown as { network: NetworkData }).network;
-    adoptRevision(response);
+    if (!adoptRevision(response)) return;
     labState.setNetworks({
       ...$labState.networks,
       [String(created.id)]: created
@@ -1968,7 +1936,7 @@
         suppressToast: true
       });
       const updated = (response as unknown as { network: NetworkData }).network;
-      adoptRevision(response);
+      if (!adoptRevision(response)) return;
       labState.setNetworks({ ...$labState.networks, [String(updated.id)]: updated });
       publishFlowState();
       // The lease and second-server notes are longer, so they stay up longer.
@@ -2024,7 +1992,7 @@
         suppressToast: true
       });
       const updated = (response as unknown as { network: NetworkData }).network;
-      adoptRevision(response);
+      if (!adoptRevision(response)) return;
       labState.setNetworks({ ...$labState.networks, [String(updated.id)]: updated });
       publishFlowState();
       toastStore.push(networkSavedMessage(network, updated, detail.config), 'success');
@@ -2231,7 +2199,7 @@
         suppressToast: true,
       });
       const created = createdFromLinkResponse(response);
-      adoptRevision(response);
+      if (!adoptRevision(response)) return;
 
       // The lab can only be patched in place from a complete result. A
       // node-to-node link is stored as an implicit bridge with two halves, but
@@ -2294,8 +2262,15 @@
       const client = createWsClient({ labId });
       wsClient = client;
       labWsStores = createLabWsStores(client);
+      for (const event of [
+        'hello', 'force_resnapshot', 'lab_topology', 'layout_updated', 'node_created',
+        'nodes_created', 'node_updated', 'node_deleted', 'network_created',
+        'network_updated', 'network_deleted', 'network_promoted', 'interface_updated',
+        'link_created', 'link_updated', 'link_deleted', 'link_patched', 'topology_updated'
+      ]) {
+        client.on(event, () => dispatch('snapshot-needed'));
+      }
       client.on('lab_topology', (_msg: WsMessage) => {
-        void layoutDebouncer.flush();
         // lab_topology resets the reconciliation store (done inside labWs);
         // republish edges so overlays clear from the canvas immediately.
         publishFlowState();
@@ -2353,6 +2328,7 @@
 
   onDestroy(() => {
     canvasDestroyed = true;
+    finishNodeDrag();
     clearTopologyChangeBanner();
   });
 
@@ -2430,12 +2406,16 @@
             top: Math.round(nodeCreateAnchor.y),
           }
         });
+        if (!adoptRevision(response)) {
+          nodeModalOpen = false;
+          nodeModalNode = null;
+          return;
+        }
         const nextNodes = { ...$labState.nodes };
         for (const node of response.data.nodes) {
           nextNodes[String(node.id)] = node;
         }
         labState.setNodes(nextNodes);
-        adoptRevision(response);
         publishFlowState();
         dispatchCanvasChange('node-create', {
         });
@@ -2461,11 +2441,15 @@
           method: 'PUT',
           body: event.detail.payload,
         });
+        if (!adoptRevision(response)) {
+          nodeModalOpen = false;
+          nodeModalNode = null;
+          return;
+        }
         labState.setNodes({
           ...$labState.nodes,
           [String(response.data.id)]: response.data,
         });
-        adoptRevision(response);
         publishFlowState();
         dispatchCanvasChange('node-edit', {
           nodeId: response.data.id,
@@ -2506,6 +2490,7 @@
     autoPanOnNodeDrag={!canvasLocked}
     defaultEdgeOptions={{ type: 'default' }}
     proOptions={{ hideAttribution: true }}
+    on:nodedragstart={beginNodeDrag}
     on:nodedragstop={handleNodeDragStop}
     onMoveEnd={(_event, viewport) => handleViewportEnd(viewport)}
     on:moveend={(event: CustomEvent<LabViewport>) => handleViewportEnd(event.detail)}
@@ -2597,13 +2582,7 @@
 
     <Panel position="top-left">
       <div class="flex items-center gap-2 rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-500 shadow-lg shadow-black/20">
-        {#if saveState === 'saving'}
-          Saving topology…
-        {:else if saveState === 'saved'}
-          Topology saved
-        {:else}
-          Topology editor
-        {/if}
+        Topology editor
         {#if focusedId}
           <button type="button" data-testid="exit-focus" class="rounded border border-blue-500/50 px-2 py-0.5 text-blue-200 hover:text-white" on:click={() => setExplicitFocus(null)}>
             Exit focus

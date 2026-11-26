@@ -690,6 +690,7 @@ export interface LabMeta {
    * PUT /topology; distinct from the user-authored `version` field.
    */
   revision?: number;
+  defaults?: Partial<LabDefaults>;
   grid: boolean;
   lock: boolean;
   sat?: string;

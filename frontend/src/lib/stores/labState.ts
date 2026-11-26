@@ -43,11 +43,7 @@ export interface LabSnapshot {
   networks: Record<string, NetworkData>;
   topology: TopologyLink[];
   links: Link[];
-  /**
-   * Optional: loadLab's parallel GETs do not fetch defaults — the canvas
-   * owns default link style updates via PUT /layout. When omitted, the
-   * current value is kept instead of resetting to a constant.
-   */
+  /** When omitted, keep the current layout defaults. */
   defaults?: LabDefaults;
 }
 

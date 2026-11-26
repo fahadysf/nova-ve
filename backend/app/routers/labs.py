@@ -840,6 +840,8 @@ async def update_topology(
                 scoped_path,
             )
 
+    await ws_hub.publish(lab.path, "topology_updated", {"revision": lab.revision})
+
     # #297: report the field patches the payload applied (see patched_nodes).
     nodes_after = data.get("nodes", {})
     networks_after = data.get("networks", {})
@@ -1022,6 +1024,8 @@ async def create_node(
         )
         nodes[str(next_id)] = node
         lab.save()
+
+    await ws_hub.publish(lab.path, "node_created", {"node_id": next_id, "revision": lab.revision})
 
     # #297: covers from-template creation too — that handler delegates here.
     await audit_service.record(
@@ -1525,6 +1529,8 @@ async def create_nodes_from_paired_template(
         # The links wrote the file after lab.save(); read what landed last.
         revision = LabService.read_meta_revision_static(lab.path)
 
+    await ws_hub.publish(lab.path, "nodes_created", {"revision": revision})
+
     # #297: one entry per object the template brought into existence.
     await audit_service.record_batch(
         [
@@ -1643,6 +1649,8 @@ async def create_nodes_batch(
             nodes[str(node_id)] = node
             created_nodes.append(node)
         lab.save()
+
+    await ws_hub.publish(lab.path, "nodes_created", {"revision": lab.revision})
 
     # #297: one entry per node — each is an object that now exists.
     await audit_service.record_batch(
@@ -1832,6 +1840,8 @@ async def update_node(
         _apply_first_mac_edit(before, node)
         lab.save()
 
+    await ws_hub.publish(lab.path, "node_updated", {"node_id": node_id, "revision": lab.revision})
+
     # A save that changed nothing (the edit dialog re-submits every field)
     # is not an event worth a row.
     changes = audit_service.field_changes(before, node, skip=("interfaces",))
@@ -1934,6 +1944,7 @@ async def delete_node(
         ]
         lab.save()
 
+    await ws_hub.publish(lab.path, "node_deleted", {"node_id": node_id, "revision": lab.revision})
     await audit_service.record("node.delete", actor=current_user.username, **audit_context)
     return {
         "code": 200,
@@ -3329,6 +3340,7 @@ async def get_lab(
             file_revision = (file_data.get("meta") or {}).get("revision")
             if isinstance(file_revision, int):
                 data["revision"] = file_revision
+            data["defaults"] = file_data.get("defaults") or {}
         except (FileNotFoundError, NotADirectoryError, IsADirectoryError, LegacyLabSchemaError, ValueError):
             pass
         return {
@@ -3363,6 +3375,7 @@ async def get_lab(
     meta["filename"] = relative_path
     meta["path"] = f"/{relative_path}"
     meta["owner"] = current_user.username
+    meta["defaults"] = data.get("defaults") or {}
     meta.setdefault("shared", [])
 
     return {
