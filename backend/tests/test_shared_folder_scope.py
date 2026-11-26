@@ -101,6 +101,36 @@ class TestSharedListing:
         assert result == {"folders": [], "labs": []}
         assert not (empty_labs_dir / "Shared/old-folder").exists()
 
+    def test_folder_listing_tolerates_disappearance_before_scan(self, empty_labs_dir, monkeypatch):
+        folder = empty_labs_dir / "groups"
+        folder.mkdir()
+        path_type = type(folder)
+        iterdir = path_type.iterdir
+
+        def disappear(path):
+            if path == folder:
+                raise FileNotFoundError(path)
+            return iterdir(path)
+
+        monkeypatch.setattr(path_type, "iterdir", disappear)
+        assert FolderService.list_folder("groups") == {"folders": [], "labs": []}
+
+    def test_folder_listing_tolerates_a_disappearing_entry_ancestor(self, empty_labs_dir, monkeypatch):
+        folder = empty_labs_dir / "group"
+        folder.mkdir()
+        lab = folder / "moving.json"
+        lab.write_text("{}")
+        path_type = type(lab)
+        original_stat = path_type.stat
+
+        def changed(path, *args, **kwargs):
+            if path == lab:
+                raise NotADirectoryError(path)
+            return original_stat(path, *args, **kwargs)
+
+        monkeypatch.setattr(path_type, "stat", changed)
+        assert FolderService.list_folder("group") == {"folders": [], "labs": []}
+
     def test_at_user_root_default_false_keeps_nested_listings_unchanged(self, empty_labs_dir):
         (empty_labs_dir / "lanes" / "alpha").mkdir(parents=True)
         result = FolderService.list_folder("lanes/alpha", recursive=True)

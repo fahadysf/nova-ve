@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from app.services.lab_paths import iter_lab_json_files
 from app.config import get_settings
 from app.services.lab_lock import LabLockTimeout, lab_lock_async
 
@@ -119,7 +120,7 @@ def _lab_json_files(labs_dir: Path | None = None) -> list[Path]:
         return []
     return sorted(
         path
-        for path in root.rglob("*.json")
+        for path in iter_lab_json_files(root)
         if path.is_file() and not path.name.endswith(".lock")
     )
 

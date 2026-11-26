@@ -4,14 +4,18 @@ import time
 from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 
+from app.services.lab_paths import LabMembershipPathError
 
 class LabLockTimeout(Exception):
     """Raised when a lab or folder lock cannot be acquired within the timeout."""
 
 
 def _lock_path(lab_id: str, labs_dir: Path, create_parent: bool) -> Path:
-    labs_dir = Path(labs_dir)
+    labs_dir = Path(labs_dir).resolve()
     labs_dir.mkdir(parents=True, exist_ok=True)
+    requested = labs_dir / lab_id
+    if not requested.is_relative_to(labs_dir) or (not create_parent and requested.resolve() != requested):
+        raise LabMembershipPathError("Lab changes require a canonical path.")
     path = labs_dir / f"{lab_id}.lock"
     if create_parent:
         path.parent.mkdir(parents=True, exist_ok=True)

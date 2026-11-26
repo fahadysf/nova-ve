@@ -16,6 +16,7 @@ import json
 import logging
 import re
 import time
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -1608,8 +1609,9 @@ class TestLabManagementEvents:
 class TestFolderEvents:
     @pytest.fixture()
     def folder_env(self, monkeypatch):
-        for name in ("create_folder_path", "rename_folder", "delete_folder"):
+        for name in ("create_folder_path", "rename_folder"):
             monkeypatch.setattr(folders.FolderService, name, lambda *args: None)
+        monkeypatch.setattr(folders.FolderService, "delete_folder", lambda *_: nullcontext())
         monkeypatch.setattr(
             folders, "assert_no_external_members_for_scope", lambda path: None
         )

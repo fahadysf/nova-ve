@@ -33,6 +33,7 @@ from typing import Any, Iterator
 
 import yaml
 
+from app.services.lab_paths import iter_lab_json_files
 from app.config import get_settings
 from app.schemas.node import validate_console_mode_for_type
 from app.services.template_service import (
@@ -509,7 +510,7 @@ class ImageLibraryService:
     def _iter_lab_nodes(self) -> Iterator[tuple[dict[str, Any], dict[str, Any]]]:
         if not self.labs_dir.exists():
             return
-        for lab_file in sorted(self.labs_dir.rglob("*.json")):
+        for lab_file in sorted(iter_lab_json_files(self.labs_dir)):
             try:
                 data = json.loads(lab_file.read_text())
             except (OSError, UnicodeError, json.JSONDecodeError):

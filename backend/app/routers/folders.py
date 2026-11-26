@@ -282,13 +282,23 @@ async def rename_folder(
     db: AsyncSession = Depends(get_db),
 ):
     async def rename_and_commit(old_prefix: str, new_prefix: str) -> None:
+        descendants = [
+            lab for lab in await LabService(db).list_labs()
+            if lab.filename == old_prefix or lab.filename.startswith(f"{old_prefix}/")
+        ]
         FolderService.rename_folder(old_prefix, new_prefix)
-        for lab in await LabService(db).list_labs():
-            if lab.filename == old_prefix or lab.filename.startswith(f"{old_prefix}/"):
+        try:
+            for lab in descendants:
                 suffix = lab.filename[len(old_prefix) :].lstrip("/")
                 lab.filename = "/".join(part for part in [new_prefix, suffix] if part)
                 lab.path = f"/{lab.filename}"
-        await db.commit()
+            await db.commit()
+        except BaseException:
+            try:
+                FolderService.rename_folder(new_prefix, old_prefix)
+            finally:
+                await db.rollback()
+            raise
 
     try:
         old_prefix = _normalize_folder_path(_scoped_folder_path(current_user, folder_path, treat_as_absolute=True))
@@ -346,11 +356,18 @@ async def delete_folder(
 ):
     async def delete_and_commit(folder_prefix: str) -> None:
         await asyncio.to_thread(assert_no_external_members_for_scope, folder_prefix)
-        await asyncio.to_thread(FolderService.delete_folder, folder_prefix)
-        for lab in await LabService(db).list_labs():
-            if lab.filename == folder_prefix or lab.filename.startswith(f"{folder_prefix}/"):
-                await db.delete(lab)
-        await db.commit()
+        descendants = [
+            lab for lab in await LabService(db).list_labs()
+            if lab.filename == folder_prefix or lab.filename.startswith(f"{folder_prefix}/")
+        ]
+        async with FolderService.delete_folder(folder_prefix):
+            try:
+                for lab in descendants:
+                    await db.delete(lab)
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
 
     try:
         folder_prefix = _normalize_folder_path(_scoped_folder_path(current_user, folder_path, treat_as_absolute=True))

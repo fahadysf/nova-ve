@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import uuid
@@ -42,13 +43,16 @@ from app.services.lab_service import (
     HIGH_WATER_FIELDS,
     LEGACY_SCHEMA_ERROR,
     LabIdExhaustedError,
+    LabMembershipPathError,
     LabService,
     _lab_file_path,
     _normalize_relative_lab_path,
     allocate_network_id,
     allocate_node_id,
+    build_relative_lab_path,
     lab_membership_lock,
     locked_lab_async,
+    unlink_lab_file,
 )
 from app.services.network_service import NetworkServiceError, network_service
 from app.services.cloud_inventory_service import SharedCloudReferenceError
@@ -553,22 +557,24 @@ async def create_lab(
     lab_service = LabService(db)
     try:
         scoped_path = _scoped_lab_path(current_user, request.path or "", treat_as_absolute=False)
-        lab = await lab_service.create_lab(
-            owner=current_user.username,
-            name=request.name,
-            path=scoped_path,
-            filename=request.filename,
-            author=request.author,
-            description=request.description,
-            body=request.body,
-            version=request.version,
-            scripttimeout=request.scripttimeout,
-            countdown=request.countdown,
-            linkwidth=request.linkwidth,
-            grid=request.grid,
-            lock=request.lock,
-            sat=request.sat,
-        )
+        filename = build_relative_lab_path(request.name, path=scoped_path, filename=request.filename)
+        async with lab_membership_lock(filename):
+            lab, cancelled = await wait_for_mutation(asyncio.create_task(lab_service.create_lab(
+                owner=current_user.username,
+                name=request.name,
+                filename=filename,
+                locked=True,
+                author=request.author,
+                description=request.description,
+                body=request.body,
+                version=request.version,
+                scripttimeout=request.scripttimeout,
+                countdown=request.countdown,
+                linkwidth=request.linkwidth,
+                grid=request.grid,
+                lock=request.lock,
+                sat=request.sat,
+            )))
     except FileExistsError as e:
         return {
             "code": 400,
@@ -582,14 +588,17 @@ async def create_lab(
             "message": str(e),
         }
 
-    await audit_service.record(
-        "lab.create",
-        actor=current_user.username,
-        target_type="lab",
-        target_id=lab.path,
-        target_name=lab.name,
-        lab_path=lab.path,
-        lab_name=lab.name,
+    await notify_after_mutation(
+        audit_service.record(
+            "lab.create",
+            actor=current_user.username,
+            target_type="lab",
+            target_id=lab.path,
+            target_name=lab.name,
+            lab_path=lab.path,
+            lab_name=lab.name,
+        ),
+        cancelled,
     )
     return {
         "code": 200,
@@ -3399,7 +3408,7 @@ async def delete_lab(
                 if current_user.role != "admin":
                     return {"code": 403, "status": "fail", "message": "Access denied."}
                 await asyncio.to_thread(assert_no_external_members_for_scope, scoped_path)
-                filepath.unlink(missing_ok=True)
+                await unlink_lab_file(scoped_path, locked=True)
                 path, name = f"/{scoped_path}", Path(scoped_path).stem
                 audit_details = {"detail": {"orphan": True}}
                 cancelled = False
@@ -3469,6 +3478,14 @@ async def move_lab(
             "message": f"Lab already exists at target: /{new_relative} (60039).",
         }
 
+    # Preserve deliberate creation of a missing directory, but do not
+    # recreate a destination ancestor that moved while this request waited.
+    target_ancestor = next(directory for directory in target.parents if directory.is_dir())
+    try:
+        original_directory = target_ancestor.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return {"code": 409, "status": "fail", "message": "The destination folder changed (60039)."}
+
     # Re-resolve both paths under their membership locks after any folder move.
     cancelled = False
     async with lab_membership_lock(scoped_path, new_relative):
@@ -3477,6 +3494,12 @@ async def move_lab(
         lab = await lab_service.get_lab_by_filename(scoped_path)
         if not source.is_file():
             return {"code": 404, "status": "fail", "message": "Lab does not exist (60038)."}
+        try:
+            same_directory = os.path.samestat(original_directory, target_ancestor.stat())
+        except (FileNotFoundError, NotADirectoryError):
+            same_directory = False
+        if not same_directory:
+            return {"code": 409, "status": "fail", "message": "The destination folder changed (60039)."}
         try:
             with source.open(encoding="utf-8") as lab_json:
                 data = json.load(lab_json)

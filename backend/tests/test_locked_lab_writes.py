@@ -18,13 +18,14 @@ import pytest
 
 from app.routers import folders, labs
 from app.schemas.folder import FolderRenameRequest
-from app.schemas.lab import LabMetaUpdate, LabMoveRequest
+from app.schemas.lab import LabMetaCreate, LabMetaUpdate, LabMoveRequest
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.services import network_service as network_service_mod
 from app.services.cloud_inventory_service import nat_cloud_ipam_lock
 from app.services.lab_lock import LabLockTimeout, lab_lock, lab_lock_async
-from app.services.lab_service import LabService, locked_lab, locked_lab_async
+from app.services.lab_paths import FOLDER_DELETIONS, iter_lab_json_files
+from app.services.lab_service import LabMembershipPathError, LabService, lab_membership_lock, locked_lab, locked_lab_async
 from app.services.node_runtime_service import NodeRuntimeService
 from app.services.network_service import NetworkService
 
@@ -931,6 +932,53 @@ async def test_folder_rename_waits_for_inbound_or_outbound_lab_move(settings, mo
 
 
 @pytest.mark.asyncio
+async def test_queued_lab_move_does_not_recreate_a_renamed_destination(settings, monkeypatch):
+    _seed(settings)
+    (settings.LABS_DIR / "group").mkdir()
+    rename_has_lock = asyncio.Event()
+    allow_rename = asyncio.Event()
+    move_started = asyncio.Event()
+
+    async def list_labs(_service):
+        rename_has_lock.set()
+        await allow_rename.wait()
+        return []
+
+    async def get_lab(_service, filename):
+        return SimpleNamespace(filename=filename, path=f"/{filename}", name="Moving")
+
+    monkeypatch.setattr(LabService, "list_labs", list_labs)
+    monkeypatch.setattr(LabService, "get_lab_by_filename", get_lab)
+
+    async def move():
+        move_started.set()
+        return await labs.move_lab(
+            LAB, LabMoveRequest(target_folder="/group/new-child"), current_user=ADMIN, db=_FakeDb(),
+        )
+
+    rename = asyncio.create_task(folders.rename_folder(
+        "group", FolderRenameRequest(path="renamed"), current_user=ADMIN, db=_FakeDb(),
+    ))
+    moving = None
+    try:
+        await asyncio.wait_for(rename_has_lock.wait(), timeout=3)
+        moving = asyncio.create_task(move())
+        await asyncio.wait_for(move_started.wait(), timeout=3)
+        await asyncio.sleep(0)
+        assert not moving.done()
+    finally:
+        allow_rename.set()
+        renamed = await asyncio.wait_for(rename, timeout=5)
+        if moving is not None:
+            moved = await asyncio.wait_for(moving, timeout=5)
+
+    assert renamed["code"] == 200 and moved["code"] == 409
+    assert (settings.LABS_DIR / LAB).is_file()
+    assert (settings.LABS_DIR / "renamed").is_dir()
+    assert not (settings.LABS_DIR / "group").exists()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_folder_rename_finishes_commit_and_audit(settings, monkeypatch, audit_events):
     _seed(settings)
     original_name = f"group/{LAB}"
@@ -975,6 +1023,147 @@ async def test_cancelled_folder_rename_finishes_commit_and_audit(settings, monke
     assert (settings.LABS_DIR / row.filename).is_file()
     assert not (settings.LABS_DIR / "group").exists()
     assert [event.event for event in audit_events] == ["folder.rename"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rename", "delete"])
+async def test_failed_folder_commit_restores_the_subtree(settings, monkeypatch, audit_events, operation):
+    _seed(settings)
+    original_name = f"group/nested/{LAB}"
+    source = settings.LABS_DIR / original_name
+    source.parent.mkdir(parents=True)
+    (settings.LABS_DIR / LAB).rename(source)
+    orphan = source.with_name("file-only.json")
+    orphan.write_text("{}")
+    row = SimpleNamespace(filename=original_name, path=f"/{original_name}")
+
+    class FailingDb(_RecordingDeleteDb):
+        rolled_back = False
+
+        async def commit(self):
+            if operation == "delete":
+                assert not source.exists()
+                assert not list(iter_lab_json_files(settings.LABS_DIR))
+            raise RuntimeError("DB commit failed")
+
+        async def rollback(self):
+            self.rolled_back = True
+            row.filename = original_name
+            row.path = f"/{original_name}"
+
+    async def list_labs(_service):
+        return [row]
+
+    monkeypatch.setattr(LabService, "list_labs", list_labs)
+    monkeypatch.setattr(folders, "assert_no_external_members_for_scope", lambda *_: None)
+    db = FailingDb()
+
+    with pytest.raises(RuntimeError, match="DB commit failed"):
+        if operation == "rename":
+            await folders.rename_folder("group", FolderRenameRequest(path="renamed"), current_user=ADMIN, db=db)
+        else:
+            await folders.delete_folder("group", current_user=ADMIN, db=db)
+
+    assert db.rolled_back
+    assert row.filename == original_name and row.path == f"/{original_name}"
+    assert source.is_file() and orphan.is_file()
+    assert not (settings.LABS_DIR / "renamed").exists()
+    assert not list((settings.LABS_DIR / FOLDER_DELETIONS).glob("folder-*"))
+    assert not audit_events
+
+
+@pytest.mark.asyncio
+async def test_folder_and_lab_mutations_require_canonical_paths(settings, monkeypatch):
+    _seed(settings)
+    source_dir = settings.LABS_DIR / "group"
+    source_dir.mkdir()
+    source = source_dir / LAB
+    (settings.LABS_DIR / LAB).rename(source)
+    (settings.LABS_DIR / "shortcut").symlink_to(source_dir, target_is_directory=True)
+
+    async def list_labs(_service):
+        return []
+
+    monkeypatch.setattr(LabService, "list_labs", list_labs)
+    monkeypatch.setattr(folders, "assert_no_external_members_for_scope", lambda *_: None)
+    db = _RecordingDeleteDb()
+    renamed = await folders.rename_folder("shortcut", FolderRenameRequest(path="renamed"), current_user=ADMIN, db=db)
+    deleted = await folders.delete_folder("shortcut", current_user=ADMIN, db=db)
+    with pytest.raises(LabMembershipPathError):
+        async with lab_membership_lock(f"shortcut/{LAB}"):
+            pytest.fail("The alias acquired a lab membership lock")
+    with pytest.raises(LabMembershipPathError):
+        async with locked_lab_async(f"shortcut/{LAB}"):
+            pytest.fail("The alias acquired an ordinary write lock")
+
+    assert renamed["code"] == deleted["code"] == 400
+    assert source.is_file() and db.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_folder_rename_restores_files_if_recorder_relocation_fails(settings, monkeypatch, audit_events):
+    _seed(settings)
+    source_folder = settings.LABS_DIR / "group"
+    source_folder.mkdir()
+    (settings.LABS_DIR / LAB).rename(source_folder / LAB)
+    row = SimpleNamespace(filename=f"group/{LAB}", path=f"/group/{LAB}")
+    attempts = []
+
+    async def list_labs(_service):
+        return [row]
+
+    def relocate(source, destination):
+        attempts.append((source.name, destination.name))
+        if len(attempts) == 1:
+            raise RuntimeError("Recorder relocation failed")
+
+    monkeypatch.setattr(LabService, "list_labs", list_labs)
+    monkeypatch.setattr(
+        "app.services.folder_service.get_console_recorder",
+        lambda: SimpleNamespace(relocate_folder=relocate),
+    )
+    db = _RecordingDeleteDb()
+    with pytest.raises(RuntimeError, match="Recorder relocation failed"):
+        await folders.rename_folder("group", FolderRenameRequest(path="renamed"), current_user=ADMIN, db=db)
+
+    assert attempts == [("group", "renamed"), ("renamed", "group")]
+    assert (source_folder / LAB).is_file() and not (settings.LABS_DIR / "renamed").exists()
+    assert row.filename == f"group/{LAB}" and db.commits == 0
+    assert not audit_events
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lab_creation_finishes_commit_and_audit(settings, audit_events):
+    committing = asyncio.Event()
+    allow_commit = asyncio.Event()
+
+    class CreatingDb(_RecordingDeleteDb):
+        def add(self, row):
+            self.row = row
+
+        async def commit(self):
+            committing.set()
+            await allow_commit.wait()
+            await super().commit()
+
+    db = CreatingDb()
+    pending = asyncio.create_task(labs.create_lab(
+        LabMetaCreate(name="Created", filename="group/created.json"), current_user=ADMIN, db=db,
+    ))
+    try:
+        await asyncio.wait_for(committing.wait(), timeout=3)
+        pending.cancel()
+        await asyncio.sleep(0)
+        assert not pending.done()
+        assert not audit_events
+    finally:
+        allow_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(pending, timeout=5)
+
+    assert db.commits == 1
+    assert (settings.LABS_DIR / db.row.filename).is_file()
+    assert [event.event for event in audit_events] == ["lab.create"]
 
 
 @pytest.mark.asyncio
