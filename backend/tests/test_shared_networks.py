@@ -413,14 +413,15 @@ async def test_create_cannot_forge_membership(settings, host, labs_dir):
     await svc.delete_network(forger, blank["id"])
     assert host.deleted == [blank["runtime"]["bridge_name"]]
 
-    # Junk already stored by an older release stays inert.
-    await svc.create_network(forger, {"name": "junk"})
-    _edit(labs_dir, forger, lambda d: d["networks"]["1"]["config"].update(
+    # Junk already stored by an older release stays inert. Ids are never
+    # reused (#332), so the network is addressed by the id the create returned.
+    junk = await svc.create_network(forger, {"name": "junk"})
+    _edit(labs_dir, forger, lambda d: d["networks"][str(junk["id"])]["config"].update(
         shared_cloud_id=f"nat-cloud:{OWNER_ID}:1"))
-    info = build_network_info(forger, 1, lambda path: path == forger)
+    info = build_network_info(forger, junk["id"], lambda path: path == forger)
     assert info["sharing"]["role"] == "none" and info["sharing"]["labs"] == []
     with pytest.raises(NetworkServiceError):
-        await svc.patch_network(forger, 1, {"type": "nat_cloud"})
+        await svc.patch_network(forger, junk["id"], {"type": "nat_cloud"})
     await svc.delete_network(owner, 1)
 
     # Once shared, the id form works for everyone; admins may reuse any NAT-Cloud.

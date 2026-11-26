@@ -15,7 +15,7 @@ from app.openapi import COMMON_RESPONSES
 from app.routers.labs import LAB_ACCESS
 from app.schemas.user import UserRead
 from app.services import audit_service, host_net
-from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabService
+from app.services.lab_service import LEGACY_SCHEMA_ERROR, LabIdExhaustedError, LabService
 from app.services.link_service import (
     DuplicateLinkError,
     InterfaceAlreadyAttachedError,
@@ -138,6 +138,17 @@ async def create_link(
                 "code": 409,
                 "status": "fail",
                 "message": str(exc),
+            },
+        )
+    except LabIdExhaustedError as exc:
+        # #332: a node-to-node link needs a new implicit network, and the
+        # lab has used every network id the host layer can name.
+        return JSONResponse(
+            status_code=exc.code,
+            content={
+                "code": exc.code,
+                "status": "fail",
+                "message": exc.message,
             },
         )
     except KeyError as exc:

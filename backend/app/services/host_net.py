@@ -153,6 +153,13 @@ def get_instance_id() -> str:
 # ---------------------------------------------------------------------------
 
 
+# Highest ids the names below still fit: the longest of them is 14
+# characters (IFNAMSIZ minus one) and RE_BRIDGE_NAME and the sweeper's
+# interface pattern cap the digits. A lab must never be handed more (#332).
+MAX_NETWORK_ID = 99999
+MAX_NODE_ID = 999
+
+
 def _lab_hash(lab_id: str, instance_id: str) -> int:
     """Return a deterministic 16-bit hash of (instance_id, lab_id).
 
