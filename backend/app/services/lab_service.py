@@ -1,4 +1,5 @@
 import ipaddress
+import asyncio
 import json
 import logging
 import os
@@ -14,7 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.lab import LabMeta
 from app.services import host_net
-from app.services.cloud_inventory_service import LINUX_BRIDGE_TYPE, bridge_dhcp_enabled
+from app.services.async_utils import run_mutation, wait_for_mutation
+from app.services.cloud_inventory_service import (
+    LINUX_BRIDGE_TYPE,
+    bridge_dhcp_enabled,
+    nat_cloud_ipam_lock_async,
+)
 from app.services.console_recording import RECORDINGS_FOLDER
 from app.services.lab_lock import lab_lock, lab_lock_async
 from app.services.shared_network_service import (
@@ -732,6 +738,14 @@ def keep_high_water_marks(snapshot: dict, live: dict) -> None:
         snapshot_meta[field] = max(_high_water_mark(snapshot, field), _high_water_mark(live, field))
 
 
+def _cleanup_and_unlink_lab(filename: str, data: dict) -> None:
+    """Clean up the lab while the caller holds its non-reentrant lock."""
+    assert_no_external_members_for_scope(filename)
+    _cleanup_lab_network_runtime(data, filename)
+    _cleanup_lab_node_runtime(data, filename)
+    _lab_file_path(filename).unlink(missing_ok=True)
+
+
 async def unlink_lab_file(filename: str) -> None:
     """Remove a lab file under its lock (#328).
 
@@ -932,38 +946,38 @@ class LabService:
 
         return lab
 
-    async def delete_lab(self, lab: LabMeta) -> None:
-        filepath = _lab_file_path(lab.filename)
+    async def delete_lab(self, lab: LabMeta) -> bool:
+        """Delete the lab and report cancellation received after mutation started."""
+        filename = lab.filename
+        filepath = _lab_file_path(filename)
+        cancelled = False
         if filepath.exists():
-            # #332: read, check, clean up and unlink under one lock. Reading
-            # before the lock and cleaning up from that stale read orphans
-            # bridges and disks of anything created while the delete waited.
-            loaded = False
-            try:
-                async with locked_lab_async(lab.filename) as locked:
-                    # Read: a failure from here on must surface and keep
-                    # file and row, not delete a half-cleaned lab.
-                    loaded = True
-                    # Writers take this lab's lock, so while it is held the
-                    # check's own read of the file sees the state just read.
-                    assert_no_external_members_for_scope(lab.filename)
-                    _cleanup_lab_network_runtime(locked.data, lab.filename)
-                    _cleanup_lab_node_runtime(locked.data, lab.filename)
-                    # Unlink directly: unlink_lab_file would take this same
-                    # (non-reentrant) lock again.
-                    _lab_file_path(lab.filename).unlink(missing_ok=True)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                if loaded:
-                    raise
-                # Only a lab that could not be read is deleted without cleanup.
-                logger.warning(
-                    "delete_lab: could not read %s for network cleanup (%s)",
-                    lab.filename,
-                    exc,
-                )
-                await unlink_lab_file(lab.filename)
-        await self.db.delete(lab)
-        await self.db.commit()
+            # Shared-network joins take IPAM before their lab lock. Keep
+            # them out from the reference check until the owner is gone.
+            async with nat_cloud_ipam_lock_async(get_settings()):
+                # #332: read, check, clean up and unlink under the lab lock.
+                loaded = False
+                try:
+                    async with locked_lab_async(filename) as locked:
+                        loaded = True
+                        # Keep the lock until the worker exits, even if the request is cancelled.
+                        _, cancelled = await run_mutation(_cleanup_and_unlink_lab, filename, locked.data)
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    if loaded:
+                        raise
+                    # Only a lab that could not be read is removed without cleanup.
+                    logger.warning(
+                        "delete_lab: could not read %s for network cleanup (%s)",
+                        filename,
+                        exc,
+                    )
+                    await unlink_lab_file(filename)
+        async def delete_row() -> None:
+            await self.db.delete(lab)
+            await self.db.commit()
+
+        _, cancelled_during_commit = await wait_for_mutation(asyncio.create_task(delete_row()))
+        return cancelled or cancelled_during_commit
 
     @staticmethod
     def read_lab_json_static(filename: str) -> dict:
