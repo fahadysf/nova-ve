@@ -15,6 +15,7 @@ from app.routers import labs
 from app.services.guacamole_db_service import GuacamoleDatabaseService, _AUTH_TOKEN_CACHE
 from app.services.html5_service import Html5SessionService
 from app.services.node_runtime_service import (
+    NodeRuntimeError,
     NodeRuntimeService,
     _merge_qemu_args,
     _parse_qemu_tokens,
@@ -116,6 +117,113 @@ def patched_settings(monkeypatch, runtime_settings):
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: runtime_settings)
     monkeypatch.setattr("app.services.html5_service.get_settings", lambda: runtime_settings)
     return runtime_settings
+
+
+_BAD_RECORD_MARKER = b"invalid-runtime-record-marker"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        pytest.param(b'{"detail":"' + _BAD_RECORD_MARKER + b'"}', id="missing-identity"),
+        pytest.param(b'{"lab_id":"","node_id":1}', id="empty-lab-id"),
+        pytest.param(b'{"lab_id":"test-lab","node_id":true}', id="boolean-node-id"),
+        pytest.param(b'{"lab_id":"test-lab","node_id":1}', id="mismatched-filename"),
+        pytest.param(b'["' + _BAD_RECORD_MARKER + b'"]', id="non-dict"),
+        pytest.param(b'{"detail":"' + _BAD_RECORD_MARKER, id="invalid-json"),
+        pytest.param(b"\xff" + _BAD_RECORD_MARKER, id="invalid-utf8"),
+    ],
+)
+def test_malformed_runtime_records_do_not_block_eager_or_lazy_reads(
+    patched_settings, caplog, contents
+):
+    runtime_dir = patched_settings.TMP_DIR / "node-runtime"
+    runtime_dir.mkdir()
+    good = {"lab_id": "test-lab", "node_id": 1, "kind": "qemu"}
+    (runtime_dir / "test-lab-1.json").write_text(json.dumps(good))
+    eager_bad = runtime_dir / "test-lab-2.json"
+    eager_bad.write_bytes(contents)
+
+    service = NodeRuntimeService()
+    assert service._registry == {"test-lab:1": good}
+    assert service._runtime_record("test-lab", 1, include_stopped=True) == good
+    assert "test-lab-2.json" in caplog.text
+
+    lazy_bad = runtime_dir / "test-lab-3.json"
+    lazy_bad.write_bytes(contents)
+    assert service._runtime_record("test-lab", 3, include_stopped=True) is None
+    assert "test-lab-3.json" in caplog.text
+    assert _BAD_RECORD_MARKER.decode() not in caplog.text
+    assert eager_bad.read_bytes() == lazy_bad.read_bytes() == contents
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_field,admitted",
+    [
+        pytest.param({"pid": "invalid"}, False, id="pid"),
+        pytest.param({"pid_create_time": []}, False, id="create-time"),
+        pytest.param({"pid_create_time": float("nan")}, False, id="nonfinite-create-time"),
+        pytest.param({"pid_create_time": 10**400}, False, id="overflowing-create-time"),
+        pytest.param({"kind": {}}, False, id="kind"),
+        pytest.param({"kind": "docker", "container_name": []}, False, id="container-name"),
+        pytest.param({"pid": -1}, False, id="negative-pid"),
+        pytest.param({"kind": "docker", "container_name": "invalid\0name"}, False, id="nul-container-name"),
+        pytest.param({"pid": 123}, True, id="liveness-evaluation-error"),
+    ],
+)
+async def test_invalid_liveness_fields_do_not_disrupt_runtime_consumers(
+    patched_settings, sample_lab, monkeypatch, bad_field, admitted
+):
+    runtime_dir = patched_settings.TMP_DIR / "node-runtime"
+    runtime_dir.mkdir()
+    lab_id = sample_lab["id"]
+    bad = {"lab_id": lab_id, "node_id": 1, "kind": "qemu", **bad_field}
+    good = {"lab_id": lab_id, "node_id": 2, "kind": "qemu"}
+    bad_path = runtime_dir / f"{lab_id}-1.json"
+    bad_text = json.dumps(bad)
+    bad_path.write_text(bad_text)
+    (runtime_dir / f"{lab_id}-2.json").write_text(json.dumps(good))
+    sample_lab["nodes"]["2"] = {**sample_lab["nodes"]["1"], "id": 2, "status": 0}
+    lab_path = patched_settings.LABS_DIR / "sample.json"
+    lab_path.write_text(json.dumps(sample_lab))
+
+    def is_alive(record):
+        if record["node_id"] == bad["node_id"]:
+            raise ValueError("Invalid process data")
+        assert record == good
+        return True
+
+    async def publish(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(NodeRuntimeService, "_is_runtime_alive", staticmethod(is_alive))
+    monkeypatch.setattr(
+        NodeRuntimeService, "_check_alive_sync", staticmethod(lambda record, *_: is_alive(record))
+    )
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", publish)
+
+    service = NodeRuntimeService()
+    assert (f"{lab_id}:1" in service._registry) is admitted
+    assert service.runtime_counts()["qemu"] == 1
+    await NodeRuntimeService._run_heartbeat_cycle()
+    assert json.loads(lab_path.read_text())["nodes"]["2"]["status"] == 2
+    assert bad_path.read_text() == bad_text
+
+
+def test_malformed_runtime_state_blocks_start_and_stop(patched_settings, sample_lab, monkeypatch):
+    runtime_dir = patched_settings.TMP_DIR / "node-runtime"
+    runtime_dir.mkdir()
+    state_file = runtime_dir / f'{sample_lab["id"]}-1.json'
+    state_file.write_text("{}")
+    service = NodeRuntimeService()
+    monkeypatch.setattr(service, "_start_qemu_node", lambda *_: pytest.fail("Started a node"))
+    monkeypatch.setattr(service, "_stop_qemu_runtime", lambda *_: pytest.fail("Stopped a node"))
+
+    for operate in (service.start_node, service.stop_node):
+        with pytest.raises(NodeRuntimeError, match="Repair the malformed runtime state"):
+            operate(sample_lab, 1)
+    assert state_file.read_text() == "{}"
 
 
 def _fake_subprocess_run_factory(recorded_calls):
@@ -2465,7 +2573,7 @@ def test_management_starts_serialize_inventory_and_launch(monkeypatch, patched_s
     lab = _us332_mgmt_lab(3, 253)
     for node in lab["nodes"].values():
         node["interfaces"] = []
-    monkeypatch.setattr(service, "_runtime_record", lambda *a: None)
+    monkeypatch.setattr(service, "_runtime_record", lambda *a, **kw: None)
     monkeypatch.setattr(service, "_reconcile_docker_node_runtime", lambda *a: None)
     monkeypatch.setattr("app.services.node_runtime_service.host_net.sandbox_mode", lambda: False)
     monkeypatch.setattr(service, "_persist_runtime", lambda *a: None)
