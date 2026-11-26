@@ -50,6 +50,7 @@
   import LinkEdge from '$lib/components/canvas/LinkEdge.svelte';
   import LinkPreview from '$lib/components/canvas/LinkPreview.svelte';
   import LinkConfirmModal from '$lib/components/canvas/LinkConfirmModal.svelte';
+  import DeleteConfirmDialog from '$lib/components/DeleteConfirmDialog.svelte';
   import NetworkConfigModal from '$lib/components/canvas/NetworkConfigModal.svelte';
   import PortInfoPopover from '$lib/components/canvas/PortInfoPopover.svelte';
   import { selectedPortInfoStore, type SelectedPortInfo } from '$lib/stores/portInfo';
@@ -365,6 +366,9 @@
       }
     | null = null;
   let portMenuTarget: ConnectionPointTarget | null = null;
+  /** Node awaiting delete confirmation (#338); no DELETE is sent until confirmed. */
+  let nodeDeleteConfirm: { id: number; name: string } | null = null;
+  let nodeDeleteBusy = false;
 
   // #268 — the node the context menu currently targets. The Console entry
   // renders one pill per available console mode from this node's config.
@@ -1605,24 +1609,37 @@
     }
 
     if (action === 'delete') {
-      const response = await apiRequest(`/labs/${labId}/nodes/${decoded.id}`, { method: 'DELETE' });
-      adoptRevision(response);
-      const nextNodes = { ...$labState.nodes };
-      delete nextNodes[String(decoded.id)];
-      labState.setNodes(nextNodes);
-      labState.setTopology($labState.topology.filter(
-        (link) => link.source !== `node${decoded.id}` && link.destination !== `node${decoded.id}`
-      ));
-      recalculateNetworks();
-      publishFlowState();
-      scheduleSave();
-      dispatchCanvasChange('node-delete', {
-        nodeId: decoded.id,
-      });
+      // #338: confirm first — the backend deletes disks/data immediately.
+      nodeDeleteConfirm = { id: decoded.id, name: node.name || `node ${decoded.id}` };
       return;
     }
 
     await runNodeLifecycle(action, node);
+  }
+
+  async function confirmNodeDelete() {
+    if (!nodeDeleteConfirm || nodeDeleteBusy) return;
+    const nodeId = nodeDeleteConfirm.id;
+    nodeDeleteBusy = true;
+    try {
+      const response = await apiRequest(`/labs/${labId}/nodes/${nodeId}`, { method: 'DELETE' });
+      adoptRevision(response);
+      const nextNodes = { ...$labState.nodes };
+      delete nextNodes[String(nodeId)];
+      labState.setNodes(nextNodes);
+      labState.setTopology(
+        $labState.topology.filter(
+          (link) => link.source !== `node${nodeId}` && link.destination !== `node${nodeId}`
+        )
+      );
+      recalculateNetworks();
+      publishFlowState();
+      scheduleSave();
+      dispatchCanvasChange('node-delete', { nodeId });
+      nodeDeleteConfirm = null;
+    } finally {
+      nodeDeleteBusy = false;
+    }
   }
 
   function handleEditNode(targetId: string) {
@@ -2999,6 +3016,17 @@
       on:cancel={handleLinkConfirmCancel}
     />
   </div>
+  {#if nodeDeleteConfirm}
+    <DeleteConfirmDialog
+      title={`Delete node "${nodeDeleteConfirm.name}"?`}
+      message="Its disks and data will be deleted immediately and may not be recoverable."
+      confirmLabel="Delete node"
+      busy={nodeDeleteBusy}
+      testId="node-delete-confirm"
+      on:confirm={confirmNodeDelete}
+      on:cancel={() => (nodeDeleteConfirm = null)}
+    />
+  {/if}
   <div hidden={hideNetworkModal} inert={hideNetworkModal}>
     <NetworkConfigModal
       {labId}

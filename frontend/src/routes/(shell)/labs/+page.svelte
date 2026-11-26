@@ -10,6 +10,7 @@
   import { authStore } from '$lib/stores/auth';
   import { toastStore } from '$lib/stores/toasts';
   import FolderTreeNode from '$lib/components/labs/FolderTreeNode.svelte';
+  import DeleteConfirmDialog from '$lib/components/DeleteConfirmDialog.svelte';
   import {
     buildTree,
     countLabs,
@@ -160,11 +161,20 @@
     });
   }
 
-  async function deleteLab(lab: LabListItem) {
-    if (!window.confirm(`Delete lab "${lab.file}"?`)) return;
+  // #338: confirm first — lab file and every node's disks/data are deleted.
+  let labDeleteConfirm: LabListItem | null = null;
+
+  function deleteLab(lab: LabListItem) {
+    labDeleteConfirm = lab;
+  }
+
+  async function confirmDeleteLab() {
+    if (!labDeleteConfirm) return;
+    const lab = labDeleteConfirm;
     await mutate(async () => {
       await apiRequest(`/labs/_${lab.path}`, { method: 'DELETE' });
       toastStore.push('Lab deleted.');
+      labDeleteConfirm = null;
       await load();
     });
   }
@@ -338,6 +348,18 @@
         </ul>
       </section>
     </div>
+  {/if}
+
+  {#if labDeleteConfirm}
+    <DeleteConfirmDialog
+      title={`Delete lab "${labDeleteConfirm.file}"?`}
+      message="The lab file and all of its nodes' disks and data will be deleted immediately and may not be recoverable."
+      confirmLabel="Delete lab"
+      busy={busy}
+      testId="lab-delete-confirm"
+      on:confirm={confirmDeleteLab}
+      on:cancel={() => (labDeleteConfirm = null)}
+    />
   {/if}
 
   {#if movePicker}
