@@ -1,28 +1,32 @@
 import asyncio
 import fcntl
 import time
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 
 
 class LabLockTimeout(Exception):
-    """Raised when the lab lock cannot be acquired within the timeout."""
+    """Raised when a lab or folder lock cannot be acquired within the timeout."""
 
 
-def _lock_path(lab_id: str, labs_dir: Path) -> Path:
+def _lock_path(lab_id: str, labs_dir: Path, create_parent: bool) -> Path:
     labs_dir = Path(labs_dir)
     labs_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = labs_dir / f"{lab_id}.lock"
-    # Issue #174 follow-up: when lab_id contains path separators (nested
-    # labs like "nested/lab.json"), the lock file's parent directory may
-    # not exist. Create it so open(...) doesn't fail with FileNotFoundError.
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    return lock_path
+    path = labs_dir / f"{lab_id}.lock"
+    if create_parent:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    return path
 
 
-def _try_lock(fd) -> bool:
+def _namespace_path(labs_dir: Path) -> Path:
+    labs_dir = Path(labs_dir)
+    labs_dir.mkdir(parents=True, exist_ok=True)
+    return labs_dir / ".folder-namespace.lock"
+
+
+def _try_lock(fd, mode: int) -> bool:
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, mode | fcntl.LOCK_NB)
     except BlockingIOError:
         return False
     return True
@@ -33,20 +37,9 @@ def _timeout(lab_id: str, timeout_s: float) -> LabLockTimeout:
 
 
 @contextmanager
-def lab_lock(lab_id: str, labs_dir: Path, timeout_s: float = 5.0):
-    """Acquire an exclusive flock on LABS_DIR/{lab_id}.lock.
-
-    - Opens the lock file fresh per request via 'a+' (no truncation).
-    - Releases via fcntl.LOCK_UN in a finally block.
-    - Times out by polling LOCK_NB in 50ms increments.
-    - Lock fd MUST NOT be cached at module scope.
-    - Not re-entrant: each acquisition opens its own file description, so a
-      holder that asks again (any thread, same process) waits for itself.
-    """
-    lock_path = _lock_path(lab_id, labs_dir)
-    deadline = time.monotonic() + timeout_s
-    with open(lock_path, 'a+') as fd:  # 'a+' avoids truncation
-        while not _try_lock(fd):
+def _file_lock(path: Path, mode: int, lab_id: str, timeout_s: float, deadline: float):
+    with open(path, 'a+') as fd:
+        while not _try_lock(fd, mode):
             if time.monotonic() >= deadline:
                 raise _timeout(lab_id, timeout_s)
             time.sleep(0.05)
@@ -57,16 +50,9 @@ def lab_lock(lab_id: str, labs_dir: Path, timeout_s: float = 5.0):
 
 
 @asynccontextmanager
-async def lab_lock_async(lab_id: str, labs_dir: Path, timeout_s: float = 5.0):
-    """:func:`lab_lock` for coroutines: waits without blocking the event loop.
-
-    The same flock, so it excludes :func:`lab_lock` holders in worker threads.
-    Do not await anything inside that needs this lab's lock.
-    """
-    lock_path = _lock_path(lab_id, labs_dir)
-    deadline = time.monotonic() + timeout_s
-    with open(lock_path, 'a+') as fd:  # 'a+' avoids truncation
-        while not _try_lock(fd):
+async def _file_lock_async(path: Path, mode: int, lab_id: str, timeout_s: float, deadline: float):
+    with open(path, 'a+') as fd:
+        while not _try_lock(fd, mode):
             if time.monotonic() >= deadline:
                 raise _timeout(lab_id, timeout_s)
             await asyncio.sleep(0.05)
@@ -74,3 +60,54 @@ async def lab_lock_async(lab_id: str, labs_dir: Path, timeout_s: float = 5.0):
             yield
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+@contextmanager
+def lab_lock(
+    lab_id: str,
+    labs_dir: Path,
+    timeout_s: float = 5.0,
+    *,
+    namespace: bool = True,
+    create_parent: bool = True,
+):
+    """Share the folder namespace, then exclusively lock the lab's adjacent file."""
+    deadline = time.monotonic() + timeout_s
+    shared = (
+        _file_lock(_namespace_path(labs_dir), fcntl.LOCK_SH, lab_id, timeout_s, deadline)
+        if namespace else nullcontext()
+    )
+    with shared:
+        path = _lock_path(lab_id, labs_dir, create_parent)
+        with _file_lock(path, fcntl.LOCK_EX, lab_id, timeout_s, deadline):
+            yield
+
+
+@asynccontextmanager
+async def lab_lock_async(
+    lab_id: str,
+    labs_dir: Path,
+    timeout_s: float = 5.0,
+    *,
+    namespace: bool = True,
+    create_parent: bool = True,
+):
+    """Acquire the same locks as :func:`lab_lock` without blocking while waiting."""
+    deadline = time.monotonic() + timeout_s
+    shared = (
+        _file_lock_async(_namespace_path(labs_dir), fcntl.LOCK_SH, lab_id, timeout_s, deadline)
+        if namespace else nullcontext()
+    )
+    async with shared:
+        path = _lock_path(lab_id, labs_dir, create_parent)
+        async with _file_lock_async(path, fcntl.LOCK_EX, lab_id, timeout_s, deadline):
+            yield
+
+
+@asynccontextmanager
+async def folder_namespace_lock_async(labs_dir: Path, timeout_s: float = 5.0, *, shared: bool = False):
+    """Guard folder membership with a lock outside movable lab folders."""
+    deadline = time.monotonic() + timeout_s
+    mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+    async with _file_lock_async(_namespace_path(labs_dir), mode, "folder namespace", timeout_s, deadline):
+        yield

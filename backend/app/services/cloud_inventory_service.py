@@ -106,7 +106,7 @@ def nat_cloud_ipam_lock(timeout_s: float = 5.0) -> Iterator[None]:
 
 
 def nat_cloud_ipam_lock_async(settings: Any):
-    return lab_lock_async(_NAT_CLOUD_IPAM_LOCK, _base_data_dir(settings))
+    return lab_lock_async(_NAT_CLOUD_IPAM_LOCK, _base_data_dir(settings), namespace=False)
 
 
 def nat_cloud_id(lab_id: str, network_id: int) -> str:

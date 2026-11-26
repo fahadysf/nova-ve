@@ -16,7 +16,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.routers import labs
+from app.routers import folders, labs
+from app.schemas.folder import FolderRenameRequest
 from app.schemas.lab import LabMoveRequest
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
@@ -53,6 +54,7 @@ def settings(tmp_path, monkeypatch):
         "app.services.network_service",
         "app.services.link_service",
         "app.services.cloud_inventory_service",
+        "app.services.folder_service",
     ):
         monkeypatch.setattr(f"{module}.get_settings", lambda: s)
 
@@ -678,6 +680,60 @@ async def test_cancelled_lab_delete_finishes_commit_and_audit(settings, monkeypa
     assert db.commits == 1
     assert audits == ["lab.delete"]
     assert not (settings.LABS_DIR / LAB).exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["rename", "delete"])
+async def test_folder_mutation_waits_for_nested_lab_writer(settings, monkeypatch, operation):
+    _seed(settings)
+    source_name = f"group/nested/{LAB}"
+    source = settings.LABS_DIR / source_name
+    source.parent.mkdir(parents=True)
+    (settings.LABS_DIR / LAB).rename(source)
+    row = SimpleNamespace(filename=source_name, path=f"/{source_name}")
+    db = _RecordingDeleteDb()
+    started = asyncio.Event()
+
+    async def list_labs(_service):
+        return [row]
+
+    async def no_audit(*_args, **_kwargs):
+        pass
+
+    monkeypatch.setattr(LabService, "list_labs", list_labs)
+    monkeypatch.setattr(folders.audit_service, "record", no_audit)
+    monkeypatch.setattr(folders, "assert_no_external_members_for_scope", lambda *_: None)
+
+    async def mutate_folder():
+        started.set()
+        if operation == "rename":
+            return await folders.rename_folder(
+                "group", FolderRenameRequest(path="renamed"), current_user=ADMIN, db=db,
+            )
+        return await folders.delete_folder("group", current_user=ADMIN, db=db)
+
+    async with lab_lock_async(source_name, settings.LABS_DIR):
+        pending = asyncio.create_task(mutate_folder())
+        await asyncio.wait_for(started.wait(), timeout=3)
+        await asyncio.sleep(0)
+        if pending.done():
+            await pending
+            pytest.fail("Folder changed before the nested lab writer released its lock")
+        assert source.is_file()
+        assert db.commits == 0
+        state = LabService.read_lab_json_static(source_name)
+        state["meta"]["name"] = "saved by writer"
+        LabService.write_lab_json_static(source_name, state)
+
+    result = await asyncio.wait_for(pending, timeout=5)
+    assert result["code"] == 200
+    assert not source.exists()
+    assert db.commits == 1
+    if operation == "rename":
+        assert row.filename == f"renamed/nested/{LAB}"
+        assert LabService.read_lab_json_static(row.filename)["meta"]["name"] == "saved by writer"
+    else:
+        assert db.deleted == [row]
 
 
 @pytest.mark.asyncio

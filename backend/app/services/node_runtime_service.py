@@ -426,7 +426,7 @@ class NodeRuntimeService:
 
                 lock_name = "mgmt-" + hashlib.sha256(lab_id.encode()).hexdigest()
                 try:
-                    with lab_lock(lock_name, self.runtime_dir, timeout_s=60):
+                    with lab_lock(lock_name, self.runtime_dir, timeout_s=60, namespace=False):
                         self._check_mgmt_address_available(lab_id, node_id)
                         runtime = self._start_docker_node(lab_data, node)
                 except LabLockTimeout as exc:

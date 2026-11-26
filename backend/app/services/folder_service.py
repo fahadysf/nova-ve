@@ -2,10 +2,13 @@ import json
 import os
 import shutil
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from app.config import get_settings
+from app.services.cloud_inventory_service import nat_cloud_ipam_lock_async
 from app.services.console_recording import RECORDINGS_FOLDER, get_console_recorder
+from app.services.lab_lock import folder_namespace_lock_async
 
 # Static virtual folders that always appear at root. Shared moved out of the
 # pure-stub set in #285: it is a real directory, listed by the file scan once
@@ -61,6 +64,13 @@ def _relative_folder_path(full_path: Path) -> str:
 
 def _fmt_time(ts: float) -> str:
     return time.strftime("%d %b %Y %H:%M", time.localtime(ts))
+
+
+@asynccontextmanager
+async def folder_mutation_lock():
+    settings = get_settings()
+    async with nat_cloud_ipam_lock_async(settings), folder_namespace_lock_async(settings.LABS_DIR):
+        yield
 
 
 class FolderService:
@@ -209,6 +219,8 @@ class FolderService:
     @staticmethod
     def rename_folder(old_path: str, new_path: str) -> Path:
         """Rename a folder."""
+        if not _normalize_folder_path(old_path) or not _normalize_folder_path(new_path):
+            raise ValueError("The labs root cannot be renamed.")
         source = _safe_folder_path(old_path)
         dest = _safe_folder_path(new_path)
         if not source.exists():
@@ -222,6 +234,8 @@ class FolderService:
     @staticmethod
     def delete_folder(folder_path: str) -> None:
         """Delete a folder and all nested contents."""
+        if not _normalize_folder_path(folder_path):
+            raise ValueError("The labs root cannot be deleted.")
         target = _safe_folder_path(folder_path)
         if not target.exists():
             raise FileNotFoundError(f"Folder not found: {folder_path}")
