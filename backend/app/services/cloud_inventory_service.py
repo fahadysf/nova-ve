@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from app.config import get_settings
+from app.services.lab_lock import LabLockTimeout
 
 NAT_CLOUD_TYPE = "nat_cloud"
 LINUX_BRIDGE_TYPE = "linux_bridge"
@@ -91,7 +92,10 @@ def nat_cloud_ipam_lock(timeout_s: float = 5.0) -> Iterator[None]:
                 break
             except BlockingIOError:
                 if time.monotonic() >= deadline:
-                    raise TimeoutError("Timed out waiting for NAT-Cloud IPAM lock")
+                    # Same 503 + Retry-After as a busy lab (main.py).
+                    raise LabLockTimeout(
+                        "Another network change is in progress; retry in 2s"
+                    )
                 time.sleep(0.05)
         try:
             yield

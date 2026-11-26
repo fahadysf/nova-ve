@@ -632,8 +632,14 @@ describe('TopologyCanvas lab controls', () => {
       revision: 62,
     } as never);
     await openNetworkMenu();
+    // The menu repeats the modal's warning about a second DHCP server.
+    expect(screen.getByTestId('network-menu-dhcp')).toHaveAttribute(
+      'title', 'Start a DHCP server on this network. Turn off DHCP on any node attached here, such as a lab router.'
+    );
     await fireEvent.click(screen.getByTestId('network-menu-dhcp'));
-    await waitFor(() => expect(toast).toHaveBeenCalledWith('DHCP enabled; server running.', 'success', 4000));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(
+      'DHCP enabled; server running. Turn off DHCP on any node attached here, such as a lab router.', 'success', 8000
+    ));
     expect(get(labState).networks['7'].config?.dhcp).toBe(true);
     toast.mockRestore();
   });

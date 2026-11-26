@@ -780,7 +780,7 @@
                     </span>
                   {/if}
                 </div>
-                {#if showLiveProblem}
+                {#if showLiveProblem && liveStatus}
                   <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
                     {liveStatus.problem}
                   </p>
@@ -901,7 +901,7 @@
               {#if errors.dhcp}
                 <p id="bridge-dhcp-error" class="text-xs text-red-300 sm:col-span-2" role="alert">{errors.dhcp}</p>
               {/if}
-              {#if showLiveProblem}
+              {#if showLiveProblem && liveStatus}
                 <p class="rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200 sm:col-span-2">
                   {liveStatus.problem}
                 </p>

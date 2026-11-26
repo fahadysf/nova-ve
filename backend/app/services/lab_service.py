@@ -252,18 +252,21 @@ def _bridge_server_cidr(config: dict) -> str:
     return f"{config['dhcp_server']}/{prefix}"
 
 
-def _cleanup_bridge_dhcp_runtime(bridge: str, network: dict, context: str) -> None:
+def _cleanup_bridge_dhcp_runtime(bridge: str, network: dict, context: str) -> bool:
     """Best-effort removal of an isolated bridge's DHCP server, address and guard.
 
     Deleting the bridge drops its address, but not the dnsmasq process or the
     nftables guard, which match the bridge by name (#233, #325).
+
+    Returns True when the guard was kept because the address could not be
+    removed; the caller drops it once the bridge itself is gone.
     """
     if str(network.get("type") or LINUX_BRIDGE_TYPE) != LINUX_BRIDGE_TYPE or is_member(network):
-        return
+        return False
     config = network.get("config") if isinstance(network.get("config"), dict) else {}
     runtime = network.get("runtime") if isinstance(network.get("runtime"), dict) else {}
     if not (bridge_dhcp_enabled(network) or runtime.get("dhcp") is True):
-        return
+        return False
     server = runtime.get("dhcp_server") or config.get("dhcp_server")
     try:
         address = _bridge_server_cidr({"cidr": config.get("cidr"), "dhcp_server": server})
@@ -282,7 +285,20 @@ def _cleanup_bridge_dhcp_runtime(bridge: str, network: dict, context: str) -> No
                 # Never leave an address unguarded. Rules for a bridge that
                 # is gone match nothing; the next DHCP enable replaces them.
                 logger.warning("%s: keeping the guard on %s", context, bridge)
-                return
+                return True
+    return False
+
+
+def _drop_bridge_guard_after_delete(bridge: str, context: str) -> None:
+    """Remove a guard kept by ``_cleanup_bridge_dhcp_runtime`` once its bridge is gone.
+
+    The bridge's address went with it, so the guard protects nothing; left
+    behind, a new bridge reusing the name would inherit the rules.
+    """
+    try:
+        host_net.bridge_guard_remove(bridge)
+    except host_net.HostNetError as exc:
+        logger.warning("%s: bridge_guard_remove(%s) failed (%s)", context, bridge, exc)
 
 
 def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
@@ -362,7 +378,7 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
                     exc,
                 )
 
-        _cleanup_bridge_dhcp_runtime(bridge, network, "delete_lab")
+        guard_kept = _cleanup_bridge_dhcp_runtime(bridge, network, "delete_lab")
         try:
             host_net.bridge_del(bridge)
         except host_net.HostNetEINVAL:
@@ -373,6 +389,9 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
                 bridge,
                 exc,
             )
+            continue
+        if guard_kept:
+            _drop_bridge_guard_after_delete(bridge, "delete_lab")
 
 
 def _legacy_topology_to_links(data: dict) -> list[dict]:

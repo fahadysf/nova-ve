@@ -876,6 +876,23 @@ async def test_validate_config_returns_defaults_and_changes_nothing(api, host, l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw",
+    [{"cidr": "10.0.0.0/16"}, {"cidr": "10.0.0.0/30"}, {"cidr": "10.0.0.0/24"}, {}],
+    ids=["wide", "narrow", "dhcp-capable", "no-cidr"],
+)
+async def test_validate_config_accepts_a_label_only_cidr_of_any_size(api, host, labs_dir, raw):
+    # The create modal pre-checks every bridge with ``{cidr}`` and no
+    # ``dhcp`` key; a CIDR outside /22-/29 is a plain label and must pass.
+    lab = _lab(labs_dir, "a.json", LAB_A)
+    async with _client() as c:
+        res = await c.post(f"/api/labs/{lab}/networks/validate-config",
+                           json={"type": "linux_bridge", "config": raw})
+    assert res.status_code == 200, res.text
+    assert res.json()["data"]["config"].get("dhcp") in (None, False)
+
+
+@pytest.mark.asyncio
 async def test_validate_config_needs_lab_access(api, host, labs_dir):
     lab = _lab(labs_dir, "a.json", LAB_A)
     api["value"] = SimpleNamespace(username="alice", role="user", html5=True, folder="alice")
@@ -991,13 +1008,55 @@ def test_reconcile_keeps_the_guard_while_the_address_stays(host, labs_dir):
     assert summary["skipped"] and "busy" in summary["skipped"][0]["reason"]
 
 
-def test_lab_cleanup_keeps_the_guard_when_the_address_stays(host, labs_dir):
+def test_lab_cleanup_keeps_the_guard_until_the_bridge_is_gone(host, labs_dir):
     data = {"id": LAB_A, "networks": {"1": _bridge(1, config=_dhcp_config(), runtime={"dhcp": True})}}
     host.fail["bridge_addr_del"] = host_net.HostNetUnknown("busy")
     _cleanup_lab_network_runtime(data, "a.json")
+    b1 = host_net.bridge_name(LAB_A, 1)
+    # The guard outlives the address, then goes with the bridge, so a new
+    # bridge reusing the name does not inherit the rules.
+    assert host.calls == [
+        ("dnsmasq_stop", b1),
+        ("bridge_addr_del", b1, "10.40.1.254/24"),
+        ("bridge_del", b1),
+        ("bridge_guard_remove", b1),
+    ]
+    host.calls.clear()
+    host.fail["bridge_del"] = host_net.HostNetUnknown("busy")
+    _cleanup_lab_network_runtime(data, "a.json")
+    # The bridge (and its address) stayed, so the guard stays too.
+    assert "bridge_guard_remove" not in host.names()
+
+
+@pytest.mark.asyncio
+async def test_delete_network_drops_a_kept_guard_once_the_bridge_is_gone(host, labs_dir):
+    lab = _lab(labs_dir, "a.json", LAB_A, {"1": _bridge(1, config=_dhcp_config(), runtime={"dhcp": True})})
+    host.fail["bridge_addr_del"] = host_net.HostNetUnknown("busy")
+    await NetworkService().delete_network(lab, 1)
     b1 = host_net.bridge_name(LAB_A, 1)
     assert host.calls == [
         ("dnsmasq_stop", b1),
         ("bridge_addr_del", b1, "10.40.1.254/24"),
         ("bridge_del", b1),
+        ("bridge_guard_remove", b1),
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_busy_subnet_lock_is_a_retryable_503(api, host, labs_dir, monkeypatch):
+    import contextlib
+    from app.services import network_service as ns
+    from app.services.lab_lock import LabLockTimeout
+
+    @contextlib.contextmanager
+    def busy():
+        raise LabLockTimeout("Another network change is in progress; retry in 2s")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ns, "nat_cloud_ipam_lock", busy)
+    lab = _lab(labs_dir, "a.json", LAB_A, {"1": _bridge(1, config={"cidr": "10.40.1.0/24"})})
+    async with _client() as c:
+        res = await c.patch(f"/api/labs/{lab}/networks/1", json={"config": {"dhcp": True}})
+    assert res.status_code == 503, res.text
+    assert res.headers.get("retry-after") == "2"
+    assert "retry" in res.json()["message"]

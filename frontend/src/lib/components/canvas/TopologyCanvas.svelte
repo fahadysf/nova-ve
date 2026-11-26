@@ -56,7 +56,14 @@
   import { canvasPrefs } from '$lib/stores/canvasPrefs';
   import { infoPanels } from '$lib/stores/infoPanels';
   import { networkSharing, type NetworkModalType } from '$lib/services/networkSharing';
-  import { dhcpEnabled, dhcpToggle, LEASES_KEPT_NOTE, networkConfigurable } from '$lib/services/networkDhcp';
+  import {
+    dhcpEnabled,
+    dhcpToggle,
+    LEASES_KEPT_NOTE,
+    networkConfigurable,
+    networkKind,
+    ONE_DHCP_SERVER_NOTE
+  } from '$lib/services/networkDhcp';
   import { fieldError } from '$lib/services/apiErrors';
   import { toastStore } from '$lib/stores/toasts';
   import {
@@ -1825,8 +1832,9 @@
       adoptRevision(response);
       labState.setNetworks({ ...$labState.networks, [String(updated.id)]: updated });
       publishFlowState();
-      // The lease note is longer, so it stays up longer.
-      toastStore.push(networkSavedMessage(before, updated, { dhcp: enable }), 'success', enable ? 4000 : 8000);
+      // The lease and second-server notes are longer, so they stay up longer.
+      const short = enable && networkKind(updated) !== 'linux_bridge';
+      toastStore.push(networkSavedMessage(before, updated, { dhcp: enable }), 'success', short ? 4000 : 8000);
       dispatchCanvasChange('network-update', {});
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -1853,7 +1861,10 @@
     if (!isOn || (wasOn && !rangeChanged)) return 'Network settings saved.';
     // The host reports a pid only for a server it verified as running.
     const started = Number(after.runtime?.dhcp_pid ?? 0) > 0;
-    if (!wasOn) return started ? 'DHCP enabled; server running.' : 'DHCP enabled.';
+    if (!wasOn) {
+      const enabled = started ? 'DHCP enabled; server running.' : 'DHCP enabled.';
+      return networkKind(after) === 'linux_bridge' ? `${enabled} ${ONE_DHCP_SERVER_NOTE}` : enabled;
+    }
     return started ? 'DHCP range updated; server restarted.' : 'DHCP range updated.';
   }
 
@@ -2836,7 +2847,9 @@
             aria-busy={menuDhcpPending}
             title={menuDhcp.enabled
               ? `Stop the DHCP server. ${LEASES_KEPT_NOTE}`
-              : 'Start a DHCP server on this network.'}
+              : networkKind(menuNetwork) === 'linux_bridge'
+                ? `Start a DHCP server on this network. ${ONE_DHCP_SERVER_NOTE}`
+                : 'Start a DHCP server on this network.'}
             on:click|preventDefault|stopPropagation={() =>
               handleDhcpToggle(menu?.targetId ?? '', !menuDhcp?.enabled)}
           >

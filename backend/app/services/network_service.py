@@ -42,6 +42,7 @@ from app.services.lab_service import (
     LabService,
     _bridge_server_cidr,
     _cleanup_bridge_dhcp_runtime,
+    _drop_bridge_guard_after_delete,
     _normalize_relative_lab_path,
     keep_written_revision,
     locked_lab,
@@ -1085,7 +1086,7 @@ class NetworkService:
             config = _normalize_bridge_config(
                 {k: v for k, v in raw_config.items() if k not in MEMBERSHIP_CONFIG_KEYS}
             )
-            if config["dhcp"]:
+            if config.get("dhcp") is True:
                 _check_bridge_dhcp_overlaps(
                     config["cidr"],
                     own_bridge=host_net.bridge_name(lab_id, _next_network_id(networks)),
@@ -1880,7 +1881,10 @@ class NetworkService:
                                 str(config.get("cidr") or ""),
                                 str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
                             )
-                        _cleanup_bridge_dhcp_runtime(bridge, network, "delete_network")
+                        guard_kept = _cleanup_bridge_dhcp_runtime(
+                            bridge, network, "delete_network"
+                        )
+                        bridge_gone = True
                         try:
                             host_net.bridge_del(bridge)
                         except host_net.HostNetEINVAL:
@@ -1889,12 +1893,15 @@ class NetworkService:
                                 bridge,
                             )
                         except host_net.HostNetError as exc:
+                            bridge_gone = False
                             logger.warning(
                                 "delete_network: bridge_del(%s) failed (%s); "
                                 "JSON record removed regardless",
                                 bridge,
                                 exc,
                             )
+                        if guard_kept and bridge_gone:
+                            _drop_bridge_guard_after_delete(bridge, "delete_network")
 
         await ws_hub.publish(normalized, "network_deleted", {"network": removed})
         return removed
