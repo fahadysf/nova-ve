@@ -73,6 +73,8 @@ RUNTIME_ROOT = Path(os.environ.get("NOVA_VE_RUNTIME_ROOT", "/var/lib/nova-ve"))
 # helper recreates the tree on every start, and every ancestor is
 # root-owned. Not derived from RUNTIME_ROOT, and the backend cannot move it
 # through sudo (sudo resets the environment; this is root's own setting).
+# ``_check_dnsmasq_root`` refuses the tree unless every directory in it is
+# root's alone, whatever this is set to.
 DNSMASQ_ROOT = Path(os.environ.get("NOVA_VE_DNSMASQ_ROOT", "/run/nova-ve/dnsmasq"))
 IP_FORWARD_PATH = Path(os.environ.get("NOVA_VE_IP_FORWARD_PATH", "/proc/sys/net/ipv4/ip_forward"))
 IPV4_CONF_ROOT = Path(os.environ.get("NOVA_VE_IPV4_CONF_ROOT", "/proc/sys/net/ipv4/conf"))
@@ -914,13 +916,21 @@ def cmd_bridge_guard_remove(args: argparse.Namespace) -> int:
     return _guard_locked(_guard_remove, bridge)
 
 
-def _write_private_file(path: Path, text: str, root: Path | None = None) -> None:
+def _write_private_file(
+    path: Path,
+    text: str,
+    root: Path | None = None,
+    *,
+    check_dir: Callable[[Path], None] | None = None,
+) -> None:
     """Write ``path`` as root without following links the service account made.
 
     The state directory belongs to the unprivileged service account, so a
     symlink planted there must never redirect a root write. Directories are
     created and checked one by one below ``root``; the file is
-    written to a fresh temporary name and renamed into place.
+    written to a fresh temporary name and renamed into place. ``check_dir``
+    sees every one of those directories once it exists, for a tree whose
+    trust rules are stricter than "not a link".
     """
     if root is None:
         root = RUNTIME_ROOT
@@ -935,6 +945,8 @@ def _write_private_file(path: Path, text: str, root: Path | None = None) -> None
             pass
         if current.is_symlink() or not current.is_dir():
             raise OSError(f"refusing to write through {current}: not a plain directory")
+        if check_dir is not None:
+            check_dir(current)
     tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644)
     try:
@@ -946,15 +958,63 @@ def _write_private_file(path: Path, text: str, root: Path | None = None) -> None
         raise
 
 
-def _check_dnsmasq_root() -> None:
-    """Refuse a planted link in the root-owned dnsmasq tree (#334).
+# Owner every directory of the dnsmasq tree must have. Root in production;
+# the tests run unprivileged and point this at their own uid, so the
+# ownership refusal is exercised without weakening the default.
+_TRUSTED_UID = 0
 
-    ``/run`` itself is root-owned, so this is defence in depth: the helper
-    must not quietly follow a symlink at its own root either.
+
+def _check_trusted_dir(path: Path) -> None:
+    """Refuse ``path`` unless it is a directory that only root may change.
+
+    Only then can nobody replace what the helper writes below it. The stat
+    does not follow links: a link or a plain file where a directory belongs
+    is refused rather than used.
+    """
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        raise OSError(f"refusing to use {path}: {exc.strerror}") from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise OSError(f"refusing to use {path}: not a plain directory")
+    if info.st_uid != _TRUSTED_UID:
+        raise OSError(
+            f"refusing to use {path}: owned by uid {info.st_uid}, expected {_TRUSTED_UID}"
+        )
+    if info.st_mode & 0o022:
+        raise OSError(f"refusing to use {path}: writable by group or others")
+
+
+def _ensure_dnsmasq_root() -> None:
+    """Create the tree's fixed ancestors when a reboot emptied ``/run``.
+
+    Each level is made only once the level above it passed the trust check,
+    so nothing is ever created below a planted link.
     """
     for candidate in (DNSMASQ_ROOT.parent, DNSMASQ_ROOT):
-        if candidate.is_symlink() or (candidate.exists() and not candidate.is_dir()):
-            raise OSError(f"refusing to use {candidate}: not a plain directory")
+        if not os.path.lexists(candidate):
+            try:
+                os.mkdir(candidate, 0o755)
+            except OSError as exc:
+                raise OSError(
+                    f"refusing to use {candidate}: cannot create it ({exc.strerror})"
+                ) from exc
+        _check_trusted_dir(candidate)
+
+
+def _check_dnsmasq_root(bridge: str | None = None) -> None:
+    """Refuse a dnsmasq tree that is not root's alone (#334).
+
+    Covers both fixed ancestors and, when it already exists, the bridge's
+    own directory. A missing directory is fine here: ``_ensure_dnsmasq_root``
+    creates and checks the ancestors before anything is written, and
+    ``_write_private_file`` checks the bridge's directory as it makes it.
+    """
+    for candidate in (DNSMASQ_ROOT.parent, DNSMASQ_ROOT):
+        if os.path.lexists(candidate):
+            _check_trusted_dir(candidate)
+    if bridge is not None and os.path.lexists(DNSMASQ_ROOT / bridge):
+        _check_trusted_dir(DNSMASQ_ROOT / bridge)
 
 
 def _dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
@@ -1008,12 +1068,26 @@ def _dnsmasq_stop_bridge(bridge: str) -> bool:
                 pass
         for _attempt in range(attempts):
             if not _dnsmasq_pids(bridge):
-                _dnsmasq_paths(bridge)[1].unlink(missing_ok=True)
-                _unlink_legacy_pidfile(bridge)
                 return True
             time.sleep(0.05)
     print(f"dnsmasq for {bridge} did not stop", file=sys.stderr)
     return False
+
+
+def _remove_pidfiles(bridge: str) -> bool:
+    """Unlink both pid files once the server is gone; False when the tree is not trusted.
+
+    Stopping a server only reads ``/proc``, so a tree the helper refuses to
+    write must not keep one alive: only the unlink below it is skipped.
+    """
+    _unlink_legacy_pidfile(bridge)
+    try:
+        _check_dnsmasq_root(bridge)
+    except OSError as exc:
+        print(f"{exc}; leaving the pid file of {bridge} in place", file=sys.stderr)
+        return False
+    _dnsmasq_paths(bridge)[1].unlink(missing_ok=True)
+    return True
 
 
 def _dnsmasq_options(gateway: str, dhcp_start: str, dhcp_end: str, *, no_router: bool) -> list[str]:
@@ -1043,7 +1117,8 @@ def _write_dnsmasq_conf(
     dhcp_end: str,
     no_router: bool,
 ) -> None:
-    _check_dnsmasq_root()
+    # The tree itself was checked before anything was stopped or read; this
+    # re-checks the bridge's directory at the moment it is made or found.
     _write_private_file(
         conf,
         "\n".join(
@@ -1059,6 +1134,7 @@ def _write_dnsmasq_conf(
             ]
         ),
         root=DNSMASQ_ROOT,
+        check_dir=_check_trusted_dir,
     )
 
 
@@ -1136,21 +1212,45 @@ def _migrate_legacy_leases(bridge: str, leases: Path) -> None:
     finally:
         if fd >= 0:
             os.close(fd)
-    _write_private_file(leases, text, root=DNSMASQ_ROOT)
+    # The legacy file is consumed only once a server runs on this copy, which
+    # may be a later attempt: the note says which starts still owe that.
+    _write_private_file(_legacy_lease_note(bridge), "", root=DNSMASQ_ROOT, check_dir=_check_trusted_dir)
+    _write_private_file(leases, text, root=DNSMASQ_ROOT, check_dir=_check_trusted_dir)
     try:
         os.chmod(leases, 0o644)
     except OSError:
         pass
-    # Consume the legacy copy: /run is tmpfs, so without this the stale
-    # pre-#334 leases would be re-imported on every boot.
+
+
+def _legacy_lease_note(bridge: str) -> Path:
+    """Marks leases that were copied from the legacy file, which is still to be consumed."""
+    return DNSMASQ_ROOT / bridge / "leases.imported"
+
+
+def _finish_legacy_leases(bridge: str) -> None:
+    """Consume the legacy lease file now that a server runs on its copy.
+
+    /run is tmpfs, so a legacy file that stayed would be imported again on
+    every boot. Only a running server makes the move final: a start that
+    failed must leave the file, because the copy may be gone with the next
+    boot. Only a file the helper copied is ever consumed, so one it refused
+    (too large, or not a regular file) is left as it is.
+    """
+    note = _legacy_lease_note(bridge)
+    if not os.path.lexists(note):
+        return
     dir_fd = _open_legacy_dir(bridge)
-    if dir_fd is not None:
-        try:
-            os.rename("leases", "leases.pre-334", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
-        except OSError:
-            pass
-        finally:
-            os.close(dir_fd)
+    if dir_fd is None:
+        return
+    try:
+        os.rename("leases", "leases.pre-334", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass  # consumed already
+    except OSError:
+        return  # left for the next start
+    finally:
+        os.close(dir_fd)
+    note.unlink(missing_ok=True)
 
 
 def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
@@ -1168,8 +1268,18 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     ):
         raise _ValidationError("server inside dhcp range")
 
+    # #334: fail closed on a tree that is not root's alone, before anything
+    # below it is read, written, unlinked or any server is stopped.
+    try:
+        _ensure_dnsmasq_root()
+        _check_dnsmasq_root(bridge)
+    except OSError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
     if not _dnsmasq_stop_bridge(bridge):
         return 1
+    _remove_pidfiles(bridge)
     conf, pidfile, leases = _dnsmasq_paths(bridge)
     try:
         _migrate_legacy_leases(bridge, leases)
@@ -1185,13 +1295,24 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     if not pids:
         print(f"dnsmasq for {bridge} exited right after starting", file=sys.stderr)
         return 1
+    _finish_legacy_leases(bridge)
     print(pids[0])
     return 0
 
 
 def cmd_dnsmasq_stop(args: argparse.Namespace) -> int:
     bridge = validate_bridge_name(args.bridge)
-    return 0 if _dnsmasq_stop_bridge(bridge) else 1
+    if not _dnsmasq_stop_bridge(bridge):
+        return 1
+    # The server is gone either way; a tree the helper refuses still needs
+    # an operator, so the verb must not look like a clean stop.
+    return 0 if _remove_pidfiles(bridge) else 1
+
+
+def cmd_dnsmasq_layout_version(args: argparse.Namespace) -> int:
+    """Report the protected DHCP layout without touching host state."""
+    print("root-owned-dnsmasq-v1")
+    return 0
 
 
 def cmd_link_set_name_in_netns(args: argparse.Namespace) -> int:
@@ -1444,6 +1565,7 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "forward-remove": cmd_forward_remove,
     "dnsmasq-start": cmd_dnsmasq_start,
     "dnsmasq-stop": cmd_dnsmasq_stop,
+    "dnsmasq-layout-version": cmd_dnsmasq_layout_version,
     "link-set-name-in-netns": cmd_link_set_name_in_netns,
     "addr-add-in-netns": cmd_addr_add_in_netns,
     "addr-up-in-netns": cmd_addr_up_in_netns,
@@ -1563,6 +1685,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("dnsmasq-stop", help="stop per-bridge dnsmasq DHCP/DNS")
     p.add_argument("bridge")
 
+    sub.add_parser("dnsmasq-layout-version", help="report the protected DHCP layout version")
+
     p = sub.add_parser(
         "link-set-name-in-netns",
         help="nsenter -t <pid> -n ip link set <oldname> name <newname>",
@@ -1627,6 +1751,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # #334: what the helper creates must not depend on who invoked it. A
+    # tight umask would lock the backend out of the dnsmasq leases it only
+    # reads; a loose one would open the dnsmasq tree to everyone.
+    os.umask(0o022)
     parser = build_parser()
     # argparse exits 2 on parse failure (unknown verb, missing args); we
     # let that propagate.  We use exit code 3 only if an unknown verb

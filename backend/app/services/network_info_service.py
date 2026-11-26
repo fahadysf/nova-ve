@@ -43,8 +43,11 @@ MAX_LEASES = 100
 # #334: the privileged helper keeps dnsmasq's config, pid and leases under a
 # root-owned /run tree; the backend only reads them. The pre-#334 location
 # under the data dir is still read as a fallback for servers started before
-# the upgrade.
-DNSMASQ_ROOT = Path(os.environ.get("NOVA_VE_DNSMASQ_ROOT", "/run/nova-ve/dnsmasq"))
+# the upgrade. This must equal the helper's own default and is deliberately
+# not read from the environment: sudo resets it, so NOVA_VE_DNSMASQ_ROOT set
+# here would never reach the helper and would only make the backend look in
+# the wrong place.
+DNSMASQ_ROOT = Path("/run/nova-ve/dnsmasq")
 
 
 def _dnsmasq_dir(bridge: str) -> Path:
@@ -137,6 +140,27 @@ def _learned_macs(bridge: str | None) -> dict[str, str]:
     return learned
 
 
+def _proc_pids() -> list[str]:
+    try:
+        return [name for name in os.listdir(PROC_ROOT) if name.isdigit()]
+    except OSError:
+        return []
+
+
+def _dnsmasq_confs(pid: str) -> list[str]:
+    """Real paths of the conf files ``pid``'s dnsmasq reads; empty for anything else."""
+    try:
+        argv = (PROC_ROOT / pid / "cmdline").read_bytes().split(b"\0")
+    except OSError:
+        return []
+    if os.path.basename(argv[0]) != b"dnsmasq":
+        return []
+    prefix = b"--conf-file="
+    return [
+        os.path.realpath(os.fsdecode(arg[len(prefix):])) for arg in argv if arg.startswith(prefix)
+    ]
+
+
 def _dnsmasq_pid(root: Path) -> int | None:
     """Pid of the bridge's dnsmasq if that process is really running.
 
@@ -145,26 +169,10 @@ def _dnsmasq_pid(root: Path) -> int | None:
     """
     # The helper does not resolve symlinks in the data directory; we do.
     wanted = os.path.realpath(root / "dnsmasq.conf")
-    prefix = b"--conf-file="
-
-    def serves(pid: str) -> bool:
-        try:
-            argv = (PROC_ROOT / pid / "cmdline").read_bytes().split(b"\0")
-        except OSError:
-            return False
-        return os.path.basename(argv[0]) == b"dnsmasq" and any(
-            arg.startswith(prefix) and os.path.realpath(os.fsdecode(arg[len(prefix):])) == wanted
-            for arg in argv
-        )
-
     recorded = (_read_text(root / "dnsmasq.pid") or "").strip()
-    if recorded.isdigit() and serves(recorded):
+    if recorded.isdigit() and wanted in _dnsmasq_confs(recorded):
         return int(recorded)
-    try:
-        candidates = [name for name in os.listdir(PROC_ROOT) if name.isdigit()]
-    except OSError:
-        return None
-    return next((int(pid) for pid in candidates if serves(pid)), None)
+    return next((int(pid) for pid in _proc_pids() if wanted in _dnsmasq_confs(pid)), None)
 
 
 def dhcp_server_pid(bridge: str | None) -> int | None:
@@ -177,6 +185,43 @@ def dhcp_server_pid(bridge: str | None) -> int | None:
     return _dnsmasq_pid(DNSMASQ_ROOT / bridge) or _dnsmasq_pid(
         _base_data_dir() / "nat-cloud" / bridge
     )
+
+
+def running_dnsmasq_layouts() -> dict[str, set[str]]:
+    """``{bridge: layouts}`` of every DHCP server that runs, from one pass over ``/proc``.
+
+    ``"current"`` is the root-owned /run tree, ``"legacy"`` the data directory
+    the helper used before #334.
+    """
+    prefixes = {
+        f"{os.path.realpath(root)}{os.sep}": layout
+        for layout, root in (("current", DNSMASQ_ROOT), ("legacy", _base_data_dir() / "nat-cloud"))
+    }
+    out: dict[str, set[str]] = {}
+    for pid in _proc_pids():
+        for conf in _dnsmasq_confs(pid):
+            for prefix, layout in prefixes.items():
+                if not conf.startswith(prefix):
+                    continue
+                bridge, _, name = conf[len(prefix):].rpartition(os.sep)
+                if name == "dnsmasq.conf" and host_net.RE_BRIDGE_NAME.match(bridge):
+                    out.setdefault(bridge, set()).add(layout)
+    return out
+
+
+def dhcp_server_layout(bridge: str | None) -> str | None:
+    """Where the bridge's DHCP server reads its config from (#334).
+
+    ``"legacy"`` when any server for the bridge still uses the data directory
+    the helper used before #334, else ``"current"`` for the root-owned /run
+    tree, else ``None`` without a server. A legacy server wins on purpose: one
+    that reads a config the service account can replace has to go, whatever
+    else runs for the bridge.
+    """
+    if not bridge or not host_net.RE_BRIDGE_NAME.match(bridge):
+        return None
+    found = running_dnsmasq_layouts().get(bridge, set())
+    return "legacy" if "legacy" in found else "current" if found else None
 
 
 def _lease_time(root: Path) -> str | None:
