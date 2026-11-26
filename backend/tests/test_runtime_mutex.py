@@ -29,7 +29,7 @@ from app.services.node_runtime_service import (
     NodeRuntimeError,
     NodeRuntimeService,
 )
-from app.services.runtime_mutex import RuntimeMutexRegistry, runtime_mutex
+from app.services.runtime_mutex import RuntimeMutexContention, RuntimeMutexRegistry, runtime_mutex
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +218,36 @@ def _mock_host_net(monkeypatch, *, present_bridges: set[str], hold_event=None):
 # ---------------------------------------------------------------------------
 # RuntimeMutexRegistry unit tests
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "index,expected",
+    [
+        (-1, "Node operation already in progress on node=7; timed out after 2.0s"),
+        (3, "Hot-attach already in progress on (node=7, iface=3); timed out after 2.0s"),
+    ],
+)
+def test_runtime_mutex_contention_message_matches_lock_scope(monkeypatch, index, expected):
+    class HeldLock:
+        def acquire(self, *, timeout):
+            assert timeout == 2.0
+            return False
+
+    registry = RuntimeMutexRegistry()
+    if index == -1:
+        monkeypatch.setattr(registry, "_get_or_create_node_lock", lambda *_: HeldLock())
+        lock = registry.acquire_node_sync("lab-1", 7)
+    else:
+        monkeypatch.setattr(registry, "_get_or_create", lambda *_: HeldLock())
+        lock = registry.acquire_sync("lab-1", 7, index)
+
+    with pytest.raises(RuntimeMutexContention) as caught:
+        with lock:
+            pytest.fail("A held lock was acquired")
+
+    assert str(caught.value) == expected
+    assert caught.value.interface_index == index
+    assert caught.value.timeout == 2.0
 
 
 def test_runtime_mutex_distinct_keys_do_not_block():

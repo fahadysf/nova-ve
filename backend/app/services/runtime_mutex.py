@@ -88,11 +88,14 @@ class RuntimeMutexContention(Exception):
         self.node_id = int(node_id)
         self.interface_index = int(interface_index)
         self.timeout = float(timeout)
-        super().__init__(
-            f"Hot-attach already in progress on (node={self.node_id}, "
-            f"iface={self.interface_index}); timed out after "
-            f"{self.timeout:.1f}s"
-        )
+        if self.interface_index == -1:
+            operation = f"Node operation already in progress on node={self.node_id}"
+        else:
+            operation = (
+                f"Hot-attach already in progress on (node={self.node_id}, "
+                f"iface={self.interface_index})"
+            )
+        super().__init__(f"{operation}; timed out after {self.timeout:.1f}s")
 
 
 class RuntimeMutexRegistry:
