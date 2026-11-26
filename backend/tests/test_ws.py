@@ -41,9 +41,9 @@ def _make_fake_user():
     )
 
 
-def _patch_auth_ok(monkeypatch):
+def _patch_auth_ok(monkeypatch, user=None):
     """Make the WebSocket auth path succeed without a real DB."""
-    fake_user_obj = _make_fake_user()
+    fake_user_obj = user or _make_fake_user()
 
     async def fake_validate_session(self, token, username):
         return fake_user_obj
@@ -62,6 +62,20 @@ def _patch_auth_ok(monkeypatch):
 
 def _cookies_with_session():
     return {"nova_session": "fake-token", "nova_user": "testuser"}
+
+
+def _scoped_user(folder="/lanes/alpha"):
+    user = _make_fake_user()
+    user.folder = folder
+    return user
+
+
+def _publish(hub, lab, event_type, payload):
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(hub.publish(lab, event_type, payload))
+    finally:
+        loop.close()
 
 
 # ---------------------------------------------------------------------------
@@ -189,54 +203,29 @@ def test_nested_folder_lab_connects_and_replays(monkeypatch):
     hub = _fresh_hub()
     _patch_auth_ok(monkeypatch)
     lab = "team/project/lab.json"
-
-    loop = asyncio.new_event_loop()
-    try:
-        loop.run_until_complete(hub.publish(lab, "node_created", {"x": 1}))
-    finally:
-        loop.close()
+    _publish(hub, lab, "node_created", {"x": 1})
 
     client = TestClient(app, raise_server_exceptions=True)
-    with client.websocket_connect(
-        f"/ws/labs/{lab}?last_seq=0", cookies=_cookies_with_session()
-    ) as ws:
+    client.cookies.update(_cookies_with_session())
+    with client.websocket_connect(f"/ws/labs/{lab}?last_seq=0") as ws:
         hello = ws.receive_json()
         assert hello["type"] == "hello"
         assert hello["seq"] == 1
         ev = ws.receive_json()
         assert ev["type"] == "node_created"
 
-        loop2 = asyncio.new_event_loop()
-        try:
-            loop2.run_until_complete(hub.publish(lab, "node_created", {"x": 2}))
-        finally:
-            loop2.close()
+        _publish(hub, lab, "node_created", {"x": 2})
         assert ws.receive_json()["seq"] == 2
 
 
 def test_nested_folder_lab_out_of_scope_closes_1008(monkeypatch):
     """#330/#327: a scoped user must not open another folder's lab."""
     _fresh_hub()
-    scoped = SimpleNamespace(
-        id=2, username="scoped", role="user", email="s@example.com",
-        name="Scoped", html5=True, folder="/teamA",
-    )
-
-    async def fake_validate_session(self, token, username):
-        return scoped
-
-    monkeypatch.setattr(
-        "app.services.auth_service.AuthService.validate_session",
-        fake_validate_session,
-    )
-    monkeypatch.setattr(
-        "app.schemas.user.UserRead.model_validate", lambda obj: obj
-    )
+    _patch_auth_ok(monkeypatch, _scoped_user("/teamA"))
     client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.update(_cookies_with_session())
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(
-            "/ws/labs/teamB/lab.json", cookies=_cookies_with_session()
-        ):
+        with client.websocket_connect("/ws/labs/teamB/lab.json"):
             pass
     assert exc_info.value.code == 1008
 
@@ -246,10 +235,73 @@ def test_nested_lab_dotdot_closes_1008(monkeypatch):
     _fresh_hub()
     _patch_auth_ok(monkeypatch)
     client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.update(_cookies_with_session())
     with pytest.raises(WebSocketDisconnect) as exc_info:
-        with client.websocket_connect(
-            "/ws/labs/team%2F..%2Fsecret%2Flab.json", cookies=_cookies_with_session()
-        ):
+        with client.websocket_connect("/ws/labs/team%2F..%2Fsecret%2Flab.json"):
+            pass
+    assert exc_info.value.code == 1008
+
+
+def test_scoped_user_connects_to_own_nested_lab(monkeypatch):
+    """#330: every lab of a folder-scoped user lives under their folder."""
+    hub = _fresh_hub()
+    _patch_auth_ok(monkeypatch, _scoped_user())
+    _publish(hub, "lanes/alpha/lab.json", "link_created", {"a": 1})
+
+    client = TestClient(app, raise_server_exceptions=True)
+    client.cookies.update(_cookies_with_session())
+    with client.websocket_connect("/ws/labs/lanes%2Falpha%2Flab.json?last_seq=0") as ws:
+        assert ws.receive_json() == {"type": "hello", "seq": 1}
+        assert ws.receive_json()["payload"] == {"a": 1}
+        _publish(hub, "lanes/alpha/lab.json", "link_deleted", {"a": 2})
+        assert ws.receive_json()["payload"] == {"a": 2}
+
+
+def test_scoped_user_connects_to_shared_lab(monkeypatch):
+    """#330: /Shared is resolved at the labs root for a folder-scoped user."""
+    hub = _fresh_hub()
+    _patch_auth_ok(monkeypatch, _scoped_user())
+    client = TestClient(app, raise_server_exceptions=True)
+    client.cookies.update(_cookies_with_session())
+    with client.websocket_connect("/ws/labs/Shared%2Fx.json") as ws:
+        assert ws.receive_json() == {"type": "hello", "seq": 0}
+        _publish(hub, "Shared/x.json", "link_created", {"a": 1})
+        assert ws.receive_json()["payload"] == {"a": 1}
+
+
+def test_socket_subscribes_under_the_publishers_key(monkeypatch):
+    """#330: publishers key events by the normalized lab path.
+
+    ``{lab:path}`` also accepts a leading or doubled slash, so subscribing
+    under the string from the URL would miss every event for that lab.
+    """
+    hub = _fresh_hub()
+    _patch_auth_ok(monkeypatch)
+    client = TestClient(app, raise_server_exceptions=True)
+    client.cookies.update(_cookies_with_session())
+    with client.websocket_connect("/ws/labs/%2Fteam%2F%2Fproject%2Flab.json") as ws:
+        assert ws.receive_json()["type"] == "hello"
+        assert [key for key, state in hub._labs.items() if state.subscribers] == [
+            "team/project/lab.json"
+        ]
+        _publish(hub, "team/project/lab.json", "link_created", {"a": 1})
+        assert ws.receive_json()["payload"] == {"a": 1}
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["unrestricted", "scoped"])
+@pytest.mark.parametrize("path", ["", "/", "%5C", "%20"], ids=["empty", "slash", "backslash", "blank"])
+def test_no_lab_path_closes_1008(monkeypatch, scoped, path):
+    """#330: ``{lab:path}`` also matches a path without a lab in it.
+
+    For a folder-scoped user it would otherwise resolve to the folder
+    itself and subscribe to it.
+    """
+    _fresh_hub()
+    _patch_auth_ok(monkeypatch, _scoped_user() if scoped else None)
+    client = TestClient(app, raise_server_exceptions=False)
+    client.cookies.update(_cookies_with_session())
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(f"/ws/labs/{path}"):
             pass
     assert exc_info.value.code == 1008
 

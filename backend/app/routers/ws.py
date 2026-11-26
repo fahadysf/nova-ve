@@ -43,6 +43,10 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
     # #330: subscribe, replay and resnapshot under the same normalized key
     # publishers use, not the raw route value.
     try:
+        # ``{lab:path}`` also matches an empty path. A folder-scoped user
+        # would otherwise be subscribed to their folder itself.
+        if not lab.strip().replace("\\", "/").strip("/"):
+            raise ValueError("empty lab path")
         scoped = _scoped_lab_path(user, lab, treat_as_absolute=True)
         lab = _normalize_relative_lab_path(scoped)
     except (PermissionError, ValueError):
