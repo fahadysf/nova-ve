@@ -856,7 +856,7 @@ class LabService:
         file was removed out-of-band can be detected.
         """
         try:
-            return _lab_file_path(filename).exists()
+            return _lab_file_path(filename).is_file()
         except ValueError:
             # Malformed/stored-attacker filename: treat as missing.
             return False
