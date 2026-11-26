@@ -21,6 +21,7 @@ from app.schemas.lab import LabMoveRequest
 from app.schemas.network import NetworkCreate, NetworkUpdate
 from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.services import network_service as network_service_mod
+from app.services.cloud_inventory_service import nat_cloud_ipam_lock
 from app.services.lab_lock import LabLockTimeout, lab_lock, lab_lock_async
 from app.services.lab_service import LabService, locked_lab
 from app.services.node_runtime_service import NodeRuntimeService
@@ -533,6 +534,149 @@ async def test_delete_lab_is_not_undone_by_an_in_flight_writer(settings):
     with _slow_locked_writer(_add_node_9):
         await LabService(_FakeDb()).delete_lab(lab_row)
 
+    assert not (settings.LABS_DIR / LAB).exists()
+
+
+class _RecordingDeleteDb(_FakeDb):
+    def __init__(self):
+        self.deleted = []
+        self.commits = 0
+
+    async def delete(self, lab):
+        self.deleted.append(lab)
+
+    async def commit(self):
+        self.commits += 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_request", [False, True])
+async def test_delete_cleanup_keeps_loop_responsive_and_holds_lock(
+    settings, monkeypatch, cancel_request
+):
+    _seed(settings)
+    loop = asyncio.get_running_loop()
+    started = asyncio.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def cleanup(_data, _filename):
+        loop.call_soon_threadsafe(started.set)
+        release.wait(timeout=3)
+        finished.set()
+
+    monkeypatch.setattr("app.services.lab_service.assert_no_external_members_for_scope", lambda _: None)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", cleanup)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_node_runtime", lambda *_: None)
+
+    db = _RecordingDeleteDb()
+    row = SimpleNamespace(filename=LAB)
+    delete = asyncio.create_task(LabService(db).delete_lab(row))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert not finished.is_set(), "The event loop could not run until cleanup finished"
+        if cancel_request:
+            delete.cancel()
+            await asyncio.sleep(0)
+        assert not delete.done()
+        with pytest.raises(LabLockTimeout):
+            with lab_lock(LAB, settings.LABS_DIR, timeout_s=0):
+                pytest.fail("The lab lock was released while cleanup was in flight")
+        with pytest.raises(LabLockTimeout):
+            with nat_cloud_ipam_lock(timeout_s=0):
+                pytest.fail("A shared-network join could proceed during cleanup")
+        assert (settings.LABS_DIR / LAB).is_file()
+        assert not db.deleted
+    finally:
+        release.set()
+        cancelled = await asyncio.wait_for(delete, timeout=5)
+
+    assert cancelled is cancel_request
+    assert db.deleted == [row]
+    assert db.commits == 1
+    assert not (settings.LABS_DIR / LAB).exists()
+
+
+@pytest.mark.asyncio
+async def test_delete_cleanup_failure_preserves_state(settings, monkeypatch):
+    _seed(settings)
+
+    def fail(_data, _filename):
+        raise OSError("Cleanup failed")
+
+    monkeypatch.setattr("app.services.lab_service.assert_no_external_members_for_scope", lambda _: None)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", lambda *_: None)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_node_runtime", fail)
+    db = _RecordingDeleteDb()
+    with pytest.raises(OSError, match="Cleanup failed"):
+        await LabService(db).delete_lab(SimpleNamespace(filename=LAB))
+
+    assert (settings.LABS_DIR / LAB).is_file()
+    assert not db.deleted
+    assert db.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_lab_delete_ipam_lock_failure_leaves_file_and_row(settings, monkeypatch):
+    _seed(settings)
+
+    def unavailable(_settings):
+        raise OSError("IPAM lock unavailable")
+
+    monkeypatch.setattr("app.services.lab_service.nat_cloud_ipam_lock_async", unavailable)
+    db = _RecordingDeleteDb()
+    with pytest.raises(OSError, match="IPAM lock unavailable"):
+        await LabService(db).delete_lab(SimpleNamespace(filename=LAB))
+
+    assert (settings.LABS_DIR / LAB).is_file()
+    assert not db.deleted
+    assert db.commits == 0
+
+
+@pytest.mark.asyncio
+async def test_cancelled_lab_delete_finishes_commit_and_audit(settings, monkeypatch):
+    _seed(settings)
+    committing = asyncio.Event()
+    allow_commit = asyncio.Event()
+    row = SimpleNamespace(filename=LAB, owner=ADMIN.username, path=f"/{LAB}", name="Test lab")
+    audits = []
+
+    class SuspendingDb(_RecordingDeleteDb):
+        async def commit(self):
+            committing.set()
+            await allow_commit.wait()
+            await super().commit()
+
+    async def get_lab(_self, _filename):
+        return row
+
+    async def audit(event, **_details):
+        audits.append(event)
+
+    monkeypatch.setattr(LabService, "get_lab_by_filename", get_lab)
+    monkeypatch.setattr(labs.audit_service, "record", audit)
+    monkeypatch.setattr("app.services.lab_service.assert_no_external_members_for_scope", lambda _: None)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", lambda *_: None)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_node_runtime", lambda *_: None)
+
+    db = SuspendingDb()
+    delete = asyncio.create_task(labs.delete_lab(LAB, current_user=ADMIN, db=db))
+    try:
+        await asyncio.wait_for(committing.wait(), timeout=5)
+        delete.cancel()
+        await asyncio.sleep(0)
+        delete.cancel()
+        await asyncio.sleep(0)
+        assert not delete.done()
+        assert not audits
+    finally:
+        allow_commit.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(delete, timeout=5)
+
+    assert db.deleted == [row]
+    assert db.commits == 1
+    assert audits == ["lab.delete"]
     assert not (settings.LABS_DIR / LAB).exists()
 
 
