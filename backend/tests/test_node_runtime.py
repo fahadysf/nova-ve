@@ -1119,6 +1119,8 @@ async def test_docker_runtime_stays_running_without_host_pid_visibility(monkeypa
             return SimpleNamespace(returncode=0, stdout="4321\n", stderr="")
         if args[:2] == ["inspect", "-f"] and args[2] == "{{.State.Running}}":
             return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
+        if args[:2] == ["inspect", "-f"] and args[2] == "{{json .}}":
+            return SimpleNamespace(returncode=0, stdout=json.dumps({"State": {"Running": True, "Pid": 4321}, "HostConfig": {"NetworkMode": "none"}}), stderr="")
         if args[0] in {"stop", "rm"}:
             return SimpleNamespace(returncode=0, stdout="", stderr="")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1951,6 +1953,8 @@ def _us204_docker_run_factory(containers: dict[str, dict[str, object]]):
                     stdout=("true" if container["running"] else "false") + "\n",
                     stderr="",
                 )
+            if template == "{{json .}}":
+                return SimpleNamespace(returncode=0, stdout=json.dumps({"State": {"Running": container["running"], "Pid": container["pid"]}, "HostConfig": {"NetworkMode": "none"}}), stderr="")
             if template == "{{.Id}}":
                 return SimpleNamespace(
                     returncode=0,
@@ -2062,6 +2066,62 @@ def test_docker_start_reconciles_running_same_name_container(
 # ---------------------------------------------------------------------------
 # US-287: opt-in per-lab management attachment (mgmt0)
 # ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("output,expected", [
+    ('{"State":{"Running":true,"Pid":123},"HostConfig":{"NetworkMode":"bridge"}}', "bridge"),
+    ('{"State":{"Running":true,"Pid":123},"HostConfig":{"NetworkMode":"none"}}', "none"),
+    ('{"State":{"Running":false}}', None),
+])
+def test_docker_network_state_inspects_host_mode(monkeypatch, patched_settings, output, expected):
+    monkeypatch.setattr(NodeRuntimeService, "_resolve_binary", lambda self, name: "docker")
+    calls = []
+    def inspect(cmd, **kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", inspect)
+    state = NodeRuntimeService().docker_network_state("lab", 1)
+    assert (state["network_mode"] if state else None) == expected
+    assert calls[0][-1] == "nova-ve-lab-1"
+    assert all("State.Pid" not in arg for arg in calls[0])
+
+
+def test_docker_inspection_distinguishes_missing_from_errors(monkeypatch, patched_settings):
+    from app.services.node_runtime_service import NodeRuntimeError
+    monkeypatch.setattr(NodeRuntimeService, "_resolve_binary", lambda self, name: "docker")
+    service = NodeRuntimeService()
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="Error: No such object: test"))
+    assert service.docker_network_state("lab", 1) is None
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="Cannot connect to daemon"))
+    with pytest.raises(NodeRuntimeError, match="Could not inspect"):
+        service.docker_network_state("lab", 1)
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired("docker", 5)
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", timeout)
+    with pytest.raises(NodeRuntimeError, match="Could not inspect"):
+        service.docker_network_state("lab", 1)
+
+
+def test_unregistered_legacy_stop_does_not_mutate_candidate(monkeypatch, patched_settings):
+    from app.services.node_runtime_service import NodeRuntimeError
+    service = NodeRuntimeService()
+    monkeypatch.setattr(service, "_runtime_record", lambda *args, **kwargs: None)
+    monkeypatch.setattr(service, "docker_network_state", lambda *args, **kwargs: {"container_name": "nova-ve-lab-1", "network_mode": "bridge"})
+    monkeypatch.setattr(service, "_stop_docker_runtime", lambda *args: pytest.fail("must not stop unverified container"))
+    with pytest.raises(NodeRuntimeError, match="Verify its ownership"):
+        service.stop_node({"id": "lab", "nodes": {"1": {"id": 1, "name": "old", "type": "docker"}}}, 1)
+
+
+def test_legacy_container_is_not_adopted_or_given_a_proxy(monkeypatch, patched_settings):
+    from app.services.node_runtime_service import NodeRuntimeError
+    service = NodeRuntimeService()
+    monkeypatch.setattr(service, "_resolve_binary", lambda name: "docker")
+    monkeypatch.setattr(service, "_docker_container_running_by_name", lambda *args: True)
+    monkeypatch.setattr(service, "docker_network_state", lambda *args: {"container_name": "nova-ve-lab-1", "network_mode": "bridge", "pid": 456})
+    monkeypatch.setattr("app.services.node_runtime_service.runtime_pids.register", lambda *args: pytest.fail("must not register legacy container"))
+    monkeypatch.setattr("app.services.host_net.console_proxy_start", lambda **kwargs: pytest.fail("must not start proxy"))
+    lab = {"id": "lab", "nodes": {"1": {"id": 1, "name": "old", "type": "docker"}}}
+    with pytest.raises(NodeRuntimeError, match="legacy networking"):
+        service.start_node(lab, 1)
 
 
 def _us287_mgmt_lab() -> dict:

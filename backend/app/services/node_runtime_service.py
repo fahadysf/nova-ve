@@ -750,6 +750,11 @@ class NodeRuntimeService:
         lab_id = self._lab_id(lab_data)
         runtime = self._runtime_record(lab_id, node_id)
         if not runtime:
+            node = self._node_data(lab_data, node_id)
+            if node.get("type") == "docker":
+                state = self.docker_network_state(lab_id, node_id)
+                if state and state["network_mode"] != "none":
+                    raise NodeRuntimeError(self.legacy_docker_message(node, state))
             return
 
         self._record_transition(lab_id, node_id)
@@ -5159,9 +5164,13 @@ class NodeRuntimeService:
             host_net.sweep_node_host_ifaces(lab_id, node_id)
             return None
 
-        pid = self._docker_container_pid(docker_binary, container_name)
-        if not pid:
-            return None
+        state = self.docker_network_state(lab_id, node_id)
+        if state is None:
+            raise NodeRuntimeError("Could not verify Docker networking; retry before starting this node.")
+        if state["network_mode"] != "none":
+            raise NodeRuntimeError(self.legacy_docker_message(node, state))
+
+        pid = state["pid"]
 
         try:
             runtime_pids.register(pid, "docker", lab_id, node_id)
@@ -5310,6 +5319,71 @@ class NodeRuntimeService:
                 or remove.stdout.strip()
                 or f"Failed to remove stale Docker container {container_name}"
             )
+
+    def docker_network_state(
+        self, lab_id: str, node_id: int, container_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Inspect a running same-name candidate without adopting or changing it.
+
+        The historical naming scheme truncates lab IDs and carries no ownership
+        label, so a name match alone does not establish ownership.
+        """
+        name = container_name or self._container_name(lab_id, node_id)
+        docker = self._resolve_binary("docker")
+        if not docker:
+            raise NodeRuntimeError("Could not inspect Docker networking; Docker is unavailable.")
+        try:
+            result = subprocess.run(
+                [docker, "--host", self.settings.DOCKER_HOST, "inspect", "-f", "{{json .}}", name],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise NodeRuntimeError("Could not inspect Docker networking; retry before linking.") from exc
+        if result.returncode != 0:
+            if "no such object" in result.stderr.lower() or "no such container" in result.stderr.lower():
+                return None
+            raise NodeRuntimeError("Could not inspect Docker networking; retry before linking.")
+        try:
+            info = json.loads(result.stdout)
+            if not info["State"]["Running"]:
+                return None
+            mode = info["HostConfig"]["NetworkMode"]
+            pid = info["State"]["Pid"]
+            if not isinstance(mode, str) or not mode or not isinstance(pid, int) or pid <= 0:
+                raise ValueError("missing network mode or container PID")
+            return {"container_name": name, "network_mode": mode, "pid": pid}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise NodeRuntimeError("Could not inspect Docker networking; retry before linking.") from exc
+
+    @staticmethod
+    def legacy_docker_message(node: dict[str, Any], state: dict[str, str]) -> str:
+        return (
+            f"A running Docker container named {state['container_name']} matches node "
+            f"{node.get('name') or node.get('id')} and uses legacy networking. "
+            "Verify its ownership, stop and remove it in Docker, then start the node again."
+        )
+
+    def legacy_docker_nodes(self, lab_data: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+        """Report same-name legacy candidates, including inspection failures."""
+        lab_id = self._lab_id(lab_data)
+        found: list[dict[str, Any]] = []
+        unavailable: list[dict[str, Any]] = []
+        for key, node in (lab_data.get("nodes") or {}).items():
+            if not isinstance(node, dict) or node.get("type") != "docker":
+                continue
+            try:
+                node_id = int(key)
+            except (TypeError, ValueError):
+                continue
+            item = {"node_id": node_id, "name": str(node.get("name") or node_id)}
+            try:
+                state = self.docker_network_state(lab_id, node_id)
+            except NodeRuntimeError:
+                unavailable.append(item)
+                continue
+            if state and state["network_mode"] != "none":
+                found.append({**item, "container_name": state["container_name"], "network_mode": state["network_mode"], "ownership": "unverified"})
+        return {"legacy_nodes": found, "legacy_inspection_unavailable": unavailable}
 
     def _docker_container_running_by_name(
         self,

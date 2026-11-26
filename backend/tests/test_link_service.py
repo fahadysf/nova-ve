@@ -64,6 +64,14 @@ def link_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.link_service.get_settings", lambda: settings)
     monkeypatch.setattr("app.services.network_service.get_settings", lambda: settings)
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
+    # Tests in this module do not use a real Docker daemon.
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.NodeRuntimeService.docker_network_state",
+        lambda self, lab_id, node_id, container_name=None: (
+            {"container_name": container_name or "test", "network_mode": "none"}
+            if self._runtime_record(lab_id, node_id) else None
+        ),
+    )
     return settings
 
 

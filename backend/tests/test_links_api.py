@@ -71,6 +71,7 @@ def patched_route_settings(monkeypatch, route_settings):
     monkeypatch.setattr("app.services.link_service.get_settings", lambda: route_settings)
     monkeypatch.setattr("app.services.network_service.get_settings", lambda: route_settings)
     monkeypatch.setattr("app.routers.labs.get_settings", lambda: route_settings)
+    monkeypatch.setattr("app.services.node_runtime_service.NodeRuntimeService.docker_network_state", lambda *args, **kwargs: None)
     return route_settings
 
 
@@ -146,6 +147,74 @@ def _explicit_network(net_id: int, name: str = "lan") -> dict:
         "smart": -1,
         "config": {},
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_first", [True, False])
+@pytest.mark.parametrize("registered", [True, False])
+async def test_legacy_docker_link_rejected_before_host_changes(
+    patched_route_settings, auth_override, reset_idempotency, ws_recorder, monkeypatch,
+    legacy_first, registered,
+):
+    from app.services.node_runtime_service import NodeRuntimeService
+
+    lab = _seed_lab(patched_route_settings.LABS_DIR, nodes={"1": _node(1, "healthy"), "2": _node(2, "old")})
+    path = patched_route_settings.LABS_DIR / lab
+    before = json.loads(path.read_text())
+    before["schema_version"] = 2
+    path.write_text(json.dumps(before))
+    monkeypatch.setattr(NodeRuntimeService, "_runtime_record", lambda self, lab_id, node_id, **kwargs: (
+        {"kind": "docker", "container_name": f"container-{node_id}"} if node_id == 1 or registered else None
+    ))
+    monkeypatch.setattr(NodeRuntimeService, "docker_network_state", lambda self, lab_id, node_id, container_name=None: {
+        "container_name": f"container-{node_id}", "network_mode": "bridge" if node_id == 2 else "none",
+    })
+    calls = []
+    monkeypatch.setattr("app.services.host_net.bridge_add", lambda *args: calls.append("bridge"))
+    monkeypatch.setattr(NodeRuntimeService, "_attach_docker_interface_locked", lambda *args, **kwargs: calls.append("attach"))
+    first, second = (2, 1) if legacy_first else (1, 2)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post(f"/api/labs/{lab}/links", json={
+            "from": {"node_id": first, "interface_index": 0},
+            "to": {"node_id": second, "interface_index": 0},
+        })
+    assert resp.status_code == 422
+    assert "legacy networking" in resp.json()["message"]
+    assert "Verify its ownership" in resp.json()["message"]
+    assert "tap_name" not in resp.text
+    assert json.loads(path.read_text()) == before
+    assert calls == []
+    assert ws_recorder == []
+
+
+@pytest.mark.asyncio
+async def test_docker_changed_pid_rejected_before_link_or_host_changes(
+    patched_route_settings, auth_override, reset_idempotency, monkeypatch,
+):
+    from app.services.node_runtime_service import NodeRuntimeService
+    lab = _seed_lab(patched_route_settings.LABS_DIR, nodes={"1": _node(1)}, networks={"5": _explicit_network(5)})
+    monkeypatch.setattr(NodeRuntimeService, "_runtime_record", lambda *args, **kwargs: {"kind": "docker", "pid": 123, "container_name": "test"})
+    monkeypatch.setattr(NodeRuntimeService, "docker_network_state", lambda *args, **kwargs: {"container_name": "test", "network_mode": "none", "pid": 456})
+    monkeypatch.setattr(NodeRuntimeService, "_attach_docker_interface_locked", lambda *args, **kwargs: pytest.fail("must not attach to a stale PID"))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.post(f"/api/labs/{lab}/links", json={"from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 5}})
+    assert response.status_code == 422
+    assert "changed process" in response.json()["message"]
+    assert json.loads((patched_route_settings.LABS_DIR / lab).read_text())["links"] == []
+
+
+@pytest.mark.asyncio
+async def test_unregistered_manual_docker_is_not_silently_skipped(
+    patched_route_settings, auth_override, reset_idempotency, monkeypatch,
+):
+    from app.services.node_runtime_service import NodeRuntimeService
+    lab = _seed_lab(patched_route_settings.LABS_DIR, nodes={"1": _node(1)}, networks={"5": _explicit_network(5)})
+    monkeypatch.setattr(NodeRuntimeService, "_runtime_record", lambda *args, **kwargs: None)
+    monkeypatch.setattr(NodeRuntimeService, "docker_network_state", lambda *args, **kwargs: {"container_name": "test", "network_mode": "none"})
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        resp = await client.post(f"/api/labs/{lab}/links", json={"from": {"node_id": 1}, "to": {"network_id": 5}})
+    assert resp.status_code == 422
+    assert "no runtime record" in resp.json()["message"]
 
 
 @pytest.mark.asyncio
