@@ -844,6 +844,128 @@ async def test_warm_auth_token_populates_cache_off_critical_path(monkeypatch, ru
 
 
 @pytest.mark.asyncio
+async def test_login_preflight_and_immediate_console_share_token_exchange(monkeypatch, runtime_settings):
+    from fastapi import Response
+    from unittest.mock import AsyncMock
+
+    from app.routers import auth
+    from app.schemas.auth import LoginRequest
+    from app.schemas.user import UserRead
+
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = "postgresql://guacdb-test"
+    user = UserRead(username="fixture", name="Fixture", email="fixture@example.test")
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    requests = []
+
+    async def enter_exchange(username, password):
+        if password != service._guacamole_password(user):
+            raise AssertionError("Incorrect fixture password material")
+        requests.append(username)
+        entered.set()
+        await release.wait()
+        return "fixture-guacamole-token"
+
+    monkeypatch.setattr(service, "_request_auth_token", enter_exchange)
+    monkeypatch.setattr(service, "_token_is_valid", AsyncMock(return_value=True))
+    monkeypatch.setattr(auth, "GuacamoleDatabaseService", lambda: service)
+    monkeypatch.setattr(auth, "AuthService", lambda _db: SimpleNamespace(
+        authenticate=AsyncMock(return_value=user), create_session=AsyncMock(return_value="fixture-session")
+    ))
+    monkeypatch.setattr(auth, "create_access_token", lambda **kwargs: "fixture-access-token")
+    monkeypatch.setattr(auth.audit_service, "record", AsyncMock())
+
+    original_tasks = asyncio.all_tasks()
+    try:
+        login = await asyncio.wait_for(auth.login(
+            LoginRequest(username=user.username, password="fixture-password"), Response(), db=None
+        ), timeout=2)
+        assert login["code"] == 200
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        password = service._guacamole_password(user)
+        console = asyncio.create_task(service._auth_token(user.username, password))
+        await asyncio.sleep(0)
+        release.set()
+        assert await asyncio.wait_for(console, timeout=2) == "fixture-guacamole-token"
+        assert await service._auth_token(user.username, password) == "fixture-guacamole-token"
+        assert requests == [user.username]
+    finally:
+        release.set()
+        await asyncio.gather(*(asyncio.all_tasks() - original_tasks), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_token_waiter_does_not_interrupt_concurrent_console(monkeypatch, runtime_settings):
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def exchange(username, password):
+        calls.append(username)
+        started.set()
+        await release.wait()
+        return "fixture-token"
+
+    monkeypatch.setattr(service, "_request_auth_token", exchange)
+    first = asyncio.create_task(service._auth_token("fixture", "fixture-password"))
+    second = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        second = asyncio.create_task(service._auth_token("fixture", "fixture-password"))
+        await asyncio.sleep(0)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        release.set()
+        assert await asyncio.wait_for(second, timeout=2) == "fixture-token"
+        assert calls == ["fixture"]
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_foreground_token_exchange_recovers_from_failed_warmup(monkeypatch, runtime_settings):
+    from app.services.guacamole_db_service import GuacamoleDatabaseError
+
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = "postgresql://guacdb-test"
+    started = asyncio.Event()
+    release = asyncio.Event()
+    requests = 0
+
+    async def exchange(username, password):
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            started.set()
+            await release.wait()
+            raise GuacamoleDatabaseError("Fixture account was not provisioned when warm-up began")
+        return "post-provision-token"
+
+    monkeypatch.setattr(service, "_request_auth_token", exchange)
+    prewarm = asyncio.create_task(service.warm_auth_token("fixture"))
+    foreground = []
+    try:
+        await asyncio.wait_for(started.wait(), timeout=2)
+        password = service._token_password_for("fixture")
+        foreground = [asyncio.create_task(service._auth_token("fixture", password)) for _ in range(2)]
+        await asyncio.sleep(0)
+        assert requests == 1
+        release.set()
+        assert await asyncio.wait_for(asyncio.gather(*foreground), timeout=2) == ["post-provision-token"] * 2
+        assert requests == 2
+    finally:
+        release.set()
+        await asyncio.gather(prewarm, *foreground, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_warm_auth_token_swallows_failures(monkeypatch, runtime_settings):
     service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
     service.settings = runtime_settings
