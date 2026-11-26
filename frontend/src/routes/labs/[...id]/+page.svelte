@@ -50,6 +50,9 @@
   let rootLabs: LabListItem[] = [];
   let loading = true;
   let error = '';
+  let legacyNodes: { node_id: number; name: string }[] = [];
+  let legacyInspectionUnavailable: { node_id: number; name: string }[] = [];
+  let reconcileRequest = 0;
   let zenMode = false;
   let recordingsTarget: { nodeId: number | null; nodeName?: string } | null = null;
   let showConsolesInZen = false;
@@ -281,6 +284,9 @@
     const routeKey = isLabIndexRoute ? 'labs-index' : `lab:${labId}`;
     if ($authStore.authenticated && routeKey !== lastLoadedRoute) {
       lastLoadedRoute = routeKey;
+      legacyNodes = [];
+      legacyInspectionUnavailable = [];
+      reconcileRequest += 1;
       zenMode = false;
       recordingsTarget = null;
       void (isLabIndexRoute ? loadLabIndex() : loadLab());
@@ -331,9 +337,19 @@
       // bridges were lost across a host reboot/manual cleanup find their
       // host state already prepared by the time the user starts a node or
       // creates a link.
-      apiRequest(`/labs/${labId}/runtime/reconcile`, {
+      const requestedLab = labId;
+      const requestId = ++reconcileRequest;
+      apiRequest<{
+        legacy_nodes?: { node_id: number; name: string }[];
+        legacy_inspection_unavailable?: { node_id: number; name: string }[];
+      }>(`/labs/${labId}/runtime/reconcile`, {
         method: 'POST',
         suppressToast: true
+      }).then((response) => {
+        if (requestedLab === labId && requestId === reconcileRequest) {
+          legacyNodes = response.data?.legacy_nodes ?? [];
+          legacyInspectionUnavailable = response.data?.legacy_inspection_unavailable ?? [];
+        }
       }).catch(() => {
         /* best-effort; surfacing the failure in a toast would be noisy
            on every lab open and isn't actionable for the user. */
@@ -1353,6 +1369,18 @@
       {/if}
     </div>
   {:else}
+    {#if legacyNodes.length}
+      <div role="alert" class="mx-3 mb-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+        <div class="font-medium">Potential legacy networked nodes: {legacyNodes.map((node) => node.name || `Node ${node.node_id}`).join(', ')}</div>
+        <p class="mt-1 text-amber-100/80">An administrator should verify the container belongs to this lab, then stop and remove it on the host. Start the node again before creating links.</p>
+      </div>
+    {/if}
+    {#if legacyInspectionUnavailable.length}
+      <div role="alert" class="mx-3 mb-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-100">
+        <div class="font-medium">Could not inspect Docker networking: {legacyInspectionUnavailable.map((node) => node.name || `Node ${node.node_id}`).join(', ')}</div>
+        <p class="mt-1 text-amber-100/80">Ask an administrator to check Docker connectivity, then retry before creating links.</p>
+      </div>
+    {/if}
     <div class="relative flex flex-1 overflow-hidden px-3 pb-3">
       <InfoPanelStack
         {labId}

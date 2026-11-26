@@ -3,7 +3,7 @@
 
 <!--
   Lab management (#262). Live instance inventory from /api/manage/labs:
-  state, allocated vCPU/RAM per lab, KPI totals, and admin lifecycle
+  state, allocated vCPU/RAM and disk usage per lab, KPI totals, and admin lifecycle
   actions (stop = stop every running node; wipe = stop + wipe all).
 -->
 <script lang="ts">
@@ -13,6 +13,7 @@
   import { apiRequest } from '$lib/api';
   import { authStore } from '$lib/stores/session';
   import { toastStore } from '$lib/stores/toasts';
+  import { formatSize } from '$lib/services/recordingSearch';
 
   interface ManagedLab {
     path: string;
@@ -25,6 +26,7 @@
     nodes_running: number;
     cpu_allocated: number;
     ram_allocated_mb: number;
+    disk_bytes: number | null;
     lock: boolean;
   }
 
@@ -35,6 +37,7 @@
     nodes_running: number;
     cpu_allocated: number;
     ram_allocated_mb: number;
+    disk_bytes: number | null;
   }
 
   let labs: ManagedLab[] = [];
@@ -119,7 +122,7 @@
       </span>
     </PageHeader>
 
-    <section class="grid grid-cols-2 gap-4 lg:grid-cols-4" data-testid="labs-kpis">
+    <section class="grid grid-cols-2 gap-4 lg:grid-cols-5" data-testid="labs-kpis">
       <div class="rounded-xl border border-gray-800 bg-gray-900/95 px-4 py-3">
         <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Labs running</div>
         <div class="mt-1 text-xl font-semibold text-gray-100">
@@ -142,6 +145,12 @@
           {totals ? ramGb(totals.ram_allocated_mb) : '—'}
         </div>
       </div>
+      <div class="rounded-xl border border-gray-800 bg-gray-900/95 px-4 py-3">
+        <div class="text-[10px] uppercase tracking-[0.05em] text-gray-500">Disk used</div>
+        <div class="mt-1 text-xl font-semibold text-gray-100">
+          {totals ? (totals.disk_bytes != null ? formatSize(totals.disk_bytes) : 'Unavailable') : '—'}
+        </div>
+      </div>
     </section>
 
     {#if loading && !labs.length}
@@ -159,6 +168,7 @@
               <th class="px-3 py-2.5">Nodes</th>
               <th class="px-3 py-2.5">vCPU</th>
               <th class="px-3 py-2.5">Memory</th>
+              <th class="px-3 py-2.5">Disk used</th>
               <th class="px-5 py-2.5 text-right">Actions</th>
             </tr>
           </thead>
@@ -182,6 +192,7 @@
                 </td>
                 <td class="px-3 py-3 text-[12px] text-gray-300">{lab.cpu_allocated}</td>
                 <td class="px-3 py-3 text-[12px] text-gray-300">{ramGb(lab.ram_allocated_mb)}</td>
+                <td class="px-3 py-3 text-[12px] text-gray-300">{lab.disk_bytes != null ? formatSize(lab.disk_bytes) : 'Unavailable'}</td>
                 <td class="px-5 py-3 text-right">
                   {#if isAdmin()}
                     <span class="inline-flex justify-end gap-1.5">

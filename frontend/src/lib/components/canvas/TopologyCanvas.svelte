@@ -57,6 +57,7 @@
   import { canvasPrefs } from '$lib/stores/canvasPrefs';
   import { infoPanels } from '$lib/stores/infoPanels';
   import { networkSharing, type NetworkModalType } from '$lib/services/networkSharing';
+  import { FRAME_WIDTH, FRAME_ROW_LIMIT, networkFrameHeight, networkFrameRows, frameFits, frameRowPosition } from '$lib/services/networkFrame';
   import {
     dhcpEnabled,
     dhcpToggle,
@@ -187,7 +188,7 @@
   const edgeTypes = {
     link: LinkEdge
   } as unknown as Record<string, never>;
-  const { fitView, screenToFlowPosition, zoomIn, zoomOut } = useSvelteFlow();
+  const { fitView, screenToFlowPosition, zoomIn, zoomOut, getViewport } = useSvelteFlow();
 
   // #248: every mutating endpoint response carries the post-write lab
   // revision; adopting it keeps the If-Match token fresh without a reload,
@@ -228,6 +229,14 @@
   };
   const NODE_CARD_HEIGHT = 58;
   const NETWORK_CARD_HEIGHT = 50;
+  let requestedFrameId: number | null = null;
+  let activeFrameBox: NodeBox | null = null;
+  let frameZoomHigh = true;
+  let frameLabId = labId;
+  $: if (frameLabId !== labId) {
+    frameLabId = labId;
+    requestedFrameId = null;
+  }
   let topologyChangeBanner:
     | {
         message: string;
@@ -567,6 +576,14 @@
   // N-1 remainder, and edges are left untouched.
   const HOVER_CLEAR_GRACE_MS = 120;
   let hoverFocusId: string | null = null;
+  let focusedId: string | null = null;
+  let focusLabId = labId;
+  $: if (focusLabId !== labId) {
+    focusLabId = labId;
+    focusedId = null;
+    hoverFocusId = null;
+    publishFlowState();
+  }
   // Rapid pointer crossings fire mouseleave on the old node BEFORE
   // mouseenter on the new one; clearing focus synchronously on leave
   // would flash everything to full opacity between the two events
@@ -625,24 +642,50 @@
   }
 
   function publishFlowState() {
+    if (requestedFrameId !== null && frameRows(requestedFrameId).length === 0) requestedFrameId = null;
+    // Compute the expanded obstacle once per projection, not once per edge.
+    activeFrameBox = requestedFrameId !== null && frameZoomHigh && frameHasSpace(requestedFrameId)
+      ? frameCandidate(requestedFrameId)
+      : null;
     const builtNodes = buildFlowNodes();
     const builtEdges = buildFlowEdges();
+    if (focusedId && !builtNodes.some((node) => node.id === focusedId)) {
+      focusedId = null;
+    }
+    const focusedNodes = focusedId ? computeHoverFocus(focusedId, builtEdges) : null;
+    const focusedNetworks = new Set(
+      focusedId
+        ? builtEdges
+            .filter((edge) => edge.source === focusedId || edge.target === focusedId)
+            .flatMap((edge) => [edge.source, edge.target])
+            .filter((id) => id.startsWith('network'))
+        : []
+    );
     // A stale hover target (node removed while hovered) must not light
     // ghosts — focus only applies to nodes that still render.
     const focusNodes =
       hoverFocusId && builtNodes.some((node) => node.id === hoverFocusId)
         ? computeHoverFocus(hoverFocusId, builtEdges)
         : null;
-    nodesStore.set(
-      focusNodes
-        ? builtNodes.map((node) =>
-            focusNodes.has(node.id)
-              ? { ...node, class: `${node.class ? `${node.class} ` : ''}nv-focus-pulse` }
-              : node
-          )
-        : builtNodes
-    );
-    edgesStore.set(builtEdges);
+    nodesStore.set(builtNodes.map((node) => {
+      const classes = [node.class];
+      if (focusNodes?.has(node.id)) classes.push('nv-focus-pulse');
+      if (focusedNodes && !focusedNodes.has(node.id)) classes.push('nv-focus-dimmed');
+      return classes.filter(Boolean).length ? { ...node, class: classes.filter(Boolean).join(' ') } : node;
+    }));
+    edgesStore.set(builtEdges.map((edge) => {
+      const onPath = edge.source === focusedId || edge.target === focusedId ||
+        focusedNetworks.has(edge.source) || focusedNetworks.has(edge.target);
+      return focusedId && !onPath
+        ? { ...edge, class: `${edge.class ? `${edge.class} ` : ''}nv-focus-dimmed` }
+        : edge;
+    }));
+  }
+
+  function setExplicitFocus(targetId: string | null) {
+    focusedId = targetId;
+    closeMenu();
+    publishFlowState();
   }
 
   // #245: the canvas is a pure view of the shared labState store. Any store
@@ -662,7 +705,51 @@
   }
 
   function networkCardWidth(network: NetworkData): number {
-    return network.width ? network.width + 40 : 130;
+    const compactWidth = network.width ? network.width + 40 : 130;
+    return frameIsExpanded(network.id) ? Math.max(FRAME_WIDTH, compactWidth) : compactWidth;
+  }
+
+  function frameRows(networkId: number) {
+    return networkFrameRows(networkId, $labState.links, $labState.nodes);
+  }
+
+  function frameCandidate(networkId: number): NodeBox | null {
+    const network = $labState.networks[String(networkId)];
+    if (!network) return null;
+    return { x: network.left || 100, y: network.top || 100, w: Math.max(FRAME_WIDTH, network.width ? network.width + 40 : 130), h: networkFrameHeight(frameRows(networkId).length) };
+  }
+
+  function frameHasSpace(networkId: number): boolean {
+    const candidate = frameCandidate(networkId);
+    if (!candidate) return false;
+    const others: NodeBox[] = [];
+    for (const node of Object.values($labState.nodes)) {
+      const box = nodeBox(node.id);
+      if (box) others.push(box);
+    }
+    for (const network of Object.values($labState.networks)) {
+      if (network.id === networkId || !network.visibility) continue;
+      others.push({ x: network.left || 100, y: network.top || 100, w: network.width ? network.width + 40 : 130, h: NETWORK_CARD_HEIGHT });
+    }
+    return frameFits(candidate, others);
+  }
+
+  function frameIsExpanded(networkId: number): boolean {
+    return requestedFrameId === networkId && activeFrameBox !== null;
+  }
+
+  function toggleNetworkFrame(networkId: number) {
+    const currentViewport = getViewport?.();
+    if (currentViewport) frameZoomHigh = currentViewport.zoom >= 0.85;
+    if (requestedFrameId === networkId) {
+      requestedFrameId = null;
+    } else if (!frameHasSpace(networkId)) {
+      toastStore.push('Not enough space to show network connections. Move nearby items or open network info.', 'info');
+      return;
+    } else {
+      requestedFrameId = networkId;
+    }
+    publishFlowState();
   }
 
   function nodeBox(nodeId: number): NodeBox | null {
@@ -683,7 +770,7 @@
       x: network.left || 100,
       y: network.top || 100,
       w: networkCardWidth(network),
-      h: NETWORK_CARD_HEIGHT,
+      h: frameIsExpanded(networkId) ? networkFrameHeight(frameRows(networkId).length) : NETWORK_CARD_HEIGHT,
     };
   }
 
@@ -830,7 +917,15 @@
 
     for (const [networkId, positions] of network.entries()) {
       const box = networkBox(networkId);
-      if (box) network.set(networkId, separatePositionRecord(positions, box));
+      if (box) {
+        const adjusted = separatePositionRecord(positions, box);
+        if (frameIsExpanded(networkId)) {
+          frameRows(networkId).slice(0, FRAME_ROW_LIMIT).forEach((row, index) => {
+            adjusted[row.linkId] = frameRowPosition(index, box.h, row.peerX !== null && row.peerX > box.x + box.w / 2 ? 'right' : 'left');
+          });
+        }
+        network.set(networkId, adjusted);
+      }
     }
 
     // Dotted "new connection" handles (#258): the open slot obeys the same
@@ -927,6 +1022,11 @@
           label: node.name,
           status: node.status,
           transientStatus: node.transientStatus,
+          onLifecycleAction: (action: LabNodeAction) => {
+            const current = $labState.nodes[String(node.id)];
+            if (!current || !isEligibleForLabAction(current, action)) return;
+            void handleNodeAction(action, `node${node.id}`);
+          },
           type: node.type,
           template: node.template,
           console: node.console,
@@ -979,6 +1079,10 @@
           portPositionsByLinkId: connectionPointPositions.network.get(network.id) ?? {},
           portRefsByLinkId: connectionPointPositions.networkRefs.get(network.id) ?? {},
           openSlotPosition: connectionPointPositions.networkOpenSlot.get(network.id) ?? null,
+          frameRows: frameRows(network.id),
+          frameExpanded: frameIsExpanded(network.id),
+          frameRequested: requestedFrameId === network.id,
+          toggleFrame: () => toggleNetworkFrame(network.id),
           brokenImplicit: isBrokenImplicit
         },
         style: `width: ${networkCardWidth(network)}px;`
@@ -1118,16 +1222,19 @@
   async function handleZoomIn() {
     if (canvasLocked) return;
     await zoomIn({ duration: 120 });
+    syncFrameZoom(getViewport?.());
   }
 
   async function handleZoomOut() {
     if (canvasLocked) return;
     await zoomOut({ duration: 120 });
+    syncFrameZoom(getViewport?.());
   }
 
   async function handleFitView() {
     if (canvasLocked) return;
     await fitView({ duration: 180, padding: 0.2 });
+    syncFrameZoom(getViewport?.());
   }
 
   function eventPoint(event: MouseEvent | TouchEvent): { x: number; y: number } {
@@ -1270,9 +1377,18 @@
     }
   }
 
-  function handleViewportEnd(event: CustomEvent<LabViewport>) {
-    const viewport = event.detail;
+  function syncFrameZoom(viewport: LabViewport | undefined) {
     if (!viewport) return;
+    const nextZoomHigh = frameZoomHigh ? viewport.zoom > 0.75 : viewport.zoom >= 0.85;
+    if (nextZoomHigh !== frameZoomHigh) {
+      frameZoomHigh = nextZoomHigh;
+      if (requestedFrameId !== null) publishFlowState();
+    }
+  }
+
+  function handleViewportEnd(viewport: LabViewport) {
+    if (!viewport) return;
+    syncFrameZoom(viewport);
     layoutDebouncer.pushViewport(viewport);
   }
 
@@ -1654,6 +1770,12 @@
     }
   }
 
+  function handleNodeInfo(targetId: string) {
+    closeMenu();
+    const decoded = decodeId(targetId);
+    if (decoded?.type === 'node') infoPanels.open('node', decoded.id);
+  }
+
   async function handleNetworkSharing(targetId: string, shared: boolean) {
     closeMenu();
     const decoded = decodeId(targetId);
@@ -2012,6 +2134,8 @@
     if (snap.state !== 'idle') {
       dragLinkStore.cancel();
       dragLinkSourceAnchor = null;
+    } else if (focusedId) {
+      setExplicitFocus(null);
     }
   }
 
@@ -2383,7 +2507,8 @@
     defaultEdgeOptions={{ type: 'default' }}
     proOptions={{ hideAttribution: true }}
     on:nodedragstop={handleNodeDragStop}
-    on:moveend={(event: CustomEvent<LabViewport>) => handleViewportEnd(event)}
+    onMoveEnd={(_event, viewport) => handleViewportEnd(viewport)}
+    on:moveend={(event: CustomEvent<LabViewport>) => handleViewportEnd(event.detail)}
     on:edgeclick={(event: CustomEvent<{ edge: Edge }>) => {
       selectedEdgeId = event.detail.edge.id;
       closeMenu();
@@ -2471,13 +2596,18 @@
     {/if}
 
     <Panel position="top-left">
-      <div class="rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-500 shadow-lg shadow-black/20">
+      <div class="flex items-center gap-2 rounded-full border border-gray-800 bg-gray-900/95 px-3 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-500 shadow-lg shadow-black/20">
         {#if saveState === 'saving'}
           Saving topology…
         {:else if saveState === 'saved'}
           Topology saved
         {:else}
           Topology editor
+        {/if}
+        {#if focusedId}
+          <button type="button" data-testid="exit-focus" class="rounded border border-blue-500/50 px-2 py-0.5 text-blue-200 hover:text-white" on:click={() => setExplicitFocus(null)}>
+            Exit focus
+          </button>
         {/if}
       </div>
     </Panel>
@@ -2790,6 +2920,12 @@
         {menu.targetType === 'node' ? 'Node actions' : menu.targetType === 'network' ? 'Network actions' : menu.targetType === 'port' ? 'Connection point' : 'Link actions'}
       </div>
       {#if menu?.targetType === 'node'}
+        <button type="button" class="menu-item" data-testid="node-menu-focus" on:click|preventDefault|stopPropagation={() => setExplicitFocus(menu?.targetId ?? null)}>
+          <span>Focus</span><LocateFixed class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+        </button>
+        <button type="button" class="menu-item" data-testid="node-menu-info" on:click|preventDefault|stopPropagation={() => handleNodeInfo(menu?.targetId ?? '')}>
+          <span>Node Info</span><Info class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+        </button>
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('start', menu?.targetId ?? '')}>
           <span>Start</span><Play class="h-3.5 w-3.5 text-gray-400" />
         </button>
@@ -2847,6 +2983,9 @@
           <span>Delete Node</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
         </button>
       {:else if menu?.targetType === 'network'}
+        <button type="button" class="menu-item" data-testid="network-menu-focus" on:click|preventDefault|stopPropagation={() => setExplicitFocus(menu?.targetId ?? null)}>
+          <span>Focus</span><LocateFixed class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+        </button>
         <button
           type="button"
           class="menu-item"
@@ -3182,6 +3321,12 @@
     outline: 2px solid #c0c0c0;
     outline-offset: 2px;
     animation: nv-focus-pulse 2s ease-in-out infinite;
+  }
+
+  :global(.svelte-flow__node.nv-focus-dimmed),
+  :global(.svelte-flow__edge.nv-focus-dimmed) {
+    opacity: 0.2;
+    transition: opacity 150ms;
   }
 
   :global(.canvas-minimap svg) {

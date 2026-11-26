@@ -393,7 +393,14 @@ async def reconcile_runtime(
     if err is not None:
         return err
 
-    summary = await asyncio.to_thread(network_service.ensure_lab_bridges, lab_path)
+    def reconcile():
+        from app.services.node_runtime_service import NodeRuntimeService
+
+        summary = network_service.ensure_lab_bridges(lab_path)
+        summary.update(NodeRuntimeService().legacy_docker_nodes(data))
+        return summary
+
+    summary = await asyncio.to_thread(reconcile)
     return {
         "code": 200,
         "status": "success",

@@ -3269,7 +3269,13 @@ async def get_lab(
             "message": str(e),
         }
     lab_service = LabService(db)
-    lab = await lab_service.get_lab_by_filename(scoped_path)
+    try:
+        lab = await lab_service.get_lab_by_filename(scoped_path)
+    except ValueError:
+        return _json_error(
+            400,
+            {"code": 400, "status": "fail", "message": "Invalid or absent lab path."},
+        )
 
     if lab:
         data = {

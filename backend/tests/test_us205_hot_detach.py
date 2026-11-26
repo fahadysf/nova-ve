@@ -90,6 +90,7 @@ def lab_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.link_service.get_settings", lambda: settings)
     monkeypatch.setattr("app.services.network_service.get_settings", lambda: settings)
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
+    monkeypatch.setattr(NodeRuntimeService, "docker_network_state", lambda *args, **kwargs: None)
     return settings
 
 

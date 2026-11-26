@@ -4,9 +4,10 @@
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
   import { Handle, Position } from '@xyflow/svelte';
-  import { Container, Info, Router, Server } from 'lucide-svelte';
+  import { Container, Info, Play, Router, Server, Square } from 'lucide-svelte';
   import PortLayer from './PortLayer.svelte';
   import { infoPanels } from '$lib/stores/infoPanels';
+  import { dragLinkStore } from '$lib/stores/dragLink';
   import type { NodeInterface, PortPosition } from '$lib/types';
 
   type NodeConnectionPointRef = { linkId: string; endpointKey: 'from' | 'to' };
@@ -16,6 +17,7 @@
     iconSources?: string[];
     status?: number;
     transientStatus?: 'starting' | 'stopping';
+    onLifecycleAction?: (action: 'start' | 'stop') => void;
     type?: string;
     template?: string;
     console?: string;
@@ -42,6 +44,11 @@
     if (typeof nodeId === 'number') {
       infoPanels.open('node', nodeId);
     }
+  }
+
+  function runLifecycle(event: MouseEvent) {
+    event.stopPropagation();
+    if (!transitioning) data.onLifecycleAction?.(running ? 'stop' : 'start');
   }
 
   // Flat neutral card face (#254): type is carried by the icon glyph only —
@@ -78,6 +85,7 @@
 <div
   class="nb-card group relative min-w-[10.5rem] rounded-lg border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg)] px-3.5 py-2 transition-colors hover:border-[var(--card-canvas-border-hover)] hover:bg-[var(--card-canvas-bg-hover)]"
   data-testid="custom-node-card"
+  data-link-dragging={['port_pressed', 'dragging', 'near_target'].includes($dragLinkStore.state)}
 >
   <Handle
     type="source"
@@ -151,6 +159,30 @@
     on:port:mouseleave={(e) => dispatch('port:mouseleave', e.detail)}
   />
 
+  {#if data.onLifecycleAction}
+    <button
+      type="button"
+      class="node-lifecycle nodrag absolute right-1 top-1 inline-flex h-6 w-6 items-center justify-center rounded-md border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg)] text-[var(--card-canvas-sub-fg)] hover:text-[var(--card-canvas-name-fg)] disabled:cursor-wait"
+      class:node-lifecycle-pending={transitioning}
+      disabled={transitioning}
+      aria-label={`${transitioning ? (data.transientStatus === 'starting' ? 'Starting' : 'Stopping') : (running ? 'Stop' : 'Start')} ${data.label}`}
+      title={transitioning ? (data.transientStatus === 'starting' ? 'Starting' : 'Stopping') : (running ? 'Stop node' : 'Start node')}
+      data-testid="node-lifecycle-button"
+      on:click={runLifecycle}
+      on:pointerdown|stopPropagation
+      on:mousedown|stopPropagation
+      on:mouseup|stopPropagation
+    >
+      {#if transitioning}
+        <span class="h-2 w-2 animate-pulse rounded-full bg-amber-300" aria-hidden="true"></span>
+      {:else if running}
+        <Square class="h-3 w-3" aria-hidden="true" />
+      {:else}
+        <Play class="h-3 w-3" aria-hidden="true" />
+      {/if}
+    </button>
+  {/if}
+
   <button
     type="button"
     class="nodrag absolute bottom-1 right-1 inline-flex h-3 w-3 items-center justify-center rounded-full border border-[var(--card-canvas-border)] bg-[var(--card-canvas-bg-hover)] text-[var(--card-canvas-sub-fg)] transition-colors hover:border-[var(--card-canvas-border-hover)] hover:text-[var(--card-canvas-name-fg)]"
@@ -165,6 +197,18 @@
 </div>
 
 <style>
+  /* Keep the connection points mounted: Svelte Flow measures these anchors. */
+  @media (hover: hover) and (pointer: fine) {
+    .nb-card:not(:hover):not(:focus-within) .node-lifecycle:not(.node-lifecycle-pending) {
+      opacity: 0;
+    }
+    .nb-card:where(:not(:hover):not(:focus-within):not([data-link-dragging='true'])) :global(.port-affordance) {
+      opacity: 0;
+    }
+    :global(.svelte-flow__node:focus-within) .nb-card :global(.port-affordance) {
+      opacity: 1;
+    }
+  }
   /* Selection halo (#254) — Svelte Flow marks the wrapping element with
      .selected; ring the card itself so the halo hugs the rounded box. */
   :global(.svelte-flow__node.selected) .nb-card {
