@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { ChevronRight, Folder, FolderOpen } from 'lucide-svelte';
+  import RunningDot from '$lib/components/labs/RunningDot.svelte';
   import type { ExplorerNode } from '$lib/services/labsExplorer';
 
   export let node: ExplorerNode;
@@ -39,6 +40,9 @@
         <Folder size={16} class="shrink-0 text-amber-400" />
       {/if}
       <span class="truncate">{node.name}</span>
+      {#if node.path && node.running > 0}
+        <RunningDot count={node.running} />
+      {/if}
     </button>
   </div>
   {#if isOpen}
