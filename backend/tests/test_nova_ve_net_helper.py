@@ -816,6 +816,46 @@ def test_migrated_leases_stay_readable_by_the_backend(helper):
     assert stat.S_IMODE(leases.stat().st_mode) == 0o644
 
 
+def test_private_state_writer_uses_distinct_temporary_names(helper, tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    staged = []
+    replace = helper.os.replace
+
+    def record_replace(source, destination):
+        staged.append(source.name)
+        replace(source, destination)
+
+    monkeypatch.setattr(helper.os, "replace", record_replace)
+    helper._write_private_file(target, "first", root=tmp_path)
+    helper._write_private_file(target, "second", root=tmp_path)
+
+    assert len(set(staged)) == 2
+    assert target.read_text() == "second"
+
+
+def test_private_state_writer_cleans_failed_attempt_and_retries(helper, tmp_path, monkeypatch):
+    target = tmp_path / "state.json"
+    target.write_text("previous")
+    leftover = tmp_path / f".state.json.{os.getpid()}.tmp"
+    leftover.write_text("leftover from an older helper")
+
+    def fail_replace(_source, _destination):
+        raise OSError("Replace failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(helper.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="Replace failed"):
+            helper._write_private_file(target, "updated", root=tmp_path)
+
+    assert target.read_text() == "previous"
+    assert set(tmp_path.glob(".state.json.*.tmp")) == {leftover}
+    helper._write_private_file(target, "updated", root=tmp_path)
+
+    assert target.read_text() == "updated"
+    assert leftover.read_text() == "leftover from an older helper"
+    assert set(tmp_path.glob(".state.json.*.tmp")) == {leftover}
+
+
 def _load_helper(monkeypatch, **env):
     """The helper as the service account's sudo runs it: no ``NOVA_VE_*`` in the environment."""
     for name in list(os.environ):
