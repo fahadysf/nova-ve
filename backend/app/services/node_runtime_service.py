@@ -1622,6 +1622,8 @@ class NodeRuntimeService:
             return
 
         for lab_file in iter_lab_json_files(labs_dir):
+            if lab_file.is_symlink():
+                continue
             try:
                 data = json.loads(lab_file.read_text())
             except (OSError, json.JSONDecodeError):
@@ -1630,7 +1632,7 @@ class NodeRuntimeService:
             if not lab_id:
                 continue
             try:
-                await cls._discover_lab(lab_id, data, ws_hub)
+                await cls._discover_lab(lab_id, data, ws_hub, lab_file.relative_to(labs_dir).as_posix())
             except Exception:
                 _discovery_logger.exception(
                     "discovery: failed lab=%s", lab_id
@@ -1638,7 +1640,7 @@ class NodeRuntimeService:
 
     @classmethod
     async def _discover_lab(
-        cls, lab_id: str, lab_data: dict[str, Any], ws_hub: Any
+        cls, lab_id: str, lab_data: dict[str, Any], ws_hub: Any, lab_path: str
     ) -> None:
         """Scan bridges for one lab and publish ``discovered_link`` /
         ``link_divergent`` WS events.
@@ -1744,7 +1746,7 @@ class NodeRuntimeService:
                     "generation": gen,
                 }
                 try:
-                    await ws_hub.publish(lab_id, "discovered_link", payload)
+                    await ws_hub.publish(lab_path, "discovered_link", payload)
                 except Exception:
                     _discovery_logger.exception(
                         "discovery: ws publish failed lab=%s iface=%s",
@@ -1756,6 +1758,7 @@ class NodeRuntimeService:
         # ------------------------------------------------------------------
         await cls._publish_divergent_links(
             lab_id=lab_id,
+            lab_path=lab_path,
             lab_data=lab_data,
             kernel_members=kernel_members,
             is_leased=is_leased,
@@ -1768,6 +1771,7 @@ class NodeRuntimeService:
         cls,
         *,
         lab_id: str,
+        lab_path: str,
         lab_data: dict[str, Any],
         kernel_members: set[str],
         is_leased: Callable[..., bool] | None,
@@ -1844,7 +1848,7 @@ class NodeRuntimeService:
                 "generation": generation,
             }
             try:
-                await ws_hub.publish(lab_id, "link_divergent", payload)
+                await ws_hub.publish(lab_path, "link_divergent", payload)
             except Exception:
                 _discovery_logger.exception(
                     "discovery: ws publish failed lab=%s link_id=%s",

@@ -2859,8 +2859,10 @@ def test_us204_hot_attach_symmetric_with_initial_attach(monkeypatch, patched_set
 
 
 @pytest.mark.asyncio
-async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_settings):
-    lab_path = patched_settings.LABS_DIR / "live-mac.json"
+@pytest.mark.parametrize("lab_filename", ["live-mac.json", "team/project/live-mac.json"])
+async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_settings, lab_filename):
+    lab_path = patched_settings.LABS_DIR / lab_filename
+    lab_path.parent.mkdir(parents=True, exist_ok=True)
     lab_data = {
         "schema": 2,
         "id": "lab-live-qemu",
@@ -2914,7 +2916,7 @@ async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_setting
     )
 
     response = await labs.get_interface_live_mac(
-        "live-mac.json",
+        lab_filename,
         1,
         0,
         current_user=SimpleNamespace(username="admin"),
@@ -2923,6 +2925,8 @@ async def test_live_mac_endpoint_publishes_ws_event(monkeypatch, patched_setting
     assert response == fixed_result
     assert len(captured) == 1
     event = captured[0]
+    assert event["lab_id"] == lab_filename
+    assert event["rev"] == lab_data["id"]
     assert event["type"] == "interface_live_mac"
     assert event["payload"]["node_id"] == 1
     assert event["payload"]["interface_index"] == 0

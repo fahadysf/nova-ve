@@ -3109,7 +3109,7 @@ async def get_interface_live_mac(
     result = runtime_service.read_live_mac(lab_id, node_id, idx, lab_data=data)
 
     await ws_hub.publish(
-        lab_id,
+        _normalize_relative_lab_path(scoped_path),
         "interface_live_mac",
         {
             "node_id": int(node_id),
