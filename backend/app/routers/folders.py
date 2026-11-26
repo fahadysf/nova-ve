@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -86,7 +87,19 @@ def annotate_owners(result: dict, lab_owners: dict[str, str] | None = None) -> d
     return result
 
 
-async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recursive: bool = False) -> dict:
+async def _merge_db_labs(
+    result: dict,
+    db: AsyncSession,
+    folder_path: str,
+    recursive: bool = False,
+    lab_ids: dict[str, str] | None = None,
+) -> dict:
+    """Union DB lab rows into a file-scan listing.
+
+    ``lab_ids`` (optional) collects the row id of every in-scope lab that
+    has a backing file, keyed by path — the id→path map the running
+    annotation needs (#365), taken from rows this pass already loads.
+    """
     existing_paths = {lab["path"] for lab in result["labs"]}
     lab_owners: dict[str, str] = {}
     folder_prefix = folder_path.strip("/")
@@ -116,6 +129,9 @@ async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recur
             continue
 
         lab_owners[lab.path] = lab.owner
+        row_id = getattr(lab, "id", None)
+        if lab_ids is not None and row_id:
+            lab_ids[lab.path] = str(row_id)
         if lab.path in existing_paths:
             continue
 
@@ -134,6 +150,15 @@ async def _merge_db_labs(result: dict, db: AsyncSession, folder_path: str, recur
     return annotate_owners(result, lab_owners)
 
 
+async def _annotate_running(result: dict, lab_ids: dict[str, str]) -> None:
+    """Attach ``nodes_running`` to the listed labs (#365).
+
+    Liveness checks block on ``/proc`` reads and docker/hypervisor queries,
+    so they run off the event loop (#277).
+    """
+    await asyncio.to_thread(FolderService.annotate_running, result["labs"], lab_ids)
+
+
 @router.get("/")
 async def list_root(
     current_user: UserRead = Depends(get_current_user),
@@ -142,7 +167,9 @@ async def list_root(
     try:
         scoped_root = _scoped_folder_path(current_user, "", treat_as_absolute=False)
         result = FolderService.list_folder(scoped_root, recursive=True, at_user_root=True)
-        result = await _merge_db_labs(result, db, scoped_root, recursive=True)
+        lab_ids: dict[str, str] = {}
+        result = await _merge_db_labs(result, db, scoped_root, recursive=True, lab_ids=lab_ids)
+        await _annotate_running(result, lab_ids)
     except ValueError as e:
         return {
             "code": 400,
@@ -173,7 +200,9 @@ async def list_folder(
     try:
         scoped_path = _scoped_folder_path(current_user, folder_path, treat_as_absolute=True)
         result = FolderService.list_folder(scoped_path)
-        result = await _merge_db_labs(result, db, scoped_path)
+        lab_ids: dict[str, str] = {}
+        result = await _merge_db_labs(result, db, scoped_path, lab_ids=lab_ids)
+        await _annotate_running(result, lab_ids)
     except ValueError as e:
         return {
             "code": 400,

@@ -159,6 +159,8 @@ export interface LabListItem {
   lock?: boolean;
   shared?: number;
   owner?: string;
+  /** Live nodes in this lab, from the runtime registry (#365). */
+  nodes_running?: number;
 }
 
 export interface FolderListing {

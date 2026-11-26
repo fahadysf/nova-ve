@@ -1,7 +1,9 @@
 <!-- Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com> -->
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 
-<!-- File-explorer style Labs browser (#322): folder tree + Name/Owner/Modified list. -->
+<!-- File-explorer style Labs browser (#322): folder tree + Name/Owner/Modified list.
+     Running labs are surfaced three ways (#365): the virtual Running folder,
+     a green count on each lab, and a pulsing dot on folders holding any. -->
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
@@ -10,6 +12,7 @@
   import { authStore } from '$lib/stores/auth';
   import { toastStore } from '$lib/stores/toasts';
   import FolderTreeNode from '$lib/components/labs/FolderTreeNode.svelte';
+  import RunningDot from '$lib/components/labs/RunningDot.svelte';
   import DeleteConfirmDialog from '$lib/components/DeleteConfirmDialog.svelte';
   import {
     buildTree,
@@ -20,6 +23,7 @@
     normalizePath,
     ownerLabel,
     parentPath,
+    RUNNING_FOLDER,
     SHARED_OWNER,
     SYSTEM_OWNER,
     type ExplorerNode
@@ -297,6 +301,7 @@
               <div class="flex min-w-0 items-center gap-3">
                 <Folder size={18} class="shrink-0 fill-amber-400/20 text-amber-400" />
                 <span class="truncate text-gray-100">{folder.name}</span>
+                {#if folder.running > 0}<RunningDot count={folder.running} />{/if}
                 <span class="text-[10px] text-gray-600">{countLabs(folder)} labs</span>
                 {#if folder.path === '/Shared'}
                   <span class="rounded border border-blue-500/40 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-blue-300">Shared space</span>
@@ -320,6 +325,7 @@
               role="option"
               aria-selected={selected === lab.path}
               tabindex="0"
+              data-testid={`lab-row-${lab.file}`}
               class="group grid cursor-default grid-cols-[minmax(0,1fr)_10rem_11rem_11rem] items-center gap-4 px-4 py-2 text-sm {selected ===
               lab.path
                 ? 'bg-blue-500/15'
@@ -331,6 +337,15 @@
               <div class="flex min-w-0 items-center gap-3">
                 <FileText size={18} class="shrink-0 text-sky-400" />
                 <span class="truncate text-gray-100">{labDisplayName(lab)}</span>
+                {#if (lab.nodes_running ?? 0) > 0}
+                  <span
+                    class="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[9px] uppercase tracking-wider text-emerald-300"
+                    title="{lab.nodes_running} nodes running in this lab"
+                    data-testid="lab-running-count"
+                  >
+                    {lab.nodes_running} running
+                  </span>
+                {/if}
               </div>
               <div class="truncate text-gray-400">{ownerLabel(lab.owner)}</div>
               <div class="text-gray-500">{lab.mtime}</div>
@@ -343,7 +358,9 @@
           {/each}
 
           {#if current.folders.length === 0 && current.labs.length === 0}
-            <li class="px-4 py-10 text-center text-sm text-gray-500">This folder is empty.</li>
+            <li class="px-4 py-10 text-center text-sm text-gray-500">
+              {currentFolder === RUNNING_FOLDER ? 'No labs are running.' : 'This folder is empty.'}
+            </li>
           {/if}
         </ul>
       </section>

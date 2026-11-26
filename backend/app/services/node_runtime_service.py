@@ -836,23 +836,50 @@ class NodeRuntimeService:
             enriched["disk_usage"] = self._disk_usage(self._overlay_path(lab_id, node_id))
         return enriched
 
-    def runtime_counts(self) -> dict[str, int]:
-        counts = {"qemu": 0, "docker": 0, "iol": 0, "dynamips": 0, "vpcs": 0}
+    def _live_runtime_records(self) -> list[dict[str, Any]]:
+        """Every registry record whose workload is alive right now.
+
+        Shared by the registry aggregations below. Dead records are dropped
+        from the registry on the way (the ``_runtime_record`` side effect);
+        a record carrying invalid liveness data is skipped (#356) so one bad
+        runtime file cannot take the whole tally down.
+        """
+        live: list[dict[str, Any]] = []
         for runtime in list(self._registry.values()):
             lab_id, node_id = runtime["lab_id"], runtime["node_id"]
             try:
-                live_runtime = self._runtime_record(lab_id, node_id)
+                record = self._runtime_record(lab_id, node_id)
             except (TypeError, ValueError, OverflowError):
                 _logger.warning(
                     "Ignoring invalid liveness data in runtime file %r", self._state_path(lab_id, node_id).name
                 )
                 continue
-            if not live_runtime:
-                continue
+            if record:
+                live.append(record)
+        return live
+
+    def runtime_counts(self) -> dict[str, int]:
+        counts = {"qemu": 0, "docker": 0, "iol": 0, "dynamips": 0, "vpcs": 0}
+        for live_runtime in self._live_runtime_records():
             kind = live_runtime.get("kind")
             if kind in counts:
                 counts[kind] += 1
         return counts
+
+    def running_nodes_by_lab(self) -> dict[str, int]:
+        """Live node count per lab id; only labs with something running.
+
+        The same registry-authoritative liveness as ``is_node_running``
+        (#262) that /api/manage/labs asks per node, grouped by lab in one
+        pass over the registry (#365) — no lab file is read. Blocking
+        (``/proc`` reads, ``docker inspect`` / hypervisor queries): call it
+        from a worker thread, never on the event loop (#277).
+        """
+        running: dict[str, int] = {}
+        for record in self._live_runtime_records():
+            lab_id = record["lab_id"]
+            running[lab_id] = running.get(lab_id, 0) + 1
+        return running
 
     def is_node_running(self, lab_id: str, node_id: int) -> bool:
         """Registry-authoritative liveness check (#262).
