@@ -153,8 +153,8 @@ async def _merge_db_labs(
 async def _annotate_running(result: dict, lab_ids: dict[str, str]) -> None:
     """Attach ``nodes_running`` to the listed labs (#365).
 
-    Liveness checks block on ``/proc`` reads and docker/hypervisor queries,
-    so they run off the event loop (#277).
+    Only the fallback read of a lab file for a running lab without a DB
+    row can block, and it stays off the event loop (#277).
     """
     await asyncio.to_thread(FolderService.annotate_running, result["labs"], lab_ids)
 
