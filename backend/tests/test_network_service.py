@@ -1025,6 +1025,82 @@ async def test_create_nat_cloud_ignores_its_own_leftover_bridge(
 
 
 @pytest.mark.asyncio
+async def test_create_nat_cloud_sets_aside_the_bridge_its_allocated_id_names(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch
+):
+    """#332: a deleted network keeps its id, so the next one is not always
+    ``max(networks) + 1``. The bridge a create sets aside as its own must be
+    the one the id it allocates will name, or a leftover looks like a clash."""
+    lab_name = _seed_lab(labs_dir, lab_id="lab-nat-leftover")
+    service = NetworkService()
+    gone = await service.create_network(
+        lab_name, {"name": "old", "type": "nat_cloud", "config": {"cidr": "10.87.0.0/24"}}
+    )
+    await service.delete_network(lab_name, gone["id"])
+
+    bridge = host_net.bridge_name("lab-nat-leftover", 2)
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: [(bridge, "10.88.0.1/24")])
+    config = {"cidr": "10.88.0.0/24"}
+
+    NetworkService().validate_nat_cloud_config(lab_name, config)
+    created = await service.create_network(
+        lab_name, {"name": "internet", "type": "nat_cloud", "config": config}
+    )
+
+    assert created["id"] == 2
+    assert created["runtime"]["bridge_name"] == bridge
+
+
+@pytest.mark.asyncio
+async def test_create_network_stops_at_the_last_id_the_host_can_name(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir
+):
+    """#332: ids are never reused, so the highest one is the last creation.
+    Past it every path refuses, and the lab file is exactly as it was."""
+    lab_id = "lab-nat-limit"
+    lab_name = _seed_lab(labs_dir, lab_id=lab_id)
+    path = labs_dir / lab_name
+    data = json.loads(path.read_text())
+    data["meta"]["last_network_id"] = host_net.MAX_NETWORK_ID - 1
+    path.write_text(json.dumps(data))
+    limit = host_net.MAX_NETWORK_ID
+
+    last = await NetworkService().create_network(
+        lab_name, {"name": "last", "type": "nat_cloud", "config": {"cidr": "10.86.0.0/24"}}
+    )
+    assert last["id"] == limit
+    assert last["runtime"]["bridge_name"] == host_net.bridge_name(lab_id, limit)
+    assert json.loads(path.read_text())["meta"]["last_network_id"] == limit
+    before = path.read_bytes()
+
+    requests = [
+        {"name": "one too many", "type": "nat_cloud"},
+        {"name": "one too many", "type": "linux_bridge"},
+        {"name": "one too many", "config": {"cidr": "10.40.2.0/24", "dhcp": True}},
+    ]
+    for request in requests:
+        with pytest.raises(NetworkServiceError) as exc:
+            await NetworkService().create_network(lab_name, request)
+        assert _beyond_the_limit(exc.value, "network")
+    for validate in (
+        lambda: NetworkService().validate_nat_cloud_config(lab_name, {}),
+        lambda: NetworkService().validate_network_config(
+            lab_name, "linux_bridge", {"cidr": "10.40.2.0/24", "dhcp": True}
+        ),
+    ):
+        with pytest.raises(NetworkServiceError) as exc:
+            validate()
+        assert _beyond_the_limit(exc.value, "network")
+
+    assert path.read_bytes() == before
+
+
+def _beyond_the_limit(exc: NetworkServiceError, kind: str) -> bool:
+    """A typed 409 that names the kind of id the lab has run out of."""
+    return exc.code == 409 and f"{kind} ids" in exc.message
+
+
+@pytest.mark.asyncio
 async def test_nat_cloud_conflict_does_not_name_labs_the_caller_cannot_open(
     instance_id, settings, helper_mocks, stub_publish, labs_dir
 ):

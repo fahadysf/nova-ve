@@ -2352,6 +2352,149 @@ def test_docker_start_mgmt_attach_failure_rolls_back(
     # next start reuses its subnet — same lifecycle as network bridges.
 
 
+# #332: ids are never reused, so two nodes of a lab can fold to one mgmt0 octet
+
+
+def _us332_mgmt_lab(*node_ids: int) -> dict:
+    """Docker nodes with ``mgmt_access`` on, each with one interface on net 1."""
+    from app.services import host_net as host_net_module
+
+    bridge = host_net_module.bridge_name("lab-204", 1)
+    return {
+        "schema": 2,
+        "id": "lab-204",
+        "meta": {"name": "us332"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            str(node_id): {
+                "id": node_id,
+                "name": f"mgmt-{node_id}",
+                "type": "docker",
+                "image": "nova-ve/alpine-telnet:latest",
+                "console": "telnet",
+                "cpu": 1,
+                "ram": 256,
+                "ethernet": 1,
+                "extras": {"mgmt_access": "true"},
+                "interfaces": [
+                    {"index": 0, "name": "eth0", "planned_mac": None, "port_position": None},
+                ],
+            }
+            for node_id in node_ids
+        },
+        "networks": {
+            "1": {
+                "id": 1,
+                "name": "lab-link",
+                "type": "linux_bridge",
+                "visibility": True,
+                "implicit": False,
+                "config": {},
+                "runtime": {"bridge_name": bridge},
+            }
+        },
+        "links": [
+            {
+                "id": f"lnk_{index + 1:03d}",
+                "from": {"node_id": node_id, "interface_index": 0},
+                "to": {"network_id": 1},
+                "style_override": None,
+                "label": "",
+                "color": "",
+                "width": "1",
+                "metrics": {"delay_ms": 0, "loss_pct": 0, "bandwidth_kbps": 0, "jitter_ms": 0},
+            }
+            for index, node_id in enumerate(node_ids)
+        ],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+
+def _us332_mgmt_network() -> str:
+    """The /24 the mgmt bridge of ``lab-204`` is given on a host with no clash."""
+    from app.services import host_net as host_net_module
+
+    return f"172.16.{host_net_module.mgmt_subnet_candidates('lab-204')[0]}"
+
+
+def _us332_mgmt_start_io(monkeypatch, lab: dict, containers: dict) -> None:
+    """Everything a docker start touches; ``containers`` is the fake daemon."""
+    _us203_helper_mock(
+        monkeypatch, present_bridges={lab["networks"]["1"]["runtime"]["bridge_name"]}
+    )
+    _mock_runtime_binaries(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.sweep_node_host_ifaces",
+        lambda _lab_id, _node_id: None,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.console_proxy_start",
+        lambda **_kwargs: 8123,
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.subprocess.run", _us204_docker_run_factory(containers)
+    )
+
+
+def test_mgmt_inventory_refuses_orphan_with_same_address(monkeypatch, patched_settings):
+    from app.services.node_runtime_service import NodeRuntimeError
+    service = NodeRuntimeService()
+    monkeypatch.setattr(service, "_resolve_binary", lambda _: "docker")
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", lambda *a, **k:
+                        SimpleNamespace(returncode=0, stdout="nova-ve-lab204-253\n", stderr=""))
+    with pytest.raises(NodeRuntimeError, match="management address"):
+        service._check_mgmt_address_available("lab-204", 3)
+    service._check_mgmt_address_available("lab-204", 4)
+
+
+def test_mgmt_inventory_failure_refuses_start(monkeypatch, patched_settings):
+    from app.services.node_runtime_service import NodeRuntimeError
+    service = NodeRuntimeService()
+    monkeypatch.setattr(service, "_resolve_binary", lambda _: "docker")
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", lambda *a, **k:
+                        SimpleNamespace(returncode=1, stdout="", stderr="unavailable"))
+    with pytest.raises(NodeRuntimeError, match="inspect running containers"):
+        service._check_mgmt_address_available("lab-204", 3)
+
+
+def test_management_starts_serialize_inventory_and_launch(monkeypatch, patched_settings, _us203_instance_id):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    service = NodeRuntimeService()
+    lab = _us332_mgmt_lab(3, 253)
+    for node in lab["nodes"].values():
+        node["interfaces"] = []
+    monkeypatch.setattr(service, "_runtime_record", lambda *a: None)
+    monkeypatch.setattr(service, "_reconcile_docker_node_runtime", lambda *a: None)
+    monkeypatch.setattr("app.services.node_runtime_service.host_net.sandbox_mode", lambda: False)
+    monkeypatch.setattr(service, "_persist_runtime", lambda *a: None)
+    first_entered = threading.Event()
+    release = threading.Event()
+    second_checked = threading.Event()
+    def check(_lab, node_id):
+        if node_id == 253:
+            second_checked.set()
+    def launch(_lab, node):
+        if node["id"] == 3:
+            first_entered.set()
+            assert release.wait(3)
+        return {"id": node["id"]}
+    monkeypatch.setattr(service, "_check_mgmt_address_available", check)
+    monkeypatch.setattr(service, "_start_docker_node", launch)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(service.start_node, lab, 3)
+        assert first_entered.wait(3)
+        second = pool.submit(service.start_node, lab, 253)
+        try:
+            assert not second_checked.wait(0.2)
+        finally:
+            release.set()
+        first.result(timeout=3)
+        second.result(timeout=3)
+    assert second_checked.is_set()
+
+
 def _us204_start_alpine_a(
     monkeypatch,
     patched_settings,

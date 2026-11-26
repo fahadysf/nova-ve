@@ -30,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 LEGACY_SCHEMA_ERROR = "Lab uses legacy schema; run scripts/migrate_lab_v1_to_v2.py"
 
+# ``meta`` keys recording the highest id handed out of each kind (#332).
+# Internal: never returned to clients.
+HIGH_WATER_FIELDS = ("last_node_id", "last_network_id", "last_link_id")
+
 # Fields that read_lab_json_static synthesises into the in-memory dict so that
 # legacy router code keeps working. They MUST be stripped before persisting.
 LEGACY_COMPAT_KEYS = ("topology",)
@@ -446,10 +450,21 @@ def _cleanup_lab_node_runtime(data: dict, lab_filename: str) -> None:
 
 def _legacy_topology_to_links(data: dict) -> list[dict]:
     links: list[dict] = []
-    for index, entry in enumerate(data.get("topology", []) or []):
-        if not isinstance(entry, dict):
-            continue
+    topology = [entry for entry in data.get("topology") or [] if isinstance(entry, dict)]
+    # #332: ids the document already carries. A generated id skips them, and
+    # below they raise the mark so a later allocation cannot collide either.
+    taken = {str(link.get("id")) for link in data.get("links") or [] if isinstance(link, dict)}
+    taken.update(str(entry["id"]) for entry in topology if entry.get("id"))
 
+    def _identified(link: dict) -> dict:
+        if not link["id"]:
+            link["id"] = allocate_link_id(data)
+            while link["id"] in taken:
+                link["id"] = allocate_link_id(data)
+            taken.add(str(link["id"]))
+        return link
+
+    for entry in topology:
         source = str(entry.get("source", "") or "")
         destination = str(entry.get("destination", "") or "")
         source_iface = entry.get("source_interfaceId", 0) or 0
@@ -466,7 +481,7 @@ def _legacy_topology_to_links(data: dict) -> list[dict]:
         source_node_id = _node_id(source)
         destination_node_id = _node_id(destination)
         link: dict[str, object] = {
-            "id": entry.get("id") or f"lnk_{index + 1:03d}",
+            "id": entry.get("id"),
             "style_override": None,
             "label": str(entry.get("label", "") or ""),
             "color": str(entry.get("color", "") or ""),
@@ -486,13 +501,13 @@ def _legacy_topology_to_links(data: dict) -> list[dict]:
                 dst_index = 0
             link["from"] = {"node_id": source_node_id, "interface_index": int(source_iface)}
             link["to"] = {"node_id": destination_node_id, "interface_index": dst_index}
-            links.append(link)
+            links.append(_identified(link))
             continue
 
         if source_node_id is not None and network_id:
             link["from"] = {"node_id": source_node_id, "interface_index": int(source_iface)}
             link["to"] = {"network_id": network_id}
-            links.append(link)
+            links.append(_identified(link))
             continue
 
         if destination_node_id is not None and network_id:
@@ -502,9 +517,14 @@ def _legacy_topology_to_links(data: dict) -> list[dict]:
                 dst_index = 0
             link["from"] = {"node_id": destination_node_id, "interface_index": dst_index}
             link["to"] = {"network_id": network_id}
-            links.append(link)
+            links.append(_identified(link))
             continue
 
+    if links:
+        _set_high_water(
+            data, "last_link_id",
+            max(_high_water_mark(data, "last_link_id"), _max_link_number({"links": links})),
+        )
     return links
 
 
@@ -575,6 +595,143 @@ def keep_written_revision(data: dict, revision: int | None) -> None:
     meta["revision"] = revision
 
 
+def _max_int_key(mapping: dict) -> int:
+    highest = 0
+    for key in mapping:
+        try:
+            highest = max(highest, int(key))
+        except (TypeError, ValueError):
+            continue
+    return highest
+
+
+class LabIdExhaustedError(Exception):
+    """Every id of a kind that the host layer can name has been handed out (#332).
+
+    Ids are never reused, so this limits how often a lab can create, not how
+    many it can hold at once. ``code`` and ``message`` mirror
+    ``NetworkServiceError``.
+    """
+
+    def __init__(self, kind: str, limit: int) -> None:
+        super().__init__(
+            f"This lab has used all {limit} {kind} ids. Ids are never reused, "
+            f"so start a new lab to add more {kind}s."
+        )
+        self.code = 409
+        self.message = str(self)
+
+
+# What each mark names, and the highest id of that kind the host layer can
+# still name. ``None``: the id is a string that widens instead of overflowing.
+_ID_LIMITS = {
+    "last_node_id": ("node", host_net.MAX_NODE_ID),
+    "last_network_id": ("network", host_net.MAX_NETWORK_ID),
+    "last_link_id": ("link", None),
+}
+
+
+def _high_water_mark(data: dict, field: str) -> int:
+    """The highest id of ``field``'s kind that ``data`` records as used."""
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        return 0
+    try:
+        return int(meta.get(field) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _set_high_water(data: dict, field: str, value: int) -> None:
+    meta = data.get("meta")
+    if not isinstance(meta, dict):
+        meta = data["meta"] = {}
+    meta[field] = value
+
+
+def _preview_high_water(data: dict, field: str, current_max: int) -> int:
+    """Next id for ``field`` without recording it.
+
+    Raises :class:`LabIdExhaustedError` when that id is past the limit, so
+    nothing is ever created that the host layer could not name.
+    """
+    value = max(current_max, _high_water_mark(data, field)) + 1
+    kind, limit = _ID_LIMITS[field]
+    if limit is not None and value > limit:
+        raise LabIdExhaustedError(kind, limit)
+    return value
+
+
+def _allocate_high_water(data: dict, field: str, current_max: int) -> int:
+    """Next id for ``field``, recorded so the id is never reused (#332).
+
+    Deleting the highest-numbered object must not free its id: a delete
+    racing a create could then remove the new object, and node work dirs
+    are keyed by id. Labs written before #332 have no high-water mark, so
+    allocation starts above the current maximum; a mark can never move
+    backwards, not even on a rollback (:func:`keep_high_water_marks`).
+    """
+    # A refused allocation raises before anything is recorded.
+    value = _preview_high_water(data, field, current_max)
+    _set_high_water(data, field, value)
+    return value
+
+
+def allocate_node_id(data: dict) -> int:
+    """Allocate a node id that this lab has never used before (#332)."""
+    return _allocate_high_water(data, "last_node_id", _max_int_key(data.get("nodes") or {}))
+
+
+def allocate_network_id(data: dict) -> int:
+    """Allocate a network id that this lab has never used before (#332)."""
+    return _allocate_high_water(
+        data, "last_network_id", _max_int_key(data.get("networks") or {})
+    )
+
+
+def preview_network_id(data: dict) -> int:
+    """The network id the next allocation in ``data`` would take (#332)."""
+    return _preview_high_water(
+        data, "last_network_id", _max_int_key(data.get("networks") or {})
+    )
+
+
+def _max_link_number(data: dict) -> int:
+    highest = 0
+    for link in data.get("links") or []:
+        if not isinstance(link, dict):
+            continue
+        link_id = str(link.get("id") or "")
+        if link_id.startswith("lnk_") and link_id[4:].isdigit():
+            highest = max(highest, int(link_id[4:]))
+    return highest
+
+
+def allocate_link_id(data: dict) -> str:
+    """Allocate a link id that this lab has never used before (#332)."""
+    return f"lnk_{_allocate_high_water(data, 'last_link_id', _max_link_number(data)):03d}"
+
+
+def keep_high_water_marks(snapshot: dict, live: dict) -> None:
+    """Carry the high-water marks of ``live`` into a ``snapshot`` about to be
+    written back.
+
+    A rollback is not an edit: freeing the ids allocated since the snapshot
+    was taken would hand them out a second time.
+    """
+    meta = live.get("meta")
+    if not isinstance(meta, dict):
+        return
+    marks = {field: meta[field] for field in HIGH_WATER_FIELDS if field in meta}
+    if not marks:
+        return
+    snapshot_meta = snapshot.get("meta")
+    if not isinstance(snapshot_meta, dict):
+        snapshot_meta = snapshot["meta"] = {}
+    for field in marks:
+        snapshot_meta[field] = max(_high_water_mark(snapshot, field), _high_water_mark(live, field))
+
+
 async def unlink_lab_file(filename: str) -> None:
     """Remove a lab file under its lock (#328).
 
@@ -605,6 +762,12 @@ class LockedLab:
 
     def restore(self, snapshot: dict) -> None:
         """Write back a copy taken under this lock. A rollback is not an edit."""
+        # Ids allocated since the snapshot stay allocated (#332): those seen
+        # here, and those a writer that borrowed this lock allocated in a
+        # copy of its own (paired-template links). The lock is held, so the
+        # file cannot change underneath the read.
+        keep_high_water_marks(snapshot, self.data)
+        keep_high_water_marks(snapshot, LabService.read_lab_json_static(self.path))
         self.data = snapshot
         self.save(bump_revision=False)
 
@@ -771,20 +934,34 @@ class LabService:
 
     async def delete_lab(self, lab: LabMeta) -> None:
         filepath = _lab_file_path(lab.filename)
-        assert_no_external_members_for_scope(lab.filename)
         if filepath.exists():
+            # #332: read, check, clean up and unlink under one lock. Reading
+            # before the lock and cleaning up from that stale read orphans
+            # bridges and disks of anything created while the delete waited.
+            loaded = False
             try:
-                data = LabService.read_lab_json_static(lab.filename)
+                async with locked_lab_async(lab.filename) as locked:
+                    # Read: a failure from here on must surface and keep
+                    # file and row, not delete a half-cleaned lab.
+                    loaded = True
+                    # Writers take this lab's lock, so while it is held the
+                    # check's own read of the file sees the state just read.
+                    assert_no_external_members_for_scope(lab.filename)
+                    _cleanup_lab_network_runtime(locked.data, lab.filename)
+                    _cleanup_lab_node_runtime(locked.data, lab.filename)
+                    # Unlink directly: unlink_lab_file would take this same
+                    # (non-reentrant) lock again.
+                    _lab_file_path(lab.filename).unlink(missing_ok=True)
             except (OSError, ValueError, json.JSONDecodeError) as exc:
+                if loaded:
+                    raise
+                # Only a lab that could not be read is deleted without cleanup.
                 logger.warning(
                     "delete_lab: could not read %s for network cleanup (%s)",
                     lab.filename,
                     exc,
                 )
-            else:
-                _cleanup_lab_network_runtime(data, lab.filename)
-                _cleanup_lab_node_runtime(data, lab.filename)
-            await unlink_lab_file(lab.filename)
+                await unlink_lab_file(lab.filename)
         await self.db.delete(lab)
         await self.db.commit()
 

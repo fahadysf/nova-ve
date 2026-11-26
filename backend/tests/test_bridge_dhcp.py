@@ -401,6 +401,57 @@ async def test_dhcp_refuses_a_host_interface_subnet_but_not_its_own(host, labs_d
 
 
 @pytest.mark.asyncio
+async def test_dhcp_bridge_is_its_own_by_the_id_that_will_be_allocated(host, labs_dir):
+    """#332: a deleted network keeps its id, so the next one is not always
+    ``max(networks) + 1``. The bridge that id names is the create's own."""
+    lab = _lab(labs_dir, "a.json", LAB_A)
+    service = NetworkService()
+    gone = await service.create_network(
+        lab, {"name": "old", "config": {"cidr": "10.40.1.0/24", "dhcp": False}}
+    )
+    await service.delete_network(lab, gone["id"])
+
+    # Left behind by a failed delete, address and all.
+    leftover = host_net.bridge_name(LAB_A, 2)
+    host.existing.add(leftover)
+    host.host_addrs = [(leftover, "10.40.2.254/24")]
+    host.calls.clear()
+    config = _dhcp_config("10.40.2.0/24")
+
+    service.validate_network_config(lab, "linux_bridge", config)
+    created = await service.create_network(lab, {"name": "lan", "config": config})
+
+    assert created["id"] == 2
+    assert created["runtime"]["bridge_name"] == leftover
+    # Reused as it is, so it is neither rebuilt nor re-stamped.
+    assert not {"bridge_add", "bridge_fingerprint_write"} & set(host.names())
+
+
+@pytest.mark.asyncio
+async def test_no_dhcp_bridge_is_made_past_the_last_network_id(host, labs_dir):
+    """#332: ids are never reused. The name a DHCP create checks against comes
+    from the id before it is allocated; both stop at the same last id."""
+    lab = _lab(labs_dir, "a.json", LAB_A)
+    path = labs_dir / lab
+    data = json.loads(path.read_text())
+    data["meta"]["last_network_id"] = host_net.MAX_NETWORK_ID
+    path.write_text(json.dumps(data))
+    before = path.read_bytes()
+
+    refusals = (
+        lambda: _create_dhcp(lab),
+        lambda: NetworkService().validate_network_config(lab, "linux_bridge", _dhcp_config()),
+    )
+    for refuse in refusals:
+        with pytest.raises(NetworkServiceError) as exc_info:
+            await refuse()
+        assert exc_info.value.code == 409
+        assert "network ids" in exc_info.value.message
+    assert path.read_bytes() == before
+    assert host.calls == []
+
+
+@pytest.mark.asyncio
 async def test_dhcp_refuses_a_nat_cloud_in_another_lab_without_naming_hidden_labs(host, labs_dir):
     _lab(labs_dir, "secret.json", LAB_B, {"1": _nat_cloud(1, LAB_B, "10.40.1.0/24")})
     lab = _lab(labs_dir, "a.json", LAB_A)
