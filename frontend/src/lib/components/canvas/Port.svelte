@@ -359,7 +359,7 @@
 </script>
 
 <div
-  class="port-affordance pointer-events-auto absolute z-10"
+  class="pointer-events-auto absolute z-10"
   style={stylePosition}
   data-port-node-id={nodeId}
   data-port-interface-index={interfaceIndex}
@@ -403,7 +403,7 @@
   {/if}
   <span
     bind:this={portHandle}
-    class={`port-handle block h-2.5 w-2.5 rounded-full border ${
+    class={`port-affordance port-handle block h-2.5 w-2.5 rounded-full border ${
       newConnectionSlot ? 'border-dashed border-blue-300/80' : 'border-gray-950'
     } ${
       isHovered ? 'port-handle-hover' : ''
@@ -420,12 +420,12 @@
   ></span>
   {#if hasMismatch}
     <span
-      class="pointer-events-none absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-300 ring-1 ring-amber-100/80 shadow-[0_0_4px_rgba(252,211,77,0.7)]"
+      class="port-affordance pointer-events-none absolute -right-0.5 -top-0.5 h-1.5 w-1.5 rounded-full bg-amber-300 ring-1 ring-amber-100/80 shadow-[0_0_4px_rgba(252,211,77,0.7)]"
       data-testid="port-mismatch-dot"
       aria-hidden="true"
     ></span>
   {/if}
-  {#if connected && !newConnectionSlot && !showTooltip}
+  {#if connected && !newConnectionSlot}
     <!-- Vertical pills swap the padding utilities: writing-mode vertical-rl
          turns the physical px/py axes around, so keeping them would pad the
          caps wide and the text sides thin — an ovular blob instead of the

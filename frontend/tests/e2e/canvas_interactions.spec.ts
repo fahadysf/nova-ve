@@ -45,19 +45,25 @@ test('ports reveal on hover and while a connection is being dragged', async ({ p
   await openLab(page);
   const first = page.locator('.svelte-flow__node[data-id="node1"]');
   const third = page.locator('.svelte-flow__node[data-id="node3"]');
-  const source = first.locator('[data-port-new-connection="true"]');
-  const target = third.locator('[data-port-new-connection="true"]');
+  const source = first.getByTestId('port-new-connection-handle');
+  const target = third.getByTestId('port-new-connection-handle');
+  const connectedPort = first.locator('[data-port-link-id="link-1"]');
+  const label = connectedPort.getByTestId('port-pinned-label');
   const network = page.locator('.svelte-flow__node[data-id="network9"]');
   const networkPort = network.locator('[data-network-port-open="true"]');
   await page.mouse.move(10, 10);
   await expect(source).toHaveCSS('opacity', '0');
   await expect(target).toHaveCSS('opacity', '0');
   await expect(networkPort).toHaveCSS('opacity', '0');
+  await expect(connectedPort).toHaveCSS('opacity', '1');
+  await expect(label).toBeVisible();
+  await expect(label).toHaveText('eth0');
   await network.getByTestId('network-node').hover();
   await expect(networkPort).toHaveCSS('opacity', '1');
   await first.getByTestId('node-icon-container').hover();
   await expect(source).toHaveCSS('opacity', '1');
   await expect(target).toHaveCSS('opacity', '0');
+  await expect(label).toBeVisible();
   const box = await source.boundingBox();
   if (!box) throw new Error('The source port has no bounds');
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -119,7 +125,7 @@ test.describe('touch input', () => {
 
   test('connection affordances remain available without hover', async ({ page }) => {
     await openLab(page);
-    const source = page.locator('.svelte-flow__node[data-id="node1"] [data-port-new-connection="true"]');
+    const source = page.locator('.svelte-flow__node[data-id="node1"]').getByTestId('port-new-connection-handle');
     await page.mouse.move(10, 10);
     await expect(source).toHaveCSS('opacity', '1');
   });

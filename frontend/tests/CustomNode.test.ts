@@ -32,7 +32,7 @@ describe('CustomNode', () => {
     } } });
     const card = screen.getByTestId('custom-node-card');
     const port = container.querySelector('[data-port-new-connection="true"]');
-    expect(port).toHaveClass('port-affordance');
+    expect(screen.getByTestId('port-new-connection-handle')).toHaveClass('port-affordance');
     expect(card).toHaveAttribute('data-link-dragging', 'false');
     dragLinkStore.start({ source: { kind: 'node-slot', nodeId: 2, port: { side: 'right', offset: 0.5 } } });
     await tick();

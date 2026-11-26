@@ -54,7 +54,7 @@ change their attachment points.
 
 | Interaction | Behavior |
 |---|---|
-| Hover or keyboard-focus a node or network | Reveal its connection points. A link drag reveals eligible targets across the canvas; touch devices keep them available without hover. |
+| Hover or keyboard-focus a node or network | Reveal its port markers. Connected interface names remain visible at rest. A link drag reveals eligible targets across the canvas; touch devices keep them available without hover. |
 | Drag a connection point | The `dragLink` store tracks the press, drag, target, and cancellation. Escape cancels the drag; a valid drop opens the existing confirmation flow. |
 | Right-click a node | Open its context menu for lifecycle, console, configuration, information, deletion, and focus actions. Destructive actions use their normal confirmations. |
 | Select Focus from a context menu | Keep the focused element and its connected neighborhood visible and dim unrelated elements. Exit explicitly with the focus control or Escape. Ordinary clicks do not enter focus. |
