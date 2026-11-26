@@ -19,12 +19,41 @@ vi.mock('@xyflow/svelte', async () => {
 });
 
 import NetworkNode from '$lib/components/canvas/NetworkNode.svelte';
+import { dragLinkStore } from '$lib/stores/dragLink';
+import { tick } from 'svelte';
 
 afterEach(() => {
+  dragLinkStore.cancel();
   vi.restoreAllMocks();
 });
 
 describe('NetworkNode', () => {
+  it('shows six connection rows and an overflow link without removing anchors', () => {
+    const frameRows = Array.from({ length: 8 }, (_, i) => ({ linkId: `link-${i}`, label: `Router ${i} · eth0`, peerX: 0 }));
+    const { container } = render(NetworkNode, { props: { id: 'network7', data: {
+      label: 'core', networkId: 7, linkIds: frameRows.map((row) => row.linkId),
+      frameRows, frameExpanded: true, frameRequested: true, toggleFrame: () => {},
+    } } });
+    expect(screen.getByTestId('network-frame-rows').querySelectorAll('[data-link-id]')).toHaveLength(6);
+    expect(screen.getByRole('button', { name: '+2 more' })).toBeInTheDocument();
+    expect(container.querySelectorAll('[data-network-port-link-id]')).toHaveLength(9);
+  });
+  it('keeps network anchors mounted and reveals them during a link gesture', async () => {
+    const { container } = render(NetworkNode, { props: { id: 'network7', data: {
+      label: 'core', networkId: 7, linkIds: [],
+    } } });
+    const card = screen.getByTestId('network-node');
+    const port = container.querySelector('[data-network-port-open="true"]');
+    expect(port).toHaveClass('port-affordance');
+    expect(card).toHaveAttribute('data-link-dragging', 'false');
+    dragLinkStore.start({ source: { kind: 'node-slot', nodeId: 2, port: { side: 'right', offset: 0.5 } } });
+    await tick();
+    expect(card).toHaveAttribute('data-link-dragging', 'true');
+    expect(container.querySelector('[data-network-port-open="true"]')).toBe(port);
+    dragLinkStore.cancel();
+    await tick();
+    expect(card).toHaveAttribute('data-link-dragging', 'false');
+  });
   it('shows the network name on the box face without a repeated type label', () => {
     render(NetworkNode, {
       props: {

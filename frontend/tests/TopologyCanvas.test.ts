@@ -1015,6 +1015,66 @@ describe('TopologyCanvas hover focus (#275)', () => {
     );
   }
 
+  async function openFocusMenu(id: string) {
+    await fireEvent(screen.getByTestId('svelte-flow-mock'), new CustomEvent('mock-flow-event', {
+      detail: { type: 'nodecontextmenu', detail: { node: { id }, event: new MouseEvent('contextmenu') } },
+    }));
+  }
+
+  it('focuses the selected path explicitly and follows topology updates until dismissed', async () => {
+    renderCanvas(
+      { '1': makeNode(1, 'a', 0, caps), '2': makeNode(2, 'b', 0, caps), '3': makeNode(3, 'c', 0, caps) },
+      { '9': makeNetwork(9, 'a'), '8': makeNetwork(8, 'b') },
+      [link('l1', 1, 9), link('l2', 2, 9), link('l3', 3, 8)]
+    );
+    await fireEvent(screen.getByTestId('svelte-flow-mock'), new CustomEvent('mock-flow-event', {
+      detail: { type: 'nodeclick', detail: { node: { id: 'node1' } } },
+    }));
+    expect(screen.queryByTestId('exit-focus')).not.toBeInTheDocument();
+    await openFocusMenu('node1');
+    await fireEvent.click(screen.getByTestId('node-menu-focus'));
+    expect(screen.getByTestId('exit-focus')).toBeVisible();
+    expect(classOf('nodes', 'node1') ?? '').not.toContain('nv-focus-dimmed');
+    expect(classOf('nodes', 'node2') ?? '').not.toContain('nv-focus-dimmed');
+    expect(classOf('nodes', 'network9') ?? '').not.toContain('nv-focus-dimmed');
+    expect(classOf('nodes', 'node3')).toContain('nv-focus-dimmed');
+    expect(classOf('edges', 'link:l2') ?? '').not.toContain('nv-focus-dimmed');
+    expect(classOf('edges', 'link:l3')).toContain('nv-focus-dimmed');
+
+    labState.setLinks([link('l1', 1, 9), link('l3', 3, 8)]);
+    await tick();
+    expect(classOf('nodes', 'node2')).toContain('nv-focus-dimmed');
+    await fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByTestId('exit-focus')).not.toBeInTheDocument();
+    expect(classOf('nodes', 'node3') ?? '').not.toContain('nv-focus-dimmed');
+  });
+
+  it('focuses networks, supports the exit control, and opens node information', async () => {
+    infoPanels.reset();
+    renderCanvas({ '1': makeNode(1, 'a', 0, caps), '2': makeNode(2, 'b', 0, caps) },
+      { '9': makeNetwork(9, 'a') }, [link('l1', 1, 9)]);
+    await openFocusMenu('network9');
+    await fireEvent.click(screen.getByTestId('network-menu-focus'));
+    expect(classOf('nodes', 'node1') ?? '').not.toContain('nv-focus-dimmed');
+    expect(classOf('nodes', 'node2')).toContain('nv-focus-dimmed');
+    await fireEvent.click(screen.getByTestId('exit-focus'));
+    expect(classOf('nodes', 'node2') ?? '').not.toContain('nv-focus-dimmed');
+    await openFocusMenu('node1');
+    await fireEvent.click(screen.getByTestId('node-menu-info'));
+    expect(infoPanels._peek()).toEqual(expect.arrayContaining([expect.objectContaining({ kind: 'node', refId: 1 })]));
+    infoPanels.reset();
+  });
+
+  it('clears focus when switching labs with the same node IDs', async () => {
+    const view = renderCanvas({ '1': makeNode(1, 'a', 0, caps), '2': makeNode(2, 'b', 0, caps) });
+    await openFocusMenu('node1');
+    await fireEvent.click(screen.getByTestId('node-menu-focus'));
+    expect(screen.getByTestId('exit-focus')).toBeVisible();
+    await view.rerender({ labId: 'another-lab' });
+    expect(screen.queryByTestId('exit-focus')).not.toBeInTheDocument();
+    expect(classOf('nodes', 'node2') ?? '').not.toContain('nv-focus-dimmed');
+  });
+
   it('pulses the hovered node and its connected nodes; everything else is untouched', async () => {
     renderCanvas(
       {
