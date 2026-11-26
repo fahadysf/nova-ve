@@ -5212,47 +5212,44 @@ class NodeRuntimeService:
         Idempotent: a non-empty existing value is left untouched (the
         operator may have set an explicit MAC; we never overwrite it).
         """
-        from app.services.lab_lock import lab_lock  # local import: cycle-free
-        from app.services.lab_service import LabService  # noqa: WPS433
+        from app.services.lab_service import LabService, _lab_file_path, locked_lab
 
         try:
             settings = get_settings()
         except Exception:  # noqa: BLE001
             return
-        labs_dir = Path(settings.LABS_DIR)
+        labs_dir = Path(settings.LABS_DIR).resolve()
         if not labs_dir.exists():
             return
 
-        # Find the lab.json file whose ``id`` matches lab_id.
-        target: Optional[Path] = None
-        for path in labs_dir.glob("*.json"):
+        for path in iter_lab_json_files(labs_dir):
+            relative = path.relative_to(labs_dir).as_posix()
             try:
-                data = LabService.read_lab_json_static(path.name)
+                if _lab_file_path(relative) != path:
+                    continue
+                data = LabService.read_lab_json_static(relative)
             except Exception:  # noqa: BLE001
                 continue
-            if str(data.get("id") or "") == lab_id:
-                target = path
-                break
-        if target is None:
-            return
+            if str(data.get("id") or "") != lab_id:
+                continue
 
-        with lab_lock(target.name, labs_dir, create_parent=False):
-            data = LabService.read_lab_json_static(target.name)
-            node = data.get("nodes", {}).get(str(int(node_id)))
-            if not isinstance(node, dict):
-                return
-            iface = self._lookup_interface(node, int(interface_index))
-            if not isinstance(iface, dict):
-                return
-            existing = iface.get("planned_mac")
-            if existing:  # non-empty: respect operator-supplied MAC.
-                return
-            iface["planned_mac"] = str(planned_mac)
-            # Strip the read-time topology shim so the writer does not
-            # regenerate links[] from a stale snapshot.
-            data.pop("topology", None)
-            # #248: MAC assignment on start is runtime bookkeeping, not an edit.
-            LabService.write_lab_json_static(target.name, data, bump_revision=False)
+            try:
+                with locked_lab(relative) as lab:
+                    if _lab_file_path(relative) != path or str(lab.data.get("id") or "") != lab_id:
+                        continue
+                    node = lab.data.get("nodes", {}).get(str(int(node_id)))
+                    if not isinstance(node, dict):
+                        return
+                    iface = self._lookup_interface(node, int(interface_index))
+                    if not isinstance(iface, dict) or iface.get("planned_mac"):
+                        return
+                    iface["planned_mac"] = str(planned_mac)
+                    lab.data.pop("topology", None)
+                    # #248: save runtime bookkeeping without an editor revision.
+                    lab.save(bump_revision=False)
+                    return
+            except FileNotFoundError:
+                continue
 
     def _docker_force_remove(self, docker_binary: str, container_name: str) -> None:
         """Force-remove a container, swallowing any error (best-effort cleanup)."""

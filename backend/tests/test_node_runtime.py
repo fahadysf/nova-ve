@@ -14,6 +14,7 @@ import pytest
 from app.routers import labs
 from app.services.guacamole_db_service import GuacamoleDatabaseService, _AUTH_TOKEN_CACHE
 from app.services.html5_service import Html5SessionService
+from app.services.lab_service import LabService
 from app.services.node_runtime_service import (
     NodeRuntimeError,
     NodeRuntimeService,
@@ -117,6 +118,35 @@ def patched_settings(monkeypatch, runtime_settings):
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: runtime_settings)
     monkeypatch.setattr("app.services.html5_service.get_settings", lambda: runtime_settings)
     return runtime_settings
+
+
+def test_planned_mac_persists_in_the_matching_nested_lab(patched_settings):
+    labs_dir = patched_settings.LABS_DIR
+    target = labs_dir / "team" / "nested" / "same.json"
+    sibling = labs_dir / "team" / "same.json"
+    root = labs_dir / "same.json"
+    target.parent.mkdir(parents=True)
+
+    def document(lab_id):
+        return {
+            "schema": 2,
+            "id": lab_id,
+            "meta": {"revision": 7},
+            "nodes": {"1": {"interfaces": [{"index": 0, "planned_mac": None}]}},
+            "networks": {},
+            "links": [],
+        }
+
+    for path, lab_id in ((root, "root-lab"), (sibling, "sibling-lab"), (target, "target-lab")):
+        path.write_text(json.dumps(document(lab_id)))
+    root_bytes, sibling_bytes = root.read_bytes(), sibling.read_bytes()
+
+    NodeRuntimeService()._persist_planned_mac_to_lab_json("target-lab", 1, 0, "02:00:00:00:00:01")
+
+    saved = LabService.read_lab_json_static("team/nested/same.json")
+    assert saved["nodes"]["1"]["interfaces"][0]["planned_mac"] == "02:00:00:00:00:01"
+    assert saved["meta"]["revision"] == 7
+    assert (root.read_bytes(), sibling.read_bytes()) == (root_bytes, sibling_bytes)
 
 
 _BAD_RECORD_MARKER = b"invalid-runtime-record-marker"
