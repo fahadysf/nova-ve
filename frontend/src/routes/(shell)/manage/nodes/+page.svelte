@@ -212,7 +212,7 @@
               <tr class="border-b border-gray-800/60 last:border-0 hover:bg-gray-800/40" data-testid={`node-row-${node.name}`}>
                 <td class="px-5 py-3">
                   <div class="font-medium text-gray-100">{node.name}</div>
-                  <div class="font-mono text-[10px] text-gray-500">{node.template || node.type} \u00b7 {node.image || ''}</div>
+                  <div class="font-mono text-[10px] text-gray-500">{node.template || node.type}{node.image ? ` · ${node.image}` : ''}</div>
                 </td>
                 <td class="px-3 py-3 text-[12px] text-gray-400" title={node.lab_path}>{node.lab_name}</td>
                 <td class="px-3 py-3">
