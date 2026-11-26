@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import signal
+import socket
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -44,9 +48,26 @@ def helper(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "PIDS_JSON_PATH", pids_path, raising=True)
     monkeypatch.setattr(mod, "PROC_ROOT", proc_root, raising=True)
     monkeypatch.setattr(mod, "RUNTIME_ROOT", tmp_path / "runtime", raising=True)
+    monkeypatch.setattr(mod, "DNSMASQ_ROOT", tmp_path / "run" / "dnsmasq", raising=True)
+    # Even an unstubbed ``_run`` could not start a real server from here.
+    monkeypatch.setattr(mod, "DNSMASQ_BIN", str(tmp_path / "dnsmasq-not-installed"), raising=True)
     monkeypatch.setattr(mod, "IP_FORWARD_PATH", tmp_path / "ip_forward", raising=True)
     monkeypatch.setattr(mod, "IPV4_CONF_ROOT", tmp_path / "ipv4-conf", raising=True)
     monkeypatch.setattr(mod, "GUARD_LOCK_PATH", tmp_path / "guard.lock", raising=True)
+    # The tree is this test user's own; production keeps the default of root.
+    monkeypatch.setattr(mod, "_TRUSTED_UID", os.geteuid(), raising=True)
+
+    # No test in this file may signal a real process. One that reaches
+    # ``os.kill`` without installing its own stub (``_fake_kill``) fails here
+    # instead of sending the signal.
+    def no_kill(pid, sig):
+        raise AssertionError(f"os.kill({pid}, {sig}) called without a stub")
+
+    monkeypatch.setattr(mod.os, "kill", no_kill)
+
+    # The helper fixes its own umask and some tests vary it, so every test
+    # starts from a known one and the runner's is put back afterwards.
+    runner_umask = os.umask(0o022)
 
     # Capture the argv that WOULD have been run — never actually fork.
     calls: list[list[str]] = []
@@ -77,7 +98,8 @@ def helper(monkeypatch, tmp_path):
     mod._test_capture_calls = capture_calls  # type: ignore[attr-defined]
     mod._test_pids_path = pids_path  # type: ignore[attr-defined]
     mod._test_proc_root = proc_root  # type: ignore[attr-defined]
-    return mod
+    yield mod
+    os.umask(runner_umask)
 
 
 def _seed_pid(mod, pid: int, *, kind: str = "docker", cgroup: str | None = None) -> None:
@@ -362,7 +384,7 @@ def test_forward_remove_deletes_docker_user_rules_when_rule_shape_available(help
 
 
 def _seed_dnsmasq(helper, pid: int, bridge: str) -> None:
-    conf = helper.RUNTIME_ROOT / "nat-cloud" / bridge / "dnsmasq.conf"
+    conf = helper._dnsmasq_paths(bridge)[0]
     entry = helper._test_proc_root / str(pid)
     entry.mkdir()
     (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={conf}\0".encode())
@@ -382,6 +404,12 @@ def _fake_kill(helper, monkeypatch, *, ignores=()):
     return killed
 
 
+def test_dnsmasq_layout_version_is_read_only(helper, capsys):
+    assert helper.main(["dnsmasq-layout-version"]) == 0
+    assert capsys.readouterr().out.strip() == "root-owned-dnsmasq-v1"
+    assert helper._test_calls == []
+
+
 def test_dnsmasq_stop_finds_server_without_pid_file(helper, monkeypatch):
     _seed_dnsmasq(helper, 501, "novec0den1")
     killed = _fake_kill(helper, monkeypatch)
@@ -392,7 +420,7 @@ def test_dnsmasq_stop_finds_server_without_pid_file(helper, monkeypatch):
 def test_dnsmasq_stop_ignores_stale_pid_file_of_another_network(helper, monkeypatch):
     # n1 vs n10: names that share a prefix must not match either.
     _seed_dnsmasq(helper, 502, "novec0den10")
-    root = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1"
+    root = helper._dnsmasq_paths("novec0den1")[0].parent
     root.mkdir(parents=True)
     (root / "dnsmasq.pid").write_text("502\n")
     killed = _fake_kill(helper, monkeypatch)
@@ -437,7 +465,7 @@ def test_dnsmasq_start_writes_bridge_config(helper, monkeypatch):
         ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
     )
     assert rc == 0
-    conf = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1" / "dnsmasq.conf"
+    conf = helper._dnsmasq_paths("novec0den1")[0]
     text = conf.read_text()
     assert "interface=novec0den1" in text
     assert "port=0" in text
@@ -466,7 +494,7 @@ def test_dnsmasq_start_isolated_sends_no_router_and_no_dns(helper, monkeypatch):
         ["dnsmasq-start", "novec0den2", "10.40.1.254", "10.40.1.128", "10.40.1.253", "--no-router"],
     )
     assert rc == 0
-    lines = (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den2" / "dnsmasq.conf").read_text().splitlines()
+    lines = (helper._dnsmasq_paths("novec0den2")[0]).read_text().splitlines()
     assert "listen-address=10.40.1.254" in lines
     assert "port=0" in lines
     assert "dhcp-range=10.40.1.128,10.40.1.253,12h" in lines
@@ -483,7 +511,7 @@ def test_dnsmasq_config_never_follows_planted_links(helper, monkeypatch, tmp_pat
     outside.mkdir()
     victim = outside / "victim"
     victim.write_text("keep\n")
-    root = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den2"
+    root = helper._dnsmasq_paths("novec0den2")[0].parent
     root.mkdir(parents=True)
     (root / "dnsmasq.conf").symlink_to(victim)
     argv = ["dnsmasq-start", "novec0den2", "10.40.1.254", "10.40.1.128", "10.40.1.253", "--no-router"]
@@ -493,10 +521,84 @@ def test_dnsmasq_config_never_follows_planted_links(helper, monkeypatch, tmp_pat
     assert "dhcp-option=3" in (root / "dnsmasq.conf").read_text()
 
     # A symlinked directory is refused outright.
-    (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den3").symlink_to(outside)
+    (helper._dnsmasq_paths("novec0den3")[0].parent).symlink_to(outside)
     argv[1] = "novec0den3"
     assert helper.main(argv) == 1
     assert sorted(p.name for p in outside.iterdir()) == ["victim"]
+
+
+def test_dnsmasq_paths_live_under_root_owned_dnsmasq_root(helper, monkeypatch, tmp_path):
+    """#334: conf, pid and leases must not live in the service-owned data dir.
+
+    Root dnsmasq follows the lease file too, so leaving leases behind in a
+    directory the service account controls would keep a symlink-based root
+    write open.
+    """
+    dnsmasq_root = tmp_path / "run" / "nova-ve" / "dnsmasq"
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", dnsmasq_root, raising=True)
+    conf, pidfile, leases = helper._dnsmasq_paths("novec0den1")
+    assert conf == dnsmasq_root / "novec0den1" / "dnsmasq.conf"
+    assert pidfile == dnsmasq_root / "novec0den1" / "dnsmasq.pid"
+    assert leases == dnsmasq_root / "novec0den1" / "leases"
+    assert helper.RUNTIME_ROOT not in conf.parents
+
+
+def test_dnsmasq_stop_finds_legacy_server_from_before_upgrade(helper, monkeypatch, tmp_path):
+    """#334 upgrade trap: servers started with the old conf path stay stoppable."""
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", tmp_path / "run-dnsmasq", raising=True)
+    legacy_conf = helper._legacy_dnsmasq_paths("novec0den1")[0]
+    entry = helper._test_proc_root / "601"
+    entry.mkdir()
+    (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={legacy_conf}\0".encode())
+    killed = _fake_kill(helper, monkeypatch)
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert killed == [(601, helper.signal.SIGTERM)]
+
+
+def test_dnsmasq_start_migrates_existing_leases(helper, monkeypatch, tmp_path):
+    """#334: leases from the old location must survive the move."""
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", tmp_path / "run-dnsmasq", raising=True)
+    legacy = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1"
+    legacy.mkdir(parents=True)
+    (legacy / "leases").write_text("0 aa:bb:cc:dd:ee:ff 10.255.0.100 host *\n")
+    assert _start_dnsmasq(
+        helper, monkeypatch,
+        ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"],
+    ) == 0
+    _conf, _pidfile, leases = helper._dnsmasq_paths("novec0den1")
+    assert "10.255.0.100" in leases.read_text()
+    assert not (legacy / "leases").exists()
+    assert (legacy / "leases.pre-334").exists()
+
+
+def test_dnsmasq_start_never_migrates_a_planted_lease_symlink(helper, monkeypatch, tmp_path):
+    """#334: a symlinked legacy leases file must not become a root read."""
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", tmp_path / "run-dnsmasq", raising=True)
+    victim = tmp_path / "victim"
+    victim.write_text("root-only-secret\n")
+    legacy = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1"
+    legacy.mkdir(parents=True)
+    (legacy / "leases").symlink_to(victim)
+    assert _start_dnsmasq(
+        helper, monkeypatch,
+        ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"],
+    ) == 0
+    _conf, _pidfile, leases = helper._dnsmasq_paths("novec0den1")
+    assert not leases.exists() or "root-only-secret" not in leases.read_text()
+    assert victim.read_text() == "root-only-secret\n"
+
+
+def test_dnsmasq_stop_never_unlinks_through_a_planted_link(helper, monkeypatch, tmp_path):
+    """#334: removing the legacy pid file must not follow a symlinked ancestor."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "dnsmasq.pid").write_text("999\n")
+    _seed_dnsmasq(helper, 602, "novec0den1")
+    _fake_kill(helper, monkeypatch)
+    (helper.RUNTIME_ROOT / "nat-cloud").mkdir(parents=True, exist_ok=True)
+    (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1").symlink_to(outside)
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert (outside / "dnsmasq.pid").read_text() == "999\n"
 
 
 def test_dnsmasq_start_keeps_router_for_nat_cloud(helper, monkeypatch):
@@ -504,10 +606,427 @@ def test_dnsmasq_start_keeps_router_for_nat_cloud(helper, monkeypatch):
         helper, monkeypatch, ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
     )
     assert rc == 0
-    lines = (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1" / "dnsmasq.conf").read_text().splitlines()
+    lines = (helper._dnsmasq_paths("novec0den1")[0]).read_text().splitlines()
     assert "dhcp-option=option:router,10.255.0.1" in lines
     assert "dhcp-authoritative" in lines
     assert "dhcp-option=3" not in lines
+
+
+_NAT_START = ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
+_LEASE = "0 aa:bb:cc:dd:ee:ff 10.255.0.100 host *\n"
+
+
+def _legacy_dir(helper, bridge: str = "novec0den1") -> Path:
+    """The bridge's pre-#334 state directory, which the service account owns."""
+    legacy = helper.RUNTIME_ROOT / "nat-cloud" / bridge
+    legacy.mkdir(parents=True, exist_ok=True)
+    return legacy
+
+
+def _seed_legacy_dnsmasq(helper, pid: int, bridge: str) -> None:
+    """A server the old helper started: only the legacy conf path finds it."""
+    conf = helper._legacy_dnsmasq_paths(bridge)[0]
+    entry = helper._test_proc_root / str(pid)
+    entry.mkdir()
+    (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={conf}\0".encode())
+
+
+def _written(helper) -> dict[str, str]:
+    """Everything the test's scratch tree holds, as ``{path: kind}``.
+
+    The fake ``/proc`` is left out because a stopped server leaves it. Links
+    are listed, never followed.
+    """
+    root = helper._test_proc_root.parent
+    out: dict[str, str] = {}
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for name in dirs + files:
+            path = Path(base) / name
+            relative = path.relative_to(root)
+            if relative.parts[0] == "proc":
+                continue
+            kind = "link" if path.is_symlink() else "dir" if path.is_dir() else "file"
+            out[str(relative)] = kind
+    return out
+
+
+@pytest.mark.parametrize("umask", [0o077, 0o000])
+def test_dnsmasq_tree_modes_do_not_depend_on_the_callers_umask(helper, monkeypatch, umask):
+    """#334: the tree's modes do not follow the umask of whoever ran sudo.
+
+    A tight one would lock the backend out of the leases it only reads; a
+    loose one would leave the tree open to everyone.
+    """
+    (_legacy_dir(helper) / "leases").write_text(_LEASE)
+    os.umask(umask)
+    assert _start_dnsmasq(helper, monkeypatch, _NAT_START) == 0
+    bridge_root = helper._dnsmasq_paths("novec0den1")[0].parent
+    for directory in (helper.DNSMASQ_ROOT.parent, helper.DNSMASQ_ROOT, bridge_root):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o755
+    for name in ("dnsmasq.conf", "leases"):
+        assert stat.S_IMODE((bridge_root / name).stat().st_mode) == 0o644
+    assert sorted(path.name for path in bridge_root.iterdir()) == ["dnsmasq.conf", "leases"]
+
+
+@pytest.mark.parametrize("level", ["parent", "root"])
+@pytest.mark.parametrize("planted", ["symlink", "file"])
+def test_dnsmasq_verbs_refuse_a_tree_that_is_not_a_plain_directory(
+    helper, monkeypatch, capsys, level, planted
+):
+    """#334: a link or a file where a tree directory belongs is refused, never followed."""
+    outside = helper._test_proc_root.parent / "outside"
+    outside.mkdir()
+    (outside / "victim").write_text("keep\n")
+    target = helper.DNSMASQ_ROOT.parent if level == "parent" else helper.DNSMASQ_ROOT
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if planted == "symlink":
+        target.symlink_to(outside, target_is_directory=True)
+    else:
+        target.write_text("not a directory\n")
+    legacy = _legacy_dir(helper)
+    (legacy / "leases").write_text(_LEASE)
+    (legacy / "dnsmasq.pid").write_text("701\n")
+    _seed_legacy_dnsmasq(helper, 701, "novec0den1")
+    killed = _fake_kill(helper, monkeypatch)
+
+    # Start fails closed: nothing is written or spawned, no server is stopped
+    # and the legacy leases are left for a later attempt.
+    before = _written(helper)
+    assert helper.main(_NAT_START) == 1
+    assert "refusing to use" in capsys.readouterr().err
+    assert killed == [] and helper._test_calls == []
+    assert (legacy / "leases").read_text() == _LEASE
+    assert _written(helper) == before
+
+    # Stop still removes the server, which is found through /proc alone. Only
+    # the work below the tree is skipped, and the verb says so.
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 1
+    assert killed == [(701, helper.signal.SIGTERM)]
+    assert "refusing to use" in capsys.readouterr().err
+    assert sorted(path.name for path in outside.iterdir()) == ["victim"]
+    assert not (legacy / "dnsmasq.pid").exists()
+
+
+def _tree_dir(helper, level: str) -> Path:
+    """One of the three directories a bridge's state lives under."""
+    return {
+        "parent": helper.DNSMASQ_ROOT.parent,
+        "root": helper.DNSMASQ_ROOT,
+        "bridge": helper._dnsmasq_paths("novec0den1")[0].parent,
+    }[level]
+
+
+@pytest.mark.parametrize("level", ["parent", "root", "bridge"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        pytest.param(0o777, id="world-and-group-writable"),
+        pytest.param(0o720, id="group-writable"),
+        pytest.param(0o702, id="world-writable"),
+    ],
+)
+def test_dnsmasq_start_refuses_a_tree_directory_others_may_write(
+    helper, monkeypatch, capsys, level, mode
+):
+    """#334: only a directory that nobody but root may write is trusted."""
+    tree_dir = _tree_dir(helper, level)
+    tree_dir.mkdir(parents=True)
+    tree_dir.chmod(mode)
+    killed = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(_NAT_START) == 1
+    expected = f"refusing to use {tree_dir}: writable by group or others\n"
+    assert capsys.readouterr().err == expected
+    assert killed == [] and helper._test_calls == []
+    assert list(tree_dir.iterdir()) == []
+
+
+def test_dnsmasq_start_refuses_a_tree_owned_by_someone_else(helper, monkeypatch, capsys):
+    """#334: the owner must be root, not merely "not writable by others"."""
+    helper.DNSMASQ_ROOT.mkdir(parents=True)
+    # Unprivileged, the test cannot make another user's directory, so it
+    # moves the trusted owner one uid away instead.
+    monkeypatch.setattr(helper, "_TRUSTED_UID", os.geteuid() + 1, raising=True)
+    killed = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(_NAT_START) == 1
+    owner = f"owned by uid {os.geteuid()}, expected {os.geteuid() + 1}"
+    assert capsys.readouterr().err == f"refusing to use {helper.DNSMASQ_ROOT.parent}: {owner}\n"
+    assert killed == [] and helper._test_calls == []
+
+
+def test_dnsmasq_stop_skips_only_the_pid_file_below_an_untrusted_tree(helper, monkeypatch, capsys):
+    """#334: a tree the helper refuses to write must not keep a server alive."""
+    bridge_root = helper._dnsmasq_paths("novec0den1")[0].parent
+    bridge_root.mkdir(parents=True)
+    (bridge_root / "dnsmasq.pid").write_text("703\n")
+    bridge_root.chmod(0o777)
+    _seed_dnsmasq(helper, 703, "novec0den1")
+    killed = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 1
+    assert killed == [(703, helper.signal.SIGTERM)]
+    assert "refusing to use" in capsys.readouterr().err
+    assert (bridge_root / "dnsmasq.pid").read_text() == "703\n"
+
+
+def test_dnsmasq_start_keeps_legacy_leases_until_the_server_is_up(helper, monkeypatch):
+    """#334: a start that fails must not eat the leases, and a retry must not import twice."""
+    legacy = _legacy_dir(helper)
+    (legacy / "leases").write_text(_LEASE)
+    note = helper._legacy_lease_note("novec0den1")
+
+    # The daemon exits right away: the copy is kept, the legacy file is not consumed.
+    assert helper.main(_NAT_START) == 1
+    leases = helper._dnsmasq_paths("novec0den1")[2]
+    assert leases.read_text() == _LEASE and note.exists()
+    assert (legacy / "leases").read_text() == _LEASE
+    assert not (legacy / "leases.pre-334").exists()
+
+    # The retry keeps that copy instead of importing the file again, so a
+    # legacy file changed in between never yields a second, different lease
+    # file. It is the retry, with its server up, that consumes the legacy file.
+    (legacy / "leases").write_text("0 aa:bb:cc:dd:ee:ff 10.255.0.100 swapped *\n")
+    assert _start_dnsmasq(helper, monkeypatch, _NAT_START) == 0
+    assert leases.read_text() == _LEASE
+    assert not note.exists()
+    assert not (legacy / "leases").exists()
+    assert "swapped" in (legacy / "leases.pre-334").read_text()
+
+
+def test_dnsmasq_stop_removes_the_pid_file_of_the_old_layout(helper, monkeypatch):
+    """#334: a pid file in the service-owned directory must not outlive its server."""
+    legacy = _legacy_dir(helper)
+    (legacy / "dnsmasq.pid").write_text("704\n")
+    _seed_legacy_dnsmasq(helper, 704, "novec0den1")
+    killed = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert killed == [(704, helper.signal.SIGTERM)]
+    assert not (legacy / "dnsmasq.pid").exists()
+
+
+def test_migrated_leases_stay_readable_by_the_backend(helper):
+    """#334: root writes the copy; the unprivileged backend only reads it."""
+    (_legacy_dir(helper) / "leases").write_text(_LEASE)
+    os.umask(0o077)
+    leases = helper._dnsmasq_paths("novec0den1")[2]
+    helper._migrate_legacy_leases("novec0den1", leases)
+    assert leases.read_text() == _LEASE
+    assert stat.S_IMODE(leases.stat().st_mode) == 0o644
+
+
+def _load_helper(monkeypatch, **env):
+    """The helper as the service account's sudo runs it: no ``NOVA_VE_*`` in the environment."""
+    for name in list(os.environ):
+        if name.startswith("NOVA_VE_"):
+            monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    spec = importlib.util.spec_from_file_location("nova_ve_net_helper_defaults", HELPER_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_dnsmasq_root_defaults_to_the_run_tree_and_not_to_the_data_dir(monkeypatch):
+    """#334: only root's own setting moves the tree, never the data directory.
+
+    No verb runs here. The module is loaded for its constants and the paths
+    the verbs would use are only computed, so nothing is written anywhere.
+    """
+    mod = _load_helper(monkeypatch)
+    assert mod.DNSMASQ_ROOT == Path("/run/nova-ve/dnsmasq")
+    conf, pidfile, leases = mod._dnsmasq_paths("novec0den1")
+    assert (conf, pidfile, leases) == tuple(
+        Path("/run/nova-ve/dnsmasq/novec0den1") / name for name in ("dnsmasq.conf", "dnsmasq.pid", "leases")
+    )
+    assert mod._legacy_dnsmasq_paths("novec0den1") == (
+        Path("/var/lib/nova-ve/nat-cloud/novec0den1/dnsmasq.conf"),
+        Path("/var/lib/nova-ve/nat-cloud/novec0den1/dnsmasq.pid"),
+        Path("/var/lib/nova-ve/nat-cloud/novec0den1/leases"),
+    )
+
+    # Moving the data directory moves the legacy paths, not the tree.
+    moved = _load_helper(monkeypatch, NOVA_VE_RUNTIME_ROOT="/elsewhere/data")
+    assert moved.RUNTIME_ROOT == Path("/elsewhere/data")
+    assert moved.DNSMASQ_ROOT == Path("/run/nova-ve/dnsmasq")
+    assert moved._dnsmasq_paths("novec0den1") == (conf, pidfile, leases)
+
+    # The backend reads the same tree from a constant of its own.
+    from app.services import network_info_service
+
+    assert network_info_service.DNSMASQ_ROOT == mod.DNSMASQ_ROOT
+
+
+_CAP = 1_048_576
+
+# One helper verb in a fresh interpreter, with every side effect removed
+# before ``main`` runs: ``os.kill`` refuses, the spawn point only records a
+# server in a ``/proc`` of the test's own, and every path is under the test's
+# scratch directory. A helper that blocks on a planted file is killed by the
+# timeout instead of hanging the suite.
+_ISOLATED_RUNNER = """
+import importlib.util
+import sys
+from pathlib import Path
+
+helper_file, scratch, *argv = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("nova_ve_net_helper_isolated", helper_file)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+
+def refuse(*_args):
+    raise AssertionError("the isolated helper must not signal a process")
+
+
+def spawn(command):
+    entry = mod.PROC_ROOT / "7001"
+    entry.mkdir()
+    (entry / "cmdline").write_bytes(f"dnsmasq\\0{command[1]}\\0".encode())
+    return 0
+
+
+mod.os.kill = refuse
+mod._run = spawn
+mod.DNSMASQ_BIN = "dnsmasq-must-not-run"
+mod._TRUSTED_UID = mod.os.geteuid()
+mod.PROC_ROOT = Path(scratch) / "proc"
+mod.RUNTIME_ROOT = Path(scratch) / "runtime"
+mod.DNSMASQ_ROOT = Path(scratch) / "run" / "dnsmasq"
+sys.exit(mod.main(argv))
+"""
+
+
+def _start_isolated(scratch: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
+    """Run ``argv`` through the helper in its own process, bounded in time."""
+    try:
+        return subprocess.run(
+            [sys.executable, "-B", "-c", _ISOLATED_RUNNER, str(HELPER_PATH), str(scratch), *argv],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("the helper blocked on a planted legacy file")
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        pytest.param("fifo", id="fifo-without-writer"),
+        pytest.param("fed-fifo", id="fifo-with-text-in-it"),
+        pytest.param("socket", id="unix-socket"),
+        pytest.param("directory", id="directory"),
+        pytest.param("symlink", id="symlink"),
+    ],
+)
+def test_dnsmasq_start_never_migrates_leases_that_are_not_a_regular_file(tmp_path, tmp_path_factory, kind):
+    """#334: the legacy directory is the service account's, so ``leases`` can be anything."""
+    legacy = tmp_path / "runtime" / "nat-cloud" / "novec0den1"
+    legacy.mkdir(parents=True)
+    (tmp_path / "proc").mkdir()
+    leases = legacy / "leases"
+    victim = tmp_path / "victim"
+    victim.write_text("root-only\n")
+    held: list[int] = []
+    server = None
+    if kind in ("fifo", "fed-fifo"):
+        # Without a writer a plain open blocks forever: the helper must not
+        # wait for one to turn up.
+        os.mkfifo(leases)
+        if kind == "fed-fifo":
+            # A reader of our own lets a writer in, so text is already
+            # waiting in the pipe when the helper looks at the file.
+            held.append(os.open(leases, os.O_RDONLY | os.O_NONBLOCK))
+            held.append(os.open(leases, os.O_WRONLY | os.O_NONBLOCK))
+            os.write(held[-1], _LEASE.encode())
+    elif kind == "socket":
+        # A socket path may not be long, so it is bound in a short directory
+        # of the test's own and then moved into place.
+        bound = tmp_path_factory.mktemp("sock") / "leases"
+        if len(str(bound)) > 100:
+            pytest.skip("no path short enough for a unix socket on this host")
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(str(bound))
+        os.rename(bound, leases)
+    elif kind == "directory":
+        leases.mkdir()
+        (leases / "leases").write_text("not a lease file\n")
+    else:
+        leases.symlink_to(victim)
+    expected = stat.S_IFMT(os.lstat(leases).st_mode)
+
+    try:
+        proc = _start_isolated(tmp_path, _NAT_START)
+    finally:
+        for fd in held:
+            os.close(fd)
+        if server is not None:
+            server.close()
+
+    # The server came up: the start succeeded, only without those leases.
+    assert proc.returncode == 0
+    assert "Traceback" not in proc.stderr
+    # Only the configuration every start writes: no lease file was made.
+    new_root = tmp_path / "run" / "dnsmasq" / "novec0den1"
+    assert sorted(path.name for path in new_root.iterdir()) == ["dnsmasq.conf"]
+    # The planted entry is still exactly what it was, under its own name.
+    assert stat.S_IFMT(os.lstat(leases).st_mode) == expected
+    assert not (legacy / "leases.pre-334").exists()
+    assert victim.read_text() == "root-only\n"
+
+
+def test_dnsmasq_start_does_not_migrate_an_oversized_legacy_lease_file(helper, monkeypatch):
+    """#334: the service account must not be able to fill /run through the helper."""
+    legacy = _legacy_dir(helper)
+    content = b"0 aa:bb:cc:dd:ee:ff 10.255.0.100 host *\n" * (_CAP // 40 + 2)
+    assert len(content) > _CAP
+    (legacy / "leases").write_bytes(content)
+    assert _start_dnsmasq(helper, monkeypatch, _NAT_START) == 0
+    bridge_root = helper._dnsmasq_paths("novec0den1")[0].parent
+    assert sorted(path.name for path in bridge_root.iterdir()) == ["dnsmasq.conf"]
+    # Refused, so never copied and never consumed: left as it was.
+    assert (legacy / "leases").read_bytes() == content
+    assert not (legacy / "leases.pre-334").exists()
+
+
+def test_dnsmasq_start_migrates_a_legacy_lease_file_exactly_at_the_cap(helper, monkeypatch):
+    legacy = _legacy_dir(helper)
+    content = b"#" * (_CAP - len(_LEASE)) + _LEASE.encode()
+    assert len(content) == _CAP
+    (legacy / "leases").write_bytes(content)
+    assert _start_dnsmasq(helper, monkeypatch, _NAT_START) == 0
+    bridge_root = helper._dnsmasq_paths("novec0den1")[0].parent
+    assert sorted(path.name for path in bridge_root.iterdir()) == ["dnsmasq.conf", "leases"]
+    assert helper._dnsmasq_paths("novec0den1")[2].read_bytes() == content
+    assert (legacy / "leases.pre-334").read_bytes() == content
+
+
+@pytest.mark.parametrize("guard", ["fstat", "read"])
+def test_each_size_guard_refuses_an_oversized_legacy_lease_file_on_its_own(helper, monkeypatch, guard):
+    """#334: the two guards cover different moments, so each must hold without the other.
+
+    ``fstat`` sees a small file and is told it is too large. ``read`` sees a
+    file that really is too large while ``fstat`` is told it is small, which
+    is what a writer racing the helper could arrange.
+    """
+    legacy = _legacy_dir(helper)
+    content = b"#" * (_CAP + 1) if guard == "read" else _LEASE.encode()
+    (legacy / "leases").write_bytes(content)
+    real_fstat = os.fstat
+    reported = 4 if guard == "read" else _CAP + 1
+
+    def fstat(fd):
+        info = real_fstat(fd)
+        return os.stat_result(info[:6] + (reported,) + info[7:])
+
+    monkeypatch.setattr(helper.os, "fstat", fstat)
+    leases = helper._dnsmasq_paths("novec0den1")[2]
+    helper._migrate_legacy_leases("novec0den1", leases)
+    assert not leases.exists()
+    assert (legacy / "leases").read_bytes() == content
 
 
 @pytest.mark.parametrize(

@@ -735,8 +735,11 @@ async def test_info_names_docker_nodes_from_learned_macs(settings, labs_dir, mon
         network_info_service.subprocess, "run",
         lambda *a, **k: SimpleNamespace(returncode=0, stdout=output),
     )
+    # Pre-#334 layout: a server started before the upgrade keeps its config
+    # and leases in the data directory, and the info panel still reads them.
     root = labs_dir.parent / "nat-cloud" / bridge
     root.mkdir(parents=True)
+    (root / "dnsmasq.conf").write_text("port=0\ndhcp-range=10.255.0.100,10.255.0.254,12h\n")
     (root / "leases").write_text("0 aa:00:00:00:00:01 10.255.0.101 * *\n0 aa:00:00:00:00:03 10.255.0.102 * *\n")
 
     info = build_network_info(lab, 1, lambda path: True)
@@ -745,6 +748,35 @@ async def test_info_names_docker_nodes_from_learned_macs(settings, labs_dir, mon
     ]
     assert [l["node_name"] for l in info["ip"]["dhcp"]["leases"]] == ["host-1", "host-2"]
     assert all("_ports" not in e for e in info["endpoints"])
+
+
+@pytest.mark.asyncio
+async def test_info_reads_new_dnsmasq_tree_before_the_legacy_one(settings, labs_dir, monkeypatch, tmp_path):
+    """#334: the info panel follows the server into the root-owned /run tree."""
+    svc = NetworkService()
+    lab = _lab(labs_dir, "nat.json", "lab-nat", nodes={"1": _node("50:00:00:01:00:00")}, links=LINK)
+    bridge = (await svc.create_network(lab, {"name": "inet", "type": "nat_cloud"}))["runtime"]["bridge_name"]
+    monkeypatch.setattr(network_info_service, "DNSMASQ_ROOT", tmp_path / "run" / "dnsmasq")
+    legacy = labs_dir.parent / "nat-cloud" / bridge
+    current = tmp_path / "run" / "dnsmasq" / bridge
+
+    def seed(root, conf, leases):
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "dnsmasq.conf").write_text(conf)
+        (root / "leases").write_text(leases)
+
+    def dhcp():
+        return build_network_info(lab, 1, lambda path: True)["ip"]["dhcp"]
+
+    # Right after the upgrade the server still runs from the legacy config.
+    seed(legacy, "port=0\ndhcp-range=10.255.0.100,10.255.0.254,12h\n", "0 50:00:00:01:00:00 10.255.0.140 r1 *\n")
+    assert [(l["ip"], l["node_name"]) for l in dhcp()["leases"]] == [("10.255.0.140", "r1")]
+    assert dhcp()["lease_time"] == "12h"
+
+    # The helper's restart leaves the legacy files behind; they no longer count.
+    seed(current, "port=0\ndhcp-range=10.255.0.100,10.255.0.254,24h\n", "")
+    assert dhcp()["leases"] == []
+    assert dhcp()["lease_time"] == "24h"
 
 
 @pytest.mark.asyncio

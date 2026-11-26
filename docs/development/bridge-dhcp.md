@@ -103,23 +103,56 @@ forward rule lets them continue unchanged. There are no NAT rules.
 the table once no chain is left. Both verbs are idempotent and serialized by a
 file lock (`/run/nova-ve-bridge-guard.lock`, opened without following
 links). The helper writes `dnsmasq.conf` through a fresh temporary file and
-a rename, refusing symlinked directories under the state root, because that
-directory belongs to the unprivileged service account.
+a rename, and refuses symlinked directories under its own root: a second
+line of defence behind the root-owned location described below.
 
 ## dnsmasq
 
-The server reuses the NAT-Cloud state directory
-`/var/lib/nova-ve/nat-cloud/<bridge>/` (configuration, pid file, leases), so
-the info panel reads leases and the live process the same way. In
-`--no-router` mode the configuration has `port=0` (no DNS service),
+The server shares the NAT-Cloud state directory
+`/run/nova-ve/dnsmasq/<bridge>/` (configuration, pid file, leases), so the
+info panel reads leases and the live process the same way for both. The tree
+belongs to root, because dnsmasq runs as root and must not read its
+configuration, or write its leases, where the service account can replace
+files. The helper writes `dnsmasq.conf` and the one-time copy of any legacy
+leases; dnsmasq writes the pid and leases. `/run` is tmpfs, so the helper
+recreates the tree on start and leases there do not survive a reboot.
+
+On upgrade from the legacy `<data dir>/nat-cloud/<bridge>/` layout, the
+helper finds servers in either layout, removes the legacy pid file when
+stopping a server, and copies eligible legacy leases on the first start.
+After the new server is confirmed running, it renames the legacy `leases`
+to `leases.pre-334`. The backend and helper still read the legacy directory
+as a fallback when needed.
+
+In `--no-router` mode the configuration has `port=0` (no DNS service),
 `listen-address=<server>`, and empty `dhcp-option=3` and `dhcp-option=6`,
 which tell dnsmasq to send no router and no DNS server. It is not
 authoritative, so it does not NAK clients of another server on the segment.
 
 ## Deploys and upgrades
 
-The new behaviour needs the new helper verbs: upgrades must reinstall
-`/opt/nova-ve/bin/nova-ve-net.py` (the installer does), not only rebuild the
-application. `provision-ubuntu-2604.sh` reconciles bridges with DHCP after
-restarting services: for owner bridges that exist it re-applies guard,
-address and server, and for bridges with DHCP off it removes any leftovers.
+Upgrades from the legacy layout require a maintenance window for DHCP:
+
+1. Stop the old backend and prevent older backend instances or helpers from
+   starting more legacy servers. Install the new privileged helper before
+   restarting the backend.
+2. Inspect running dnsmasq command lines for each legacy
+   `--conf-file=<data dir>/nat-cloud/<bridge>/dnsmasq.conf`. Stop each such
+   server using the new helper's `dnsmasq-stop <bridge>` command, or migrate
+   it with the new helper using its saved DHCP settings. Stopping preserves
+   its legacy leases for the next start. This interrupts DHCP service.
+3. Verify that no legacy dnsmasq command line remains, then start the new
+   backend and open the affected labs to reconcile their DHCP servers.
+
+The backend checks the installed helper's protected-layout capability before
+serving requests. It must also have visibility of the host process list; the
+startup check cannot detect processes hidden by the host's procfs
+configuration. It refuses startup if it finds a legacy server or encounters
+an error inspecting the process list. Refusing startup does not stop an
+existing legacy server: it continues to read a service-owned configuration
+until it is stopped or
+migrated, so the upgrade is incomplete until the verification succeeds.
+The check is a startup snapshot; keep older backends and helpers from
+starting legacy servers after it. A new helper with an old backend can make
+the old backend report DHCP stopped or restart it on lab open. An old helper
+with a new backend can recreate legacy servers and is unsupported.
