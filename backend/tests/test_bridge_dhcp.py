@@ -70,6 +70,8 @@ class Host:
     def __init__(self):
         self.calls: list[tuple] = []
         self.existing: set[str] = set()
+        # bridge -> layout its DHCP server reads its config from (#334)
+        self.servers: dict[str, str] = {}
         self.host_addrs: list[tuple[str, str]] = []
         self.fail: dict[str, Exception] = {}
 
@@ -133,7 +135,14 @@ def host(monkeypatch, settings):
     monkeypatch.setattr(host_net, "bridge_fingerprint_check", lambda *a: "match")
     monkeypatch.setattr(host_net, "link_state", lambda name: (True, None, True))
     monkeypatch.setattr(host_net, "list_ipv4_addrs", returning("list_ipv4_addrs", lambda: h.host_addrs))
-    monkeypatch.setattr("app.services.network_info_service.dhcp_server_pid", lambda bridge: None)
+    monkeypatch.setattr(
+        "app.services.network_info_service.dhcp_server_pid",
+        lambda bridge: 2222 if bridge in h.servers else None,
+    )
+    monkeypatch.setattr(
+        "app.services.network_info_service.dhcp_server_layout",
+        lambda bridge: h.servers.get(bridge),
+    )
     return h
 
 
@@ -798,6 +807,24 @@ def test_reconcile_restores_dhcp_and_restarts_only_on_drift(host, labs_dir, monk
     assert "bridge_guard_apply" in host.names()
 
 
+def test_reconcile_restarts_a_server_that_still_uses_the_old_layout(host, labs_dir):
+    """#334: a server reading its config from the data directory is drift, settings or not."""
+    saved = {"dhcp": True, "dhcp_server": "10.40.1.254", "dhcp_start": "10.40.1.128",
+             "dhcp_end": "10.40.1.253"}
+    lab = _lab(labs_dir, "a.json", LAB_A, {"1": _bridge(1, config=_dhcp_config(), runtime=saved)})
+    bridge = host_net.bridge_name(LAB_A, 1)
+    host.existing.add(bridge)
+    # Running with the settings it was saved with, but started before the move.
+    host.servers[bridge] = "legacy"
+    NetworkService().ensure_lab_bridges(lab)
+    assert ("dnsmasq_start_isolated", bridge, "10.40.1.254", "10.40.1.128", "10.40.1.253") in host.calls
+
+    host.calls.clear()
+    host.servers[bridge] = "current"  # what the helper's restart leaves behind
+    NetworkService().ensure_lab_bridges(lab)
+    assert "dnsmasq_start_isolated" not in host.names()
+
+
 def test_reconcile_honours_dhcp_false(host, labs_dir):
     lab = _lab(
         labs_dir,
@@ -849,6 +876,42 @@ def test_member_lab_open_restores_the_owners_dhcp(host, labs_dir):
 # ---------------------------------------------------------------------------
 # Info panel
 # ---------------------------------------------------------------------------
+
+
+def test_info_reads_leases_from_root_owned_dnsmasq_dir(tmp_path, monkeypatch):
+    """#334: leases/pid come from the helper's /run tree, not the data dir."""
+    from app.services import network_info_service as info
+
+    bridge = "novec0den1"
+    root = tmp_path / "run" / "dnsmasq" / bridge
+    root.mkdir(parents=True)
+    (root / "dnsmasq.conf").write_text("dhcp-range=10.255.0.100,10.255.0.254,12h\n")
+    (root / "leases").write_text("0 aa:bb:cc:dd:ee:ff 10.255.0.100 host *\n")
+    (root / "dnsmasq.pid").write_text("4242\n")
+    proc = tmp_path / "proc" / "4242"
+    proc.mkdir(parents=True)
+    (proc / "cmdline").write_bytes(f"dnsmasq\0--conf-file={root / 'dnsmasq.conf'}\0".encode())
+    monkeypatch.setattr(info, "DNSMASQ_ROOT", tmp_path / "run" / "dnsmasq", raising=True)
+    monkeypatch.setattr(info, "PROC_ROOT", tmp_path / "proc", raising=True)
+
+    assert info._dnsmasq_dir(bridge) == root
+    assert info.dhcp_server_pid(bridge) == 4242
+    leases = info._leases(root, 0)
+    assert [lease["ip"] for lease in leases] == ["10.255.0.100"]
+
+
+def test_backend_dnsmasq_root_is_not_steered_by_the_environment(monkeypatch):
+    """#334: sudo resets the environment, so an override here only misleads the reader."""
+    import importlib.util
+
+    from app.services import network_info_service as info
+
+    monkeypatch.setenv("NOVA_VE_DNSMASQ_ROOT", "/elsewhere/dnsmasq")
+    spec = importlib.util.spec_from_file_location("network_info_service_env", info.__file__)
+    fresh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fresh)
+    assert fresh.DNSMASQ_ROOT == Path("/run/nova-ve/dnsmasq")
+    assert info.DNSMASQ_ROOT == Path("/run/nova-ve/dnsmasq")
 
 
 def test_info_shows_cidr_and_dhcp_for_bridges(host, labs_dir):

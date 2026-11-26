@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -106,6 +108,10 @@ app.add_exception_handler(labs.LabAccessDenied, labs.lab_access_denied_handler)
 
 @app.on_event("startup")
 async def startup():
+    # Refuse to serve while a privileged server still reads a service-owned config.
+    from app.services.dnsmasq_layout import require_secure_dnsmasq_layout
+
+    await asyncio.to_thread(require_secure_dnsmasq_layout)
     import logging
     _logger = logging.getLogger("nova-ve")
     try:
@@ -212,6 +218,7 @@ async def startup():
                 _logger.info("startup orphan-sweep: no orphans found")
         except Exception:
             _logger.exception("startup orphan-sweep failed (non-fatal)")
+
 
 
 @app.on_event("shutdown")

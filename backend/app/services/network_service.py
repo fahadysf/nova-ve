@@ -1039,12 +1039,13 @@ class NetworkService:
     def _ensure_bridge_dhcp_runtime(self, network: dict, bridge: str) -> bool:
         """Bring an isolated bridge's host DHCP state in line with its settings.
 
-        Restarts the server only when it is not running or its settings
-        changed. A bridge with DHCP off is touched only when something is
-        left to remove. Returns True when persisted runtime fields changed.
+        Restarts the server only when it is not running, it still uses the
+        layout from before #334, or its settings changed. A bridge with DHCP
+        off is touched only when something is left to remove. Returns True
+        when persisted runtime fields changed.
         """
         # Local import: network_info_service imports this module.
-        from app.services.network_info_service import dhcp_server_pid
+        from app.services.network_info_service import dhcp_server_layout, dhcp_server_pid
 
         config = network.get("config") or {}
         runtime = network.setdefault("runtime", {})
@@ -1058,7 +1059,12 @@ class NetworkService:
             host_net.bridge_addr_add(bridge, _bridge_server_cidr(config))
             host_net.link_up(bridge)
             pid = dhcp_server_pid(bridge)
-            if pid is None or any(applied[key] != config[key] for key in BRIDGE_DHCP_FIELDS):
+            # #334: a server that still reads its config from the data
+            # directory is drift, whatever its settings say.
+            drifted = pid is None or dhcp_server_layout(bridge) == "legacy" or any(
+                applied[key] != config[key] for key in BRIDGE_DHCP_FIELDS
+            )
+            if drifted:
                 pid = host_net.dnsmasq_start_isolated(
                     bridge, config["dhcp_server"], config["dhcp_start"], config["dhcp_end"]
                 )

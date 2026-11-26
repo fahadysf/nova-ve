@@ -9,6 +9,21 @@ os.environ.setdefault(
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-backend-suite-000000")
 
 
+@pytest.fixture(autouse=True)
+def _guard_dnsmasq_capability_probe(monkeypatch):
+    """A startup test must stub the capability probe before it can spawn sudo."""
+    from app.services import host_net
+
+    invoke = host_net._invoke_helper
+
+    def guarded(verb, *args):
+        if verb == "dnsmasq-layout-version":
+            raise AssertionError("dnsmasq capability probe must be stubbed in tests")
+        return invoke(verb, *args)
+
+    monkeypatch.setattr(host_net, "_invoke_helper", guarded)
+
+
 def _stub_host_net_for_qemu_start(monkeypatch):
     """Issue #174 / #175 (S3): stub the host_net surface used by the QEMU
     start path so tests run without a privileged helper or real
