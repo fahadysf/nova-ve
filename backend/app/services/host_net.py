@@ -34,7 +34,7 @@ import subprocess
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Sequence, TypedDict
 
 logger = logging.getLogger("nova-ve")
 
@@ -317,7 +317,7 @@ def _bridge_fingerprint_root() -> Path:
     return _runtime_root() / _BRIDGE_FINGERPRINT_DIRNAME
 
 
-def _run(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
+def _run(argv: Sequence[str], *, input_text: str | None = None) -> "subprocess.CompletedProcess[str]":
     """Spawn ``argv`` (shell=False) and return the completed process.
 
     Captures stdout+stderr as text. Tests monkey-patch this function.
@@ -328,6 +328,7 @@ def _run(argv: Sequence[str]) -> "subprocess.CompletedProcess[str]":
         check=False,
         capture_output=True,
         text=True,
+        **({"input": input_text} if input_text is not None else {}),
     )
 
 
@@ -356,7 +357,7 @@ def _classify_helper_error(
 _classify_helper_failure = _classify_helper_error
 
 
-def _invoke_helper(verb: str, *args: str) -> "subprocess.CompletedProcess[str]":
+def _invoke_helper(verb: str, *args: str, input_text: str | None = None) -> "subprocess.CompletedProcess[str]":
     """Run ``sudo <helper> <verb> [args...]`` and raise typed errors on failure.
 
     In sandbox mode (#253) the helper is never invoked — every verb is a
@@ -369,7 +370,7 @@ def _invoke_helper(verb: str, *args: str) -> "subprocess.CompletedProcess[str]":
             "sandbox: skip host op '%s %s' (no-op)", verb, " ".join(args)
         )
         return subprocess.CompletedProcess(argv, returncode=0, stdout="", stderr="")
-    proc = _run(argv)
+    proc = _run(argv) if input_text is None else _run(argv, input_text=input_text)
     if proc.returncode != 0:
         raise _classify_helper_error(proc.stderr or "", proc.returncode)
     return proc
@@ -571,15 +572,61 @@ def link_master_any(iface: str, bridge: str, *, driver: str | None = None) -> No
     ``link_master`` regex (which rejects ``br-eth*``).
     """
     bridge_value = bridge or ""
-    if RE_HOST_BRIDGE_NAME.match(bridge_value):
-        if driver == "bridge_cloud":
-            link_master_host(iface, bridge_value)
-            return
+    if _is_host_bridge_target(bridge_value, driver):
+        link_master_host(iface, bridge_value)
+    else:
+        link_master(iface, bridge_value)
+
+
+def _is_host_bridge_target(bridge: str, driver: str | None) -> bool:
+    is_host = bool(RE_HOST_BRIDGE_NAME.match(bridge))
+    if is_host and driver != "bridge_cloud":
         raise HostNetError(
-            f"refusing to attach to host bridge {bridge_value!r} "
+            f"refusing to attach to host bridge {bridge!r} "
             f"without driver=bridge_cloud (got driver={driver!r})"
         )
-    link_master(iface, bridge_value)
+    return is_host
+
+
+class TapChange(TypedDict, total=False):
+    create: bool
+    master: str
+    host_bridge: bool
+    up: bool
+    detach: bool
+
+
+def tap_attachment_change(
+    tap: str, bridge: str, driver: str | None,
+) -> TapChange:
+    exists, master, up = link_state(tap)
+    change: TapChange = {}
+    if not exists:
+        change["create"] = True
+    if not exists or master != bridge:
+        change["master"] = bridge
+        if _is_host_bridge_target(bridge, driver):
+            change["host_bridge"] = True
+    if not exists or not up:
+        change["up"] = True
+    return change
+
+
+def reconcile_taps(changes: dict[str, TapChange]) -> dict[str, str]:
+    """Return failures by TAP after one privileged invocation."""
+    if not changes or sandbox_mode():
+        return {}
+    result = _invoke_helper("reconcile-taps", input_text=json.dumps(changes, separators=(",", ":")))
+    try:
+        failures = json.loads(result.stdout)
+    except (TypeError, ValueError) as exc:
+        raise HostNetError("Invalid TAP reconcile reply.") from exc
+    if not isinstance(failures, dict) or any(
+        tap not in changes or not isinstance(error, str) or not error
+        for tap, error in failures.items()
+    ):
+        raise HostNetError("Invalid TAP reconcile failure report.")
+    return failures
 
 
 def link_set_nomaster(iface: str) -> None:

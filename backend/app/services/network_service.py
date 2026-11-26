@@ -925,8 +925,10 @@ def _reconcile_qemu_nic_link_state(
         # UP, runtime.interface_attachments) to lab.json links[]. Bring the
         # host side into agreement with the JSON before we ask QEMU to
         # flip carrier — otherwise QMP set_link runs on stale TAP state.
+        host_failures = {}
         try:
-            recon = runtime_service.reconcile_qemu_node_links(lab_id, lab_data, node)
+            recon = runtime_service.reconcile_qemu_node_links(lab_id, lab_data, node, batch_host=True)
+            host_failures = recon.get("host_failures", {})
             for w in recon.get("warnings", []):
                 logger.warning(
                     "reconcile_qemu_node_links: lab=%s node=%s iface=%s reason=%s",
@@ -941,13 +943,16 @@ def _reconcile_qemu_nic_link_state(
                 lab_id,
                 node_id,
             )
+            host_failures = dict.fromkeys(range(ethernet), "Host TAP reconciliation failed.")
 
         node_connected = connected.get(node_id, set())
         for index in range(ethernet):
             up = index in node_connected
-            ok, reason = runtime_service.set_qemu_nic_link(
-                lab_id, node_id, index, up=up
-            )
+            reason = host_failures.get(index)
+            if reason:
+                ok = False
+            else:
+                ok, reason = runtime_service.set_qemu_nic_link(lab_id, node_id, index, up=up)
             entry: Dict[str, Any] = {
                 "node_id": node_id,
                 "interface_index": index,

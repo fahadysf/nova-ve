@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import subprocess
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -186,6 +189,144 @@ async def test_reconcile_reports_scoped_legacy_candidates_and_inspection_failure
     assert response.status_code == 200
     assert response.json()["data"]["legacy_nodes"] == [{"node_id": 1, "name": "n1", "container_name": "nova-ve-lab-1", "network_mode": "bridge", "ownership": "unverified"}]
     assert response.json()["data"]["legacy_inspection_unavailable"] == [{"node_id": 2, "name": "n2"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("drifted", "fail_one"),
+    [(False, False), (True, False), (True, True)],
+    ids=["steady", "drifted", "one-host-failure"],
+)
+async def test_large_lab_reconcile_keeps_other_requests_responsive_and_bounds_helper_spawns(
+    patched_route_settings, auth_override, monkeypatch, drifted, fail_one,
+):
+    from app.database import get_db
+    from app.services import host_net
+    from app.services.node_runtime_service import NodeRuntimeService
+
+    lab_id = "reconcile-budget"
+    nodes = {str(node): {**_node(node, 16), "type": "qemu"} for node in range(1, 14)}
+    links = [
+        {
+            "id": f"lnk_{node}_{index}",
+            "from": {"node_id": node, "interface_index": index},
+            "to": {"network_id": 1},
+        }
+        for node in range(1, 14)
+        for index in range(8)
+    ]
+    bridge = host_net.bridge_name(lab_id, 1)
+    lab = _seed_lab(
+        patched_route_settings.LABS_DIR, f"{lab_id}.json",
+        nodes=nodes,
+        networks={"1": {**_explicit_network(1), "runtime": {"bridge_name": bridge}}},
+        links=links,
+    )
+    tap_set = {
+        host_net.tap_name(lab_id, node, index): index < 8
+        for node in range(1, 14)
+        for index in range(16)
+    }
+    states = {
+        tap: (None, False) if not attached or drifted else (bridge, True)
+        for tap, attached in tap_set.items()
+    }
+    helper_calls = []
+    invalid_qmp = []
+    failed_tap = host_net.tap_name(lab_id, 1, 0)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = threading.Event()
+
+    def wait_in_worker():
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(timeout=3), "test did not release the reconcile worker"
+
+    def link_state(name):
+        if name == bridge:
+            return True, None, True
+        return (True, *states[name])
+
+    def mock_helper(verb, *args, input_text=None):
+        if verb == "reconcile-taps":
+            if not release.is_set():
+                wait_in_worker()
+            helper_calls.append((verb, None))
+            failures = {}
+            for tap, change in json.loads(input_text).items():
+                if fail_one and tap == failed_tap:
+                    failures[tap] = "fixture host attach failed"
+                    continue
+                assert change == {"master": bridge, "up": True}
+                states[tap] = (bridge, True)
+            return subprocess.CompletedProcess([verb], 0, json.dumps(failures), "")
+        allowed = {"link-master", "link-up"}
+        assert verb in allowed, f"unexpected privileged operation {verb!r}"
+        tap = args[0]
+        helper_calls.append((verb, tap))
+        master, up = states[tap]
+        states[tap] = (args[1], up) if verb == "link-master" else (master, True)
+        return subprocess.CompletedProcess([verb, *args], 0, "", "")
+
+    def qmp(_service, socket, command, args=None):
+        if not release.is_set():
+            wait_in_worker()
+        assert command == "set_link"
+        index = int(args["name"].removeprefix("net"))
+        node = int(socket)
+        if index < 8 and states[host_net.tap_name(lab_id, node, index)] != (bridge, True):
+            invalid_qmp.append((node, index))
+        return {"return": {}}
+
+    runtime = {node: {"kind": "qemu", "boot_ethernet": 16, "qmp_socket": str(node)} for node in range(1, 14)}
+    monkeypatch.setattr(NodeRuntimeService, "_runtime_record", lambda _service, _lab, node, **_: runtime[node])
+    monkeypatch.setattr(NodeRuntimeService, "_persist_runtime", lambda *_: None)
+    monkeypatch.setattr(NodeRuntimeService, "_qmp_command", qmp)
+    monkeypatch.setattr(NodeRuntimeService, "_resolve_qemu_nic_model", lambda *_: "e1000")
+    monkeypatch.setattr(NodeRuntimeService, "_resolve_qemu_planned_mac", lambda *_: None)
+    monkeypatch.setattr(NodeRuntimeService, "enrich_nodes", lambda _service, data: data["nodes"])
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: name == bridge)
+    monkeypatch.setattr(host_net, "bridge_fingerprint_check", lambda *_: "match")
+    monkeypatch.setattr(host_net, "link_state", link_state)
+    monkeypatch.setattr(host_net, "_invoke_helper", mock_helper)
+    monkeypatch.setattr(host_net, "_run", lambda *_, **__: pytest.fail("real host subprocess is prohibited"))
+    # The fixture initially replaces link_up. Use its ordinary wrapper so
+    # the budget counts the same invocation boundary as link-master.
+    monkeypatch.setattr(host_net, "link_up", lambda tap: mock_helper("link-up", tap))
+
+    async def execute_health_check(_query):
+        return None
+
+    async def fake_db():
+        yield SimpleNamespace(execute=execute_health_check)
+
+    monkeypatch.setitem(app.dependency_overrides, get_db, fake_db)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://fixture") as client:
+        reconcile = asyncio.create_task(client.post(f"/api/labs/{lab}/runtime/reconcile"))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            health, get_nodes = await asyncio.wait_for(
+                asyncio.gather(client.get("/api/health"), client.get(f"/api/labs/{lab}/nodes")),
+                timeout=1,
+            )
+            assert health.status_code == 200
+            assert get_nodes.status_code == 200 and len(get_nodes.json()["data"]) == 13
+            assert not reconcile.done()
+        finally:
+            release.set()
+        response = await asyncio.wait_for(reconcile, timeout=3)
+
+    assert response.json()["code"] == 200
+    nic_state = response.json()["data"]["nic_link_state"]
+    assert len(nic_state) == 208
+    assert len(helper_calls) == (13 if drifted else 0)
+    assert not invalid_qmp
+    failed = [entry for entry in nic_state if not entry["ok"]]
+    assert failed == ([{
+        "node_id": 1, "interface_index": 0, "up": True,
+        "ok": False, "reason": "fixture host attach failed",
+    }] if fail_one else [])
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ argv WOULD have been spawned.
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -132,6 +133,54 @@ def helper(monkeypatch, tmp_path):
     mod._test_proc_root = proc_root  # type: ignore[attr-defined]
     yield mod
     os.umask(runner_umask)
+
+
+def test_tap_batch_validates_all_entries_before_applying(helper, monkeypatch, capsys):
+    changes = {
+        "nveabcdd1i0": {"up": True},
+        "nveabcdd1i1": {"up": 1},
+    }
+    monkeypatch.setattr(helper.sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(changes).encode())))
+
+    assert helper.main(["reconcile-taps"]) == 2
+    assert "invalid TAP change" in capsys.readouterr().err
+    assert not helper._test_capture_calls
+    assert not helper._test_calls
+
+
+def test_tap_batch_retains_host_bridge_validation(helper, monkeypatch):
+    changes = {"nveabcdd1i0": {"master": "br-eth0"}}
+    monkeypatch.setattr(helper.sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(changes).encode())))
+
+    assert helper.main(["reconcile-taps"]) == 2
+    assert not helper._test_capture_calls
+
+
+def test_tap_batch_reports_failures_without_running_later_steps_for_that_tap(helper, monkeypatch, capsys):
+    attached = "nveabcdd1i0"
+    detached = "nveabcdd1i1"
+    changes = {
+        attached: {"create": True, "master": "noveabcdn1", "up": True},
+        detached: {"detach": True},
+    }
+    monkeypatch.setattr(helper.sys, "stdin", io.TextIOWrapper(io.BytesIO(json.dumps(changes).encode())))
+    commands = []
+
+    def capture(argv):
+        commands.append(argv[1:])
+        if "master" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "fixture attach failed")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(helper, "_run_capture", capture)
+
+    assert helper.main(["reconcile-taps"]) == 0
+    assert json.loads(capsys.readouterr().out) == {attached: "fixture attach failed"}
+    assert commands == [
+        ["tuntap", "add", "dev", attached, "mode", "tap"],
+        ["link", "set", attached, "master", changes[attached]["master"]],
+        ["link", "set", detached, "nomaster"],
+    ]
 
 
 def _seed_pid(mod, pid: int, *, kind: str = "docker", cgroup: str | None = None) -> None:

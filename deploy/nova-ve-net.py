@@ -505,7 +505,7 @@ def _nsenter_cat_address(pid: int, iface: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Verb implementations (each verb = one fixed ip/nsenter invocation)
+# Verb implementations (validated arguments and fixed command forms)
 # ---------------------------------------------------------------------------
 
 
@@ -577,6 +577,68 @@ def cmd_link_netns(args: argparse.Namespace) -> int:
 def cmd_link_up(args: argparse.Namespace) -> int:
     iface = validate_iface_name(args.iface)
     return _ip("link", "set", iface, "up")
+
+
+def cmd_reconcile_taps(_args: argparse.Namespace) -> int:
+    """Apply a node's TAP changes with one helper invocation."""
+    max_bytes = 32768
+    raw = sys.stdin.buffer.read(max_bytes + 1)
+    if len(raw) > max_bytes:
+        raise _ValidationError("TAP batch exceeds input limit")
+    try:
+        changes = json.loads(raw)
+    except (ValueError, RecursionError) as exc:
+        raise _ValidationError("invalid TAP batch JSON") from exc
+    if not isinstance(changes, dict) or not 1 <= len(changes) <= 100:
+        raise _ValidationError("TAP batch must contain 1 to 100 interfaces")
+
+    commands: dict[str, list[list[str]]] = {}
+    for name, change in changes.items():
+        tap = validate_tap_name(name)
+        flags = {"create", "up", "detach", "host_bridge"}
+        if (
+            not isinstance(change, dict)
+            or not change
+            or change.keys() - (flags | {"master"})
+            or any(type(change[key]) is not bool for key in flags & change.keys())
+            or ("master" in change and not isinstance(change["master"], str))
+        ):
+            raise _ValidationError("invalid TAP change")
+        create = change.get("create", False)
+        up = change.get("up", False)
+        detach = change.get("detach", False)
+        master = change.get("master")
+        host_bridge = change.get("host_bridge", False)
+        if (
+            (detach and (master is not None or create or up))
+            or (host_bridge and master is None)
+            or not (create or master is not None or up or detach)
+        ):
+            raise _ValidationError("conflicting or empty TAP change")
+        operations = commands[tap] = []
+        if create:
+            operations.append([IP_BIN, "tuntap", "add", "dev", tap, "mode", "tap"])
+        if master is not None:
+            validate = validate_host_bridge_name if host_bridge else validate_bridge_name
+            operations.append([IP_BIN, "link", "set", tap, "master", validate(master)])
+        if up:
+            operations.append([IP_BIN, "link", "set", tap, "up"])
+        if detach:
+            operations.append([IP_BIN, "link", "set", tap, "nomaster"])
+
+    failures: dict[str, str] = {}
+    for tap, operations in commands.items():
+        for operation in operations:
+            try:
+                result = _run_capture(operation)
+            except OSError:
+                failures[tap] = "Could not execute the host link command."
+                break
+            if result.returncode:
+                failures[tap] = result.stderr.strip()[:512] or "Host link command failed."
+                break
+    print(json.dumps(failures))
+    return 0
 
 
 def cmd_bridge_addr_add(args: argparse.Namespace) -> int:
@@ -1745,6 +1807,7 @@ VERB_TABLE: Mapping[str, Callable[[argparse.Namespace], int]] = {
     "link-set-nomaster": cmd_link_set_nomaster,
     "link-netns": cmd_link_netns,
     "link-up": cmd_link_up,
+    "reconcile-taps": cmd_reconcile_taps,
     "bridge-addr-add": cmd_bridge_addr_add,
     "bridge-addr-del": cmd_bridge_addr_del,
     "bridge-guard-apply": cmd_bridge_guard_apply,
@@ -1773,8 +1836,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="nova-ve-net.py",
         description=(
-            "Privileged network helper for nova-ve.  Each verb is a "
-            "fixed ip/nsenter invocation with regex-validated arguments."
+            "Privileged network helper for nova-ve. Commands are "
+            "allowlisted and arguments are validated before execution."
         ),
     )
     sub = parser.add_subparsers(dest="verb", required=True, metavar="VERB")
@@ -1821,6 +1884,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("link-up", help="ip link set <iface> up")
     p.add_argument("iface")
+
+    sub.add_parser("reconcile-taps", help="Apply a bounded set of TAP changes from JSON on stdin")
 
     p = sub.add_parser("bridge-addr-add", help="ip addr replace <cidr> dev <bridge>")
     p.add_argument("bridge")
