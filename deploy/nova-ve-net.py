@@ -38,6 +38,7 @@ import json
 import os
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -65,6 +66,14 @@ NSENTER_BIN = os.environ.get("NOVA_VE_NSENTER_BIN") or "nsenter"
 NFT_BIN = os.environ.get("NOVA_VE_NFT_BIN") or "nft"
 DNSMASQ_BIN = os.environ.get("NOVA_VE_DNSMASQ_BIN") or "dnsmasq"
 RUNTIME_ROOT = Path(os.environ.get("NOVA_VE_RUNTIME_ROOT", "/var/lib/nova-ve"))
+# #334: root dnsmasq must not read its config — or write its lease file —
+# from a directory the service account owns (it could swap in a
+# ``dhcp-script`` or point the lease file at a root-owned target through a
+# symlink). Config, pid and leases live under /run instead: tmpfs, so the
+# helper recreates the tree on every start, and every ancestor is
+# root-owned. Not derived from RUNTIME_ROOT, and the backend cannot move it
+# through sudo (sudo resets the environment; this is root's own setting).
+DNSMASQ_ROOT = Path(os.environ.get("NOVA_VE_DNSMASQ_ROOT", "/run/nova-ve/dnsmasq"))
 IP_FORWARD_PATH = Path(os.environ.get("NOVA_VE_IP_FORWARD_PATH", "/proc/sys/net/ipv4/ip_forward"))
 IPV4_CONF_ROOT = Path(os.environ.get("NOVA_VE_IPV4_CONF_ROOT", "/proc/sys/net/ipv4/conf"))
 # Root-owned, unlike the service account's state directory.
@@ -905,18 +914,20 @@ def cmd_bridge_guard_remove(args: argparse.Namespace) -> int:
     return _guard_locked(_guard_remove, bridge)
 
 
-def _write_private_file(path: Path, text: str) -> None:
+def _write_private_file(path: Path, text: str, root: Path | None = None) -> None:
     """Write ``path`` as root without following links the service account made.
 
     The state directory belongs to the unprivileged service account, so a
     symlink planted there must never redirect a root write. Directories are
-    created and checked one by one below ``RUNTIME_ROOT``; the file is
+    created and checked one by one below ``root``; the file is
     written to a fresh temporary name and renamed into place.
     """
+    if root is None:
+        root = RUNTIME_ROOT
     # The root itself is the operator's choice and may be a link.
-    RUNTIME_ROOT.mkdir(parents=True, exist_ok=True)
-    current = RUNTIME_ROOT
-    for part in path.parent.relative_to(RUNTIME_ROOT).parts:
+    root.mkdir(parents=True, exist_ok=True)
+    current = root
+    for part in path.parent.relative_to(root).parts:
         current = current / part
         try:
             os.mkdir(current, 0o755)
@@ -935,7 +946,28 @@ def _write_private_file(path: Path, text: str) -> None:
         raise
 
 
+def _check_dnsmasq_root() -> None:
+    """Refuse a planted link in the root-owned dnsmasq tree (#334).
+
+    ``/run`` itself is root-owned, so this is defence in depth: the helper
+    must not quietly follow a symlink at its own root either.
+    """
+    for candidate in (DNSMASQ_ROOT.parent, DNSMASQ_ROOT):
+        if candidate.is_symlink() or (candidate.exists() and not candidate.is_dir()):
+            raise OSError(f"refusing to use {candidate}: not a plain directory")
+
+
 def _dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
+    root = DNSMASQ_ROOT / bridge
+    return root / "dnsmasq.conf", root / "dnsmasq.pid", root / "leases"
+
+
+def _legacy_dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
+    """Pre-#334 locations under the service-owned data directory.
+
+    Only used to find servers started before the upgrade and to carry their
+    leases over; nothing new is written there.
+    """
     root = RUNTIME_ROOT / "nat-cloud" / bridge
     return root / "dnsmasq.conf", root / "dnsmasq.pid", root / "leases"
 
@@ -947,7 +979,12 @@ def _dnsmasq_pids(bridge: str) -> list[int]:
     lost pid file must not leave a server running, and a stale one must not
     get another network's server killed (#320).
     """
-    wanted = f"--conf-file={_dnsmasq_paths(bridge)[0]}".encode()
+    # #334: also match the legacy conf path, or an upgrade would leave the
+    # old server running next to the new one for the same bridge.
+    wanted = {
+        f"--conf-file={_dnsmasq_paths(bridge)[0]}".encode(),
+        f"--conf-file={_legacy_dnsmasq_paths(bridge)[0]}".encode(),
+    }
     pids: list[int] = []
     for entry in PROC_ROOT.iterdir():
         if not entry.name.isdigit():
@@ -956,7 +993,7 @@ def _dnsmasq_pids(bridge: str) -> list[int]:
             argv = (entry / "cmdline").read_bytes().split(b"\x00")
         except OSError:
             continue
-        if os.path.basename(argv[0]) == b"dnsmasq" and wanted in argv:
+        if os.path.basename(argv[0]) == b"dnsmasq" and wanted.intersection(argv):
             pids.append(int(entry.name))
     return sorted(pids)
 
@@ -972,6 +1009,7 @@ def _dnsmasq_stop_bridge(bridge: str) -> bool:
         for _attempt in range(attempts):
             if not _dnsmasq_pids(bridge):
                 _dnsmasq_paths(bridge)[1].unlink(missing_ok=True)
+                _unlink_legacy_pidfile(bridge)
                 return True
             time.sleep(0.05)
     print(f"dnsmasq for {bridge} did not stop", file=sys.stderr)
@@ -1005,6 +1043,7 @@ def _write_dnsmasq_conf(
     dhcp_end: str,
     no_router: bool,
 ) -> None:
+    _check_dnsmasq_root()
     _write_private_file(
         conf,
         "\n".join(
@@ -1019,7 +1058,99 @@ def _write_dnsmasq_conf(
                 "",
             ]
         ),
+        root=DNSMASQ_ROOT,
     )
+
+
+def _open_legacy_dir(bridge: str) -> int | None:
+    """fd for the legacy per-bridge dir, refusing every planted link.
+
+    Each component below ``RUNTIME_ROOT`` is opened relative to the previous
+    fd with ``O_NOFOLLOW``, so the service account cannot swap a component
+    for a symlink between a check and the use that follows it.
+    """
+    try:
+        fd = os.open(RUNTIME_ROOT, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return None
+    try:
+        for part in ("nat-cloud", bridge):
+            next_fd = os.open(
+                part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd
+            )
+            os.close(fd)
+            fd = next_fd
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def _unlink_legacy_pidfile(bridge: str) -> None:
+    """Remove the pre-#334 pid file without resolving planted links."""
+    fd = _open_legacy_dir(bridge)
+    if fd is None:
+        return
+    try:
+        os.unlink("dnsmasq.pid", dir_fd=fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _migrate_legacy_leases(bridge: str, leases: Path) -> None:
+    """Carry pre-#334 leases into the new root-owned location.
+
+    The legacy file lives in a service-owned directory: read it through the
+    ``O_NOFOLLOW`` dir-fd chain (never a checked-then-opened path), confirm
+    it is a regular file, and cap its size before copying the content
+    through the checked writer.
+    """
+    if leases.exists():
+        return
+    dir_fd = _open_legacy_dir(bridge)
+    if dir_fd is None:
+        return
+    try:
+        fd = os.open(
+            "leases",
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=dir_fd,
+        )
+    except OSError:
+        os.close(dir_fd)
+        return
+    os.close(dir_fd)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1_048_576:
+            return
+        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
+            fd = -1
+            text = fh.read(1_048_577)
+            if len(text) > 1_048_576:
+                return
+    except OSError:
+        return
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    _write_private_file(leases, text, root=DNSMASQ_ROOT)
+    try:
+        os.chmod(leases, 0o644)
+    except OSError:
+        pass
+    # Consume the legacy copy: /run is tmpfs, so without this the stale
+    # pre-#334 leases would be re-imported on every boot.
+    dir_fd = _open_legacy_dir(bridge)
+    if dir_fd is not None:
+        try:
+            os.rename("leases", "leases.pre-334", src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError:
+            pass
+        finally:
+            os.close(dir_fd)
 
 
 def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
@@ -1041,6 +1172,7 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
         return 1
     conf, pidfile, leases = _dnsmasq_paths(bridge)
     try:
+        _migrate_legacy_leases(bridge, leases)
         _write_dnsmasq_conf(conf, pidfile, leases, bridge, gateway, dhcp_start, dhcp_end, no_router)
     except OSError as exc:
         print(f"failed to write {conf}: {exc}", file=sys.stderr)

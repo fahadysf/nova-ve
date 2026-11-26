@@ -44,6 +44,7 @@ def helper(monkeypatch, tmp_path):
     monkeypatch.setattr(mod, "PIDS_JSON_PATH", pids_path, raising=True)
     monkeypatch.setattr(mod, "PROC_ROOT", proc_root, raising=True)
     monkeypatch.setattr(mod, "RUNTIME_ROOT", tmp_path / "runtime", raising=True)
+    monkeypatch.setattr(mod, "DNSMASQ_ROOT", tmp_path / "run" / "dnsmasq", raising=True)
     monkeypatch.setattr(mod, "IP_FORWARD_PATH", tmp_path / "ip_forward", raising=True)
     monkeypatch.setattr(mod, "IPV4_CONF_ROOT", tmp_path / "ipv4-conf", raising=True)
     monkeypatch.setattr(mod, "GUARD_LOCK_PATH", tmp_path / "guard.lock", raising=True)
@@ -362,7 +363,7 @@ def test_forward_remove_deletes_docker_user_rules_when_rule_shape_available(help
 
 
 def _seed_dnsmasq(helper, pid: int, bridge: str) -> None:
-    conf = helper.RUNTIME_ROOT / "nat-cloud" / bridge / "dnsmasq.conf"
+    conf = helper._dnsmasq_paths(bridge)[0]
     entry = helper._test_proc_root / str(pid)
     entry.mkdir()
     (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={conf}\0".encode())
@@ -392,7 +393,7 @@ def test_dnsmasq_stop_finds_server_without_pid_file(helper, monkeypatch):
 def test_dnsmasq_stop_ignores_stale_pid_file_of_another_network(helper, monkeypatch):
     # n1 vs n10: names that share a prefix must not match either.
     _seed_dnsmasq(helper, 502, "novec0den10")
-    root = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1"
+    root = helper._dnsmasq_paths("novec0den1")[0].parent
     root.mkdir(parents=True)
     (root / "dnsmasq.pid").write_text("502\n")
     killed = _fake_kill(helper, monkeypatch)
@@ -437,7 +438,7 @@ def test_dnsmasq_start_writes_bridge_config(helper, monkeypatch):
         ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
     )
     assert rc == 0
-    conf = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1" / "dnsmasq.conf"
+    conf = helper._dnsmasq_paths("novec0den1")[0]
     text = conf.read_text()
     assert "interface=novec0den1" in text
     assert "port=0" in text
@@ -466,7 +467,7 @@ def test_dnsmasq_start_isolated_sends_no_router_and_no_dns(helper, monkeypatch):
         ["dnsmasq-start", "novec0den2", "10.40.1.254", "10.40.1.128", "10.40.1.253", "--no-router"],
     )
     assert rc == 0
-    lines = (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den2" / "dnsmasq.conf").read_text().splitlines()
+    lines = (helper._dnsmasq_paths("novec0den2")[0]).read_text().splitlines()
     assert "listen-address=10.40.1.254" in lines
     assert "port=0" in lines
     assert "dhcp-range=10.40.1.128,10.40.1.253,12h" in lines
@@ -483,7 +484,7 @@ def test_dnsmasq_config_never_follows_planted_links(helper, monkeypatch, tmp_pat
     outside.mkdir()
     victim = outside / "victim"
     victim.write_text("keep\n")
-    root = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den2"
+    root = helper._dnsmasq_paths("novec0den2")[0].parent
     root.mkdir(parents=True)
     (root / "dnsmasq.conf").symlink_to(victim)
     argv = ["dnsmasq-start", "novec0den2", "10.40.1.254", "10.40.1.128", "10.40.1.253", "--no-router"]
@@ -493,10 +494,84 @@ def test_dnsmasq_config_never_follows_planted_links(helper, monkeypatch, tmp_pat
     assert "dhcp-option=3" in (root / "dnsmasq.conf").read_text()
 
     # A symlinked directory is refused outright.
-    (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den3").symlink_to(outside)
+    (helper._dnsmasq_paths("novec0den3")[0].parent).symlink_to(outside)
     argv[1] = "novec0den3"
     assert helper.main(argv) == 1
     assert sorted(p.name for p in outside.iterdir()) == ["victim"]
+
+
+def test_dnsmasq_paths_live_under_root_owned_dnsmasq_root(helper, monkeypatch, tmp_path):
+    """#334: conf, pid and leases must not live in the service-owned data dir.
+
+    Root dnsmasq follows the lease file too, so leaving leases behind in a
+    directory the service account controls would keep a symlink-based root
+    write open.
+    """
+    dnsmasq_root = tmp_path / "run" / "nova-ve" / "dnsmasq"
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", dnsmasq_root, raising=True)
+    conf, pidfile, leases = helper._dnsmasq_paths("novec0den1")
+    assert conf == dnsmasq_root / "novec0den1" / "dnsmasq.conf"
+    assert pidfile == dnsmasq_root / "novec0den1" / "dnsmasq.pid"
+    assert leases == dnsmasq_root / "novec0den1" / "leases"
+    assert helper.RUNTIME_ROOT not in conf.parents
+
+
+def test_dnsmasq_stop_finds_legacy_server_from_before_upgrade(helper, monkeypatch, tmp_path):
+    """#334 upgrade trap: servers started with the old conf path stay stoppable."""
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", tmp_path / "run-dnsmasq", raising=True)
+    legacy_conf = helper._legacy_dnsmasq_paths("novec0den1")[0]
+    entry = helper._test_proc_root / "601"
+    entry.mkdir()
+    (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={legacy_conf}\0".encode())
+    killed = _fake_kill(helper, monkeypatch)
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert killed == [(601, helper.signal.SIGTERM)]
+
+
+def test_dnsmasq_start_migrates_existing_leases(helper, monkeypatch, tmp_path):
+    """#334: leases from the old location must survive the move."""
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", tmp_path / "run-dnsmasq", raising=True)
+    legacy = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1"
+    legacy.mkdir(parents=True)
+    (legacy / "leases").write_text("0 aa:bb:cc:dd:ee:ff 10.255.0.100 host *\n")
+    assert _start_dnsmasq(
+        helper, monkeypatch,
+        ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"],
+    ) == 0
+    _conf, _pidfile, leases = helper._dnsmasq_paths("novec0den1")
+    assert "10.255.0.100" in leases.read_text()
+    assert not (legacy / "leases").exists()
+    assert (legacy / "leases.pre-334").exists()
+
+
+def test_dnsmasq_start_never_migrates_a_planted_lease_symlink(helper, monkeypatch, tmp_path):
+    """#334: a symlinked legacy leases file must not become a root read."""
+    monkeypatch.setattr(helper, "DNSMASQ_ROOT", tmp_path / "run-dnsmasq", raising=True)
+    victim = tmp_path / "victim"
+    victim.write_text("root-only-secret\n")
+    legacy = helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1"
+    legacy.mkdir(parents=True)
+    (legacy / "leases").symlink_to(victim)
+    assert _start_dnsmasq(
+        helper, monkeypatch,
+        ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"],
+    ) == 0
+    _conf, _pidfile, leases = helper._dnsmasq_paths("novec0den1")
+    assert not leases.exists() or "root-only-secret" not in leases.read_text()
+    assert victim.read_text() == "root-only-secret\n"
+
+
+def test_dnsmasq_stop_never_unlinks_through_a_planted_link(helper, monkeypatch, tmp_path):
+    """#334: removing the legacy pid file must not follow a symlinked ancestor."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "dnsmasq.pid").write_text("999\n")
+    _seed_dnsmasq(helper, 602, "novec0den1")
+    _fake_kill(helper, monkeypatch)
+    (helper.RUNTIME_ROOT / "nat-cloud").mkdir(parents=True, exist_ok=True)
+    (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1").symlink_to(outside)
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert (outside / "dnsmasq.pid").read_text() == "999\n"
 
 
 def test_dnsmasq_start_keeps_router_for_nat_cloud(helper, monkeypatch):
@@ -504,7 +579,7 @@ def test_dnsmasq_start_keeps_router_for_nat_cloud(helper, monkeypatch):
         helper, monkeypatch, ["dnsmasq-start", "novec0den1", "10.255.0.1", "10.255.0.100", "10.255.0.254"]
     )
     assert rc == 0
-    lines = (helper.RUNTIME_ROOT / "nat-cloud" / "novec0den1" / "dnsmasq.conf").read_text().splitlines()
+    lines = (helper._dnsmasq_paths("novec0den1")[0]).read_text().splitlines()
     assert "dhcp-option=option:router,10.255.0.1" in lines
     assert "dhcp-authoritative" in lines
     assert "dhcp-option=3" not in lines

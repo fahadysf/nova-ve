@@ -800,6 +800,28 @@ def test_member_lab_open_restores_the_owners_dhcp(host, labs_dir):
 # ---------------------------------------------------------------------------
 
 
+def test_info_reads_leases_from_root_owned_dnsmasq_dir(tmp_path, monkeypatch):
+    """#334: leases/pid come from the helper's /run tree, not the data dir."""
+    from app.services import network_info_service as info
+
+    bridge = "novec0den1"
+    root = tmp_path / "run" / "dnsmasq" / bridge
+    root.mkdir(parents=True)
+    (root / "dnsmasq.conf").write_text("dhcp-range=10.255.0.100,10.255.0.254,12h\n")
+    (root / "leases").write_text("0 aa:bb:cc:dd:ee:ff 10.255.0.100 host *\n")
+    (root / "dnsmasq.pid").write_text("4242\n")
+    proc = tmp_path / "proc" / "4242"
+    proc.mkdir(parents=True)
+    (proc / "cmdline").write_bytes(f"dnsmasq\0--conf-file={root / 'dnsmasq.conf'}\0".encode())
+    monkeypatch.setattr(info, "DNSMASQ_ROOT", tmp_path / "run" / "dnsmasq", raising=True)
+    monkeypatch.setattr(info, "PROC_ROOT", tmp_path / "proc", raising=True)
+
+    assert info._dnsmasq_dir(bridge) == root
+    assert info.dhcp_server_pid(bridge) == 4242
+    leases = info._leases(root, 0)
+    assert [lease["ip"] for lease in leases] == ["10.255.0.100"]
+
+
 def test_info_shows_cidr_and_dhcp_for_bridges(host, labs_dir):
     lab = _lab(
         labs_dir,

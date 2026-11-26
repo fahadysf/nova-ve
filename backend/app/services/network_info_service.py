@@ -40,6 +40,22 @@ from app.services.shared_network_service import (
 SYS_CLASS_NET = Path("/sys/class/net")
 PROC_ROOT = Path("/proc")
 MAX_LEASES = 100
+# #334: the privileged helper keeps dnsmasq's config, pid and leases under a
+# root-owned /run tree; the backend only reads them. The pre-#334 location
+# under the data dir is still read as a fallback for servers started before
+# the upgrade.
+DNSMASQ_ROOT = Path(os.environ.get("NOVA_VE_DNSMASQ_ROOT", "/run/nova-ve/dnsmasq"))
+
+
+def _dnsmasq_dir(bridge: str) -> Path:
+    """Directory holding the bridge's live dnsmasq state (new, else legacy)."""
+    new = DNSMASQ_ROOT / bridge
+    if (new / "dnsmasq.conf").exists():
+        return new
+    legacy = _base_data_dir() / "nat-cloud" / bridge
+    if (legacy / "dnsmasq.conf").exists():
+        return legacy
+    return new
 
 TYPE_LABELS = {
     "linux_bridge": "Isolated bridge",
@@ -156,7 +172,11 @@ def dhcp_server_pid(bridge: str | None) -> int | None:
     # The directory name comes from a JSON record; only lab bridges have one.
     if not bridge or not host_net.RE_BRIDGE_NAME.match(bridge):
         return None
-    return _dnsmasq_pid(_base_data_dir() / "nat-cloud" / bridge)
+    # Try the new root-owned location first, then the pre-#334 one: a server
+    # started before the upgrade still serves from the legacy config.
+    return _dnsmasq_pid(DNSMASQ_ROOT / bridge) or _dnsmasq_pid(
+        _base_data_dir() / "nat-cloud" / bridge
+    )
 
 
 def _lease_time(root: Path) -> str | None:
@@ -373,7 +393,7 @@ def _dhcp_block(
     }
     # The directory name comes from a JSON record; only lab bridges have one.
     if bridge and host_net.RE_BRIDGE_NAME.match(bridge):
-        root = _base_data_dir() / "nat-cloud" / bridge
+        root = _dnsmasq_dir(bridge)
         leases = _leases(root, time.time())
         for lease in leases:
             lease["node_name"] = node_by_mac.get(lease["mac"])
