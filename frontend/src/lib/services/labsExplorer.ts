@@ -7,12 +7,16 @@ import type { FolderEntry, FolderListing, LabListItem } from '$lib/types';
 
 export const SHARED_OWNER = '*';
 export const SYSTEM_OWNER = 'system';
+/** Virtual root folder that lists every lab with live nodes (#365). */
+export const RUNNING_FOLDER = '/Running';
 
 export interface ExplorerNode {
   name: string;
   path: string; // '' for the root
   owner: string;
   mtime?: string;
+  /** Live nodes in this folder's subtree, direct labs included (#365). */
+  running: number;
   folders: ExplorerNode[];
   labs: LabListItem[];
 }
@@ -41,10 +45,40 @@ function byName(a: { name: string }, b: { name: string }): number {
   return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
 }
 
+function byDisplayName(a: LabListItem, b: LabListItem): number {
+  return labDisplayName(a).localeCompare(labDisplayName(b), undefined, { sensitivity: 'base' });
+}
+
+function isRunning(lab: LabListItem): boolean {
+  return (lab.nodes_running ?? 0) > 0;
+}
+
+/** Labs with live nodes anywhere below `node` (#365). The Running folder is
+ * skipped: it only re-lists what the real folders already hold. */
+export function runningLabs(node: ExplorerNode): LabListItem[] {
+  const own = node.labs.filter(isRunning);
+  return node.folders.reduce(
+    (all, child) => (child.path === RUNNING_FOLDER ? all : all.concat(runningLabs(child))),
+    own
+  );
+}
+
+function runningNodes(labs: LabListItem[]): number {
+  return labs.reduce((sum, lab) => sum + (lab.nodes_running ?? 0), 0);
+}
+
+function tallyRunning(node: ExplorerNode): number {
+  node.running = runningNodes(node.labs);
+  for (const child of node.folders) {
+    if (child.path !== RUNNING_FOLDER) node.running += tallyRunning(child);
+  }
+  return node.running;
+}
+
 /** Build a folder tree from the flat recursive `/folders/` listing. Labs that
  * live in no folder end up on the root node. */
 export function buildTree(listing: FolderListing): ExplorerNode {
-  const root: ExplorerNode = { name: 'Labs', path: '', owner: SYSTEM_OWNER, folders: [], labs: [] };
+  const root: ExplorerNode = { name: 'Labs', path: '', owner: SYSTEM_OWNER, running: 0, folders: [], labs: [] };
   const index = new Map<string, ExplorerNode>([['', root]]);
 
   const ensure = (path: string, entry?: FolderEntry): ExplorerNode => {
@@ -62,6 +96,7 @@ export function buildTree(listing: FolderListing): ExplorerNode {
       path,
       owner: entry?.owner ?? parent.owner,
       mtime: entry?.mtime,
+      running: 0,
       folders: [],
       labs: []
     };
@@ -77,7 +112,15 @@ export function buildTree(listing: FolderListing): ExplorerNode {
 
   for (const node of index.values()) {
     node.folders.sort(byName);
-    node.labs.sort((a, b) => labDisplayName(a).localeCompare(labDisplayName(b), undefined, { sensitivity: 'base' }));
+    node.labs.sort(byDisplayName);
+  }
+  tallyRunning(root);
+  // The Running folder is a view, not a location (#365): the same lab
+  // entries re-listed, so opening one still resolves to its real path.
+  const running = index.get(RUNNING_FOLDER);
+  if (running) {
+    running.labs = runningLabs(root).sort(byDisplayName);
+    running.running = runningNodes(running.labs);
   }
   return root;
 }

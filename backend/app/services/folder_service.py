@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import time
@@ -145,6 +146,45 @@ class FolderService:
             folders = [_shared_folder_entry()] + folders
 
         return {"folders": folders, "labs": labs}
+
+    @staticmethod
+    def annotate_running(labs: list[dict], lab_ids: dict[str, str]) -> None:
+        """Set ``nodes_running`` on every listed lab (#365).
+
+        The runtime registry is the source of truth — the same liveness
+        check behind /api/manage/labs — keyed by lab id, so no lab file is
+        parsed unless a running lab has no DB row mapping its id to a path
+        (a lab written straight to disk, e.g. an imported one). Blocking
+        (``/proc`` reads, docker/hypervisor queries): call it from a worker
+        thread.
+
+        ``lab_ids`` maps a listed lab path to its ``labs`` row id.
+        """
+        from app.services.lab_service import _lab_file_path
+        from app.services.node_runtime_service import NodeRuntimeService
+
+        running = NodeRuntimeService().running_nodes_by_lab()
+        resolved: dict[str, int] = {}
+        for lab in labs:
+            count = running.pop(lab_ids.get(lab["path"]), None)
+            if count:
+                resolved[lab["path"]] = count
+        if running:
+            for lab in labs:
+                if lab["path"] in lab_ids:
+                    continue
+                try:
+                    data = json.loads(_lab_file_path(lab["path"]).read_text())
+                except (OSError, ValueError):
+                    continue
+                lab_id = str(data.get("id", "")).strip() if isinstance(data, dict) else ""
+                count = running.pop(lab_id, None)
+                if count:
+                    resolved[lab["path"]] = count
+                if not running:
+                    break
+        for lab in labs:
+            lab["nodes_running"] = resolved.get(lab["path"], 0)
 
     @staticmethod
     def create_folder(folder_path: str) -> Path:
