@@ -10,9 +10,9 @@
 # Why this is safe despite the trailing ``*``:
 #   * the helper itself uses ``subprocess.run([...], shell=False)`` —
 #     argv is never spliced into a shell string;
-#   * each network verb maps to ONE fixed ``ip`` / ``nsenter ip`` invocation;
-#   * every argv argument is validated against a tight regex BEFORE
-#     any subprocess is spawned or process signal is issued;
+#   * each network verb uses fixed ``ip`` / ``nsenter ip`` command forms;
+#   * arguments, including every entry in a bounded TAP batch, are
+#     validated BEFORE any subprocess is spawned or signal is issued;
 #   * pid-taking verbs additionally consult the runtime registry at
 #     /var/lib/nova-ve/runtime/pids.json to constrain operations to
 #     processes that nova-ve itself spawned, with QEMU process signaling

@@ -4797,7 +4797,7 @@ class NodeRuntimeService:
         return True, None
 
     def reconcile_qemu_node_links(
-        self, lab_id: str, lab_data: dict, node: dict
+        self, lab_id: str, lab_data: dict, node: dict, *, batch_host: bool = False,
     ) -> dict:
         """Issue #174: converge runtime + kernel state for a running QEMU
         node to match ``lab_data["links"]`` for every BOOT-time interface
@@ -4836,8 +4836,64 @@ class NodeRuntimeService:
 
         with runtime_mutex.acquire_node_sync(lab_id, node_id):
             return self._reconcile_qemu_node_links_locked(
-                lab_id, lab_data, node, node_id
+                lab_id, lab_data, node, node_id, batch_host=batch_host,
             )
+
+    @staticmethod
+    def _reconcile_boot_taps(
+        lab_id: str,
+        node_id: int,
+        boot_ethernet: int,
+        expected: dict[int, dict],
+        attachments: list[dict],
+    ) -> dict[int, str]:
+        """Apply planned host changes before setting a node's guest carrier."""
+        changes: dict[str, host_net.TapChange] = {}
+        indices: dict[str, list[int]] = {}
+        failures: dict[int, str] = {}
+        connected_taps = {want["tap_name"] for want in expected.values()}
+        recorded_taps = {}
+        for entry in attachments:
+            try:
+                index = int(entry.get("interface_index", -1))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= index < boot_ethernet and index not in expected and entry.get("boot_nic"):
+                tap = entry.get("tap_name") or host_net.tap_name(lab_id, node_id, index)
+                if recorded_taps.setdefault(index, tap) != tap:
+                    failures[index] = "Conflicting stale TAP records for this interface."
+
+        for index in range(boot_ethernet):
+            if index in failures:
+                continue
+            want = expected.get(index)
+            tap = (
+                want["tap_name"] if want else
+                recorded_taps.get(index) or host_net.tap_name(lab_id, node_id, index)
+            )
+            try:
+                if want:
+                    change = host_net.tap_attachment_change(tap, want["bridge_name"], want.get("driver"))
+                else:
+                    if tap in connected_taps:
+                        failures[index] = "Stale TAP record conflicts with a connected interface."
+                        continue
+                    exists, master, _up = host_net.link_state(tap)
+                    change = {"detach": True} if exists and master is not None else {}
+            except host_net.HostNetError as exc:
+                failures[index] = str(exc)
+                continue
+            if change:
+                changes[tap] = change
+                indices.setdefault(tap, []).append(index)
+
+        try:
+            errors = host_net.reconcile_taps(changes)
+        except host_net.HostNetError as exc:
+            errors = dict.fromkeys(changes, str(exc))
+        for tap, error in errors.items():
+            failures.update(dict.fromkeys(indices[tap], error))
+        return failures
 
     def _reconcile_qemu_node_links_locked(
         self,
@@ -4845,6 +4901,8 @@ class NodeRuntimeService:
         lab_data: dict,
         node: dict,
         node_id: int,
+        *,
+        batch_host: bool = False,
     ) -> dict:
         """Body of :meth:`reconcile_qemu_node_links`. Caller holds the
         per-(lab, node) node-scoped mutex (issue #175 C1).
@@ -4922,7 +4980,17 @@ class NodeRuntimeService:
         with self._lock:
             attachments = list(runtime.get("interface_attachments") or [])
 
+        host_failures = (
+            self._reconcile_boot_taps(lab_id, node_id, boot_ethernet, expected, attachments)
+            if batch_host else {}
+        )
+        warnings.extend(
+            {"interface_index": idx, "reason": reason} for idx, reason in host_failures.items()
+        )
+
         for idx, want in expected.items():
+            if idx in host_failures:
+                continue
             tap = want["tap_name"]
             bridge = want["bridge_name"]
             try:
@@ -4930,16 +4998,15 @@ class NodeRuntimeService:
                 # privileged helper spawns the kernel state doesn't already
                 # satisfy — unconditional re-application cost ~150ms per op
                 # (200+ spawns, ~30s frozen event loop on node-dense labs).
-                exists, master, admin_up = host_net.link_state(tap)
-                if not exists:
-                    # Defensive: a pre-#174 process or a race left no TAP.
-                    # Recreate so the e1000 backend has something to talk to.
-                    host_net.tap_add(tap)
-                    master, admin_up = None, False
-                if master != bridge:
-                    host_net.link_master_any(tap, bridge, driver=want.get("driver"))
-                if not admin_up:
-                    host_net.link_up(tap)
+                if not batch_host:
+                    exists, master, admin_up = host_net.link_state(tap)
+                    if not exists:
+                        host_net.tap_add(tap)
+                        master, admin_up = None, False
+                    if master != bridge:
+                        host_net.link_master_any(tap, bridge, driver=want.get("driver"))
+                    if not admin_up:
+                        host_net.link_up(tap)
                 if socket_path:
                     try:
                         self._qmp_command(
@@ -5017,7 +5084,7 @@ class NodeRuntimeService:
                     recorded_boot_indices.add(idx)
 
         for idx in range(boot_ethernet):
-            if idx in expected or idx in recorded_boot_indices:
+            if idx in expected or idx in recorded_boot_indices or idx in host_failures:
                 continue
 
             tap = host_net.tap_name(lab_id, node_id, idx)
@@ -5035,9 +5102,10 @@ class NodeRuntimeService:
                 # #277: nomaster only when a master is actually set — a
                 # never-created or already-detached TAP needs no
                 # privileged spawn.
-                _exists, _master, _up = host_net.link_state(tap)
-                if _exists and _master is not None:
-                    host_net.link_set_nomaster(tap)
+                if not batch_host:
+                    exists, master, _up = host_net.link_state(tap)
+                    if exists and master is not None:
+                        host_net.link_set_nomaster(tap)
             except host_net.HostNetError as exc:
                 warnings.append({"interface_index": idx, "reason": f"nomaster: {exc}"})
 
@@ -5052,7 +5120,7 @@ class NodeRuntimeService:
                 idx = int(entry.get("interface_index", -1))
             except (TypeError, ValueError):
                 continue
-            if idx in expected:
+            if idx in expected or idx in host_failures:
                 continue
             if not bool(entry.get("boot_nic", False)) or idx >= boot_ethernet:
                 # Hot-add ifaces have their own US-304 path. We don't drive
@@ -5073,9 +5141,10 @@ class NodeRuntimeService:
             try:
                 # #277: same state guard as Phase 2 — skip the privileged
                 # spawn when the TAP is absent or already detached.
-                _exists, _master, _up = host_net.link_state(tap)
-                if _exists and _master is not None:
-                    host_net.link_set_nomaster(tap)
+                if not batch_host:
+                    exists, master, _up = host_net.link_state(tap)
+                    if exists and master is not None:
+                        host_net.link_set_nomaster(tap)
             except host_net.HostNetError as exc:
                 warnings.append({"interface_index": idx, "reason": f"nomaster: {exc}"})
 
@@ -5097,6 +5166,7 @@ class NodeRuntimeService:
             "removed": removed,
             "warnings": warnings,
             "skipped_hotplug": skipped_hotplug,
+            "host_failures": host_failures,
         }
 
     def _find_free_pcie_slot(

@@ -671,6 +671,34 @@ def test_reconciler_handles_string_node_id_in_labjson(
     assert runtime["interface_attachments"][0]["interface_index"] == 0
 
 
+def test_batch_preserves_conflicting_stale_tap_records(monkeypatch, patched_settings):
+    lab_id = "lab-recon-conflict"
+    node = {"id": 1, "type": "qemu"}
+    service = NodeRuntimeService()
+    attachments = [
+        {"interface_index": 0, "boot_nic": True, "tap_name": tap}
+        for tap in ("nveaa11d1i0", "nveaa22d1i0")
+    ]
+    runtime = _seed_running_qemu_runtime(
+        service, lab_id=lab_id, node_id=node["id"],
+        boot_ethernet=1, interface_attachments=attachments,
+    )
+    qmp_calls = _capture_qmp(service)
+
+    def apply_changes(changes):
+        assert changes == {}
+        return {}
+
+    monkeypatch.setattr("app.services.host_net.reconcile_taps", apply_changes)
+    monkeypatch.setattr("app.services.host_net.link_state", lambda *_: pytest.fail("ambiguous TAP read"))
+    result = service.reconcile_qemu_node_links(lab_id, {"links": []}, node, batch_host=True)
+
+    assert result["host_failures"] == {0: "Conflicting stale TAP records for this interface."}
+    assert result["removed"] == []
+    assert runtime["interface_attachments"] == attachments
+    assert not qmp_calls
+
+
 def test_reconciler_phase1_force_syncs_generation(monkeypatch, patched_settings):
     """Issue #175 (M1): Phase 1 must FORCE-SYNC
     ``current_attach_generation`` to the lab.json link's

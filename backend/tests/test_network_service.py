@@ -1816,6 +1816,10 @@ def test_ensure_lab_bridges_sets_qemu_nic_link_state_per_lab_links(
         def _runtime_record(self, _lab_id, _node_id, *, include_stopped=False):
             return {"kind": "qemu", "qmp_socket": "/tmp/qmp.sock"}
 
+        def reconcile_qemu_node_links(self, *_args, batch_host=False):
+            assert batch_host
+            return {}
+
         def set_qemu_nic_link(self, _lab_id, node_id, interface_index, *, up):
             captured.append((node_id, interface_index, up))
             return True, None
