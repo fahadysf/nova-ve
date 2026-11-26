@@ -149,6 +149,7 @@ def labs_dir(monkeypatch, tmp_path):
         "app.routers.labs.get_settings",
     ):
         monkeypatch.setattr(target, lambda: settings)
+    monkeypatch.setattr("app.services.node_runtime_service.NodeRuntimeService.docker_network_state", lambda *args, **kwargs: None)
 
     instance_dir = tmp_path / "nova-ve-instance"
     instance_dir.mkdir()

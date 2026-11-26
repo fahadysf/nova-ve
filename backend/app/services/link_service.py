@@ -757,6 +757,26 @@ class LinkService:
             # running (their initial attach will run when the user starts
             # the node). The runtime registry is the single source of truth.
             runtime = runtime_service._runtime_record(lab_id, node_id)
+            node = nodes.get(str(node_id)) or nodes.get(node_id) or {}
+            if node.get("type") == "docker" or (runtime and runtime.get("kind") == "docker"):
+                state = runtime_service.docker_network_state(
+                    lab_id, node_id, runtime.get("container_name") if runtime else None,
+                )
+                if state and state["network_mode"] != "none":
+                    raise NodeRuntimeError(runtime_service.legacy_docker_message(node, state))
+                if state and runtime is None:
+                    raise NodeRuntimeError(
+                        f"A running Docker container matches node {node.get('name') or node_id} "
+                        "but has no runtime record. Verify its ownership and restart the node before linking."
+                    )
+                if runtime and state is None:
+                    raise NodeRuntimeError(
+                        "Could not verify Docker networking; retry before linking."
+                    )
+                if runtime and runtime.get("pid") and state and runtime["pid"] != state["pid"]:
+                    raise NodeRuntimeError(
+                        f"Docker node {node.get('name') or node_id} changed process; stop and restart it before linking."
+                    )
             if runtime is None:
                 continue
             kind = str(runtime.get("kind") or "")
