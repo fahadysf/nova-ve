@@ -21,7 +21,14 @@ from contextlib import AsyncExitStack, nullcontext
 from app.config import get_settings
 from app.services import host_net
 from app.services.lab_lock import lab_lock
-from app.services.lab_service import LabService, _normalize_relative_lab_path, keep_written_revision
+from app.services.lab_service import (
+    LabService,
+    _normalize_relative_lab_path,
+    allocate_link_id,
+    allocate_network_id,
+    keep_high_water_marks,
+    keep_written_revision,
+)
 from app.services.link_utils import _endpoint_key, _link_pair_key  # noqa: F401 — re-exported
 from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
 from app.services.shared_network_service import bridge_identity, find_owner, is_member, member_key
@@ -123,25 +130,13 @@ def _link_references_endpoint(
 
 
 def _next_link_id(lab_data: dict) -> str:
-    max_n = 0
-    for link in lab_data.get("links", []) or []:
-        link_id = str(link.get("id", "") or "")
-        if link_id.startswith("lnk_"):
-            tail = link_id[len("lnk_"):]
-            if tail.isdigit():
-                max_n = max(max_n, int(tail))
-    return f"lnk_{max_n + 1:03d}"
+    # #332: allocation records a high-water mark so ids are never reused.
+    return allocate_link_id(lab_data)
 
 
 def _next_network_id(lab_data: dict) -> int:
-    networks = lab_data.get("networks", {}) or {}
-    next_id = 0
-    for key in networks.keys():
-        try:
-            next_id = max(next_id, int(key))
-        except (TypeError, ValueError):
-            continue
-    return next_id + 1
+    # #332: allocation records a high-water mark so ids are never reused.
+    return allocate_network_id(lab_data)
 
 
 def _normalize_endpoint(raw: Any) -> dict:
@@ -611,6 +606,8 @@ class LinkService:
                 # Roll back lab.json — JSON file leads kernel state contract.
                 # #248: restore the pre-operation snapshot (revision included)
                 # — no phantom bump on a failed create.
+                # #332: the ids allocated above stay allocated.
+                keep_high_water_marks(original_snapshot, data)
                 LabService.write_lab_json_static(normalized, original_snapshot, bump_revision=False)
                 _recompute_mac_registry(normalized, original_snapshot)
                 _logger.error(

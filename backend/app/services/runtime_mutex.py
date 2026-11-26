@@ -101,8 +101,9 @@ class RuntimeMutexRegistry:
 
     Locks are created lazily on first acquisition and never reaped — the
     set of in-flight ``(lab, node, iface)`` keys is bounded by the lab's
-    declared topology (max 999 nodes per lab × 99 interfaces per node)
-    and the cost of a stale lock is negligible.
+    declared topology (a lab accepts at most 999 node creations, because
+    ids are never reused and must fit the host's interface names (#332),
+    × 99 interfaces per node) and the cost of a stale lock is negligible.
 
     US-303 codex iter1 HIGH-2: also exposes a per-``(lab_id, node_id)``
     "node-scoped" lock for serializing PCIe slot allocation

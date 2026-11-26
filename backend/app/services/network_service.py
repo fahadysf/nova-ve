@@ -39,13 +39,16 @@ from app.services.cloud_inventory_service import (
 )
 from app.services.lab_lock import LabLockTimeout, lab_lock
 from app.services.lab_service import (
+    LabIdExhaustedError,
     LabService,
     _bridge_server_cidr,
     _cleanup_bridge_dhcp_runtime,
     _drop_bridge_guard_after_delete,
     _normalize_relative_lab_path,
+    allocate_network_id,
     keep_written_revision,
     locked_lab,
+    preview_network_id,
 )
 from app.services.link_service import _refcount, _recompute_mac_registry
 from app.services.shared_network_service import (
@@ -266,19 +269,29 @@ def _allocate_nat_cloud_cidr(networks: dict, extra_used: list[ipaddress.IPv4Netw
     )
 
 
-def _next_network_id(networks: dict) -> int:
-    return max((int(key) for key in networks if str(key).isdigit()), default=0) + 1
+def _id_exhausted(exc: LabIdExhaustedError) -> NetworkServiceError:
+    """A lab out of ids, in this service's own error type (#332)."""
+    return NetworkServiceError(exc.code, exc.message)
+
+
+def _next_network_id(data: dict) -> int:
+    """The network id the next allocation would take, refusing as it does (#332)."""
+    try:
+        return preview_network_id(data)
+    except LabIdExhaustedError as exc:
+        raise _id_exhausted(exc) from exc
 
 
 def _normalize_new_nat_cloud(
     raw_config: dict,
     lab_id: str,
-    networks: dict,
+    data: dict,
     can_open: Callable[[str], bool] | None,
 ) -> dict:
     """Full checks for a NAT-Cloud that does not exist yet."""
+    networks = data.get("networks") or {}
     # A bridge left over from a failed delete is reused, so it is no conflict.
-    own_bridge = host_net.bridge_name(lab_id, _next_network_id(networks))
+    own_bridge = host_net.bridge_name(lab_id, _next_network_id(data))
     config = _normalize_nat_cloud_config(
         raw_config,
         networks,
@@ -1089,7 +1102,7 @@ class NetworkService:
             if config.get("dhcp") is True:
                 _check_bridge_dhcp_overlaps(
                     config["cidr"],
-                    own_bridge=host_net.bridge_name(lab_id, _next_network_id(networks)),
+                    own_bridge=host_net.bridge_name(lab_id, _next_network_id(data)),
                     can_open=can_open,
                 )
             return config
@@ -1130,7 +1143,7 @@ class NetworkService:
         networks = data.get("networks") or {}
         if network_id is None:
             lab_id = str(data.get("id") or normalized)
-            return _normalize_new_nat_cloud(raw_config, lab_id, networks, can_open)
+            return _normalize_new_nat_cloud(raw_config, lab_id, data, can_open)
 
         network = networks.get(str(network_id))
         if not isinstance(network, dict) or network.get("type") != NAT_CLOUD_TYPE:
@@ -1605,7 +1618,7 @@ class NetworkService:
                         normalized_config, owner_runtime = _normalize_shared_nat_cloud_config(shared_cloud_id)
                     else:
                         normalized_config = _normalize_new_nat_cloud(
-                            raw_config, lab_id, networks, can_open
+                            raw_config, lab_id, data, can_open
                         )
                         owner_runtime = {}
                 else:
@@ -1616,7 +1629,7 @@ class NetworkService:
                 if bridge_dhcp:
                     _check_bridge_dhcp_overlaps(
                         normalized_config["cidr"],
-                        own_bridge=host_net.bridge_name(lab_id, _next_network_id(networks)),
+                        own_bridge=host_net.bridge_name(lab_id, _next_network_id(data)),
                         can_open=can_open,
                     )
                 # Bridge-Cloud: host-owned bridge.  Validate config.host_bridge
@@ -1636,7 +1649,10 @@ class NetworkService:
                             "provision-ubuntu-2604.sh on the host first.",
                             extra={"host_bridge": host_bridge},
                         )
-                next_id = _next_network_id(networks)
+                try:
+                    next_id = allocate_network_id(data)
+                except LabIdExhaustedError as exc:
+                    raise _id_exhausted(exc) from exc
                 bridge = (
                     normalized_config["host_bridge"]
                     if network_type == BRIDGE_CLOUD_TYPE

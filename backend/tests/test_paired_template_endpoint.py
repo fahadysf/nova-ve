@@ -15,6 +15,7 @@ against an empty lab.
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,6 +27,8 @@ from fastapi.testclient import TestClient
 from app.dependencies import get_current_user
 from app.routers import labs
 from app.schemas.node import NodeFromPairedTemplate, NodeFromTemplate
+from app.services import host_net
+from app.services.link_service import LinkService
 from app.services.template_service import TemplateService
 
 
@@ -332,6 +335,99 @@ async def test_rolls_back_when_link_creation_fails(patched_split, monkeypatch):
     on_disk = json.loads(lab_file.read_text())
     assert on_disk["nodes"] == {}
     assert on_disk["links"] == []
+
+
+# ---- #332: a paired creation needs two node ids and one network id ----
+
+_ONE_NODE_ID_LEFT = (
+    "This lab has used all 999 node ids. Ids are never reused, "
+    "so start a new lab to add more nodes."
+)
+
+
+def _set_marks(lab_file: Path, **marks) -> None:
+    data = json.loads(lab_file.read_text())
+    data["meta"].update(marks)
+    lab_file.write_text(json.dumps(data))
+
+
+def _two_link_paired_template() -> dict:
+    """The vMX pair with a second interface on the control node, so that a
+    second link between the two is legal."""
+    template = copy.deepcopy(VMX_PAIRED_TEMPLATE)
+    control = template["nodes"][0]
+    control["ethernet"] = 2
+    control["interface_naming"] = {"explicit": ["fxp0", "fxp1"]}
+    template["links"].append(
+        {"from_node": "vcp", "from_iface": "fxp1", "to_node": "vfp", "to_iface": "em1"}
+    )
+    return template
+
+
+@pytest.mark.asyncio
+async def test_paired_create_is_refused_whole_when_both_nodes_do_not_fit(patched_split):
+    """With one node id left the pair is refused before anything is written:
+    no lone node, and no id burned."""
+    _seed_paired_template(patched_split, VMX_PAIRED_TEMPLATE)
+    lab_file = _seed_empty_lab(patched_split)
+    _set_marks(lab_file, last_node_id=998)
+    before = lab_file.read_bytes()
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json", NodeFromPairedTemplate(template_key="juniper-vmx"), current_user=_admin()
+    )
+
+    assert (_response_status(response), _response_json(response)["message"]) == (409, _ONE_NODE_ID_LEFT)
+    assert lab_file.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_paired_create_takes_its_nodes_back_when_no_network_id_is_left(patched_split):
+    """The pair's link brings an implicit network into being. With every
+    network id used the nodes are removed again, and their ids stay used."""
+    _seed_paired_template(patched_split, VMX_PAIRED_TEMPLATE)
+    lab_file = _seed_empty_lab(patched_split)
+    _set_marks(lab_file, last_network_id=host_net.MAX_NETWORK_ID)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json", NodeFromPairedTemplate(template_key="juniper-vmx"), current_user=_admin()
+    )
+
+    body = _response_json(response)
+    assert (_response_status(response), body["status"]) == (409, "fail")
+    assert "network ids" in body["message"]
+    on_disk = json.loads(lab_file.read_text())
+    assert (on_disk["nodes"], on_disk["links"], on_disk["networks"]) == ({}, [], {})
+    assert on_disk["meta"]["last_node_id"] == 2
+
+
+@pytest.mark.asyncio
+async def test_paired_rollback_keeps_the_ids_its_links_used(patched_split, monkeypatch):
+    """The links are made through the link service, which re-reads the lab and
+    allocates in a copy of its own. Rolling the lab back must not free those
+    ids: the route's own copy of the lab never saw them."""
+    _seed_paired_template(patched_split, _two_link_paired_template())
+    lab_file = _seed_empty_lab(patched_split)
+    real_create_link = LinkService.create_link
+    made: list[int] = []
+
+    async def refuse_second_link(self, *args, **kwargs):
+        if made:
+            raise RuntimeError("second link refused")
+        made.append(1)
+        return await real_create_link(self, *args, **kwargs)
+
+    monkeypatch.setattr(LinkService, "create_link", refuse_second_link)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json", NodeFromPairedTemplate(template_key="juniper-vmx"), current_user=_admin()
+    )
+
+    assert _response_status(response) == 500
+    on_disk = json.loads(lab_file.read_text())
+    assert (on_disk["nodes"], on_disk["links"], on_disk["networks"]) == ({}, [], {})
+    marks = on_disk["meta"]
+    assert (marks["last_node_id"], marks["last_network_id"], marks["last_link_id"]) == (2, 1, 2)
 
 
 def test_http_transport_returns_422_for_bad_scalar_preflight(
