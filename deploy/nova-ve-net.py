@@ -92,11 +92,11 @@ GUARD_LOCK_PATH = Path(os.environ.get("NOVA_VE_GUARD_LOCK", "/run/nova-ve-bridge
 # Bridge: nove<lab_hash:04x>n<network_id 1-5 digits>     max 14
 # Lab bridges: nove<lab_hash:04x>n<net 1-5 digits>, plus the per-lab
 # management bridge (#287): nove<lab_hash:04x>mg
-RE_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}(n[0-9]{1,5}|mg)$")
+RE_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}(n[0-9]{1,5}|mg)\Z")
 
 # Lab network bridges only (no management bridge): the isolated-bridge DHCP
 # verbs (#325) never apply to anything else.
-RE_NETWORK_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}n[0-9]{1,5}$")
+RE_NETWORK_BRIDGE_NAME = re.compile(r"^nove[a-f0-9]{4}n[0-9]{1,5}\Z")
 
 # Host-owned bridges created by the provision script for Bridge-Cloud
 # networks.  Lab-side verbs MUST NOT accept these; only the dedicated

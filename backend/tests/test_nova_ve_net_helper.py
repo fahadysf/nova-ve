@@ -1198,6 +1198,24 @@ def test_bridge_dhcp_verbs_reject_bad_arguments(helper, argv):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("terminal", ["\n", "\r\n"])
+@pytest.mark.parametrize(
+    "validator_name,bridge_name",
+    [
+        ("validate_bridge_name", "nove0123n1"),
+        ("validate_bridge_name", "nove0123mg"),
+        ("validate_network_bridge_name", "nove0123n99999"),
+    ],
+)
+def test_bridge_name_rejects_terminal_newlines(helper, validator_name, bridge_name, terminal):
+    validator = getattr(helper, validator_name)
+
+    assert validator(bridge_name) == bridge_name
+
+    with pytest.raises(helper._ValidationError):
+        validator(bridge_name + terminal)
+
+
 @pytest.mark.parametrize(
     "name",
     [
