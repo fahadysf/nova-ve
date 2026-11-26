@@ -1,4 +1,4 @@
-"""Helpers for thread-backed mutations and request cancellation."""
+"""Helpers for mutations and request cancellation."""
 
 import asyncio
 import contextvars
@@ -11,15 +11,19 @@ CANCELLED_NOTIFICATION_TIMEOUT_S = 5.0
 
 
 async def run_mutation(function, *args, **kwargs):
-    """Wait for an already-started worker, recording cancellation requests.
-
-    A worker cannot be cancelled safely: it may own a caller's lock or have
-    already changed persistent state. Keep the caller alive until it finishes.
-    A worker exception takes precedence over a remembered cancellation.
-    """
+    """Run a synchronous mutation in a worker and wait for it to finish."""
     context = contextvars.copy_context()
     call = functools.partial(function, *args, **kwargs)
     future = asyncio.get_running_loop().run_in_executor(None, context.run, call)
+    return await wait_for_mutation(future)
+
+
+async def wait_for_mutation(future):
+    """Let an in-flight mutation finish and remember caller cancellation.
+
+    The mutation may hold a lock or have changed persistent state. An error
+    from the mutation takes precedence over a remembered cancellation.
+    """
     cancelled = False
     while not future.done():
         try:

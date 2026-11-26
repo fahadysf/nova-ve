@@ -33,6 +33,7 @@ from app.schemas.node import (
     validate_second_console_mode_for_type,
 )
 from app.schemas.user import UserRead
+from app.services.async_utils import notify_after_mutation
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
 from app.services import audit_service
@@ -3400,7 +3401,7 @@ async def delete_lab(
                 "message": "Access denied.",
             }
         try:
-            await lab_service.delete_lab(lab)
+            cancelled = await lab_service.delete_lab(lab)
         except SharedCloudReferenceError as exc:
             return {
                 "code": 409,
@@ -3408,14 +3409,17 @@ async def delete_lab(
                 "message": exc.message,
                 "data": {"references": exc.references},
             }
-        await audit_service.record(
-            "lab.delete",
-            actor=current_user.username,
-            target_type="lab",
-            target_id=lab.path,
-            target_name=lab.name,
-            lab_path=lab.path,
-            lab_name=lab.name,
+        await notify_after_mutation(
+            audit_service.record(
+                "lab.delete",
+                actor=current_user.username,
+                target_type="lab",
+                target_id=lab.path,
+                target_name=lab.name,
+                lab_path=lab.path,
+                lab_name=lab.name,
+            ),
+            cancelled,
         )
         return {
             "code": 200,
