@@ -20,7 +20,8 @@ from contextlib import AsyncExitStack, nullcontext
 
 from app.config import get_settings
 from app.services import host_net
-from app.services.lab_lock import lab_lock
+from app.services.async_utils import notify_after_mutation, run_mutation
+from app.services.lab_lock import lab_lock, lab_lock_async
 from app.services.lab_service import (
     LabService,
     _normalize_relative_lab_path,
@@ -413,15 +414,19 @@ class LinkService:
         ``_lab_lock_held`` (#208a): when True the caller already holds
         ``lab_lock(normalized, labs_dir)``; we skip re-acquisition (fcntl
         flock is not reentrant on Linux even within the same process).
+
+        #331: the lock is awaited, not polled on the event loop, because a
+        worker thread (a network patch, the lab-open reconcile) can hold it
+        for seconds. Nothing between acquiring it and releasing it awaits.
         """
         link_payload: dict
         network_payload: Optional[dict] = None
 
         lab_lock_cm = (
-            nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
+            nullcontext() if _lab_lock_held else lab_lock_async(normalized, labs_dir)
         )
 
-        with lab_lock_cm:
+        async with lab_lock_cm:
             data = LabService.read_lab_json_static(normalized)
             networks = data.setdefault("networks", {})
             links = data.setdefault("links", [])
@@ -953,13 +958,16 @@ class LinkService:
                         bridge_name=bridge,
                     )
                 else:
-                    # US-303: QEMU hot-add via QMP.
+                    # US-303: QEMU hot-add via QMP. #331: the lab lock is held
+                    # here, so the helper must not take it again to record the
+                    # planned MAC (it is not reentrant); the caller does that.
                     attachment = runtime_service._attach_qemu_interface_locked(
                         lab_id,
                         node_id,
                         network_id,
                         interface_index,
                         bridge_name=bridge,
+                        _lab_lock_held=True,
                     )
                 attached.append((node_id, interface_index, kind))
                 if bridge not in bridges_to_raise:
@@ -977,6 +985,7 @@ class LinkService:
                     interface_index=interface_index,
                     network_id=network_id,
                     attach_generation=attach_generation,
+                    planned_mac=attachment.get("planned_mac") if kind == "qemu" else None,
                 )
 
                 if kind == "qemu":
@@ -1089,6 +1098,7 @@ class LinkService:
         interface_index: int,
         network_id: int,
         attach_generation: int,
+        planned_mac: Optional[str] = None,
     ) -> None:
         """US-204b: stamp ``Link.runtime.attach_generation`` on the link
         whose endpoints match ``(node_id, interface_index, network_id)``
@@ -1096,6 +1106,10 @@ class LinkService:
         ``node.interfaces[interface_index].runtime.current_attach_generation``
         on the matching node. Both writes happen under ``lab_lock`` and
         the lab.json is re-persisted by the caller.
+
+        ``planned_mac`` (#331) is recorded on that interface when it has no
+        MAC of its own. The caller holds the lab lock, so the attach helper
+        cannot write it to lab.json itself.
         """
         for link in lab_data.get("links", []) or []:
             endpoints = (link.get("from"), link.get("to"))
@@ -1130,6 +1144,9 @@ class LinkService:
                 if int(iface.get("index", -1)) == int(interface_index):
                     iface_runtime = iface.setdefault("runtime", {})
                     iface_runtime["current_attach_generation"] = int(attach_generation)
+                    if planned_mac and not iface.get("planned_mac"):
+                        # Never replace a MAC the operator set.
+                        iface["planned_mac"] = str(planned_mac)
                     break
 
     @staticmethod
@@ -1426,168 +1443,178 @@ class LinkService:
             if primary_error is not None:
                 raise primary_error
 
-        # ------------------------------------------------------------------
-        # Phase 3 — release the IP via ``network_service._release_ip`` (its
-        # own ``lab_lock``). Codex critic v2 MEDIUM: the canonical helper
-        # owns the sort + ipv4 validation; the inlined ``used.remove`` it
-        # used to bypass is gone.
-        # ------------------------------------------------------------------
-        if (
-            paired_net_id is not None
-            and isinstance(removed_ip, str)
-            and removed_ip
-        ):
-            from app.services.network_service import NetworkService  # noqa: WPS433
+        def finish_delete():
+            nonlocal deleted_implicit
+            # ------------------------------------------------------------------
+            # Phase 3 — release the IP via ``network_service._release_ip`` (its
+            # own ``lab_lock``). Codex critic v2 MEDIUM: the canonical helper
+            # owns the sort + ipv4 validation; the inlined ``used.remove`` it
+            # used to bypass is gone.
+            # ------------------------------------------------------------------
+            if (
+                paired_net_id is not None
+                and isinstance(removed_ip, str)
+                and removed_ip
+            ):
+                from app.services.network_service import NetworkService  # noqa: WPS433
 
-            # #208a/b architect-iter1: thread _lab_lock_held so paired-create
-            # compensation (which holds the outer lab_lock) does not deadlock
-            # on the inner per-lab fcntl flock when releasing IPAM-bearing
-            # links. Default-path delete_link callers pass False here.
-            NetworkService()._release_ip(
-                normalized,
-                int(paired_net_id),
-                removed_ip,
-                _lab_lock_held=_lab_lock_held,
-            )
-
-        # ------------------------------------------------------------------
-        # Phase 4 — under ``lab_lock``: remove the link from lab.json + GC
-        # implicit networks at refcount 0. We re-read the JSON inside the
-        # lock because Phase 3 mutated it; the link record itself was not
-        # changed by ``_release_ip`` so the original ``target_link`` is
-        # still findable by id.
-        # ------------------------------------------------------------------
-        delete_lab_lock_cm = (
-            nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
-        )
-        with delete_lab_lock_cm:
-            data = LabService.read_lab_json_static(normalized)
-            links = data.get("links", []) or []
-            networks = data.get("networks", {}) or {}
-
-            target_index = None
-            for index, link in enumerate(links):
-                if str(link.get("id")) == str(link_id):
-                    target_index = index
-                    break
-            if target_index is None:
-                # Another caller deleted the link between Phase 1 and now.
-                # Treat as idempotent success — kernel + IPAM cleanup
-                # already ran for our copy of the link record.
-                return True, None
-
-            removed_link = links.pop(target_index)
-            data["links"] = links
-
-            referenced_network_ids: List[int] = []
-            for endpoint in (removed_link.get("from"), removed_link.get("to")):
-                if isinstance(endpoint, dict) and "network_id" in endpoint:
-                    referenced_network_ids.append(int(endpoint["network_id"]))
-
-            # Cascade-delete orphaned implicit-bridge halves. An implicit
-            # bridge is paired (refcount==2) by construction; promotion only
-            # happens at refcount==3 (see ``_create_link_locked``). If
-            # removing this link drops an implicit network's refcount to 1,
-            # the surviving link is an orphan pointing at a now-dangling
-            # bridge — drop it too and let the network GC below remove the
-            # bridge in the same write. Kernel-side cleanup for the orphan
-            # half lands via the post-delete reconcile pass (QEMU) or the
-            # discovery loop (Docker).
-            for net_id in list(referenced_network_ids):
-                network_record = networks.get(str(net_id))
-                if not isinstance(network_record, dict):
-                    continue
-                if network_record.get("implicit") is not True:
-                    continue
-                if _refcount(data, net_id) != 1:
-                    continue
-                orphan_index: Optional[int] = None
-                orphan_link: Optional[dict] = None
-                for index, candidate in enumerate(data["links"]):
-                    if not isinstance(candidate, dict):
-                        continue
-                    for ep in (candidate.get("from"), candidate.get("to")):
-                        if (
-                            isinstance(ep, dict)
-                            and "network_id" in ep
-                            and int(ep["network_id"]) == int(net_id)
-                        ):
-                            orphan_index = index
-                            orphan_link = candidate
-                            break
-                    if orphan_link is not None:
-                        break
-                if orphan_link is not None and orphan_index is not None:
-                    data["links"].pop(orphan_index)
-                    ws_events.append(
-                        ("link_deleted", {"link_id": str(orphan_link.get("id"))})
-                    )
-                    _logger.info(
-                        "delete_link: cascade-removed orphan implicit-bridge half "
-                        "link=%s net=%s (primary=%s lab=%s)",
-                        orphan_link.get("id"),
-                        net_id,
-                        link_id,
-                        normalized,
-                    )
-
-            for net_id in referenced_network_ids:
-                network_record = networks.get(str(net_id))
-                if not isinstance(network_record, dict):
-                    continue
-                if network_record.get("implicit") is True and _refcount(data, net_id) == 0:
-                    networks.pop(str(net_id), None)
-                    deleted_implicit = dict(network_record)
-                    ws_events.append(("network_deleted", {"network": dict(network_record)}))
-
-            data["networks"] = networks
-            data.pop("topology", None)
-            LabService.write_lab_json_static(normalized, data)
-            _recompute_mac_registry(normalized, data)
-
-            ws_events.append(("link_deleted", {"link_id": str(link_id)}))
-
-            # Issue #174 / #175 (M2): bulletproof reconcile after delete.
-            # The targeted detach in Phase 2 might have stale-gen no-op'd
-            # or failed silently mid-flight; walk every running QEMU node
-            # in the lab and converge runtime + kernel to the JSON we
-            # just wrote. MUST run INSIDE lab_lock so the post-write
-            # re-read sees the same JSON state that was written under
-            # the lock and another writer cannot slip a divergent state
-            # in between. The reconciler exception is swallowed so a
-            # reconcile failure cannot corrupt the otherwise-successful
-            # delete_link op.
-            try:
-                from app.services.node_runtime_service import (  # noqa: WPS433
-                    NodeRuntimeService,
-                )
-
-                rt_svc = NodeRuntimeService()
-                data_after = LabService.read_lab_json_static(normalized)
-                lab_id_after = str(data_after.get("id") or normalized)
-                for raw_id, node_after in (data_after.get("nodes") or {}).items():
-                    if not isinstance(node_after, dict):
-                        continue
-                    if str(node_after.get("type") or "").lower() != "qemu":
-                        continue
-                    rt_svc.reconcile_qemu_node_links(lab_id_after, data_after, node_after)
-            except Exception:  # noqa: BLE001 — best-effort safety net
-                _logger.exception(
-                    "delete_link: post-delete reconcile failed (lab=%s link=%s)",
+                # #208a/b architect-iter1: thread _lab_lock_held so paired-create
+                # compensation (which holds the outer lab_lock) does not deadlock
+                # on the inner per-lab fcntl flock when releasing IPAM-bearing
+                # links. Default-path delete_link callers pass False here.
+                # #331: the helper polls the subnet lock and the lab lock, so it
+                # runs in a worker thread. Phase 4 takes the lab lock afterwards.
+                NetworkService()._release_ip(
                     normalized,
-                    link_id,
+                    int(paired_net_id),
+                    removed_ip,
+                    _lab_lock_held=_lab_lock_held,
                 )
 
-        for event_type, payload in ws_events:
-            await ws_hub.publish(normalized, event_type, payload)
+            # ------------------------------------------------------------------
+            # Phase 4 — under ``lab_lock``: remove the link from lab.json + GC
+            # implicit networks at refcount 0. We re-read the JSON inside the
+            # lock because Phase 3 mutated it; the link record itself was not
+            # changed by ``_release_ip`` so the original ``target_link`` is
+            # still findable by id. Both phases run in one worker so
+            # cancellation cannot leave an IP release without link cleanup.
+            # ------------------------------------------------------------------
+            delete_lab_lock_cm = (
+                nullcontext() if _lab_lock_held else lab_lock(normalized, labs_dir)
+            )
+            with delete_lab_lock_cm:
+                data = LabService.read_lab_json_static(normalized)
+                links = data.get("links", []) or []
+                networks = data.get("networks", {}) or {}
 
-        return False, deleted_implicit
+                target_index = None
+                for index, link in enumerate(links):
+                    if str(link.get("id")) == str(link_id):
+                        target_index = index
+                        break
+                if target_index is None:
+                    # Another caller deleted the link between Phase 1 and now.
+                    # Treat as idempotent success — kernel + IPAM cleanup
+                    # already ran for our copy of the link record.
+                    return True, None
+
+                removed_link = links.pop(target_index)
+                data["links"] = links
+
+                referenced_network_ids: List[int] = []
+                for endpoint in (removed_link.get("from"), removed_link.get("to")):
+                    if isinstance(endpoint, dict) and "network_id" in endpoint:
+                        referenced_network_ids.append(int(endpoint["network_id"]))
+
+                # Cascade-delete orphaned implicit-bridge halves. An implicit
+                # bridge is paired (refcount==2) by construction; promotion only
+                # happens at refcount==3 (see ``_create_link_locked``). If
+                # removing this link drops an implicit network's refcount to 1,
+                # the surviving link is an orphan pointing at a now-dangling
+                # bridge — drop it too and let the network GC below remove the
+                # bridge in the same write. Kernel-side cleanup for the orphan
+                # half lands via the post-delete reconcile pass (QEMU) or the
+                # discovery loop (Docker).
+                for net_id in list(referenced_network_ids):
+                    network_record = networks.get(str(net_id))
+                    if not isinstance(network_record, dict):
+                        continue
+                    if network_record.get("implicit") is not True:
+                        continue
+                    if _refcount(data, net_id) != 1:
+                        continue
+                    orphan_index: Optional[int] = None
+                    orphan_link: Optional[dict] = None
+                    for index, candidate in enumerate(data["links"]):
+                        if not isinstance(candidate, dict):
+                            continue
+                        for ep in (candidate.get("from"), candidate.get("to")):
+                            if (
+                                isinstance(ep, dict)
+                                and "network_id" in ep
+                                and int(ep["network_id"]) == int(net_id)
+                            ):
+                                orphan_index = index
+                                orphan_link = candidate
+                                break
+                        if orphan_link is not None:
+                            break
+                    if orphan_link is not None and orphan_index is not None:
+                        data["links"].pop(orphan_index)
+                        ws_events.append(
+                            ("link_deleted", {"link_id": str(orphan_link.get("id"))})
+                        )
+                        _logger.info(
+                            "delete_link: cascade-removed orphan implicit-bridge half "
+                            "link=%s net=%s (primary=%s lab=%s)",
+                            orphan_link.get("id"),
+                            net_id,
+                            link_id,
+                            normalized,
+                        )
+
+                for net_id in referenced_network_ids:
+                    network_record = networks.get(str(net_id))
+                    if not isinstance(network_record, dict):
+                        continue
+                    if network_record.get("implicit") is True and _refcount(data, net_id) == 0:
+                        networks.pop(str(net_id), None)
+                        deleted_implicit = dict(network_record)
+                        ws_events.append(("network_deleted", {"network": dict(network_record)}))
+
+                data["networks"] = networks
+                data.pop("topology", None)
+                LabService.write_lab_json_static(normalized, data)
+                _recompute_mac_registry(normalized, data)
+
+                ws_events.append(("link_deleted", {"link_id": str(link_id)}))
+
+                # Issue #174 / #175 (M2): bulletproof reconcile after delete.
+                # The targeted detach in Phase 2 might have stale-gen no-op'd
+                # or failed silently mid-flight; walk every running QEMU node
+                # in the lab and converge runtime + kernel to the JSON we
+                # just wrote. MUST run INSIDE lab_lock so the post-write
+                # re-read sees the same JSON state that was written under
+                # the lock and another writer cannot slip a divergent state
+                # in between. The reconciler exception is swallowed so a
+                # reconcile failure cannot corrupt the otherwise-successful
+                # delete_link op.
+                try:
+                    from app.services.node_runtime_service import (  # noqa: WPS433
+                        NodeRuntimeService,
+                    )
+
+                    rt_svc = NodeRuntimeService()
+                    data_after = LabService.read_lab_json_static(normalized)
+                    lab_id_after = str(data_after.get("id") or normalized)
+                    for raw_id, node_after in (data_after.get("nodes") or {}).items():
+                        if not isinstance(node_after, dict):
+                            continue
+                        if str(node_after.get("type") or "").lower() != "qemu":
+                            continue
+                        rt_svc.reconcile_qemu_node_links(lab_id_after, data_after, node_after)
+                except Exception:  # noqa: BLE001 — best-effort safety net
+                    _logger.exception(
+                        "delete_link: post-delete reconcile failed (lab=%s link=%s)",
+                        normalized,
+                        link_id,
+                    )
+            return False, deleted_implicit
+
+        result, cancelled = await run_mutation(finish_delete)
+
+        async def publish_events():
+            for event_type, payload in ws_events:
+                await ws_hub.publish(normalized, event_type, payload)
+
+        await notify_after_mutation(publish_events(), cancelled)
+        return result
 
     async def patch_link(self, lab_path: str, link_id: str, patch: Dict[str, Any]) -> Optional[dict]:
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
-        with lab_lock(normalized, labs_dir):
+        async with lab_lock_async(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
             links = data.get("links", []) or []
 

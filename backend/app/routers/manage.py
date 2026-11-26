@@ -31,6 +31,7 @@ from app.dependencies import get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services import audit_service
+from app.services.async_utils import notify_after_mutation, run_mutation
 from app.services.lab_lock import LabLockTimeout, lab_lock
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeService
@@ -295,14 +296,21 @@ async def _audit_lab_action(event: str, result: dict, current_user: UserRead) ->
     return result
 
 
+async def _lab_action(event: str, lab_path: str, wipe: bool, current_user: UserRead) -> dict:
+    if current_user.role != "admin":
+        return _fail("Admin role required.", code=403)
+    # #331: the action waits for the lab lock and stops every node, both of
+    # which block, so it runs in a worker thread rather than on the event loop.
+    result, cancelled = await run_mutation(_stop_or_wipe, lab_path, wipe=wipe)
+    return await notify_after_mutation(_audit_lab_action(event, result, current_user), cancelled)
+
+
 @router.post("/{lab_path:path}/stop")
 async def stop_lab(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
 ):
-    if current_user.role != "admin":
-        return _fail("Admin role required.", code=403)
-    return await _audit_lab_action("lab.stop", _stop_or_wipe(lab_path, wipe=False), current_user)
+    return await _lab_action("lab.stop", lab_path, False, current_user)
 
 
 @router.post("/{lab_path:path}/wipe")
@@ -310,9 +318,7 @@ async def wipe_lab(
     lab_path: str,
     current_user: UserRead = Depends(get_current_user),
 ):
-    if current_user.role != "admin":
-        return _fail("Admin role required.", code=403)
-    return await _audit_lab_action("lab.wipe", _stop_or_wipe(lab_path, wipe=True), current_user)
+    return await _lab_action("lab.wipe", lab_path, True, current_user)
 
 
 # ----------------------------------------------------------------------

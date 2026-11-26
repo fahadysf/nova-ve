@@ -36,12 +36,14 @@ from __future__ import annotations
 import json
 import threading
 import time
+from contextlib import contextmanager
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from app.services import host_net
+from app.services import lab_lock as lab_lock_module
 from app.services.link_service import LinkContentionError, LinkService
 from app.services.node_runtime_service import (
     NodeRuntimeError,
@@ -960,6 +962,61 @@ async def test_us303_create_link_dispatches_qemu_running_node(
     # And on node.interfaces[2].runtime.current_attach_generation.
     iface_runtime = saved["nodes"]["1"]["interfaces"][2].get("runtime") or {}
     assert iface_runtime.get("current_attach_generation") == 1
+
+
+@pytest.mark.asyncio
+async def test_us303_create_link_records_planned_mac_under_its_own_lab_lock(
+    lab_settings, monkeypatch, _instance_id
+):
+    """#331: ``create_link`` holds the lab lock while it hot-adds the NIC.
+
+    The attach helper used to take that lock again to record the planned MAC.
+    The lock is not reentrant, so the helper waited out its whole timeout on
+    the event loop and then gave up without writing anything. ``create_link``
+    now records the MAC itself, in the write that also stores the generation.
+    """
+    async def _noop(*_a, **_kw):
+        pass
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop)
+    taken: list[str] = []
+    real_lock = lab_lock_module.lab_lock
+
+    @contextmanager
+    def tracking(lab, *args, **kwargs):
+        taken.append(lab)
+        with real_lock(lab, *args, **kwargs):
+            yield
+
+    monkeypatch.setattr(lab_lock_module, "lab_lock", tracking)
+
+    lab_id = "labmac"
+    lab_name = _seed_lab(
+        lab_settings.LABS_DIR,
+        f"{lab_id}.json",
+        nodes={"1": _qemu_node(1)},
+        networks={"5": _network(5)},
+    )
+    fake_qmp = _FakeQmp()
+    fake_qmp.responses["query-pci"] = _query_pci_response([0])
+    monkeypatch.setattr("app.services.node_runtime_service._default_qmp_client", fake_qmp)
+    svc = NodeRuntimeService()
+    _seed_qemu_runtime(svc, lab_id=lab_id, node_id=1, boot_slots=1, monkeypatch=monkeypatch)
+    svc._qmp_client = fake_qmp
+    _patch_host_net(monkeypatch)
+
+    link, promoted, replayed = await LinkService().create_link(
+        lab_name,
+        {"node_id": 1, "interface_index": 2},
+        {"network_id": 5},
+    )
+
+    assert taken == [], "the blocking lab lock was taken again while create_link holds it"
+    assert replayed is False and promoted is None
+    attachment = svc._runtime_record(lab_id, 1)["interface_attachments"][-1]
+    saved = json.loads((lab_settings.LABS_DIR / lab_name).read_text())
+    assert attachment["planned_mac"]
+    assert saved["nodes"]["1"]["interfaces"][2]["planned_mac"] == attachment["planned_mac"]
 
 
 @pytest.mark.asyncio

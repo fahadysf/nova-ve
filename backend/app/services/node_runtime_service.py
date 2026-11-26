@@ -3522,9 +3522,13 @@ class NodeRuntimeService:
         bridge_name: str | None = None,
         nic_model: str | None = None,
         planned_mac: str | None = None,
+        _lab_lock_held: bool = False,
     ) -> dict[str, Any]:
         """US-303 PRIVATE hot-add NIC. Mutex MUST be held.
 
+        ``_lab_lock_held`` (#331): set when the caller holds the lab's file
+        lock. The planned MAC is then not written to lab.json here, because
+        the lock is not reentrant and waiting for it would stall the caller.
         Sequence (rollback per the plan §US-303):
 
           1. Acquire lock — done by caller; assert mutex is held here.
@@ -3591,6 +3595,7 @@ class NodeRuntimeService:
                 bridge_name=bridge_name,
                 nic_model=nic_model,
                 planned_mac=planned_mac,
+                _lab_lock_held=_lab_lock_held,
             )
 
     def _attach_qemu_interface_inner(
@@ -3603,6 +3608,7 @@ class NodeRuntimeService:
         bridge_name: str | None = None,
         nic_model: str | None = None,
         planned_mac: str | None = None,
+        _lab_lock_held: bool = False,
     ) -> dict[str, Any]:
         """Body of :meth:`_attach_qemu_interface_locked`. Caller holds
         BOTH the per-iface mutex (from the outer public entrypoint) and
@@ -3958,7 +3964,10 @@ class NodeRuntimeService:
         # ``firstmac`` default case would leave ``interface.planned_mac``
         # empty and the mismatch detector would have nothing to compare
         # against.
-        if planned_mac:
+        # The caller that holds the lab lock records the MAC in its own copy
+        # of the lab: taking the same, non-reentrant lock here would wait out
+        # the whole timeout on the event loop (#331).
+        if planned_mac and not _lab_lock_held:
             try:
                 self._persist_planned_mac_to_lab_json(
                     lab_id, int(node_id), int(interface_index), planned_mac

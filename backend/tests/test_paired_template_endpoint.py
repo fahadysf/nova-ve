@@ -1101,7 +1101,7 @@ async def test_208a_paired_create_acquires_lab_lock_around_phases(patched_split,
     # The route takes the lock through lab_service.locked_lab_async (#328).
     monkeypatch.setattr("app.services.lab_service.lab_lock_async", counting_lab_lock_async)
     monkeypatch.setattr("app.services.lab_service.lab_lock", counting_lab_lock)
-    monkeypatch.setattr("app.services.link_service.lab_lock", counting_lab_lock)
+    monkeypatch.setattr("app.services.link_service.lab_lock_async", counting_lab_lock_async)
 
     response = await labs.create_nodes_from_paired_template(
         "demo.json",
