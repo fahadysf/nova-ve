@@ -123,6 +123,37 @@ describe('lab editor controls', () => {
     infoPanels.reset();
   });
 
+  it('warns about legacy nodes returned by lab reconciliation', async () => {
+    servePath = (path) => path.endsWith('/runtime/reconcile')
+      ? { code: 200, status: 'success', data: { legacy_nodes: [{ node_id: 1, name: 'router-1', container_name: 'private-container', network_mode: 'bridge', ownership: 'unverified' }] } }
+      : labLoadPayloads()[path] ?? { code: 200, status: 'success', data: {} };
+    render(LabEditorPage);
+
+    const warning = await screen.findByRole('alert');
+    expect(warning).toHaveTextContent('Potential legacy networked nodes: router-1');
+    expect(warning).toHaveTextContent('verify the container belongs to this lab');
+    expect(warning).toHaveTextContent('stop and remove it on the host');
+    expect(warning).toHaveTextContent('Start the node again before creating links');
+    expect(warning).not.toHaveTextContent('private-container');
+  });
+
+  it('does not show a legacy warning when reconciliation returns no legacy nodes', async () => {
+    render(LabEditorPage);
+    await screen.findByTestId('topology-canvas-stub');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('warns when Docker networking could not be inspected', async () => {
+    servePath = (path) => path.endsWith('/runtime/reconcile')
+      ? { code: 200, status: 'success', data: { legacy_nodes: [], legacy_inspection_unavailable: [{ node_id: 1, name: 'router-1' }] } }
+      : labLoadPayloads()[path] ?? { code: 200, status: 'success', data: {} };
+    render(LabEditorPage);
+
+    const warning = await screen.findByRole('alert');
+    expect(warning).toHaveTextContent('Could not inspect Docker networking: router-1');
+    expect(warning).toHaveTextContent('check Docker connectivity, then retry');
+  });
+
   it.each(['tabbed', 'floating'])(
     'Zen mode hides the chrome and preserves the canvas and %s console',
     async (consoleMode) => {

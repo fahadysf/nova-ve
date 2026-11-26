@@ -143,6 +143,7 @@ def patched_route_settings(monkeypatch, tmp_path, route_settings):
     monkeypatch.setattr("app.services.host_net.dnsmasq_start", lambda bridge, gateway, start, end: 4321)
     monkeypatch.setattr("app.services.host_net.dnsmasq_stop", lambda bridge: None)
     monkeypatch.setattr("app.services.host_net.list_ipv4_addrs", lambda: [])
+    monkeypatch.setattr("app.services.node_runtime_service.NodeRuntimeService.docker_network_state", lambda *args, **kwargs: None)
     return route_settings
 
 
@@ -165,6 +166,26 @@ def ws_recorder(monkeypatch):
 
     monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", fake_publish)
     return recorded
+
+
+@pytest.mark.asyncio
+async def test_reconcile_reports_scoped_legacy_candidates_and_inspection_failures(
+    patched_route_settings, auth_override, monkeypatch,
+):
+    from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
+    lab = _seed_lab(patched_route_settings.LABS_DIR, nodes={"1": _node(1), "2": _node(2), "3": _node(3)})
+    monkeypatch.setattr("app.routers.networks.network_service.ensure_lab_bridges", lambda _path: {"created": [], "skipped": []})
+    def inspect(self, lab_id, node_id, container_name=None):
+        assert lab_id == "lab"
+        if node_id == 2:
+            raise NodeRuntimeError("inspection failed")
+        return {"container_name": "nova-ve-lab-1", "network_mode": "bridge" if node_id == 1 else "none"}
+    monkeypatch.setattr(NodeRuntimeService, "docker_network_state", inspect)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as client:
+        response = await client.post(f"/api/labs/{lab}/runtime/reconcile")
+    assert response.status_code == 200
+    assert response.json()["data"]["legacy_nodes"] == [{"node_id": 1, "name": "n1", "container_name": "nova-ve-lab-1", "network_mode": "bridge", "ownership": "unverified"}]
+    assert response.json()["data"]["legacy_inspection_unavailable"] == [{"node_id": 2, "name": "n2"}]
 
 
 @pytest.mark.asyncio
