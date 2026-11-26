@@ -151,12 +151,10 @@ class FolderService:
     def annotate_running(labs: list[dict], lab_ids: dict[str, str]) -> None:
         """Set ``nodes_running`` on every listed lab (#365).
 
-        The runtime registry is the source of truth — the same liveness
-        check behind /api/manage/labs — keyed by lab id, so no lab file is
-        parsed unless a running lab has no DB row mapping its id to a path
-        (a lab written straight to disk, e.g. an imported one). Blocking
-        (``/proc`` reads, docker/hypervisor queries): call it from a worker
-        thread.
+        The runtime registry is the source of truth, keyed by lab id, so no
+        lab file is parsed unless a running lab has no DB row mapping its id
+        to a path (a lab written straight to disk, e.g. an imported one).
+        Only that fallback touches the disk; keep it off the event loop.
 
         ``lab_ids`` maps a listed lab path to its ``labs`` row id.
         """

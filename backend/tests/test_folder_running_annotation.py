@@ -1,9 +1,9 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 """#365: the labs explorer shows what is running straight from the runtime
-registry — the same liveness /api/manage/labs relies on — with no second
-way to decide what "running" means and no lab file parsed unless a running
-lab has no DB row to map its id to a path."""
+registry — the set the node heartbeat already keeps true — with no second
+way to decide what "running" means, no probing on the listing path and no
+lab file parsed unless a running lab has no DB row to map its id to a path."""
 
 import json
 from pathlib import Path
@@ -20,8 +20,6 @@ from app.services.folder_service import FolderService
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeService
 
-LIVE = {"qemu": 0, "docker": 0, "iol": 0, "dynamips": 0, "vpcs": 0}
-
 
 @pytest.fixture()
 def labs(tmp_path, monkeypatch):
@@ -34,6 +32,23 @@ def labs(tmp_path, monkeypatch):
     return labs
 
 
+@pytest.fixture()
+def registry():
+    """A seeded class-level registry, emptied again afterwards."""
+    NodeRuntimeService.reset_registry()
+    with NodeRuntimeService._lock:
+        NodeRuntimeService._registry.update(
+            {
+                "lab-a:1": {"lab_id": "lab-a", "node_id": 1, "kind": "qemu"},
+                "lab-a:2": {"lab_id": "lab-a", "node_id": 2, "kind": "docker"},
+                "lab-b:1": {"lab_id": "lab-b", "node_id": 1, "kind": "qemu"},
+            }
+        )
+        NodeRuntimeService._loaded = True
+    yield NodeRuntimeService._registry
+    NodeRuntimeService.reset_registry()
+
+
 def _lab(labs: Path, relative: str, lab_id: str) -> None:
     path = labs / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -41,7 +56,7 @@ def _lab(labs: Path, relative: str, lab_id: str) -> None:
 
 
 def _registry_reports(monkeypatch, running: dict[str, int]) -> None:
-    """The registry already knows the live counts; nothing else is touched."""
+    """The registry already knows the running labs; nothing else is touched."""
     monkeypatch.setattr(NodeRuntimeService, "__init__", lambda self: None)
     monkeypatch.setattr(NodeRuntimeService, "running_nodes_by_lab", lambda self: dict(running))
 
@@ -62,64 +77,35 @@ def _scan() -> list[dict]:
     return FolderService.list_folder("", recursive=True)["labs"]
 
 
-def test_running_nodes_by_lab_counts_live_records_grouped_by_lab(tmp_path, monkeypatch):
+def test_running_nodes_by_lab_reads_the_registry_without_probing(registry, monkeypatch):
+    """Each probe of a docker node is a ``docker inspect`` subprocess; with
+    several of them running, probing turned the labs listing from ~13 ms
+    into ~230 ms on the test host."""
+    def no_probe(*_args, **_kwargs):
+        raise AssertionError("the labs listing must not probe liveness")
+
+    monkeypatch.setattr(NodeRuntimeService, "_runtime_record", no_probe)
+    monkeypatch.setattr(NodeRuntimeService, "_check_alive_sync", staticmethod(no_probe))
     service = object.__new__(NodeRuntimeService)
-    service.runtime_dir = tmp_path
-    alive = {("lab-a", 1), ("lab-a", 2), ("lab-b", 1)}
-    monkeypatch.setattr(
-        service, "_is_runtime_alive", lambda runtime: (runtime["lab_id"], runtime["node_id"]) in alive
-    )
-    NodeRuntimeService.reset_registry()
-    with NodeRuntimeService._lock:
-        NodeRuntimeService._registry.update(
-            {
-                "lab-a:1": {"lab_id": "lab-a", "node_id": 1, "kind": "qemu"},
-                "lab-a:2": {"lab_id": "lab-a", "node_id": 2, "kind": "docker"},
-                "lab-b:1": {"lab_id": "lab-b", "node_id": 1, "kind": "qemu"},
-                "lab-c:7": {"lab_id": "lab-c", "node_id": 7, "kind": "qemu"},
-            }
-        )
-        NodeRuntimeService._loaded = True
-    try:
-        assert service.running_nodes_by_lab() == {"lab-a": 2, "lab-b": 1}
-        # Same liveness as the per-node check /api/manage/labs uses.
-        assert service.running_nodes_by_lab() == {
-            lab_id: sum(service.is_node_running(lab_id, node_id) for (other, node_id) in alive if other == lab_id)
-            for lab_id in ("lab-a", "lab-b")
-        }
-        # The by-kind aggregation reads the same live records.
-        assert service.runtime_counts() == {**LIVE, "qemu": 2, "docker": 1}
-        assert "lab-c:7" not in NodeRuntimeService._registry
-    finally:
-        NodeRuntimeService.reset_registry()
+
+    assert service.running_nodes_by_lab() == {"lab-a": 2, "lab-b": 1}
 
 
-def test_a_record_with_invalid_liveness_data_is_skipped_not_fatal(tmp_path, monkeypatch):
-    """#356 keeps one bad runtime file from taking a tally down; the per-lab
-    aggregation shares that guard."""
+def test_running_nodes_by_lab_forgets_a_lab_once_its_last_record_is_gone(registry):
+    """A stop through the app removes the record at once; the heartbeat
+    removes the record of a workload that died. Both drop the lab."""
     service = object.__new__(NodeRuntimeService)
-    service.runtime_dir = tmp_path
+    nowhere = SimpleNamespace(TMP_DIR=Path("/nonexistent-365"))
+    assert service.running_nodes_by_lab() == {"lab-a": 2, "lab-b": 1}
 
-    def is_alive(runtime):
-        if runtime["node_id"] == 7:
-            raise ValueError("Invalid process data")
-        return True
+    registry.pop("lab-a:1")
+    assert service.running_nodes_by_lab() == {"lab-a": 1, "lab-b": 1}
 
-    monkeypatch.setattr(service, "_is_runtime_alive", is_alive)
-    NodeRuntimeService.reset_registry()
-    with NodeRuntimeService._lock:
-        NodeRuntimeService._registry.update(
-            {
-                "lab-a:1": {"lab_id": "lab-a", "node_id": 1, "kind": "qemu"},
-                "lab-c:7": {"lab_id": "lab-c", "node_id": 7, "kind": "qemu"},
-            }
-        )
-        NodeRuntimeService._loaded = True
-    try:
-        assert service.running_nodes_by_lab() == {"lab-a": 1}
-        assert service.runtime_counts() == {**LIVE, "qemu": 1}
-    finally:
-        NodeRuntimeService.reset_registry()
+    NodeRuntimeService._delete_runtime_class("lab-a", 2, nowhere)
+    assert service.running_nodes_by_lab() == {"lab-b": 1}
+
+    NodeRuntimeService._delete_runtime_class("lab-b", 1, nowhere)
+    assert service.running_nodes_by_lab() == {}
 
 
 def test_labs_with_a_db_row_are_resolved_without_parsing_a_lab_file(labs, monkeypatch):
