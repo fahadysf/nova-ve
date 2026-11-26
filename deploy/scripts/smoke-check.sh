@@ -60,6 +60,14 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl is-active --quiet nova-ve-backend
 fi
 
+# KSM is the lab-density lever and ships off by default. On kernels without
+# KSM there is nothing to check; where the interface exists, the daemon must
+# be scanning or guests silently pay the full private copy.
+if [[ -d /sys/kernel/mm/ksm ]]; then
+  test "$(cat /sys/kernel/mm/ksm/run)" = "1"
+  test "$(cat /sys/kernel/mm/ksm/pages_to_scan)" = "1250"
+fi
+
 pg_isready -h 127.0.0.1 -p 5432 -d novadb -U nova >/dev/null
 
 if command -v psql >/dev/null 2>&1; then

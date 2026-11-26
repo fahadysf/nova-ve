@@ -7,6 +7,7 @@ class SystemStatus(BaseModel):
     qemu_version: str
     uksm: str
     ksm: str
+    ksm_facts: Optional[dict] = None
     cpulimit: str
     cpu: str
     vCPU: str
