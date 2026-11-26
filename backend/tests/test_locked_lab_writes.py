@@ -1177,6 +1177,88 @@ async def test_folder_rename_restores_files_if_recorder_relocation_fails(setting
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "role", "expected"),
+    [
+        ({}, "user", "team-a/Fixture.json"),
+        ({"path": "nested"}, "user", "team-a/nested/Fixture.json"),
+        ({"path": "/team-a/specified.json"}, "user", "team-a/specified.json"),
+        ({"filename": "/team-a/explicit"}, "user", "team-a/explicit.json"),
+        ({"path": "nested", "filename": "team-a/chosen.json"}, "user", "team-a/chosen.json"),
+        ({"path": "/Shared/nested"}, "user", "Shared/nested/Fixture.json"),
+        ({"filename": "Shared/explicit.json"}, "user", "Shared/explicit.json"),
+        ({"filename": "team-b/explicit.json"}, "admin", "team-b/explicit.json"),
+    ],
+)
+async def test_create_lab_respects_destination_forms(settings, audit_events, body, role, expected):
+    class CreatingDb(_RecordingDeleteDb):
+        def add(self, row):
+            self.row = row
+
+    user = SimpleNamespace(username="fixture", role=role, folder="/team-a")
+    db = CreatingDb()
+    response = await labs.create_lab(LabMetaCreate(name="Fixture", **body), current_user=user, db=db)
+
+    assert response["code"] == 200
+    assert db.row.filename == expected
+    assert (settings.LABS_DIR / expected).is_file()
+    assert db.commits == 1
+    assert [event.event for event in audit_events] == ["lab.create"]
+
+
+@pytest.mark.asyncio
+async def test_create_lab_denies_explicit_destination_outside_user_scope(settings, audit_events):
+    user = SimpleNamespace(username="fixture", role="user", folder="/team-a")
+
+    class CreatingDb(_RecordingDeleteDb):
+        def add(self, row):
+            self.row = row
+
+    db = CreatingDb()
+    request = LabMetaCreate(name="Fixture", path="/team-a", filename="team-b/explicit.json")
+    response = await labs.create_lab(request, current_user=user, db=db)
+
+    assert response["code"] == 403
+    assert not (settings.LABS_DIR / "team-b").exists()
+    assert db.commits == 0
+    assert not audit_events
+
+
+@pytest.mark.asyncio
+async def test_create_lab_checks_the_parent_when_scope_has_a_json_suffix(settings, audit_events):
+    class CreatingDb(_RecordingDeleteDb):
+        def add(self, row):
+            self.row = row
+
+    folder = "team-a/assigned.json"
+    user = SimpleNamespace(username="fixture", role="user", folder=f"/{folder}")
+    db = CreatingDb()
+    refused = await labs.create_lab(
+        LabMetaCreate(name="Fixture", filename=folder), current_user=user, db=db,
+    )
+    assert refused["code"] == 403
+    assert not (settings.LABS_DIR / folder).exists()
+    assert db.commits == 0 and not audit_events
+
+    created = await labs.create_lab(LabMetaCreate(name="Fixture"), current_user=user, db=db)
+    assert created["code"] == 200
+    assert db.row.filename == f"{folder}/Fixture.json"
+    assert (settings.LABS_DIR / db.row.filename).is_file()
+    assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_create_lab_returns_bad_request_for_invalid_destination(settings, audit_events):
+    db = _RecordingDeleteDb()
+    response = await labs.create_lab(LabMetaCreate(name="Fixture", filename="."), current_user=ADMIN, db=db)
+
+    assert response.status_code == 400
+    assert not list(settings.LABS_DIR.glob("*.json"))
+    assert db.commits == 0
+    assert not audit_events
+
+
+@pytest.mark.asyncio
 async def test_cancelled_lab_creation_finishes_commit_and_audit(settings, audit_events):
     committing = asyncio.Event()
     allow_commit = asyncio.Event()

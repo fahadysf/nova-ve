@@ -553,9 +553,25 @@ async def create_lab(
     db: AsyncSession = Depends(get_db),
 ):
     lab_service = LabService(db)
+    requested_path = request.path or ""
     try:
-        scoped_path = _scoped_lab_path(current_user, request.path or "", treat_as_absolute=False)
-        filename = build_relative_lab_path(request.name, path=scoped_path, filename=request.filename)
+        scoped_path = _scoped_lab_path(current_user, requested_path, treat_as_absolute=False)
+        try:
+            filename = build_relative_lab_path(
+                request.name,
+                path=scoped_path,
+                filename=request.filename,
+                path_is_folder=not requested_path.strip().strip("/\\"),
+            )
+        except ValueError:
+            return _json_error(
+                400,
+                {"code": 400, "status": "fail", "message": "Invalid or absent lab path."},
+            )
+        # Authorize the file's containing folder after applying filename precedence.
+        parent = filename.rpartition("/")[0]
+        if _scoped_folder_path(current_user, parent, treat_as_absolute=True) != parent:
+            raise PermissionError("Access denied.")
         async with lab_membership_lock(filename):
             lab, cancelled = await wait_for_mutation(asyncio.create_task(lab_service.create_lab(
                 owner=current_user.username,
