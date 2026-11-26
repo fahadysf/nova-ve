@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.models.lab import LabMeta
 from app.services import host_net
+from app.services.cloud_inventory_service import LINUX_BRIDGE_TYPE, bridge_dhcp_enabled
 from app.services.console_recording import RECORDINGS_FOLDER
 from app.services.lab_lock import lab_lock, lab_lock_async
 from app.services.shared_network_service import (
@@ -244,6 +246,61 @@ def _derive_network_counts(data: dict) -> None:
             network["count"] = counts.get(network_id, 0)
 
 
+def _bridge_server_cidr(config: dict) -> str:
+    """``server/prefix`` that a bridge running DHCP carries on the host (#325)."""
+    prefix = ipaddress.ip_network(str(config["cidr"])).prefixlen
+    return f"{config['dhcp_server']}/{prefix}"
+
+
+def _cleanup_bridge_dhcp_runtime(bridge: str, network: dict, context: str) -> bool:
+    """Best-effort removal of an isolated bridge's DHCP server, address and guard.
+
+    Deleting the bridge drops its address, but not the dnsmasq process or the
+    nftables guard, which match the bridge by name (#233, #325).
+
+    Returns True when the guard was kept because the address could not be
+    removed; the caller drops it once the bridge itself is gone.
+    """
+    if str(network.get("type") or LINUX_BRIDGE_TYPE) != LINUX_BRIDGE_TYPE or is_member(network):
+        return False
+    config = network.get("config") if isinstance(network.get("config"), dict) else {}
+    runtime = network.get("runtime") if isinstance(network.get("runtime"), dict) else {}
+    if not (bridge_dhcp_enabled(network) or runtime.get("dhcp") is True):
+        return False
+    server = runtime.get("dhcp_server") or config.get("dhcp_server")
+    try:
+        address = _bridge_server_cidr({"cidr": config.get("cidr"), "dhcp_server": server})
+    except ValueError:
+        address = None
+    steps = [("dnsmasq_stop", lambda: host_net.dnsmasq_stop(bridge))]
+    if server and address:
+        steps.append(("bridge_addr_del", lambda: host_net.bridge_addr_del(bridge, address)))
+    steps.append(("bridge_guard_remove", lambda: host_net.bridge_guard_remove(bridge)))
+    for name, step in steps:
+        try:
+            step()
+        except host_net.HostNetError as exc:
+            logger.warning("%s: %s(%s) failed (%s)", context, name, bridge, exc)
+            if name == "bridge_addr_del":
+                # Never leave an address unguarded. Rules for a bridge that
+                # is gone match nothing; the next DHCP enable replaces them.
+                logger.warning("%s: keeping the guard on %s", context, bridge)
+                return True
+    return False
+
+
+def _drop_bridge_guard_after_delete(bridge: str, context: str) -> None:
+    """Remove a guard kept by ``_cleanup_bridge_dhcp_runtime`` once its bridge is gone.
+
+    The bridge's address went with it, so the guard protects nothing; left
+    behind, a new bridge reusing the name would inherit the rules.
+    """
+    try:
+        host_net.bridge_guard_remove(bridge)
+    except host_net.HostNetError as exc:
+        logger.warning("%s: bridge_guard_remove(%s) failed (%s)", context, bridge, exc)
+
+
 def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
     networks = data.get("networks", {}) or {}
     if not isinstance(networks, dict):
@@ -321,6 +378,7 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
                     exc,
                 )
 
+        guard_kept = _cleanup_bridge_dhcp_runtime(bridge, network, "delete_lab")
         try:
             host_net.bridge_del(bridge)
         except host_net.HostNetEINVAL:
@@ -331,6 +389,9 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
                 bridge,
                 exc,
             )
+            continue
+        if guard_kept:
+            _drop_bridge_guard_after_delete(bridge, "delete_lab")
 
 
 def _legacy_topology_to_links(data: dict) -> list[dict]:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -63,6 +64,25 @@ def test_classify_helper_error_matches_contract(
         ("qemu_process_signal", (4242, "term"), ("qemu-process-signal", "4242", "term")),
         ("link_del", ("nvec0de1d2i3h",), ("link-del", "nvec0de1d2i3h")),
         ("try_link_del", ("nvec0de1d2i3h",), ("link-del", "nvec0de1d2i3h")),
+        (
+            "bridge_addr_del",
+            ("novec0de1n7", "10.40.1.254/24"),
+            ("bridge-addr-del", "novec0de1n7", "10.40.1.254/24"),
+        ),
+        ("bridge_guard_apply", ("novec0de1n7",), ("bridge-guard-apply", "novec0de1n7")),
+        ("bridge_guard_remove", ("novec0de1n7",), ("bridge-guard-remove", "novec0de1n7")),
+        (
+            "dnsmasq_start_isolated",
+            ("novec0de1n7", "10.40.1.254", "10.40.1.128", "10.40.1.253"),
+            (
+                "dnsmasq-start",
+                "novec0de1n7",
+                "10.40.1.254",
+                "10.40.1.128",
+                "10.40.1.253",
+                "--no-router",
+            ),
+        ),
     ],
 )
 def test_public_wrapper_verbs_shape_expected_helper_argv(
@@ -73,8 +93,9 @@ def test_public_wrapper_verbs_shape_expected_helper_argv(
 ) -> None:
     recorded: list[tuple[str, ...]] = []
 
-    def fake_invoke_helper(verb: str, *invoke_args: str) -> None:
+    def fake_invoke_helper(verb: str, *invoke_args: str) -> SimpleNamespace:
         recorded.append((verb, *invoke_args))
+        return SimpleNamespace(stdout="")
 
     monkeypatch.setattr(host_net, "_invoke_helper", fake_invoke_helper)
 

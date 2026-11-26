@@ -651,6 +651,21 @@ def bridge_addr_add(name: str, cidr: str) -> None:
     _invoke_helper("bridge-addr-add", name, cidr)
 
 
+def bridge_addr_del(name: str, cidr: str) -> None:
+    """Remove ``cidr`` from lab bridge ``name``; succeeds when it is absent."""
+    _invoke_helper("bridge-addr-del", name, cidr)
+
+
+def bridge_guard_apply(bridge: str) -> None:
+    """Limit host input from ``bridge`` to DHCP and drop routed traffic (#325)."""
+    _invoke_helper("bridge-guard-apply", bridge)
+
+
+def bridge_guard_remove(bridge: str) -> None:
+    """Remove ``bridge``'s guard rules; succeeds when they are absent."""
+    _invoke_helper("bridge-guard-remove", bridge)
+
+
 def host_iface_exists(name: str) -> bool:
     """True if the host has an interface with this name (unprivileged read).
 
@@ -710,6 +725,13 @@ def forward_remove(
 def dnsmasq_start(bridge: str, gateway: str, dhcp_start: str, dhcp_end: str) -> int:
     """Start the per-NAT-Cloud dnsmasq instance and return its pid if known."""
     proc = _invoke_helper("dnsmasq-start", bridge, gateway, dhcp_start, dhcp_end)
+    text = (proc.stdout or "").strip()
+    return int(text) if text.isdigit() else 0
+
+
+def dnsmasq_start_isolated(bridge: str, server: str, dhcp_start: str, dhcp_end: str) -> int:
+    """Start DHCP for an isolated bridge: no router and no DNS option (#325)."""
+    proc = _invoke_helper("dnsmasq-start", bridge, server, dhcp_start, dhcp_end, "--no-router")
     text = (proc.stdout or "").strip()
     return int(text) if text.isdigit() else 0
 

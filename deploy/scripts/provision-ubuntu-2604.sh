@@ -444,7 +444,12 @@ reconcile_nat_cloud_runtime() {
       fi
       if [[ -z "${egress}" ]]; then
         echo "WARN: no default egress interface found for NAT-Cloud bridge ${bridge}; skipping." >&2
-        skipped=$((skipped + 1))
+        # A server that would not stop is a failure, not a skip.
+        if [[ "${stop_failed}" -eq 1 ]]; then
+          failed=$((failed + 1))
+        else
+          skipped=$((skipped + 1))
+        fi
         continue
       fi
 
@@ -479,6 +484,113 @@ reconcile_nat_cloud_runtime() {
   done < <(find "${labs_dir}" -type f -name '*.json' -print0 | sort -z)
 
   echo "NAT-Cloud runtime reconciliation: applied=${applied} skipped=${skipped} failed=${failed}."
+  return 0
+}
+
+# #325: isolated bridges that run DHCP get their guard rules, server address
+# and dnsmasq back after a deploy; bridges switched off whose runtime still
+# records DHCP lose the leftovers. A bridge with only a CIDR is never touched.
+# Like NAT-Cloud reconciliation, only bridges that already exist are touched.
+reconcile_bridge_dhcp_runtime() {
+  local helper="/opt/nova-ve/bin/nova-ve-net.py"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "+ reconcile existing bridge DHCP runtime state from ${ENV_FILE}"
+    return 0
+  fi
+
+  if [[ ! -x "${helper}" ]]; then
+    echo "WARN: ${helper} is not installed; skipping bridge DHCP reconciliation." >&2
+    return 0
+  fi
+  if [[ ! -f "${ENV_FILE}" ]]; then
+    echo "WARN: ${ENV_FILE} is missing; skipping bridge DHCP reconciliation." >&2
+    return 0
+  fi
+
+  # shellcheck disable=SC1090
+  set -a; source "${ENV_FILE}"; set +a
+
+  local labs_dir="${LABS_DIR:-/var/lib/nova-ve/labs}"
+  if [[ ! -d "${labs_dir}" ]]; then
+    echo "Bridge DHCP reconciliation: no labs dir at ${labs_dir}; skipping."
+    return 0
+  fi
+
+  local applied=0
+  local skipped=0
+  local failed=0
+  local lab_file
+  while IFS= read -r -d '' lab_file; do
+    local rows
+    # Owners only: a joined bridge's server belongs to the owning lab. DHCP
+    # is on only with a complete saved scope, as in the backend.
+    rows="$(
+      jq -r '
+        .networks // {}
+        | to_entries[]
+        | select((.value.type // "linux_bridge") == "linux_bridge" and .value.implicit != true)
+        | select((.value.config.shared_network_id // "") == "" and .value.runtime.shared_reference != true)
+        | (.value.config // {}) as $c
+        | ($c.dhcp == true and ([$c.cidr, $c.dhcp_server, $c.dhcp_start, $c.dhcp_end] | all(. != null and . != ""))) as $on
+        | select($on or .value.runtime.dhcp == true)
+        | [
+            (.value.runtime.bridge_name // ""),
+            ($c.cidr // ""),
+            (if $on then "true" else "false" end),
+            ($c.dhcp_server // ""),
+            ($c.dhcp_start // ""),
+            ($c.dhcp_end // ""),
+            # The address the host carries: what was applied, else the setting.
+            (.value.runtime.dhcp_server // $c.dhcp_server // "")
+          ]
+        | map(tostring) | join("\u001f")
+      ' "${lab_file}" 2>/dev/null || true
+    )"
+    if [[ -z "${rows}" ]]; then
+      continue
+    fi
+
+    while IFS=$'\x1f' read -r bridge cidr dhcp_enabled server dhcp_start dhcp_end applied_server; do
+      if [[ -z "${bridge}" ]] || ! ip link show "${bridge}" >/dev/null 2>&1; then
+        skipped=$((skipped + 1))
+        continue
+      fi
+      local prefix=""
+      if [[ "${cidr}" == */* ]]; then
+        prefix="${cidr##*/}"
+      fi
+      if [[ "${dhcp_enabled}" == "true" ]]; then
+        # Guard first: the server address is never reachable unguarded.
+        if ! "${helper}" bridge-guard-apply "${bridge}" \
+          || ! "${helper}" bridge-addr-add "${bridge}" "${server}/${prefix}" \
+          || ! "${helper}" link-up "${bridge}" \
+          || ! "${helper}" dnsmasq-start "${bridge}" "${server}" "${dhcp_start}" "${dhcp_end}" --no-router; then
+          echo "WARN: failed to restore DHCP for bridge ${bridge}." >&2
+          failed=$((failed + 1))
+          continue
+        fi
+      else
+        local cleanup_failed=0
+        "${helper}" dnsmasq-stop "${bridge}" || cleanup_failed=1
+        if [[ -n "${applied_server}" && -n "${prefix}" ]] \
+          && ! "${helper}" bridge-addr-del "${bridge}" "${applied_server}/${prefix}"; then
+          cleanup_failed=1
+        else
+          # Only once the address is gone: never leave it unguarded.
+          "${helper}" bridge-guard-remove "${bridge}" || cleanup_failed=1
+        fi
+        if [[ "${cleanup_failed}" -eq 1 ]]; then
+          echo "WARN: failed to remove disabled DHCP state from bridge ${bridge}." >&2
+          failed=$((failed + 1))
+          continue
+        fi
+      fi
+      applied=$((applied + 1))
+    done <<< "${rows}"
+  done < <(find "${labs_dir}" -type f -name '*.json' -print0 | sort -z)
+
+  echo "Bridge DHCP reconciliation: applied=${applied} skipped=${skipped} failed=${failed}."
   return 0
 }
 
@@ -1124,6 +1236,7 @@ run systemctl restart nova-ve-backend
 run systemctl restart caddy
 
 reconcile_nat_cloud_runtime
+reconcile_bridge_dhcp_runtime
 
 run "${REPO_ROOT}/deploy/scripts/smoke-check.sh"
 

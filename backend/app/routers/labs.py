@@ -240,6 +240,14 @@ async def require_lab_access(
 LAB_ACCESS = Depends(require_lab_access)
 
 
+def _can_open_lab(current_user: UserRead, lab_path: str) -> bool:
+    try:
+        _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+    except PermissionError:
+        return False
+    return True
+
+
 def _recording_lab_file(scoped_path: str) -> Path:
     lab_file = _lab_file_path(scoped_path)
     expected = get_settings().LABS_DIR.resolve() / _normalize_relative_lab_path(scoped_path)
@@ -2727,19 +2735,22 @@ async def update_network(
 
         before = dict(network)
         retype = new_type is not None and new_type != current_type
-        nat_cloud_edit = (
-            current_type == "nat_cloud" and (isinstance(new_config, dict) or retype)
-        ) or (retype and new_type == "nat_cloud")
-        if not nat_cloud_edit:
+        # Settings and type changes take the validated path: NAT-Cloud (#320)
+        # and bridge DHCP (#325) also change host state.
+        validated_edit = isinstance(new_config, dict) or retype
+        if not validated_edit:
             for field, value in patch.items():
                 if value is not None:
                     network[field] = value
             lab.save()
 
-    if nat_cloud_edit:
+    if validated_edit:
         try:
             updated, _event_type = await network_service.patch_network(
-                scoped_path, network_id, patch
+                scoped_path,
+                network_id,
+                patch,
+                can_open=lambda other: _can_open_lab(current_user, other),
             )
         except NetworkServiceError as exc:
             body = {

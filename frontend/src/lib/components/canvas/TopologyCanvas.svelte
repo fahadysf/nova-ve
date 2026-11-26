@@ -19,6 +19,8 @@
     Minus,
     Monitor,
     Pencil,
+    Power,
+    PowerOff,
     Settings2,
     Play,
     Plus,
@@ -54,6 +56,15 @@
   import { canvasPrefs } from '$lib/stores/canvasPrefs';
   import { infoPanels } from '$lib/stores/infoPanels';
   import { networkSharing, type NetworkModalType } from '$lib/services/networkSharing';
+  import {
+    dhcpEnabled,
+    dhcpToggle,
+    LEASES_KEPT_NOTE,
+    networkConfigurable,
+    networkKind,
+    ONE_DHCP_SERVER_NOTE
+  } from '$lib/services/networkDhcp';
+  import { fieldError } from '$lib/services/apiErrors';
   import { toastStore } from '$lib/stores/toasts';
   import {
     createLayoutDebouncer,
@@ -371,6 +382,11 @@
     return $labState.networks[String(decoded.id)] ?? null;
   })();
   $: menuSharing = menuNetwork ? networkSharing(menuNetwork) : null;
+  $: menuConfigurable = menuNetwork ? networkConfigurable(menuNetwork) : false;
+  $: menuDhcp = menuNetwork ? dhcpToggle(menuNetwork) : null;
+  $: menuDhcpPending = menuNetwork ? dhcpPending[menuNetwork.id] === true : false;
+  /** Networks whose right-click DHCP change is in flight (#325). */
+  let dhcpPending: Record<number, boolean> = {};
 
   const nodeColor = (node: Node) => {
     if (node.type === 'network') return '#3b82f6';
@@ -1778,10 +1794,7 @@
   }
 
   function showNetworkError(error: unknown) {
-    networkSaveError = {
-      message: error instanceof Error ? error.message : String(error),
-      field: error instanceof ApiError ? error.field : undefined
-    };
+    networkSaveError = fieldError(error);
     // Zen mode started during the request and hides the dialog.
     if (hideNetworkModal) toastStore.push(networkSaveError.message, 'error');
   }
@@ -1798,11 +1811,48 @@
     if (zenMode) zenDialog = 'network';
   }
 
+  /**
+   * Right-click DHCP on/off (#325), through the same PATCH as Configure. The
+   * menu stays open showing progress, so the result is tied to the network.
+   */
+  async function handleDhcpToggle(targetId: string, enable: boolean) {
+    const decoded = decodeId(targetId);
+    if (!decoded || decoded.type !== 'network' || dhcpPending[decoded.id]) return;
+    const id = decoded.id;
+    const before = $labState.networks[String(id)];
+    if (!before) return;
+    dhcpPending = { ...dhcpPending, [id]: true };
+    try {
+      const response = await apiRequest<NetworkData>(`/labs/${labId}/networks/${id}`, {
+        method: 'PATCH',
+        body: { config: { dhcp: enable } },
+        suppressToast: true
+      });
+      const updated = (response as unknown as { network: NetworkData }).network;
+      adoptRevision(response);
+      labState.setNetworks({ ...$labState.networks, [String(updated.id)]: updated });
+      publishFlowState();
+      // The lease and second-server notes are longer, so they stay up longer.
+      const short = enable && networkKind(updated) !== 'linux_bridge';
+      toastStore.push(networkSavedMessage(before, updated, { dhcp: enable }), 'success', short ? 4000 : 8000);
+      dispatchCanvasChange('network-update', {});
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      toastStore.push(`Could not ${enable ? 'enable' : 'disable'} DHCP on ${before.name}: ${reason}`, 'error', 8000);
+    } finally {
+      const { [id]: _done, ...rest } = dhcpPending;
+      dhcpPending = rest;
+      if (menu?.targetType === 'network' && decodeId(menu.targetId)?.id === id) closeMenu();
+    }
+  }
+
   function networkSavedMessage(before: NetworkData, after: NetworkData, sent?: NetworkCreateConfig): string {
-    const wasOn = before.config?.dhcp !== false;
-    const isOn = after.config?.dhcp !== false;
-    if (wasOn && !isOn) return 'DHCP disabled.';
-    const rangeChanged = ['dhcp_start', 'dhcp_end'].some((key) => before.config?.[key] !== after.config?.[key]);
+    const wasOn = dhcpEnabled(before);
+    const isOn = dhcpEnabled(after);
+    if (wasOn && !isOn) return `DHCP disabled. ${LEASES_KEPT_NOTE}`;
+    const rangeChanged = ['dhcp_server', 'dhcp_start', 'dhcp_end'].some(
+      (key) => before.config?.[key] !== after.config?.[key]
+    );
     // ``dhcp`` sent without changing it asks for a drifted server to be fixed.
     if (sent?.dhcp === isOn && wasOn === isOn && !rangeChanged) {
       if (!isOn) return 'DHCP server stopped.';
@@ -1811,7 +1861,10 @@
     if (!isOn || (wasOn && !rangeChanged)) return 'Network settings saved.';
     // The host reports a pid only for a server it verified as running.
     const started = Number(after.runtime?.dhcp_pid ?? 0) > 0;
-    if (!wasOn) return started ? 'DHCP enabled; server running.' : 'DHCP enabled.';
+    if (!wasOn) {
+      const enabled = started ? 'DHCP enabled; server running.' : 'DHCP enabled.';
+      return networkKind(after) === 'linux_bridge' ? `${enabled} ${ONE_DHCP_SERVER_NOTE}` : enabled;
+    }
     return started ? 'DHCP range updated; server restarted.' : 'DHCP range updated.';
   }
 
@@ -2785,24 +2838,55 @@
         >
           <span>Network Info</span><Info class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
         </button>
-        {#if menuNetwork?.type === 'nat_cloud'}
+        {#if menuDhcp && menuNetwork}
+          <button
+            type="button"
+            class="menu-item disabled:cursor-not-allowed disabled:opacity-50"
+            data-testid="network-menu-dhcp"
+            disabled={menuDhcpPending}
+            aria-busy={menuDhcpPending}
+            title={menuDhcp.enabled
+              ? `Stop the DHCP server. ${LEASES_KEPT_NOTE}`
+              : networkKind(menuNetwork) === 'linux_bridge'
+                ? `Start a DHCP server on this network. ${ONE_DHCP_SERVER_NOTE}`
+                : 'Start a DHCP server on this network.'}
+            on:click|preventDefault|stopPropagation={() =>
+              handleDhcpToggle(menu?.targetId ?? '', !menuDhcp?.enabled)}
+          >
+            <span>
+              {#if menuDhcpPending}
+                {menuDhcp.enabled ? 'Disabling DHCP…' : 'Enabling DHCP…'}
+              {:else}
+                {menuDhcp.enabled ? 'Disable DHCP' : 'Enable DHCP'}
+              {/if}
+            </span>
+            {#if menuDhcpPending}
+              <LoaderCircle class="h-3.5 w-3.5 animate-spin text-gray-400" aria-hidden="true" />
+            {:else if menuDhcp.enabled}
+              <PowerOff class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+            {:else}
+              <Power class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+            {/if}
+          </button>
+        {/if}
+        {#if menuConfigurable && menuNetwork}
           <button
             type="button"
             class="menu-item disabled:cursor-not-allowed disabled:opacity-50"
             data-testid="network-menu-configure"
-            disabled={menuSharing?.role === 'member'}
+            disabled={menuDhcpPending}
             title={menuSharing?.role === 'member'
               ? 'Settings are managed by the lab that owns this network.'
-              : 'DHCP and name settings'}
+              : menuNetwork.type === 'nat_cloud'
+                ? 'DHCP and name settings'
+                : 'Name, subnet and DHCP settings'}
             on:click|preventDefault|stopPropagation={() => handleNetworkConfigure(menu?.targetId ?? '')}
           >
             <span>Configure…</span>
             <span class="flex items-center gap-1.5">
-              {#if menuSharing?.role !== 'member'}
-                <span class="text-[9px] uppercase tracking-wide text-gray-500">
-                  {menuNetwork.config?.dhcp === false ? 'DHCP off' : 'DHCP on'}
-                </span>
-              {/if}
+              <span class="text-[9px] uppercase tracking-wide text-gray-500">
+                {menuSharing?.role === 'member' ? 'Read-only' : dhcpEnabled(menuNetwork) ? 'DHCP on' : 'DHCP off'}
+              </span>
               <Settings2 class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
             </span>
           </button>

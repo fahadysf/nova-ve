@@ -32,6 +32,9 @@ class NetworkConfig(BaseModel):
     cidr: Optional[str] = None
     gateway: Optional[str] = None
     dhcp: bool = False
+    # #325: an isolated bridge's DHCP server address (the host side of the
+    # bridge). NAT-Clouds serve DHCP from ``gateway`` instead.
+    dhcp_server: Optional[str] = None
     dhcp_start: Optional[str] = None
     dhcp_end: Optional[str] = None
     egress_interface: Optional[str] = None
@@ -143,6 +146,14 @@ class NetworkSharingUpdate(BaseModel):
 
 
 class NATCloudValidate(BaseModel):
+    config: Dict[str, Any] = Field(default_factory=dict)
+    network_id: Optional[int] = None
+
+
+class NetworkConfigValidate(BaseModel):
+    """Body of ``POST .../networks/validate-config`` (#325)."""
+
+    type: NetworkType = "linux_bridge"
     config: Dict[str, Any] = Field(default_factory=dict)
     network_id: Optional[int] = None
 

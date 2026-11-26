@@ -28,7 +28,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from app.config import get_settings
 from app.services import host_net
 from app.services.cloud_inventory_service import (
+    LINUX_BRIDGE_TYPE,
+    bridge_dhcp_config_on,
+    bridge_dhcp_enabled,
     find_nat_cloud_owner,
+    list_dhcp_bridges,
     list_nat_clouds,
     nat_cloud_id,
     nat_cloud_ipam_lock,
@@ -36,6 +40,9 @@ from app.services.cloud_inventory_service import (
 from app.services.lab_lock import LabLockTimeout, lab_lock
 from app.services.lab_service import (
     LabService,
+    _bridge_server_cidr,
+    _cleanup_bridge_dhcp_runtime,
+    _drop_bridge_guard_after_delete,
     _normalize_relative_lab_path,
     keep_written_revision,
     locked_lab,
@@ -73,6 +80,13 @@ NAT_CLOUD_DHCP_FIRST_OFFSET = 100
 # writes a fingerprint, never runs NAT or dnsmasq.  See
 # .omc/plans/bridge-cloud-feature.md §4.4 for the full ownership model.
 BRIDGE_CLOUD_TYPE = "bridge_cloud"
+
+# #325: an isolated bridge may run DHCP when its CIDR is /22 to /29. Larger
+# subnets would hand one lab a huge share of the host's address plan; smaller
+# ones leave no room for a server address and a scope.
+BRIDGE_DHCP_MIN_PREFIX = 22
+BRIDGE_DHCP_MAX_PREFIX = 29
+BRIDGE_DHCP_FIELDS = ("dhcp_server", "dhcp_start", "dhcp_end")
 
 
 class NetworkServiceError(Exception):
@@ -270,6 +284,8 @@ def _normalize_new_nat_cloud(
         networks,
         occupied=[
             *_nat_cloud_owner_networks(can_open),
+            # #325: a DHCP bridge's subnet is as taken as a NAT-Cloud's.
+            *_dhcp_bridge_networks(can_open),
             *_host_ipv4_networks(exclude_bridge=own_bridge),
         ],
     )
@@ -396,6 +412,301 @@ def _normalize_nat_cloud_edit(current: dict, changes: dict) -> dict:
     merged = {**current, "dhcp": nat_cloud_dhcp_enabled(current)}
     merged.update({k: v for k, v in changes.items() if k in ("dhcp", "dhcp_start", "dhcp_end")})
     return _normalize_nat_cloud_config(merged, {}, check_overlap=False)
+
+
+def _bridge_cidr(value: Any) -> ipaddress.IPv4Network:
+    try:
+        return _validate_cidr(value)
+    except NetworkServiceError as exc:
+        raise _field_error("config.cidr", exc.message) from exc
+
+
+def bridge_dhcp_capable(cidr: ipaddress.IPv4Network) -> bool:
+    return BRIDGE_DHCP_MIN_PREFIX <= cidr.prefixlen <= BRIDGE_DHCP_MAX_PREFIX
+
+
+def bridge_dhcp_defaults(cidr: ipaddress.IPv4Network) -> dict[str, str]:
+    """Server at the last usable address, scope over the upper half before it.
+
+    Fits every size from /22 to /29: a /29 gets server .6 and scope .4-.5.
+    Of .1-.3, nova-ve's own address allocation uses .2-.3 (``first_offset``).
+    """
+    base = int(cidr.network_address)
+    last = int(cidr.broadcast_address)
+    return {
+        "dhcp_server": str(ipaddress.IPv4Address(last - 1)),
+        "dhcp_start": str(ipaddress.IPv4Address(base + cidr.num_addresses // 2)),
+        "dhcp_end": str(ipaddress.IPv4Address(last - 2)),
+    }
+
+
+def _normalize_bridge_config(raw_config: dict) -> dict:
+    """Check an isolated bridge's CIDR and DHCP settings and fill defaults (#325).
+
+    A CIDR alone is informational. DHCP settings are kept only for a CIDR that
+    can have DHCP; a blank server or scope field means the default.
+    """
+    config = dict(raw_config)
+    dhcp = config.get("dhcp", False)
+    if not isinstance(dhcp, bool):
+        raise _field_error("config.dhcp", "config.dhcp must be true or false")
+    needs_cidr = (
+        f"DHCP needs a CIDR between /{BRIDGE_DHCP_MIN_PREFIX} and /{BRIDGE_DHCP_MAX_PREFIX}."
+    )
+    if config.get("cidr") in (None, ""):
+        if dhcp:
+            raise _field_error("config.dhcp", needs_cidr)
+        for key in BRIDGE_DHCP_FIELDS:
+            config.pop(key, None)
+        if "cidr" in config:
+            config["cidr"] = None
+        return config
+
+    cidr = _bridge_cidr(config["cidr"])
+    config["cidr"] = str(cidr)
+    if not bridge_dhcp_capable(cidr):
+        if dhcp:
+            raise _field_error("config.dhcp", f"{needs_cidr} {cidr} is /{cidr.prefixlen}.")
+        for key in BRIDGE_DHCP_FIELDS:
+            config.pop(key, None)
+        return config
+
+    defaults = bridge_dhcp_defaults(cidr)
+    values: dict[str, ipaddress.IPv4Address] = {}
+    for key in BRIDGE_DHCP_FIELDS:
+        raw = config.get(key)
+        field = f"config.{key}"
+        address = (
+            ipaddress.IPv4Address(defaults[key])
+            if raw is None or (isinstance(raw, str) and not raw.strip())
+            else _nat_address(raw, field)
+        )
+        if address not in cidr or address in (cidr.network_address, cidr.broadcast_address):
+            raise _field_error(field, f"{address} is not a usable host address in {cidr}.")
+        values[key] = address
+    server, start, end = (values[key] for key in BRIDGE_DHCP_FIELDS)
+    if int(start) > int(end):
+        raise _field_error("config.dhcp_end", "The DHCP range must end at or after its start.")
+    if int(start) <= int(server) <= int(end):
+        raise _field_error(
+            "config.dhcp_server", "The server address must be outside the DHCP range."
+        )
+    config.update({"dhcp": dhcp, **{key: str(values[key]) for key in BRIDGE_DHCP_FIELDS}})
+    return config
+
+
+def _cidr_text(value: Any) -> str:
+    try:
+        return str(ipaddress.ip_network(str(value).strip(), strict=True))
+    except ValueError:
+        return str(value)
+
+
+def _normalize_bridge_edit(current: dict, changes: dict) -> dict:
+    """Merge a partial edit into an isolated bridge's settings.
+
+    A CIDR can be added later but never changed or removed: addresses already
+    given out and the overlap checks depend on it.
+    """
+    for key in MEMBERSHIP_CONFIG_KEYS:
+        if changes.get(key):
+            raise _field_error(
+                f"config.{key}",
+                "Joining a shared network is only possible when the network is created.",
+            )
+    current_cidr = current.get("cidr")
+    if current_cidr and "cidr" in changes and (
+        not changes["cidr"] or _cidr_text(changes["cidr"]) != _cidr_text(current_cidr)
+    ):
+        raise _field_error(
+            "config.cidr", "CIDR cannot be changed; delete and recreate the network."
+        )
+    # A bare ``dhcp: true`` from before #325 was never on; an unrelated edit
+    # must not switch it on. Only an explicit ``dhcp`` in the edit does.
+    merged = {**current, "dhcp": bridge_dhcp_config_on(current)}
+    merged.update(changes)
+    return _normalize_bridge_config(merged)
+
+
+def _dhcp_bridge_networks(
+    can_open: Callable[[str], bool] | None = None,
+    *,
+    exclude: tuple[str, int] | None = None,
+) -> list[tuple[str, ipaddress.IPv4Network]]:
+    """Subnets of bridges that run DHCP, in every lab; ``exclude`` is self."""
+    occupied: list[tuple[str, ipaddress.IPv4Network]] = []
+    for item in list_dhcp_bridges():
+        if exclude is not None and (item["lab_path"], item["network_id"]) == exclude:
+            continue
+        try:
+            network = ipaddress.ip_network(str(item["cidr"]), strict=True)
+        except ValueError:
+            continue
+        if not isinstance(network, ipaddress.IPv4Network):
+            continue
+        source = (
+            f"DHCP bridge {item['network_name']!r} in lab "
+            f"{item['lab_name']!r} ({item['lab_path']})"
+        )
+        if can_open is not None and not can_open(str(item["lab_path"])):
+            source = "a DHCP bridge in another lab"
+        occupied.append((source, network))
+    return occupied
+
+
+def _check_bridge_dhcp_overlaps(
+    cidr: str,
+    *,
+    own_bridge: str,
+    can_open: Callable[[str], bool] | None,
+    exclude: tuple[str, int] | None = None,
+) -> None:
+    """A bridge that serves DHCP needs a subnet nothing else on the host uses."""
+    subnet = ipaddress.ip_network(cidr)
+    occupied = [
+        *_nat_cloud_owner_networks(can_open),
+        *_dhcp_bridge_networks(can_open, exclude=exclude),
+        *_host_ipv4_networks(exclude_bridge=own_bridge),
+    ]
+    for source, existing in occupied:
+        if subnet.overlaps(existing):
+            raise NetworkServiceError(
+                409,
+                f"CIDR {subnet} overlaps {source} CIDR {existing}; "
+                "a bridge that runs DHCP needs a subnet of its own.",
+                extra={
+                    "field": "config.cidr",
+                    "conflicting_cidr": str(existing),
+                    "source": source,
+                },
+            )
+
+
+def _check_ipam_outside_dhcp(network: dict, config: dict) -> None:
+    """Addresses already given to nodes must stay clear of the DHCP server."""
+    server = ipaddress.IPv4Address(config["dhcp_server"])
+    start = int(ipaddress.IPv4Address(config["dhcp_start"]))
+    end = int(ipaddress.IPv4Address(config["dhcp_end"]))
+    runtime = network.get("runtime")
+    used = runtime.get("used_ips") if isinstance(runtime, dict) else None
+    for raw in used or []:
+        try:
+            address = ipaddress.IPv4Address(str(raw))
+        except ValueError:
+            continue
+        if address == server:
+            raise _field_error(
+                "config.dhcp_server",
+                f"{address} is already assigned to a node on this network.",
+            )
+        if start <= int(address) <= end:
+            raise _field_error(
+                "config.dhcp_start",
+                f"Node address {address} is inside the DHCP range; "
+                "choose a range that leaves it out.",
+            )
+
+
+def _check_bridge_dhcp_change(
+    key: tuple[str, int],
+    network: dict,
+    current: dict,
+    config: dict,
+    *,
+    own_bridge: str,
+    can_open: Callable[[str], bool] | None,
+) -> None:
+    """Host-wide checks for an edit of bridge ``key`` that leaves DHCP on."""
+    if not bridge_dhcp_config_on(config):
+        return
+    if network.get("implicit") is True:
+        raise _field_error("config.dhcp", "DHCP is not available on point-to-point links.")
+    if not bridge_dhcp_config_on(current):
+        _check_bridge_dhcp_overlaps(
+            config["cidr"], own_bridge=own_bridge, can_open=can_open, exclude=key
+        )
+    _check_ipam_outside_dhcp(network, config)
+
+
+def _apply_bridge_dhcp(bridge: str, old: dict, new: dict) -> int:
+    """Move a bridge's host DHCP state from ``old`` settings to ``new``.
+
+    The guard goes on before the address and comes off after it, so the
+    address is never reachable unguarded. Returns the server pid (0 when off).
+    """
+    old_addr = _bridge_server_addr(old) if old.get("dhcp") is True else None
+    if bridge_dhcp_config_on(new):
+        new_addr = _bridge_server_cidr(new)
+        host_net.bridge_guard_apply(bridge)
+        host_net.bridge_addr_add(bridge, new_addr)
+        host_net.link_up(bridge)
+        pid = host_net.dnsmasq_start_isolated(
+            bridge, str(new["dhcp_server"]), str(new["dhcp_start"]), str(new["dhcp_end"])
+        )
+        if old_addr and old_addr != new_addr:
+            host_net.bridge_addr_del(bridge, old_addr)
+        return pid
+    host_net.dnsmasq_stop(bridge)
+    if old_addr:
+        host_net.bridge_addr_del(bridge, old_addr)
+    host_net.bridge_guard_remove(bridge)
+    return 0
+
+
+def _bridge_server_addr(config: dict) -> str | None:
+    """``server/prefix`` when the settings name one, else ``None``."""
+    if not config.get("cidr") or not config.get("dhcp_server"):
+        return None
+    try:
+        return _bridge_server_cidr(config)
+    except ValueError:
+        return None
+
+
+def _switch_bridge_dhcp(bridge: str, old: dict, new: dict) -> int:
+    """``_apply_bridge_dhcp`` that puts the old state back when a step fails."""
+    try:
+        return _apply_bridge_dhcp(bridge, old, new)
+    except host_net.HostNetError as exc:
+        try:
+            _apply_bridge_dhcp(bridge, new, old)
+        except host_net.HostNetError:
+            logger.exception("bridge DHCP: failed to restore the previous state on %s", bridge)
+        raise NetworkServiceError(500, f"Could not apply the DHCP settings: {exc}") from exc
+
+
+def _drop_new_bridge(bridge: str) -> None:
+    """Remove a bridge this request created, after its create failed."""
+    try:
+        host_net.bridge_del(bridge)
+    except host_net.HostNetError as exc:
+        logger.error("create_network: could not remove new bridge %s (%s)", bridge, exc)
+
+
+def _restore_bridge_dhcp(bridge: str, applied: dict, previous: dict) -> None:
+    """Best-effort return to the previous DHCP state after a failed edit."""
+    try:
+        _apply_bridge_dhcp(bridge, applied, previous)
+    except host_net.HostNetError:
+        logger.exception("patch_network: failed to restore DHCP on %s", bridge)
+
+
+def _record_bridge_dhcp(runtime: dict, config: dict, pid: int) -> bool:
+    """Store the applied DHCP state on ``runtime``; True when it changed."""
+    on = bridge_dhcp_config_on(config)
+    desired: dict[str, Any] = {"dhcp": on, "dhcp_pid": pid}
+    if on:
+        desired.update({key: config[key] for key in BRIDGE_DHCP_FIELDS})
+    changed = False
+    for key in BRIDGE_DHCP_FIELDS:
+        if not on and key in runtime:
+            runtime.pop(key)
+            changed = True
+    for key, value in desired.items():
+        if runtime.get(key) != value:
+            runtime[key] = value
+            changed = True
+    return changed
 
 
 def _normalize_shared_nat_cloud_config(shared_cloud_id: str) -> tuple[dict, dict]:
@@ -712,6 +1023,100 @@ class NetworkService:
         except host_net.HostNetError:
             logger.warning("cleanup_nat_cloud: nat_remove(%s) failed", bridge)
 
+    def _ensure_bridge_dhcp_runtime(self, network: dict, bridge: str) -> bool:
+        """Bring an isolated bridge's host DHCP state in line with its settings.
+
+        Restarts the server only when it is not running or its settings
+        changed. A bridge with DHCP off is touched only when something is
+        left to remove. Returns True when persisted runtime fields changed.
+        """
+        # Local import: network_info_service imports this module.
+        from app.services.network_info_service import dhcp_server_pid
+
+        config = network.get("config") or {}
+        runtime = network.setdefault("runtime", {})
+        applied = {
+            "cidr": config.get("cidr"),
+            "dhcp": runtime.get("dhcp") is True,
+            **{key: runtime.get(key) for key in BRIDGE_DHCP_FIELDS},
+        }
+        if bridge_dhcp_enabled(network):
+            host_net.bridge_guard_apply(bridge)
+            host_net.bridge_addr_add(bridge, _bridge_server_cidr(config))
+            host_net.link_up(bridge)
+            pid = dhcp_server_pid(bridge)
+            if pid is None or any(applied[key] != config[key] for key in BRIDGE_DHCP_FIELDS):
+                pid = host_net.dnsmasq_start_isolated(
+                    bridge, config["dhcp_server"], config["dhcp_start"], config["dhcp_end"]
+                )
+            if bridge_dhcp_config_on(applied) and applied["dhcp_server"] != config["dhcp_server"]:
+                host_net.bridge_addr_del(bridge, _bridge_server_cidr(applied))
+            return _record_bridge_dhcp(runtime, config, pid or 0)
+        if applied["dhcp"] or (config.get("cidr") and dhcp_server_pid(bridge) is not None):
+            # The address goes before the guard; the saved server is the
+            # best guess when the runtime does not record one.
+            server = applied["dhcp_server"] or config.get("dhcp_server")
+            _apply_bridge_dhcp(bridge, {**applied, "dhcp": True, "dhcp_server": server}, {})
+            return _record_bridge_dhcp(runtime, {}, 0)
+        return False
+
+    def validate_network_config(
+        self,
+        lab_path: str,
+        network_type: str,
+        raw_config: dict,
+        *,
+        network_id: int | None = None,
+        can_open: Callable[[str], bool] | None = None,
+    ) -> dict:
+        """Settings a create or edit would store, without changing anything."""
+        if network_type == NAT_CLOUD_TYPE:
+            return self.validate_nat_cloud_config(
+                lab_path, raw_config, network_id=network_id, can_open=can_open
+            )
+        if network_type != LINUX_BRIDGE_TYPE:
+            raise _field_error(
+                "type", "Only Linux bridge and NAT-Cloud settings can be validated."
+            )
+        normalized = _normalize_relative_lab_path(lab_path)
+        data = LabService.read_lab_json_static(normalized)
+        networks = data.get("networks") or {}
+        lab_id = str(data.get("id") or normalized)
+        if network_id is None:
+            config = _normalize_bridge_config(
+                {k: v for k, v in raw_config.items() if k not in MEMBERSHIP_CONFIG_KEYS}
+            )
+            if config.get("dhcp") is True:
+                _check_bridge_dhcp_overlaps(
+                    config["cidr"],
+                    own_bridge=host_net.bridge_name(lab_id, _next_network_id(networks)),
+                    can_open=can_open,
+                )
+            return config
+
+        network = networks.get(str(network_id))
+        if (
+            not isinstance(network, dict)
+            or str(network.get("type") or LINUX_BRIDGE_TYPE) != LINUX_BRIDGE_TYPE
+        ):
+            raise NetworkServiceError(404, "Network does not exist.")
+        if is_member(network):
+            raise NetworkServiceError(
+                422, "Shared network settings are managed by the owning lab."
+            )
+        current = dict(network.get("config") or {})
+        config = _normalize_bridge_edit(current, raw_config)
+        runtime = network.get("runtime") or {}
+        _check_bridge_dhcp_change(
+            (normalized, int(network_id)),
+            network,
+            current,
+            config,
+            own_bridge=runtime.get("bridge_name") or host_net.bridge_name(lab_id, int(network_id)),
+            can_open=can_open,
+        )
+        return config
+
     def validate_nat_cloud_config(
         self,
         lab_path: str,
@@ -801,6 +1206,9 @@ class NetworkService:
         # Reconciled after this lab's lock is released: two labs that join
         # each other's NAT-Clouds must not wait on each other's locks.
         foreign_nat_owners: List[Tuple[int, str, Any, str]] = []
+        # #325: likewise a joined bridge whose owner runs DHCP on it.
+        foreign_dhcp_owners: List[Tuple[int, LabNetwork, str]] = []
+        dhcp_bridges: List[Dict[str, Any]] = []
 
         with lab_lock(normalized, labs_dir):
             data = LabService.read_lab_json_static(normalized)
@@ -874,6 +1282,7 @@ class NetworkService:
                 # #319: a joined bridge is provisioned under its owner's
                 # identity, so either lab can restore it after a reboot.
                 bridge_lab_id, bridge_network_id = lab_id, network_id
+                member_owner: Optional[LabNetwork] = None
                 if is_member(network):
                     shared_owner = find_owner(member_key(network))
                     if shared_owner is None or not shared_owner.shared:
@@ -887,6 +1296,7 @@ class NetworkService:
                         continue
                     bridge_lab_id = shared_owner.lab_id
                     bridge_network_id = shared_owner.network_id
+                    member_owner = shared_owner
                     bridge = shared_owner.bridge_name or host_net.bridge_name(
                         bridge_lab_id, bridge_network_id
                     )
@@ -1002,6 +1412,25 @@ class NetworkService:
                                 "reason": str(exc),
                             }
                         )
+                elif str(network.get("type") or LINUX_BRIDGE_TYPE) == LINUX_BRIDGE_TYPE:
+                    if member_owner is not None:
+                        if bridge_dhcp_enabled(member_owner.network):
+                            foreign_dhcp_owners.append((network_id, member_owner, bridge))
+                    else:
+                        try:
+                            if self._ensure_bridge_dhcp_runtime(network, bridge):
+                                dirty = True
+                            if bridge_dhcp_enabled(network):
+                                dhcp_bridges.append({"network_id": network_id, "bridge": bridge})
+                        except (
+                            NetworkServiceError,
+                            host_net.HostNetError,
+                            OSError,
+                            ValueError,
+                        ) as exc:
+                            skipped.append(
+                                {"bridge": bridge, "network_id": network_id, "reason": str(exc)}
+                            )
 
             if dirty:
                 # #248: bridge reconcile is bookkeeping, not an edit.
@@ -1039,6 +1468,32 @@ class NetworkService:
                     {"bridge": owner_bridge, "network_id": network_id, "reason": str(exc)}
                 )
 
+        for network_id, owner, owner_bridge in foreign_dhcp_owners:
+            try:
+                with lab_lock(owner.lab_path, labs_dir):
+                    owner_data = LabService.read_lab_json_static(owner.lab_path)
+                    owner_network = (owner_data.get("networks") or {}).get(str(owner.network_id))
+                    if bridge_dhcp_enabled(owner_network) and self._ensure_bridge_dhcp_runtime(
+                        owner_network, owner_bridge
+                    ):
+                        # #248: reconcile bookkeeping, not an edit.
+                        LabService.write_lab_json_static(
+                            owner.lab_path, owner_data, bump_revision=False
+                        )
+                dhcp_bridges.append(
+                    {"network_id": network_id, "bridge": owner_bridge, "owner_lab": owner.lab_name}
+                )
+            except (
+                NetworkServiceError,
+                host_net.HostNetError,
+                LabLockTimeout,
+                OSError,
+                ValueError,
+            ) as exc:
+                skipped.append(
+                    {"bridge": owner_bridge, "network_id": network_id, "reason": str(exc)}
+                )
+
         # QMP set_link calls are idempotent and read-only w.r.t. lab.json —
         # run outside the lock to avoid holding it for O(nodes × NICs × 2s).
         nic_link_state = _reconcile_qemu_nic_link_state(lab_id, data)
@@ -1049,6 +1504,7 @@ class NetworkService:
             "skipped": skipped,
             "raised": raised,
             "nat_cloud": nat_cloud,
+            "dhcp_bridges": dhcp_bridges,
             "nic_link_state": nic_link_state,
         }
 
@@ -1077,7 +1533,7 @@ class NetworkService:
             raw_config = {}
         network_type = str(request.get("type", "linux_bridge") or "linux_bridge")
         cidr_value = raw_config.get("cidr")
-        if cidr_value and network_type != NAT_CLOUD_TYPE:
+        if cidr_value and network_type not in (NAT_CLOUD_TYPE, LINUX_BRIDGE_TYPE):
             _validate_cidr(cidr_value)
 
         raw_name = str(request.get("name") or "").strip()
@@ -1092,9 +1548,19 @@ class NetworkService:
             raise NetworkServiceError(
                 422, "config.shared_cloud_id is only valid on nat_cloud networks."
             )
+        # #325: a joined bridge takes its owner's settings, checked there.
+        bridge_config: dict | None = None
+        if not shared_network_id:
+            if network_type == LINUX_BRIDGE_TYPE:
+                bridge_config = _normalize_bridge_config(raw_config)
+            elif network_type != NAT_CLOUD_TYPE and raw_config.get("dhcp") is True:
+                raise _field_error(
+                    "config.dhcp", "DHCP is only available on Linux bridge and NAT-Cloud networks."
+                )
+        bridge_dhcp = bridge_dhcp_config_on(bridge_config)
         create_lock = (
             nat_cloud_ipam_lock()
-            if network_type == NAT_CLOUD_TYPE or shared_network_id
+            if network_type == NAT_CLOUD_TYPE or shared_network_id or bridge_dhcp
             else nullcontext()
         )
         with create_lock:
@@ -1143,8 +1609,16 @@ class NetworkService:
                         )
                         owner_runtime = {}
                 else:
-                    normalized_config = dict(raw_config)
+                    normalized_config = (
+                        bridge_config if bridge_config is not None else dict(raw_config)
+                    )
                     owner_runtime = {}
+                if bridge_dhcp:
+                    _check_bridge_dhcp_overlaps(
+                        normalized_config["cidr"],
+                        own_bridge=host_net.bridge_name(lab_id, _next_network_id(networks)),
+                        can_open=can_open,
+                    )
                 # Bridge-Cloud: host-owned bridge.  Validate config.host_bridge
                 # name + existence BEFORE allocating an id or persisting state.
                 if network_type == BRIDGE_CLOUD_TYPE:
@@ -1232,6 +1706,7 @@ class NetworkService:
                 # Persist BEFORE provisioning so on-disk state never leads the
                 # kernel state. Any provisioning or ownership failure rolls it back.
                 created_revision = LabService.write_lab_json_static(normalized, data)
+                created_bridge = False
                 try:
                     if network_type == BRIDGE_CLOUD_TYPE:
                         # Bridge-Cloud: host-owned bridge, existence validated
@@ -1252,6 +1727,7 @@ class NetworkService:
                             )
                     else:
                         host_net.bridge_add(bridge)
+                        created_bridge = True
                         try:
                             host_net.bridge_fingerprint_write(
                                 bridge, lab_id, next_id
@@ -1268,6 +1744,10 @@ class NetworkService:
                             raise
                     if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
                         self._ensure_nat_cloud_runtime(network, bridge)
+                    if bridge_dhcp:
+                        # Rolls its own host steps back when one fails.
+                        pid = _switch_bridge_dhcp(bridge, {}, normalized_config)
+                        _record_bridge_dhcp(network["runtime"], normalized_config, pid)
                 except host_net.HostNetBridgeOwnershipError:
                     networks.pop(str(next_id), None)
                     data["networks"] = networks
@@ -1279,6 +1759,8 @@ class NetworkService:
                     networks.pop(str(next_id), None)
                     data["networks"] = networks
                     LabService.write_lab_json_static(normalized, data, bump_revision=False)
+                    if bridge_dhcp and created_bridge:
+                        _drop_new_bridge(bridge)
                     if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
                         config = network.get("config") or {}
                         runtime = network.get("runtime") or {}
@@ -1311,7 +1793,7 @@ class NetworkService:
                         f"Failed to provision bridge {bridge}: {exc}",
                         extra={"bridge": bridge},
                     ) from exc
-                if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
+                if (network_type == NAT_CLOUD_TYPE and not shared_cloud_id) or bridge_dhcp:
                     # #248: runtime-info refresh after the create's real write
                     # — bookkeeping, don't bump again, nor undo the create's bump.
                     keep_written_revision(data, created_revision)
@@ -1399,6 +1881,10 @@ class NetworkService:
                                 str(config.get("cidr") or ""),
                                 str(runtime.get("egress_interface") or config.get("egress_interface") or ""),
                             )
+                        guard_kept = _cleanup_bridge_dhcp_runtime(
+                            bridge, network, "delete_network"
+                        )
+                        bridge_gone = True
                         try:
                             host_net.bridge_del(bridge)
                         except host_net.HostNetEINVAL:
@@ -1407,12 +1893,15 @@ class NetworkService:
                                 bridge,
                             )
                         except host_net.HostNetError as exc:
+                            bridge_gone = False
                             logger.warning(
                                 "delete_network: bridge_del(%s) failed (%s); "
                                 "JSON record removed regardless",
                                 bridge,
                                 exc,
                             )
+                        if guard_kept and bridge_gone:
+                            _drop_bridge_guard_after_delete(bridge, "delete_network")
 
         await ws_hub.publish(normalized, "network_deleted", {"network": removed})
         return removed
@@ -1503,11 +1992,21 @@ class NetworkService:
                 end_int = int(broadcast_addr) - 1  # exclusive of broadcast
                 if str(network.get("type", "")) == NAT_CLOUD_TYPE:
                     end_int = min(end_int, int(network_addr) + NAT_CLOUD_STATIC_LAST_OFFSET)
+                # #325: the DHCP server and scope are not for static use.
+                dhcp_ints: set[int] = set()
+                if bridge_dhcp_enabled(network):
+                    dhcp_ints = {int(ipaddress.IPv4Address(config["dhcp_server"]))}
+                    dhcp_ints.update(
+                        range(
+                            int(ipaddress.IPv4Address(config["dhcp_start"])),
+                            int(ipaddress.IPv4Address(config["dhcp_end"])) + 1,
+                        )
+                    )
 
                 chosen: Optional[ipaddress.IPv4Address] = None
                 for candidate_int in range(start_int, end_int + 1):
                     candidate = ipaddress.IPv4Address(candidate_int)
-                    if candidate in used:
+                    if candidate in used or candidate_int in dhcp_ints:
                         continue
                     chosen = candidate
                     break
@@ -1616,30 +2115,43 @@ class NetworkService:
         lab_path: str,
         network_id: int,
         patch: Dict[str, Any],
+        *,
+        can_open: Callable[[str], bool] | None = None,
     ) -> Tuple[dict, str]:
         """Patch a network record. Returns (payload, event_type).
 
         ``event_type`` is ``network_promoted`` when the patch turned an
         implicit network into an explicit one, otherwise ``network_updated``.
+        ``can_open`` keeps labs the caller cannot open out of conflict messages.
         """
         normalized = _normalize_relative_lab_path(lab_path)
         # A worker thread, so a slow dnsmasq stop does not stall the event
         # loop. Safe because every lab-file writer takes ``lab_lock`` and
         # re-reads under it (#328): edits made meanwhile wait, then land.
         payload, event_type = await asyncio.to_thread(
-            self._patch_network_locked, normalized, network_id, patch
+            self._patch_network_locked, normalized, network_id, patch, can_open=can_open
         )
         await ws_hub.publish(normalized, event_type, {"network": dict(payload)})
         return payload, event_type
 
     def _patch_network_locked(
-        self, normalized: str, network_id: int, patch: Dict[str, Any]
+        self,
+        normalized: str,
+        network_id: int,
+        patch: Dict[str, Any],
+        *,
+        can_open: Callable[[str], bool] | None = None,
     ) -> Tuple[dict, str]:
         # Local import: network_info_service imports this module.
         from app.services.network_info_service import dhcp_server_pid
 
+        # #325: turning DHCP on for a bridge claims its subnet host-wide.
+        subnet_lock = (
+            nat_cloud_ipam_lock() if isinstance(patch.get("config"), dict) else nullcontext()
+        )
+
         # Runs in a worker thread (see patch_network).
-        with locked_lab(normalized) as lab:
+        with subnet_lock, locked_lab(normalized) as lab:
             data = lab.data
             networks = data.get("networks", {}) or {}
             network = networks.get(str(network_id))
@@ -1733,11 +2245,43 @@ class NetworkService:
             if current_type == NAT_CLOUD_TYPE and isinstance(new_config, dict):
                 current_nat_config = dict(network.get("config") or {})
                 normalized_nat_config = _normalize_nat_cloud_edit(current_nat_config, new_config)
+            if new_type is not None and new_type != current_type and bridge_dhcp_enabled(network):
+                raise _field_error("type", "Turn DHCP off before changing the network type.")
+            normalized_bridge_config: dict | None = None
+            current_bridge_config: dict = {}
+            bridge = ""
+            resulting_type = new_type or current_type
+            if isinstance(new_config, dict) and resulting_type == LINUX_BRIDGE_TYPE:
+                if current_type == LINUX_BRIDGE_TYPE:
+                    current_bridge_config = dict(network.get("config") or {})
+                normalized_bridge_config = _normalize_bridge_edit(current_bridge_config, new_config)
+                if normalized_bridge_config.get("cidr"):
+                    bridge = (network.get("runtime") or {}).get(
+                        "bridge_name"
+                    ) or host_net.bridge_name(str(data.get("id") or normalized), int(network_id))
+                _check_bridge_dhcp_change(
+                    (normalized, int(network_id)),
+                    network,
+                    current_bridge_config,
+                    normalized_bridge_config,
+                    own_bridge=bridge,
+                    can_open=can_open,
+                )
+            elif (
+                isinstance(new_config, dict)
+                and resulting_type != NAT_CLOUD_TYPE
+                and new_config.get("dhcp") is True
+            ):
+                raise _field_error(
+                    "config.dhcp", "DHCP is only available on Linux bridge and NAT-Cloud networks."
+                )
 
             for field in ("type", "left", "top", "icon", "visibility", "config"):
                 if field in patch and patch[field] is not None:
                     if field == "config" and normalized_nat_config is not None:
                         network[field] = normalized_nat_config
+                    elif field == "config" and normalized_bridge_config is not None:
+                        network[field] = normalized_bridge_config
                     else:
                         network[field] = patch[field]
 
@@ -1779,6 +2323,29 @@ class NetworkService:
                         }
                     )
 
+            bridge_rollback: tuple[str, dict, dict] | None = None
+            if normalized_bridge_config is not None:
+                old_on = bridge_dhcp_config_on(current_bridge_config)
+                new_on = bridge_dhcp_config_on(normalized_bridge_config)
+                old_state = current_bridge_config if old_on else {}
+                switch = old_on != new_on or (
+                    new_on
+                    and any(
+                        current_bridge_config.get(key) != normalized_bridge_config[key]
+                        for key in BRIDGE_DHCP_FIELDS
+                    )
+                )
+                # As for NAT-Clouds, an explicit ``dhcp`` repairs a server
+                # whose real state has drifted from the setting.
+                if not switch and "dhcp" in new_config and normalized_bridge_config.get("cidr"):
+                    switch = (dhcp_server_pid(bridge) is not None) != new_on
+                    if switch and not new_on:
+                        old_state = {**current_bridge_config, "dhcp": True}
+                if switch:
+                    pid = _switch_bridge_dhcp(bridge, old_state, normalized_bridge_config)
+                    _record_bridge_dhcp(network.setdefault("runtime", {}), normalized_bridge_config, pid)
+                    bridge_rollback = (bridge, normalized_bridge_config, old_state)
+
             networks[str(network_id)] = network
             data.pop("topology", None)
             try:
@@ -1786,6 +2353,8 @@ class NetworkService:
             except Exception:
                 if dhcp_rollback is not None:
                     _restore_nat_cloud_dhcp(*dhcp_rollback)
+                if bridge_rollback is not None:
+                    _restore_bridge_dhcp(*bridge_rollback)
                 raise
             _recompute_mac_registry(normalized, data)
             count = _refcount(data, int(network_id))

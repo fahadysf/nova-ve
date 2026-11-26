@@ -325,6 +325,8 @@ export interface NetworkCreateConfig {
   cidr?: string;
   gateway?: string;
   dhcp?: boolean;
+  /** linux_bridge only (#325): the host's address on the bridge. */
+  dhcp_server?: string;
   dhcp_start?: string;
   dhcp_end?: string;
   egress_interface?: string;
@@ -584,6 +586,8 @@ export interface NetworkInfo {
     used_ips: string[];
     dhcp: {
       enabled: boolean;
+      /** Address the DHCP server answers from; bridges only (#325). */
+      server?: string | null;
       start: string | null;
       end: string | null;
       size: number | null;
