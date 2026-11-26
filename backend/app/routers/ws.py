@@ -1,6 +1,8 @@
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.database import get_db
@@ -49,7 +51,9 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
             raise ValueError("empty lab path")
         scoped = _scoped_lab_path(user, lab, treat_as_absolute=True)
         lab = _normalize_relative_lab_path(scoped)
-    except (PermissionError, ValueError):
+        if not await asyncio.to_thread(LabService.file_exists, lab):
+            raise FileNotFoundError(lab)
+    except (OSError, ValueError):
         await websocket.close(code=1008)
         return
 

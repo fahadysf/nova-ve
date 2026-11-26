@@ -4,6 +4,7 @@
 """Tests for WebSocket hub: seq counter, 200-event ring buffer, and replay."""
 
 import asyncio
+import json
 import time
 from types import SimpleNamespace
 
@@ -71,6 +72,19 @@ def _scoped_user(folder="/lanes/alpha"):
     return user
 
 
+@pytest.fixture()
+def lab_files(monkeypatch, tmp_path):
+    monkeypatch.setattr("app.services.lab_service.get_settings", lambda: SimpleNamespace(LABS_DIR=tmp_path))
+
+    def write_lab(relative_path):
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"schema": 2, "id": relative_path, "nodes": {}, "networks": {}, "links": []}))
+        return path
+
+    return write_lab
+
+
 def _publish(hub, lab, event_type, payload):
     loop = asyncio.new_event_loop()
     try:
@@ -94,10 +108,11 @@ def test_unauth_close_1008():
     assert exc_info.value.code == 1008
 
 
-def test_seq_replay_buffer(monkeypatch):
+def test_seq_replay_buffer(monkeypatch, lab_files):
     """Publish 3 events then connect with last_seq=0; receive hello + 3 replayed events."""
     hub = _fresh_hub()
     _patch_auth_ok(monkeypatch)
+    lab_files("X")
 
     # Publish 3 events synchronously using asyncio.run on a fresh loop
     loop = asyncio.new_event_loop()
@@ -135,16 +150,11 @@ def test_seq_replay_buffer(monkeypatch):
         assert ev4["seq"] == 4
 
 
-def test_force_resnapshot_when_seq_too_old(monkeypatch):
+def test_force_resnapshot_when_seq_too_old(monkeypatch, lab_files):
     """Overflow ring (250 events), connect with last_seq=10; expect force_resnapshot + lab_topology."""
     hub = _fresh_hub()
     _patch_auth_ok(monkeypatch)
-
-    # Stub LabService.read_lab_json_static to avoid filesystem dependency
-    monkeypatch.setattr(
-        "app.routers.ws.LabService.read_lab_json_static",
-        lambda lab_id: {"id": lab_id, "nodes": {}, "networks": {}, "topology": []},
-    )
+    lab_files("X")
 
     loop = asyncio.new_event_loop()
     try:
@@ -195,7 +205,7 @@ def test_seq_monotonic_per_lab():
     assert hub.head_seq("B") == 2
 
 
-def test_nested_folder_lab_connects_and_replays(monkeypatch):
+def test_nested_folder_lab_connects_and_replays(monkeypatch, lab_files):
     """#330: a lab inside a folder must connect and replay its events.
 
     Publishers key the hub by the normalized lab path, so the socket for
@@ -204,6 +214,7 @@ def test_nested_folder_lab_connects_and_replays(monkeypatch):
     hub = _fresh_hub()
     _patch_auth_ok(monkeypatch)
     lab = "team/project/lab.json"
+    lab_files(lab)
     _publish(hub, lab, "node_created", {"x": 1})
 
     client = TestClient(app, raise_server_exceptions=True)
@@ -219,10 +230,11 @@ def test_nested_folder_lab_connects_and_replays(monkeypatch):
         assert ws.receive_json()["seq"] == 2
 
 
-def test_nested_folder_lab_out_of_scope_closes_1008(monkeypatch):
+def test_nested_folder_lab_out_of_scope_closes_1008(monkeypatch, lab_files):
     """#330/#327: a scoped user must not open another folder's lab."""
     _fresh_hub()
     _patch_auth_ok(monkeypatch, _scoped_user("/teamA"))
+    lab_files("teamB/lab.json")
     client = TestClient(app, raise_server_exceptions=False)
     client.cookies.update(_cookies_with_session())
     with pytest.raises(WebSocketDisconnect) as exc_info:
@@ -243,10 +255,11 @@ def test_nested_lab_dotdot_closes_1008(monkeypatch):
     assert exc_info.value.code == 1008
 
 
-def test_scoped_user_connects_to_own_nested_lab(monkeypatch):
+def test_scoped_user_connects_to_own_nested_lab(monkeypatch, lab_files):
     """#330: every lab of a folder-scoped user lives under their folder."""
     hub = _fresh_hub()
     _patch_auth_ok(monkeypatch, _scoped_user())
+    lab_files("lanes/alpha/lab.json")
     _publish(hub, "lanes/alpha/lab.json", "link_created", {"a": 1})
 
     client = TestClient(app, raise_server_exceptions=True)
@@ -258,10 +271,11 @@ def test_scoped_user_connects_to_own_nested_lab(monkeypatch):
         assert ws.receive_json()["payload"] == {"a": 2}
 
 
-def test_scoped_user_connects_to_shared_lab(monkeypatch):
+def test_scoped_user_connects_to_shared_lab(monkeypatch, lab_files):
     """#330: /Shared is resolved at the labs root for a folder-scoped user."""
     hub = _fresh_hub()
     _patch_auth_ok(monkeypatch, _scoped_user())
+    lab_files("Shared/x.json")
     client = TestClient(app, raise_server_exceptions=True)
     client.cookies.update(_cookies_with_session())
     with client.websocket_connect("/ws/labs/Shared%2Fx.json") as ws:
@@ -270,7 +284,7 @@ def test_scoped_user_connects_to_shared_lab(monkeypatch):
         assert ws.receive_json()["payload"] == {"a": 1}
 
 
-def test_socket_subscribes_under_the_publishers_key(monkeypatch):
+def test_socket_subscribes_under_the_publishers_key(monkeypatch, lab_files):
     """#330: publishers key events by the normalized lab path.
 
     ``{lab:path}`` also accepts a leading or doubled slash, so subscribing
@@ -278,6 +292,7 @@ def test_socket_subscribes_under_the_publishers_key(monkeypatch):
     """
     hub = _fresh_hub()
     _patch_auth_ok(monkeypatch)
+    lab_files("team/project/lab.json")
     client = TestClient(app, raise_server_exceptions=True)
     client.cookies.update(_cookies_with_session())
     with client.websocket_connect("/ws/labs/%2Fteam%2F%2Fproject%2Flab.json") as ws:
@@ -309,6 +324,22 @@ def test_no_lab_path_closes_1008(monkeypatch, scoped, path):
         with client.websocket_connect(f"/ws/labs/{path}"):
             pass
     assert exc_info.value.code == 1008
+
+
+@pytest.mark.parametrize("path", ["team/missing.json", "team"])
+def test_subscription_requires_a_lab_file(monkeypatch, lab_files, path):
+    hub = _fresh_hub()
+    _patch_auth_ok(monkeypatch, _scoped_user("/team"))
+    lab_files("team/existing.json")
+    client = TestClient(app)
+    client.cookies.update(_cookies_with_session())
+
+    with pytest.raises(WebSocketDisconnect) as exc_info:
+        with client.websocket_connect(f"/ws/labs/{path}"):
+            pass
+
+    assert exc_info.value.code == 1008
+    assert path not in hub._labs
 
 
 def test_ring_evicts_oldest():
