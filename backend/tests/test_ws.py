@@ -4,6 +4,7 @@
 """Tests for WebSocket hub: seq counter, 200-event ring buffer, and replay."""
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -281,9 +282,13 @@ def test_socket_subscribes_under_the_publishers_key(monkeypatch):
     client.cookies.update(_cookies_with_session())
     with client.websocket_connect("/ws/labs/%2Fteam%2F%2Fproject%2Flab.json") as ws:
         assert ws.receive_json()["type"] == "hello"
-        assert [key for key, state in hub._labs.items() if state.subscribers] == [
-            "team/project/lab.json"
-        ]
+        subscribed = []
+        for _attempt in range(100):  # the handler subscribes right after hello
+            subscribed = [key for key, state in hub._labs.items() if state.subscribers]
+            if subscribed:
+                break
+            time.sleep(0.01)
+        assert subscribed == ["team/project/lab.json"]
         _publish(hub, "team/project/lab.json", "link_created", {"a": 1})
         assert ws.receive_json()["payload"] == {"a": 1}
 
