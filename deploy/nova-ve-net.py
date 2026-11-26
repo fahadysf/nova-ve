@@ -36,13 +36,17 @@ import fcntl
 import ipaddress
 import json
 import os
+import pwd
 import re
 import secrets
+import select
+import shutil
 import signal
 import stat
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -65,7 +69,9 @@ PROC_ROOT = Path(os.environ.get("NOVA_VE_PROC_ROOT", "/proc"))
 IP_BIN = os.environ.get("NOVA_VE_IP_BIN") or "ip"
 NSENTER_BIN = os.environ.get("NOVA_VE_NSENTER_BIN") or "nsenter"
 NFT_BIN = os.environ.get("NOVA_VE_NFT_BIN") or "nft"
-DNSMASQ_BIN = os.environ.get("NOVA_VE_DNSMASQ_BIN") or "dnsmasq"
+DNSMASQ_BIN = os.environ.get("NOVA_VE_DNSMASQ_BIN") or "/usr/sbin/dnsmasq"
+DNSMASQ_USER = "nobody"
+CAP_NET_RAW = 1 << 13
 RUNTIME_ROOT = Path(os.environ.get("NOVA_VE_RUNTIME_ROOT", "/var/lib/nova-ve"))
 # #334: root dnsmasq must not read its config — or write its lease file —
 # from a directory the service account owns (it could swap in a
@@ -1033,44 +1039,216 @@ def _legacy_dnsmasq_paths(bridge: str) -> tuple[Path, Path, Path]:
     return root / "dnsmasq.conf", root / "dnsmasq.pid", root / "leases"
 
 
-def _dnsmasq_pids(bridge: str) -> list[int]:
-    """Pids of the dnsmasq processes serving ``bridge``.
+def _dnsmasq_identity_matches(entry: Path, executable: Path, allowed_uids: set[int]) -> bool:
+    """Verify the executable and kernel credentials of a discovered candidate."""
+    proc_exe = entry / "exe"
+    target = os.readlink(proc_exe)
+    installed = os.fspath(executable)
+    if target not in (installed, f"{installed} (deleted)"):
+        return False
 
-    Matched on the exact ``--conf-file`` argument rather than the pid file: a
-    lost pid file must not leave a server running, and a stale one must not
-    get another network's server killed (#320).
-    """
-    # #334: also match the legacy conf path, or an upgrade would leave the
-    # old server running next to the new one for the same bridge.
-    wanted = {
-        f"--conf-file={_dnsmasq_paths(bridge)[0]}".encode(),
-        f"--conf-file={_legacy_dnsmasq_paths(bridge)[0]}".encode(),
-    }
+    # A daemon can keep running a trusted executable inode after the package
+    # replaces that file. Check the kernel's target, even in that case.
+    info = proc_exe.stat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != _TRUSTED_UID
+        or not info.st_mode & 0o111
+        or info.st_mode & 0o022
+    ):
+        raise OSError("dnsmasq process executable ownership or mode could not be verified")
+
+    limit = 16 * 1024
+    with (entry / "status").open("rb") as status:
+        data = status.read(limit + 1)
+    uid_lines = [line for line in data.splitlines() if line.startswith(b"Uid:")]
+    if len(data) > limit or len(uid_lines) != 1:
+        raise OSError("dnsmasq process credentials could not be verified")
+    values = uid_lines[0][4:].split()
+    if len(values) != 4 or any(len(value) > 10 or not value.isdigit() for value in values):
+        raise OSError("dnsmasq process credentials could not be verified")
+    uids = [int(value) for value in values]
+    if any(value not in allowed_uids for value in uids):
+        return False
+    for namespace in ("user", "net", "mnt"):
+        expected_ns = (PROC_ROOT / "self" / "ns" / namespace).stat()
+        actual_ns = (entry / "ns" / namespace).stat()
+        if not os.path.samestat(expected_ns, actual_ns):
+            return False
+
+    if uids[1] != _TRUSTED_UID:
+        # The Ubuntu DHCP daemon retains NET_RAW after dropping root for
+        # address conflict checks. A matching unprivileged account alone
+        # is insufficient evidence of a configured host DHCP process.
+        caps = [line.split()[1:] for line in data.splitlines() if line.startswith(b"CapEff:")]
+        if len(caps) != 1 or len(caps[0]) != 1 or not re.fullmatch(rb"[0-9a-fA-F]{1,16}", caps[0][0]):
+            raise OSError("dnsmasq process capabilities could not be verified")
+        if not int(caps[0][0], 16) & CAP_NET_RAW:
+            raise OSError("dnsmasq process does not have its expected DHCP capability")
+    return True
+
+
+def _dnsmasq_config_arguments(bridge: str, *, include_legacy: bool = True) -> set[bytes]:
+    paths = [_dnsmasq_paths(bridge)[0]]
+    if include_legacy:
+        paths.append(_legacy_dnsmasq_paths(bridge)[0])
+    return {f"--conf-file={path}".encode() for path in paths}
+
+
+def _dnsmasq_cmdline_matches(entry: Path, wanted: set[bytes], *, verify: bool = False) -> bool:
+    limit = 16 * 1024
+    with (entry / "cmdline").open("rb") as cmdline:
+        data = cmdline.read(limit + 1)
+    argv = data.split(b"\x00")
+    if not wanted.intersection(argv[1:]):
+        return False
+    if verify and (len(data) > limit or len(argv) != 3 or not argv[0] or argv[2] or argv[1] not in wanted):
+        raise OSError("dnsmasq process has an ambiguous configuration invocation")
+    return True
+
+
+def _dnsmasq_candidates(wanted: set[bytes]) -> list[int]:
+    """Find config matches for inspection. Command arguments alone confer no authority."""
     pids: list[int] = []
     for entry in PROC_ROOT.iterdir():
-        if not entry.name.isdigit():
+        if not entry.name.isascii() or not entry.name.isdigit():
             continue
         try:
-            argv = (entry / "cmdline").read_bytes().split(b"\x00")
-        except OSError:
+            if _dnsmasq_cmdline_matches(entry, wanted):
+                pids.append(int(entry.name))
+        except (FileNotFoundError, ProcessLookupError):
             continue
-        if os.path.basename(argv[0]) == b"dnsmasq" and wanted.intersection(argv):
-            pids.append(int(entry.name))
     return sorted(pids)
 
 
-def _dnsmasq_stop_bridge(bridge: str) -> bool:
-    """Stop the bridge's dnsmasq and confirm that it is gone."""
-    for sig, attempts in ((signal.SIGTERM, 40), (signal.SIGKILL, 20)):
-        for pid in _dnsmasq_pids(bridge):
+def _dnsmasq_executable() -> Path:
+    found = shutil.which(DNSMASQ_BIN)
+    if found is None:
+        raise OSError("dnsmasq executable could not be found")
+    executable = Path(found).resolve(strict=True)
+    info = executable.stat()
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != _TRUSTED_UID
+        or not info.st_mode & 0o111
+        or info.st_mode & 0o022
+    ):
+        raise OSError("dnsmasq executable is not trusted")
+    return executable
+
+
+def _dnsmasq_uids() -> set[int]:
+    try:
+        daemon_uid = pwd.getpwnam(DNSMASQ_USER).pw_uid
+    except KeyError as exc:
+        raise OSError("dnsmasq runtime account is unavailable") from exc
+    if os.environ.get("SUDO_UID") == str(daemon_uid):
+        raise OSError("dnsmasq and the invoking service must use different accounts")
+    service_user = os.environ.get("NOVA_VE_SERVICE_USER") or os.environ.get("NOVA_VE_OWNER")
+    if service_user:
+        try:
+            if pwd.getpwnam(service_user).pw_uid == daemon_uid:
+                raise OSError("dnsmasq and the configured service must use different accounts")
+        except KeyError as exc:
+            raise OSError("configured Nova VE service account is unavailable") from exc
+    return {_TRUSTED_UID, daemon_uid}
+
+
+def _dnsmasq_pidfd_exited(pidfd: int) -> bool:
+    poller = select.poll()
+    poller.register(pidfd, select.POLLIN)
+    events = poller.poll(0)
+    if any(mask & (select.POLLERR | select.POLLNVAL) for _, mask in events):
+        raise OSError("dnsmasq process descriptor could not be checked")
+    return any(mask & (select.POLLIN | select.POLLHUP) for _, mask in events)
+
+
+def _require_dnsmasq_pidfds() -> None:
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise OSError("dnsmasq process verification requires Linux PID descriptors")
+
+
+def _pin_dnsmasq_processes(
+    candidates: list[int],
+    wanted: set[bytes],
+    executable: Path,
+    allowed_uids: set[int],
+    handles: ExitStack,
+) -> list[tuple[int, int]]:
+    _require_dnsmasq_pidfds()
+    result = []
+    for pid in candidates:
+        try:
+            pidfd = os.pidfd_open(pid)
+        except ProcessLookupError:
+            continue
+        keep_handle = False
+        try:
+            entry = PROC_ROOT / str(pid)
             try:
-                os.kill(pid, sig)
-            except ProcessLookupError:
-                pass
-        for _attempt in range(attempts):
-            if not _dnsmasq_pids(bridge):
-                return True
-            time.sleep(0.05)
+                keep_handle = (
+                    not _dnsmasq_pidfd_exited(pidfd)
+                    and _dnsmasq_cmdline_matches(entry, wanted)
+                    and _dnsmasq_identity_matches(entry, executable, allowed_uids)
+                    and _dnsmasq_cmdline_matches(entry, wanted, verify=True)
+                    and not _dnsmasq_pidfd_exited(pidfd)
+                )
+            except (FileNotFoundError, ProcessLookupError):
+                if not _dnsmasq_pidfd_exited(pidfd):
+                    raise
+        finally:
+            if not keep_handle:
+                os.close(pidfd)
+        if keep_handle:
+            handles.callback(os.close, pidfd)
+            result.append((pid, pidfd))
+    return result
+
+
+def _dnsmasq_stop_bridge(bridge: str) -> bool:
+    """Signal only verified processes and keep the same handles through escalation."""
+    wanted = _dnsmasq_config_arguments(bridge)
+    try:
+        candidates = _dnsmasq_candidates(wanted)
+        if not candidates:
+            return True
+        executable = _dnsmasq_executable()
+        allowed_uids = _dnsmasq_uids()
+        with ExitStack() as handles:
+            processes = _pin_dnsmasq_processes(candidates, wanted, executable, allowed_uids, handles)
+            for sig, attempts in ((signal.SIGTERM, 40), (signal.SIGKILL, 20)):
+                for pid, pidfd in processes:
+                    if _dnsmasq_pidfd_exited(pidfd):
+                        continue
+                    entry = PROC_ROOT / str(pid)
+                    try:
+                        if not (
+                            _dnsmasq_identity_matches(entry, executable, allowed_uids)
+                            and _dnsmasq_cmdline_matches(entry, wanted, verify=True)
+                        ):
+                            raise OSError("dnsmasq process identity changed before shutdown")
+                    except (FileNotFoundError, ProcessLookupError):
+                        if not _dnsmasq_pidfd_exited(pidfd):
+                            raise
+                        continue
+                    try:
+                        signal.pidfd_send_signal(pidfd, sig)
+                    except ProcessLookupError:
+                        pass
+                for _attempt in range(attempts):
+                    if all(_dnsmasq_pidfd_exited(pidfd) for _, pidfd in processes):
+                        # Do not signal a replacement that appeared after pinning.
+                        with ExitStack() as verification:
+                            remaining = _pin_dnsmasq_processes(
+                                _dnsmasq_candidates(wanted), wanted, executable, allowed_uids, verification
+                            )
+                        if not remaining:
+                            return True
+                        raise OSError("another managed dnsmasq process is still present")
+                    time.sleep(0.05)
+    except OSError as exc:
+        print(f"Could not stop dnsmasq for {bridge}: {exc}", file=sys.stderr)
+        return False
     print(f"dnsmasq for {bridge} did not stop", file=sys.stderr)
     return False
 
@@ -1128,6 +1306,7 @@ def _write_dnsmasq_conf(
                 f"interface={bridge}",
                 f"listen-address={gateway}",
                 "port=0",
+                f"user={DNSMASQ_USER}",
                 *_dnsmasq_options(gateway, dhcp_start, dhcp_end, no_router=no_router),
                 f"dhcp-leasefile={leases}",
                 f"pid-file={pidfile}",
@@ -1274,6 +1453,9 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     try:
         _ensure_dnsmasq_root()
         _check_dnsmasq_root(bridge)
+        _require_dnsmasq_pidfds()
+        executable = _dnsmasq_executable()
+        allowed_uids = _dnsmasq_uids()
     except OSError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -1288,16 +1470,25 @@ def cmd_dnsmasq_start(args: argparse.Namespace) -> int:
     except OSError as exc:
         print(f"failed to write {conf}: {exc}", file=sys.stderr)
         return 1
-    rc = _run([DNSMASQ_BIN, f"--conf-file={conf}"])
+    rc = _run([str(executable), f"--conf-file={conf}"])
     if rc != 0:
         return rc
     # dnsmasq daemonises after binding; confirm the daemon stayed up.
-    pids = _dnsmasq_pids(bridge)
-    if not pids:
-        print(f"dnsmasq for {bridge} exited right after starting", file=sys.stderr)
+    wanted = _dnsmasq_config_arguments(bridge, include_legacy=False)
+    try:
+        with ExitStack() as handles:
+            processes = _pin_dnsmasq_processes(
+                _dnsmasq_candidates(wanted), wanted, executable, allowed_uids, handles
+            )
+            if not processes:
+                raise OSError("daemon exited right after starting or could not be verified")
+            if len(processes) != 1:
+                raise OSError("expected one verified daemon after startup")
+    except OSError as exc:
+        print(f"Could not verify dnsmasq for {bridge}: {exc}", file=sys.stderr)
         return 1
     _finish_legacy_leases(bridge)
-    print(pids[0])
+    print(processes[0][0])
     return 0
 
 

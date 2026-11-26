@@ -58,6 +58,13 @@ restart. The reconciliation is intentionally conservative: it re-applies DHCP,
 NAT, and forwarding state only for NAT-Cloud bridges that already exist, and it
 does not rewrite lab JSON.
 
+Before stopping DHCP, the helper verifies the bridge's dnsmasq executable,
+process credentials, and host namespaces, then sends signals through a Linux process
+descriptor. If verification fails for a candidate daemon, the helper
+reports the error and leaves the process in place. A DHCP restart in this
+state stops before launching a replacement. Keep the Nova VE service
+account distinct from dnsmasq's `nobody` runtime account.
+
 The upgraded backend also reconciles deterministic Docker node container names
 at node start. If a same-name nova-ve container is already running, nova-ve
 adopts it into runtime state. If the same-name container is stopped, nova-ve

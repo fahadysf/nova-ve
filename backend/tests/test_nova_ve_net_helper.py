@@ -45,25 +45,57 @@ def helper(monkeypatch, tmp_path):
     pids_path = tmp_path / "pids.json"
     proc_root = tmp_path / "proc"
     proc_root.mkdir()
+    namespaces = proc_root / "self" / "ns"
+    namespaces.mkdir(parents=True)
+    for name in ("user", "net", "mnt"):
+        (namespaces / name).write_text(f"host {name} namespace fixture")
     monkeypatch.setattr(mod, "PIDS_JSON_PATH", pids_path, raising=True)
     monkeypatch.setattr(mod, "PROC_ROOT", proc_root, raising=True)
     monkeypatch.setattr(mod, "RUNTIME_ROOT", tmp_path / "runtime", raising=True)
     monkeypatch.setattr(mod, "DNSMASQ_ROOT", tmp_path / "run" / "dnsmasq", raising=True)
-    # Even an unstubbed ``_run`` could not start a real server from here.
-    monkeypatch.setattr(mod, "DNSMASQ_BIN", str(tmp_path / "dnsmasq-not-installed"), raising=True)
+    # This is a metadata fixture only, and not a runnable daemon.
+    dnsmasq = tmp_path / "dnsmasq-fixture"
+    dnsmasq.write_bytes(b"dnsmasq executable fixture")
+    dnsmasq.chmod(0o755)
+    monkeypatch.setattr(mod, "DNSMASQ_BIN", str(dnsmasq), raising=True)
     monkeypatch.setattr(mod, "IP_FORWARD_PATH", tmp_path / "ip_forward", raising=True)
     monkeypatch.setattr(mod, "IPV4_CONF_ROOT", tmp_path / "ipv4-conf", raising=True)
     monkeypatch.setattr(mod, "GUARD_LOCK_PATH", tmp_path / "guard.lock", raising=True)
     # The tree is this test user's own; production keeps the default of root.
     monkeypatch.setattr(mod, "_TRUSTED_UID", os.geteuid(), raising=True)
 
-    # No test in this file may signal a real process. One that reaches
-    # ``os.kill`` without installing its own stub (``_fake_kill``) fails here
-    # instead of sending the signal.
+    # Numeric signals are forbidden even when a test simulates pidfd signals.
     def no_kill(pid, sig):
         raise AssertionError(f"os.kill({pid}, {sig}) called without a stub")
 
     monkeypatch.setattr(mod.os, "kill", no_kill)
+
+    # Use real scratch file descriptors as opaque fake handles. No kernel
+    # process is opened, inspected, or signalled by these stubs.
+    handles = {}
+
+    def fake_pidfd_open(pid):
+        entry = proc_root / str(pid)
+        try:
+            inode = entry.stat().st_ino
+            fd = os.open(entry / "cmdline", os.O_RDONLY)
+        except FileNotFoundError as exc:
+            raise ProcessLookupError(pid) from exc
+        handles[fd] = (entry, inode)
+        return fd
+
+    def fake_exited(fd):
+        entry, inode = handles[fd]
+        try:
+            return entry.stat().st_ino != inode
+        except FileNotFoundError:
+            return True
+
+    monkeypatch.setattr(mod.os, "pidfd_open", fake_pidfd_open, raising=False)
+    monkeypatch.setattr(mod.signal, "pidfd_send_signal", no_kill, raising=False)
+    monkeypatch.setattr(mod, "_dnsmasq_pidfd_exited", fake_exited)
+    monkeypatch.setattr(mod, "_dnsmasq_uids", lambda: {65534})
+    mod._test_dnsmasq_handles = handles
 
     # The helper fixes its own umask and some tests vary it, so every test
     # starts from a known one and the runner's is put back afterwards.
@@ -384,22 +416,82 @@ def test_forward_remove_deletes_docker_user_rules_when_rule_shape_available(help
 
 
 def _seed_dnsmasq(helper, pid: int, bridge: str) -> None:
-    conf = helper._dnsmasq_paths(bridge)[0]
+    _seed_dnsmasq_process(helper, pid, helper._dnsmasq_paths(bridge)[0])
+
+
+def _seed_dnsmasq_process(helper, pid: int, conf: Path) -> None:
     entry = helper._test_proc_root / str(pid)
     entry.mkdir()
     (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={conf}\0".encode())
+    (entry / "exe").symlink_to(Path(helper.DNSMASQ_BIN).resolve())
+    (entry / "status").write_text("Uid:\t65534\t65534\t65534\t65534\nCapEff:\t0000000000002000\n")
+    (entry / "ns").mkdir()
+    for name in ("user", "net", "mnt"):
+        (entry / "ns" / name).symlink_to(helper.PROC_ROOT / "self" / "ns" / name)
+
+
+@pytest.mark.parametrize(
+    "scenario,expected",
+    [
+        ("managed", True),
+        ("different-executable", False),
+        ("different-uid", False),
+        ("different-net-namespace", False),
+        ("different-mnt-namespace", False),
+        ("missing-status", None),
+        ("malformed-uid", None),
+        ("writable-executable", None),
+        ("missing-dhcp-capability", None),
+    ],
+)
+def test_dnsmasq_process_identity_uses_executable_and_credentials(helper, scenario, expected):
+    _seed_dnsmasq(helper, 510, "novec0den1")
+    entry = helper.PROC_ROOT / "510"
+    executable = Path(helper.DNSMASQ_BIN)
+    executable.write_bytes(b"executable fixture")
+    executable.chmod(0o775 if scenario == "writable-executable" else 0o755)
+    if scenario == "different-executable":
+        other = executable.with_name("unrelated-fixture")
+        other.write_bytes(b"different executable fixture")
+        other.chmod(0o755)
+        (entry / "exe").unlink()
+        (entry / "exe").symlink_to(other)
+    if scenario in {"different-net-namespace", "different-mnt-namespace"}:
+        kind = scenario.split("-")[1]
+        foreign = helper.PROC_ROOT / f"foreign-{kind}"
+        foreign.write_text("foreign namespace fixture")
+        (entry / "ns" / kind).unlink()
+        (entry / "ns" / kind).symlink_to(foreign)
+
+    daemon_uid = 65534
+    if scenario == "missing-status":
+        (entry / "status").unlink()
+    else:
+        uid = 65533 if scenario == "different-uid" else daemon_uid
+        values = f"{uid}\t{uid}" if scenario == "malformed-uid" else "\t".join([str(uid)] * 4)
+        cap = "0" if scenario == "missing-dhcp-capability" else "2000"
+        (entry / "status").write_text(f"Uid:\t{values}\nCapEff:\t{cap}\n")
+
+    if expected is None:
+        with pytest.raises(OSError):
+            helper._dnsmasq_identity_matches(entry, executable, {daemon_uid})
+    else:
+        assert helper._dnsmasq_identity_matches(entry, executable, {daemon_uid}) is expected
 
 
 def _fake_kill(helper, monkeypatch, *, ignores=()):
-    """``os.kill`` that removes the fake process unless it ignores the signal."""
+    """Remove the fake process when its pinned synthetic handle is signalled."""
     killed: list[tuple[int, int]] = []
 
-    def kill(pid, sig):
-        killed.append((pid, sig))
+    def kill(handle, sig):
+        if helper._dnsmasq_pidfd_exited(handle):
+            raise ProcessLookupError(handle)
+        entry, _inode = helper._test_dnsmasq_handles[handle]
+        killed.append((int(entry.name), sig))
         if sig not in ignores:
-            shutil.rmtree(helper._test_proc_root / str(pid))
+            shutil.rmtree(entry)
 
-    monkeypatch.setattr(helper.os, "kill", kill)
+    monkeypatch.setattr(helper.signal, "pidfd_send_signal", kill)
     monkeypatch.setattr(helper.time, "sleep", lambda _seconds: None)
     return killed
 
@@ -427,6 +519,120 @@ def test_dnsmasq_stop_ignores_stale_pid_file_of_another_network(helper, monkeypa
     assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
     assert killed == []
     assert not (root / "dnsmasq.pid").exists()
+
+
+def test_dnsmasq_stop_ignores_a_candidate_with_foreign_credentials(helper, monkeypatch):
+    _seed_dnsmasq(helper, 507, "novec0den1")
+    entry = helper.PROC_ROOT / "507"
+    (entry / "status").write_text("Uid:\t65533\t65533\t65533\t65533\n")
+    signals = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert signals == [] and entry.is_dir()
+
+
+def test_dnsmasq_start_leaves_an_unverified_candidate_in_place(helper, monkeypatch, capsys):
+    _seed_dnsmasq(helper, 508, "novec0den1")
+    entry = helper.PROC_ROOT / "508"
+    (entry / "status").unlink()
+    signals = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(_NAT_START) == 1
+    assert "Could not stop dnsmasq" in capsys.readouterr().err
+    assert signals == [] and entry.is_dir()
+    assert helper._test_calls == []
+    assert not helper._dnsmasq_paths("novec0den1")[0].exists()
+    assert helper._test_dnsmasq_handles
+    for fd in helper._test_dnsmasq_handles:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_dnsmasq_start_refuses_an_incomplete_process_scan(helper, monkeypatch):
+    _seed_dnsmasq(helper, 512, "novec0den1")
+    entry = helper.PROC_ROOT / "512"
+    original_open = Path.open
+
+    def open_fixture(path, *args, **kwargs):
+        if path == entry / "cmdline":
+            raise PermissionError("unreadable process fixture")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", open_fixture)
+    signals = _fake_kill(helper, monkeypatch)
+    assert helper.main(_NAT_START) == 1
+    assert signals == [] and helper._test_calls == [] and entry.is_dir()
+
+
+def test_dnsmasq_start_refuses_an_ambiguous_invocation(helper, monkeypatch, capsys):
+    _seed_dnsmasq(helper, 513, "novec0den1")
+    entry = helper.PROC_ROOT / "513"
+    with (entry / "cmdline").open("ab") as argv:
+        argv.write(b"unexpected-fixture-argument\0")
+    signals = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(_NAT_START) == 1
+    assert "ambiguous configuration invocation" in capsys.readouterr().err
+    assert signals == [] and helper._test_calls == [] and entry.is_dir()
+
+
+def test_dnsmasq_pinning_tolerates_esrch_only_for_an_exited_process(helper, monkeypatch):
+    _seed_dnsmasq(helper, 514, "novec0den1")
+
+    def exited(entry, *_args):
+        entry.rename(helper.PROC_ROOT / "exited-fixture")
+        raise ProcessLookupError("process fixture exited during verification")
+
+    monkeypatch.setattr(helper, "_dnsmasq_identity_matches", exited)
+    signals = _fake_kill(helper, monkeypatch)
+
+    assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
+    assert signals == []
+    for fd in helper._test_dnsmasq_handles:
+        with pytest.raises(OSError):
+            os.fstat(fd)
+
+
+def test_dnsmasq_escalation_does_not_signal_a_replacement_process(helper, monkeypatch):
+    pid = 509
+    bridge = "novec0den1"
+    _seed_dnsmasq(helper, pid, bridge)
+    sent = []
+
+    def send(handle, sig):
+        assert not helper._dnsmasq_pidfd_exited(handle)
+        sent.append(sig)
+        entry, _inode = helper._test_dnsmasq_handles[handle]
+        entry.rename(helper.PROC_ROOT / "exited-fixture")
+        _seed_dnsmasq(helper, pid, bridge)
+
+    monkeypatch.setattr(helper.signal, "pidfd_send_signal", send)
+    monkeypatch.setattr(helper.time, "sleep", lambda _: None)
+
+    assert helper.main(["dnsmasq-stop", bridge]) == 1
+    assert sent == [signal.SIGTERM]
+    assert (helper.PROC_ROOT / str(pid)).is_dir()
+
+
+def test_dnsmasq_identity_allows_the_trusted_inode_during_package_replacement(helper, monkeypatch):
+    _seed_dnsmasq(helper, 511, "novec0den1")
+    entry = helper.PROC_ROOT / "511"
+    installed = Path(helper.DNSMASQ_BIN).resolve()
+    previous = installed.with_name("old-executable-fixture")
+    previous.write_bytes(b"previous executable")
+    previous.chmod(0o755)
+    (entry / "exe").unlink()
+    (entry / "exe").symlink_to(previous)
+    readlink = os.readlink
+
+    def kernel_link(path, *args, **kwargs):
+        if path == entry / "exe":
+            return f"{installed} (deleted)"
+        return readlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(helper.os, "readlink", kernel_link)
+    assert not installed.samefile(previous)
+    assert helper._dnsmasq_identity_matches(entry, installed, {65534})
 
 
 def test_dnsmasq_stop_escalates_to_sigkill(helper, monkeypatch):
@@ -469,6 +675,7 @@ def test_dnsmasq_start_writes_bridge_config(helper, monkeypatch):
     text = conf.read_text()
     assert "interface=novec0den1" in text
     assert "port=0" in text
+    assert "user=nobody" in text
     assert "dhcp-range=10.255.0.100,10.255.0.254,12h" in text
     assert helper._test_calls[-1][0] == helper.DNSMASQ_BIN
     assert helper._test_calls[-1][1] == f"--conf-file={conf}"
@@ -547,9 +754,7 @@ def test_dnsmasq_stop_finds_legacy_server_from_before_upgrade(helper, monkeypatc
     """#334 upgrade trap: servers started with the old conf path stay stoppable."""
     monkeypatch.setattr(helper, "DNSMASQ_ROOT", tmp_path / "run-dnsmasq", raising=True)
     legacy_conf = helper._legacy_dnsmasq_paths("novec0den1")[0]
-    entry = helper._test_proc_root / "601"
-    entry.mkdir()
-    (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={legacy_conf}\0".encode())
+    _seed_dnsmasq_process(helper, 601, legacy_conf)
     killed = _fake_kill(helper, monkeypatch)
     assert helper.main(["dnsmasq-stop", "novec0den1"]) == 0
     assert killed == [(601, helper.signal.SIGTERM)]
@@ -625,10 +830,7 @@ def _legacy_dir(helper, bridge: str = "novec0den1") -> Path:
 
 def _seed_legacy_dnsmasq(helper, pid: int, bridge: str) -> None:
     """A server the old helper started: only the legacy conf path finds it."""
-    conf = helper._legacy_dnsmasq_paths(bridge)[0]
-    entry = helper._test_proc_root / str(pid)
-    entry.mkdir()
-    (entry / "cmdline").write_bytes(f"/usr/sbin/dnsmasq\0--conf-file={conf}\0".encode())
+    _seed_dnsmasq_process(helper, pid, helper._legacy_dnsmasq_paths(bridge)[0])
 
 
 def _written(helper) -> dict[str, str]:
@@ -643,7 +845,7 @@ def _written(helper) -> dict[str, str]:
         for name in dirs + files:
             path = Path(base) / name
             relative = path.relative_to(root)
-            if relative.parts[0] == "proc":
+            if relative.parts[0] == "proc" or path == Path(helper.DNSMASQ_BIN):
                 continue
             kind = "link" if path.is_symlink() else "dir" if path.is_dir() else "file"
             out[str(relative)] = kind
@@ -869,6 +1071,16 @@ def _load_helper(monkeypatch, **env):
     return mod
 
 
+@pytest.mark.parametrize("source", ["SUDO_UID", "NOVA_VE_SERVICE_USER"])
+def test_dnsmasq_runtime_account_must_differ_from_the_sudo_caller(monkeypatch, source):
+    mod = _load_helper(monkeypatch)
+    uid = mod.pwd.getpwnam(mod.DNSMASQ_USER).pw_uid
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    monkeypatch.setenv(source, str(uid) if source == "SUDO_UID" else mod.DNSMASQ_USER)
+    with pytest.raises(OSError, match="must use different accounts"):
+        mod._dnsmasq_uids()
+
+
 def test_dnsmasq_root_defaults_to_the_run_tree_and_not_to_the_data_dir(monkeypatch):
     """#334: only root's own setting moves the tree, never the data directory.
 
@@ -925,14 +1137,30 @@ def spawn(command):
     entry = mod.PROC_ROOT / "7001"
     entry.mkdir()
     (entry / "cmdline").write_bytes(f"dnsmasq\\0{command[1]}\\0".encode())
+    (entry / "exe").symlink_to(Path(mod.DNSMASQ_BIN).resolve())
+    (entry / "status").write_text("Uid:\\t65534\\t65534\\t65534\\t65534\\nCapEff:\\t2000\\n")
+    (entry / "ns").mkdir()
+    for name in ("user", "net", "mnt"):
+        (entry / "ns" / name).symlink_to(mod.PROC_ROOT / "self" / "ns" / name)
     return 0
 
 
 mod.os.kill = refuse
+mod.signal.pidfd_send_signal = refuse
+mod.os.pidfd_open = lambda pid: mod.os.open(mod.PROC_ROOT / str(pid) / "cmdline", mod.os.O_RDONLY)
+mod._dnsmasq_pidfd_exited = lambda fd: False
+mod._dnsmasq_uids = lambda: {65534}
 mod._run = spawn
-mod.DNSMASQ_BIN = "dnsmasq-must-not-run"
+dnsmasq = Path(scratch) / "dnsmasq-fixture"
+dnsmasq.write_bytes(b"dnsmasq executable fixture")
+dnsmasq.chmod(0o755)
+mod.DNSMASQ_BIN = str(dnsmasq)
 mod._TRUSTED_UID = mod.os.geteuid()
 mod.PROC_ROOT = Path(scratch) / "proc"
+namespaces = mod.PROC_ROOT / "self" / "ns"
+namespaces.mkdir(parents=True)
+for name in ("user", "net", "mnt"):
+    (namespaces / name).write_text(f"host {name} namespace fixture")
 mod.RUNTIME_ROOT = Path(scratch) / "runtime"
 mod.DNSMASQ_ROOT = Path(scratch) / "run" / "dnsmasq"
 sys.exit(mod.main(argv))
