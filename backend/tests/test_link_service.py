@@ -477,7 +477,7 @@ async def test_create_link_calls_set_qemu_nic_link_up_for_running_qemu(
         return {"kind": "qemu", "lab_id": "lab", "node_id": 1}
 
     def fake_attach_qemu(
-        self, _lab_id, node_id, network_id, interface_index, *, bridge_name=None
+        self, _lab_id, node_id, network_id, interface_index, *, bridge_name=None, _lab_lock_held=False
     ):
         return {"interface_index": interface_index, "attach_generation": 1}
 

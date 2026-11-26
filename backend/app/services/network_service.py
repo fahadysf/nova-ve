@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.config import get_settings
 from app.services import host_net
+from app.services.async_utils import notify_after_mutation, run_mutation
 from app.services.cloud_inventory_service import (
     LINUX_BRIDGE_TYPE,
     bridge_dhcp_config_on,
@@ -1541,6 +1542,37 @@ class NetworkService:
         ``shared_cloud_id``; everyone else can join only what is shared (#319).
         ``can_open`` keeps labs the caller cannot open out of conflict messages.
         """
+        # #331: the change polls two locks and then provisions the host, all
+        # of it blocking, so it runs in a worker thread.
+        payload, cancelled = await run_mutation(
+            self._create_network_locked,
+            lab_path,
+            request,
+            allow_unshared_clouds=allow_unshared_clouds,
+            can_open=can_open,
+        )
+        await notify_after_mutation(
+            ws_hub.publish(
+                _normalize_relative_lab_path(lab_path),
+                "network_created",
+                {"network": dict(payload)},
+            ), cancelled
+        )
+        return payload
+
+    def _create_network_locked(
+        self,
+        lab_path: str,
+        request: dict,
+        *,
+        allow_unshared_clouds: bool = False,
+        can_open: Callable[[str], bool] | None = None,
+    ) -> dict:
+        """Create a network in a lab and return its record.
+
+        Calls :meth:`create_network` for the event loop; this blocks until it
+        has the subnet lock and the lab lock.
+        """
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
@@ -1823,10 +1855,22 @@ class NetworkService:
                 _recompute_mac_registry(normalized, data)
                 payload = _serialize_network(network, 0)
 
-        await ws_hub.publish(normalized, "network_created", {"network": dict(payload)})
         return payload
 
     async def delete_network(self, lab_path: str, network_id: int) -> dict:
+        # #331: as with create_network, the locks and the teardown block.
+        removed, cancelled = await run_mutation(self._delete_network_locked, lab_path, network_id)
+        await notify_after_mutation(
+            ws_hub.publish(
+                _normalize_relative_lab_path(lab_path),
+                "network_deleted",
+                {"network": removed},
+            ), cancelled
+        )
+        return removed
+
+    def _delete_network_locked(self, lab_path: str, network_id: int) -> dict:
+        """Delete a network and return its record; blocks on two locks."""
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
@@ -1925,7 +1969,6 @@ class NetworkService:
                         if guard_kept and bridge_gone:
                             _drop_bridge_guard_after_delete(bridge, "delete_network")
 
-        await ws_hub.publish(normalized, "network_deleted", {"network": removed})
         return removed
 
     # ------------------------------------------------------------------
@@ -2391,6 +2434,26 @@ class NetworkService:
         Returns ``(payload, changed)``. Stopping is refused while another lab
         still uses the network.
         """
+        # #331: as with create_network, the locks are polled for.
+        (payload, changed), cancelled = await run_mutation(
+            self._set_sharing_locked, lab_path, network_id, shared
+        )
+        if changed:
+            await notify_after_mutation(
+                ws_hub.publish(
+                    _normalize_relative_lab_path(lab_path),
+                    "network_updated",
+                    {"network": dict(payload)},
+                ), cancelled
+            )
+        elif cancelled:
+            raise asyncio.CancelledError
+        return payload, changed
+
+    def _set_sharing_locked(
+        self, lab_path: str, network_id: int, shared: bool
+    ) -> Tuple[dict, bool]:
+        """Change a network's sharing flag; blocks on two locks."""
         normalized = _normalize_relative_lab_path(lab_path)
         labs_dir = get_settings().LABS_DIR
 
@@ -2419,8 +2482,6 @@ class NetworkService:
                     LabService.write_lab_json_static(normalized, data)
                 payload = _serialize_network(network, _refcount(data, int(network_id)))
 
-        if changed:
-            await ws_hub.publish(normalized, "network_updated", {"network": dict(payload)})
         return payload, changed
 
 
