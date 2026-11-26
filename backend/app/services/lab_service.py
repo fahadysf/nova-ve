@@ -394,6 +394,56 @@ def _cleanup_lab_network_runtime(data: dict, lab_filename: str) -> None:
             _drop_bridge_guard_after_delete(bridge, "delete_lab")
 
 
+def _cleanup_lab_node_runtime(data: dict, lab_filename: str) -> None:
+    """Stop and wipe every node in a lab being deleted (#338).
+
+    Mirrors single-node delete: each node's work dir (disks, configs)
+    under ``TMP_DIR/<lab_id>/<node_id>`` is removed, then any leftover
+    per-lab work dir and runtime records are dropped. Best-effort per
+    node so one failing node does not block deleting the lab itself.
+    """
+    nodes = data.get("nodes", {}) or {}
+    if not isinstance(nodes, dict):
+        nodes = {}
+    lab_id = str(data.get("id") or lab_filename).strip()
+    try:
+        from app.services.node_runtime_service import NodeRuntimeService
+
+        service = NodeRuntimeService()
+    except Exception as exc:  # noqa: BLE001 - best-effort cleanup path
+        logger.warning("delete_lab: node runtime unavailable (%s)", exc)
+        service = None
+    if service is not None:
+        for raw_node_id in list(nodes):
+            try:
+                node_id = int(raw_node_id)
+            except (TypeError, ValueError):
+                continue
+            try:
+                service.wipe_node(data, node_id)
+            except Exception as exc:  # noqa: BLE001 - best-effort cleanup path
+                logger.warning(
+                    "delete_lab: wipe_node(%s) failed during lab cleanup (%s)",
+                    node_id,
+                    exc,
+                )
+    if not lab_id or "/" in lab_id or "\\" in lab_id or lab_id in {".", ".."}:
+        return
+    tmp_dir = get_settings().TMP_DIR
+    work_root = tmp_dir / lab_id
+    try:
+        if work_root.exists():
+            shutil.rmtree(work_root)
+    except OSError as exc:
+        logger.warning("delete_lab: rmtree(%s) failed (%s)", work_root, exc)
+    runtime_dir = tmp_dir / "node-runtime"
+    try:
+        for record in runtime_dir.glob(f"{lab_id}-*.json"):
+            record.unlink(missing_ok=True)
+    except OSError as exc:
+        logger.warning("delete_lab: runtime record cleanup failed (%s)", exc)
+
+
 def _legacy_topology_to_links(data: dict) -> list[dict]:
     links: list[dict] = []
     for index, entry in enumerate(data.get("topology", []) or []):
@@ -733,6 +783,7 @@ class LabService:
                 )
             else:
                 _cleanup_lab_network_runtime(data, lab.filename)
+                _cleanup_lab_node_runtime(data, lab.filename)
             await unlink_lab_file(lab.filename)
         await self.db.delete(lab)
         await self.db.commit()
