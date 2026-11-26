@@ -45,6 +45,30 @@ The canvas lives entirely under `src/lib/components/canvas/`. Key files:
 | `InfoPanel.svelte` | One floating draggable info panel. Pointer-capture drag + viewport clamp. |
 | `InfoPanelStack.svelte` | Renders the up-to-4 open info panels in a stack. |
 
+## Canvas interaction rules
+
+The canvas keeps its graph and interface positions in the lab state. Port
+visibility is presentation only: do not remove or move the invisible Svelte
+Flow handles when hiding the visible affordances, or connected edges will
+change their attachment points.
+
+| Interaction | Behavior |
+|---|---|
+| Hover or keyboard-focus a node or network | Reveal its port markers. Connected interface names remain visible at rest. A link drag reveals eligible targets across the canvas; touch devices keep them available without hover. |
+| Drag a connection point | The `dragLink` store tracks the press, drag, target, and cancellation. Escape cancels the drag; a valid drop opens the existing confirmation flow. |
+| Right-click a node | Open its context menu for lifecycle, console, configuration, information, deletion, and focus actions. Destructive actions use their normal confirmations. |
+| Select Focus from a context menu | Keep the focused element and its connected neighborhood visible and dim unrelated elements. Exit explicitly with the focus control or Escape. Ordinary clicks do not enter focus. |
+| Hover a node | Pulse its connected neighborhood without dimming the rest of the graph. This lightweight hover feedback is separate from explicit Focus mode. |
+| Use an in-card lifecycle control | Run the same start/stop path as the context menu; pending transitions prevent duplicate requests. |
+| Expand a network’s connections | Display up to six linked interface rows and a count of further connections. The frame is a view of the existing graph: nodes are not reparented or moved, and toggling the frame does not save coordinates. |
+| Zoom or expand a network frame | At low zoom the frame returns to its compact representation; zooming back in restores a requested expansion. Expansions that would cover another canvas item are refused so the user can move items or open network info. |
+
+When changing these interactions, extend `tests/e2e/canvas_interactions.spec.ts`
+and the focused Vitest component/store tests. The browser interaction fixture
+mocks API and WebSocket traffic so its lifecycle and connection tests cannot
+change a live lab. For a local browser run, start the frontend and run
+`FRONTEND_URL=http://127.0.0.1:5173 npm run test:e2e -- tests/e2e/canvas_interactions.spec.ts`.
+
 ## Stores
 
 | Store | Lives in | Purpose |
