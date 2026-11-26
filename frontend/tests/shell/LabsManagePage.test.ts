@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/svelte';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import LabsPage from '../../src/routes/(shell)/manage/labs/+page.svelte';
@@ -26,6 +26,7 @@ const DATA = {
       nodes_running: 2,
       cpu_allocated: 6,
       ram_allocated_mb: 6144,
+      disk_bytes: 2 * 1024 ** 3,
       lock: false,
     },
     {
@@ -39,6 +40,7 @@ const DATA = {
       nodes_running: 0,
       cpu_allocated: 1,
       ram_allocated_mb: 512,
+      disk_bytes: 512 * 1024 ** 2,
       lock: false,
     },
   ],
@@ -49,6 +51,7 @@ const DATA = {
     nodes_running: 2,
     cpu_allocated: 7,
     ram_allocated_mb: 6656,
+    disk_bytes: 2.5 * 1024 ** 3,
   },
 };
 
@@ -73,6 +76,9 @@ describe('Lab management page (#262, live)', () => {
     expect(screen.getByText('2 / 4')).toBeInTheDocument(); // nodes running KPI
     expect(screen.getByText('6.5 GB')).toBeInTheDocument(); // RAM KPI (6656 MB)
     expect(screen.getByText('idle-lab')).toBeInTheDocument();
+    expect(within(screen.getByTestId('labs-kpis')).getByText('2.5 GiB')).toBeInTheDocument();
+    expect(within(screen.getByTestId('labs-row-arc-lab.json')).getByText('2.0 GiB')).toBeInTheDocument();
+    expect(within(screen.getByTestId('labs-row-idle-lab.json')).getByText('512.0 MiB')).toBeInTheDocument();
   });
 
   it('stop action posts to the manage endpoint after confirm', async () => {
@@ -93,6 +99,21 @@ describe('Lab management page (#262, live)', () => {
       );
       expect(stopCall).toBeTruthy();
     });
+  });
+
+  it('shows unavailable disk measurements without presenting them as zero', async () => {
+    apiRequest.mockResolvedValue({
+      code: 200, status: 'success', message: '',
+      data: {
+        labs: [{ ...DATA.labs[0], disk_bytes: null }],
+        totals: { ...DATA.totals, disk_bytes: null },
+      },
+    });
+    render(LabsPage);
+
+    await waitFor(() => screen.getByTestId('labs-row-arc-lab.json'));
+    expect(within(screen.getByTestId('labs-kpis')).getByText('Unavailable')).toBeInTheDocument();
+    expect(within(screen.getByTestId('labs-row-arc-lab.json')).getByText('Unavailable')).toBeInTheDocument();
   });
 
   it('non-admins see view-only rows', async () => {

@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +78,44 @@ def _user_folder_root(current_user: UserRead) -> str:
     return str(getattr(current_user, "folder", "/") or "/").replace("\\", "/").strip("/")
 
 
+def _lab_disk_bytes(lab_id: str) -> int | None:
+    """Allocated bytes in lab runtime files, excluding shared images and symlinks.
+
+    Missing work directories mean zero usage; an invalid id or an unreadable
+    directory yields an unknown value rather than an inaccurate partial sum.
+    """
+    from app.config import get_settings
+
+    if not lab_id or lab_id in {".", "..", "node-runtime"} or any(c in lab_id for c in "/\\\0"):
+        return None
+    root = get_settings().TMP_DIR / lab_id
+    try:
+        root_stat = root.lstat()
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return None
+    if not stat.S_ISDIR(root_stat.st_mode):
+        return None
+
+    def fail(error: OSError) -> None:
+        raise error
+
+    total = 0
+    seen: set[tuple[int, int]] = set()
+    try:
+        for directory, _, files in os.walk(root, followlinks=False, onerror=fail):
+            for name in files:
+                info = (Path(directory) / name).lstat()
+                if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) not in seen:
+                    seen.add((info.st_dev, info.st_ino))
+                    total += info.st_blocks * 512
+    except OSError:
+        _logger.warning("Could not measure lab disk usage", exc_info=True)
+        return None
+    return total
+
+
 def _summarize_lab(lab_file: Path, labs_dir: Path, runtime: NodeRuntimeService | None = None) -> dict[str, Any] | None:
     try:
         data = json.loads(lab_file.read_text())
@@ -125,12 +165,13 @@ def _summarize_lab(lab_file: Path, labs_dir: Path, runtime: NodeRuntimeService |
         "nodes_running": running,
         "cpu_allocated": cpu_alloc,
         "ram_allocated_mb": ram_alloc,
+        "disk_bytes": _lab_disk_bytes(lab_id),
         "lock": bool(meta.get("lock")),
     }
 
 
 @router.get("")
-async def list_managed_labs(
+def list_managed_labs(
     current_user: UserRead = Depends(get_current_user),
 ):
     """Every lab instance with state and allocated resources.
@@ -145,10 +186,11 @@ async def list_managed_labs(
     labs: list[dict[str, Any]] = []
     if labs_dir.exists():
         for lab_file in sorted(labs_dir.rglob("*.json")):
+            relative = lab_file.relative_to(labs_dir).as_posix()
+            if root and not relative.startswith(f"{root}/"):
+                continue
             summary = _summarize_lab(lab_file, labs_dir, runtime)
             if summary is None:
-                continue
-            if root and not summary["path"].lstrip("/").startswith(f"{root}/"):
                 continue
             labs.append(summary)
 
@@ -159,6 +201,7 @@ async def list_managed_labs(
         "nodes_running": sum(lab["nodes_running"] for lab in labs),
         "cpu_allocated": sum(lab["cpu_allocated"] for lab in labs),
         "ram_allocated_mb": sum(lab["ram_allocated_mb"] for lab in labs),
+        "disk_bytes": sum(lab["disk_bytes"] for lab in labs) if all(lab["disk_bytes"] is not None for lab in labs) else None,
     }
     return _ok("Managed labs listed.", {"labs": labs, "totals": totals})
 
