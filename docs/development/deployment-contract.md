@@ -63,9 +63,9 @@ Route ownership:
 
 ## Database Lifecycle Ownership
 
-- Migrations run as an explicit provisioning/deploy action via `deploy/scripts/run-migrations.sh`.
+- Migrations run as an explicit provisioning action as the service user. Operators can use `deploy/scripts/run-migrations.sh` for manual application deployments.
 - The backend service must **not** self-migrate on startup.
-- Initial seed runs as a separate explicit provisioning/deploy action via `deploy/scripts/run-seed.sh`.
+- Initial seed runs as a separate explicit provisioning action as the service user.
 - Seed is safe to rerun because it skips creation when the configured admin user already exists.
 - Guacamole schema bootstrap runs as an explicit provisioning/deploy action inside `deploy/scripts/run-guacamole.sh`.
 - Guacamole auth/storage uses PostgreSQL-backed datasource `postgresql`, not the legacy JSON-auth-only path, for the target host lane.
@@ -73,7 +73,8 @@ Route ownership:
 
 ## Filesystem Layout
 
-- App checkout root: the absolute repo path where `deploy/scripts/provision-ubuntu-2604.sh` is executed; installer default is `/var/lib/nova-ve/nova-ve-git`
+- App checkout root: the service-owned application directory. The installer defaults to `/var/lib/nova-ve/nova-ve-git`.
+- Privileged provisioning source: a temporary root-owned checkout at the same Git revision as the application. The installer removes it after provisioning.
 - **Instance ID file: `/etc/nova-ve/instance_id`** — written once by `provision-ubuntu-2604.sh`, never overwritten; authoritative source for bridge/TAP name derivation
 - Static frontend root: `/var/lib/nova-ve/www`
 - Labs: `/var/lib/nova-ve/labs`
@@ -96,7 +97,7 @@ The backend derives a 16-bit `lab_hash = blake2b(instance_id + ":" + lab_id, dig
 
 - `/etc/nova-ve/instance_id` **MUST NOT live on a shared filesystem** (NFS, CIFS, etc.).
   Each physical or virtual host must have a unique value on its local filesystem.
-- If a host VM is cloned from an image, `provision-ubuntu-2604.sh` must be re-run on the
+- If a host VM is cloned from an image, `install.sh` must be re-run on the
   clone so a new UUID is generated. The script is idempotent only within a single host
   (it never overwrites an existing non-empty file). Clones share the original UUID unless
   the file is explicitly regenerated.

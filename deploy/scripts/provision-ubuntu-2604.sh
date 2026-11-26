@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
+# Provisioning source layout: split checkout v1
 # Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 # SPDX-License-Identifier: Apache-2.0
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd -P)"
 DRY_RUN=0
 APP_OWNER="${NOVA_VE_SERVICE_USER:-${NOVA_VE_OWNER:-nova-ve}}"
 APP_GROUP="${NOVA_VE_SERVICE_GROUP:-}"
-APP_ROOT="${REPO_ROOT}"
+APP_ROOT="${NOVA_VE_REPO_DIR:-${REPO_ROOT}}"
 ENV_DIR="/etc/nova-ve"
 ENV_FILE="${ENV_DIR}/backend.env"
 FRONTEND_ROOT="${NOVA_VE_FRONTEND_ROOT:-/var/lib/nova-ve/www}"
@@ -34,6 +35,49 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+validate_provisioning_tree() {
+  local dir="${REPO_ROOT}" owner mode untrusted
+  # The installer creates a private root-owned directory under sticky /tmp.
+  while :; do
+    read -r owner mode < <(stat -c '%u %a' -- "${dir}") || return
+    if [[ "${owner}" != 0 ]] || {
+      (( (8#${mode} & 022) != 0 )) &&
+        ! { [[ "${dir}" == /tmp ]] && (( (8#${mode} & 01000) != 0 )); }
+    }; then
+      echo "Provisioning source has a writable or non-root ancestor. Run install.sh." >&2
+      return 1
+    fi
+    [[ "${dir}" == / ]] && break
+    dir="$(dirname "${dir}")"
+  done
+  untrusted="$(find "${REPO_ROOT}/deploy" \( -type l -o ! -uid 0 -o -perm /022 \) -print -quit)" || return
+  if [[ -n "${untrusted}" ]]; then
+    echo "Provisioning inputs must be owned and writable only by root. Run install.sh." >&2
+    return 1
+  fi
+}
+
+require_trusted_provisioning_source() {
+  local application_source application_commit
+  if [[ "${EUID}" -ne 0 || -z "${NOVA_VE_REPO_DIR:-}" || -z "${NOVA_VE_RELEASE_COMMIT:-}" ]]; then
+    echo "Run install.sh to prepare a trusted source and a separate application checkout." >&2
+    return 1
+  fi
+  validate_service_user "${APP_OWNER}"
+  validate_provisioning_tree || return
+  application_source="$(cd "${APP_ROOT}" && pwd -P)" || return
+  if [[ "${application_source}" == "${REPO_ROOT}" ]]; then
+    echo "Provisioning source and application checkout must be separate. Run install.sh." >&2
+    return 1
+  fi
+  application_commit="$(sudo -u "${APP_OWNER}" -H git -C "${APP_ROOT}" rev-parse --verify 'HEAD^{commit}')" || return
+  if [[ "${application_commit}" != "${NOVA_VE_RELEASE_COMMIT}" ]]; then
+    echo "Application checkout is not at the selected release. Run install.sh." >&2
+    return 1
+  fi
+  APP_ROOT="${application_source}"
+}
 
 run() {
   if [[ "${DRY_RUN}" -eq 1 ]]; then
@@ -663,6 +707,11 @@ ensure_instance_id() {
 }
 
 require_target_host
+if [[ "${DRY_RUN}" -eq 0 ]]; then
+  require_trusted_provisioning_source
+  cd -- "${REPO_ROOT}"
+  unset PYTHONPATH PYTHONHOME
+fi
 ensure_service_account
 resolve_app_identity
 
@@ -1219,7 +1268,7 @@ fi
 # does NOT abort the provisioner; the install summary records the status.
 DEMO_IMAGES_STATUS_FILE=/var/lib/nova-ve/.demo-images-status
 run rm -f "${DEMO_IMAGES_STATUS_FILE}"
-DEMO_BUILD_CMD=(sudo -u "${APP_OWNER}" -H bash "${REPO_ROOT}/deploy/scripts/build-demo-images.sh")
+DEMO_BUILD_CMD=(sudo -u "${APP_OWNER}" -H bash "${APP_ROOT}/deploy/scripts/build-demo-images.sh")
 if [[ "${NOVA_VE_SKIP_DEMO_IMAGES:-0}" == "1" ]]; then
   DEMO_BUILD_CMD=(env NOVA_VE_SKIP_DEMO_IMAGES=1 "${DEMO_BUILD_CMD[@]}")
 fi
@@ -1242,7 +1291,7 @@ run chown "${APP_OWNER}:${APP_GROUP}" "${DEMO_IMAGES_STATUS_FILE}" || true
 # does NOT abort the provisioner; the install summary records the status.
 PLATFORM_IMAGES_STATUS_FILE=/var/lib/nova-ve/.platform-images-status
 run rm -f "${PLATFORM_IMAGES_STATUS_FILE}"
-PLATFORM_BUILD_CMD=(sudo -u "${APP_OWNER}" -H env NOVA_VE_PLATFORM_MODE=auto bash "${REPO_ROOT}/deploy/scripts/build-platform-images.sh")
+PLATFORM_BUILD_CMD=(sudo -u "${APP_OWNER}" -H env NOVA_VE_PLATFORM_MODE=auto bash "${APP_ROOT}/deploy/scripts/build-platform-images.sh")
 if [[ "${NOVA_VE_SKIP_PLATFORM_IMAGES:-0}" == "1" ]]; then
   PLATFORM_BUILD_CMD=(env NOVA_VE_SKIP_PLATFORM_IMAGES=1 "${PLATFORM_BUILD_CMD[@]}")
 fi
@@ -1263,13 +1312,22 @@ ensure_instance_id
 
 ensure_database
 
-run "${PYTHON_BIN}" -m venv "${REPO_ROOT}/backend/.venv"
-run "${REPO_ROOT}/backend/.venv/bin/pip" install --upgrade pip
-run "${REPO_ROOT}/backend/.venv/bin/pip" install -r "${REPO_ROOT}/backend/requirements.txt"
+app_python="${APP_ROOT}/backend/.venv/bin/python"
+run sudo -u "${APP_OWNER}" -H "${PYTHON_BIN}" -m venv "${APP_ROOT}/backend/.venv"
+run sudo -u "${APP_OWNER}" -H "${app_python}" -m pip install --upgrade pip
+run sudo -u "${APP_OWNER}" -H "${app_python}" -m pip install -r "${APP_ROOT}/backend/requirements.txt"
 
-run "${REPO_ROOT}/deploy/scripts/run-migrations.sh"
-run "${REPO_ROOT}/deploy/scripts/run-seed.sh"
-run "${REPO_ROOT}/deploy/scripts/build-frontend.sh"
+run_app_backend() {
+  # The service manager reads the same protected environment as the backend.
+  run systemd-run --quiet --wait --pipe --collect --expand-environment=no \
+    --uid="${APP_OWNER}" --gid="${APP_GROUP}" --working-directory="${APP_ROOT}/backend" \
+    --property="EnvironmentFile=${ENV_FILE}" -- "$@"
+}
+
+run_app_backend "${app_python}" -m alembic upgrade head
+run_app_backend "${app_python}" -m scripts.seed
+run sudo -u "${APP_OWNER}" -H env NOVA_VE_FRONTEND_ROOT="${FRONTEND_ROOT}" \
+  bash "${APP_ROOT}/deploy/scripts/build-frontend.sh"
 run "${GUACAMOLE_COMPOSE_SCRIPT}"
 
 render_template "${CADDY_TEMPLATE}" /etc/caddy/Caddyfile
