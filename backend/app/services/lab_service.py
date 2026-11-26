@@ -105,6 +105,8 @@ def build_relative_lab_path(
     name: str,
     path: str | None = None,
     filename: str | None = None,
+    *,
+    path_is_folder: bool = False,
 ) -> str:
     """Build a relative lab path from API inputs."""
     if filename:
@@ -116,7 +118,7 @@ def build_relative_lab_path(
     generated_name = f"{_safe_lab_filename(name)}.json"
     if path:
         normalized_path = _normalize_relative_lab_path(path)
-        if normalized_path.endswith(".json"):
+        if not path_is_folder and normalized_path.endswith(".json"):
             return normalized_path
         return f"{normalized_path}/{generated_name}"
 
