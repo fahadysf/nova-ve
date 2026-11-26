@@ -3,7 +3,9 @@
 """Lab management API tests (#262): listing scope, state summary, and the
 stop/wipe lifecycle actions."""
 
+import asyncio
 import json
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -29,6 +31,7 @@ def manage_settings(tmp_path, monkeypatch):
     monkeypatch.setattr("app.services.lab_service.get_settings", lambda: settings)
     monkeypatch.setattr("app.services.node_runtime_service.get_settings", lambda: settings)
     monkeypatch.setattr("app.services.template_service.get_settings", lambda: settings)
+    monkeypatch.setattr("app.config.get_settings", lambda: settings)
     return settings
 
 
@@ -110,6 +113,29 @@ async def test_listing_reports_state_and_allocations(client, manage_settings, mo
 
 
 @pytest.mark.asyncio
+async def test_disk_scan_does_not_block_event_loop(client, manage_settings, monkeypatch):
+    _write_lab(manage_settings, "lab.json")
+    _as("admin")
+    monkeypatch.setattr("app.routers.manage.NodeRuntimeService", lambda: _FakeListRuntime())
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_scan(lab_id):
+        started.set()
+        release.wait(timeout=5)
+        return 0
+
+    monkeypatch.setattr("app.routers.manage._lab_disk_bytes", slow_scan)
+    request = asyncio.create_task(client.get("/api/manage/labs"))
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        assert not request.done()
+    finally:
+        release.set()
+    assert (await request).status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_non_admin_listing_scoped_to_folder_root(client, manage_settings, monkeypatch):
     nested = manage_settings.LABS_DIR / "trainee"
     nested.mkdir()
@@ -133,6 +159,67 @@ async def test_non_admin_listing_scoped_to_folder_root(client, manage_settings, 
 
     files = [lab["file"] for lab in response.json()["data"]["labs"]]
     assert files == ["scoped.json"]
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_counts_allocated_files_for_stopped_labs_and_scoped_totals(client, manage_settings, monkeypatch):
+    nested = manage_settings.LABS_DIR / "trainee"
+    nested.mkdir()
+    (nested / "scoped.json").write_text(json.dumps({"id": "scoped", "nodes": {}}))
+    _write_lab(manage_settings, "admin-lab.json")
+    scoped_dir = manage_settings.TMP_DIR / "scoped" / "1"
+    scoped_dir.mkdir(parents=True)
+    disk = scoped_dir / "virtioa.qcow2"
+    with disk.open("wb") as f:
+        f.write(b"data")
+        f.truncate(64 * 1024 * 1024)
+    (scoped_dir / "duplicate").hardlink_to(disk)
+    admin_dir = manage_settings.TMP_DIR / "admin-lab" / "1"
+    admin_dir.mkdir(parents=True)
+    admin_disk = admin_dir / "disk"
+    admin_disk.write_bytes(b"admin")
+    (scoped_dir / "external").symlink_to(admin_disk)
+    monkeypatch.setattr("app.routers.manage.NodeRuntimeService", lambda: _FakeListRuntime())
+
+    _as("admin")
+    data = (await client.get("/api/manage/labs")).json()["data"]
+    labs = {lab["file"]: lab for lab in data["labs"]}
+    scoped_bytes = disk.stat().st_blocks * 512
+    admin_bytes = admin_disk.stat().st_blocks * 512
+    assert labs["scoped.json"]["state"] == "stopped"
+    assert labs["scoped.json"]["disk_bytes"] == scoped_bytes
+    assert scoped_bytes < disk.stat().st_size
+    assert data["totals"]["disk_bytes"] == scoped_bytes + admin_bytes
+
+    _as("user", username="trainee", folder="/trainee")
+    scoped_data = (await client.get("/api/manage/labs")).json()["data"]
+    assert scoped_data["totals"]["disk_bytes"] == scoped_bytes
+    assert len(scoped_data["labs"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_disk_usage_unknown_for_unsafe_storage_and_zero_for_missing(client, manage_settings, monkeypatch):
+    _write_lab(manage_settings, "missing.json")
+    (manage_settings.LABS_DIR / "unsafe.json").write_text(json.dumps({"id": "../outside", "nodes": {}}))
+    monkeypatch.setattr("app.routers.manage.NodeRuntimeService", lambda: _FakeListRuntime())
+    _as("admin")
+    data = (await client.get("/api/manage/labs")).json()["data"]
+    labs = {lab["file"]: lab for lab in data["labs"]}
+    assert labs["missing.json"]["disk_bytes"] == 0
+    assert labs["unsafe.json"]["disk_bytes"] is None
+    assert data["totals"]["disk_bytes"] is None
+
+
+def test_disk_usage_reports_unreadable_storage_as_unknown(manage_settings, monkeypatch):
+    from app.routers.manage import _lab_disk_bytes
+
+    (manage_settings.TMP_DIR / "lab").mkdir()
+
+    def inaccessible(*args, onerror, **kwargs):
+        onerror(PermissionError("unreadable"))
+
+    monkeypatch.setattr("app.routers.manage.os.walk", inaccessible)
+    assert _lab_disk_bytes("lab") is None
 
 
 @pytest.mark.asyncio
