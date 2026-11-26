@@ -20,11 +20,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from app.config import get_settings
-from app.services.lab_lock import LabLockTimeout
+from app.services.lab_lock import LabLockTimeout, lab_lock_async
 
 NAT_CLOUD_TYPE = "nat_cloud"
 LINUX_BRIDGE_TYPE = "linux_bridge"
 BRIDGE_DHCP_KEYS = ("cidr", "dhcp_server", "dhcp_start", "dhcp_end")
+_NAT_CLOUD_IPAM_LOCK = "nat-cloud-ipam"
 
 
 @dataclass(frozen=True)
@@ -65,10 +66,11 @@ def _labs_dir() -> Path:
     return Path(get_settings().LABS_DIR).resolve()
 
 
-def _base_data_dir() -> Path:
-    settings = get_settings()
+def _base_data_dir(settings: Any = None) -> Path:
+    if settings is None:
+        settings = get_settings()
     raw = getattr(settings, "BASE_DATA_DIR", None)
-    return Path(raw).resolve() if raw else _labs_dir().parent.resolve()
+    return Path(raw).resolve() if raw else Path(settings.LABS_DIR).resolve().parent
 
 
 def _normalize_relative_path(raw_path: str) -> str:
@@ -82,7 +84,7 @@ def _normalize_relative_path(raw_path: str) -> str:
 @contextmanager
 def nat_cloud_ipam_lock(timeout_s: float = 5.0) -> Iterator[None]:
     """Host-wide lock for subnet choices: NAT-Cloud IPAM and DHCP bridges (#325)."""
-    lock_path = _base_data_dir() / "nat-cloud-ipam.lock"
+    lock_path = _base_data_dir() / f"{_NAT_CLOUD_IPAM_LOCK}.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_path, "a+") as fh:
         deadline = time.monotonic() + timeout_s
@@ -101,6 +103,10 @@ def nat_cloud_ipam_lock(timeout_s: float = 5.0) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def nat_cloud_ipam_lock_async(settings: Any):
+    return lab_lock_async(_NAT_CLOUD_IPAM_LOCK, _base_data_dir(settings))
 
 
 def nat_cloud_id(lab_id: str, network_id: int) -> str:
