@@ -101,10 +101,10 @@ def test_running_nodes_by_lab_forgets_a_lab_once_its_last_record_is_gone(registr
     registry.pop("lab-a:1")
     assert service.running_nodes_by_lab() == {"lab-a": 1, "lab-b": 1}
 
-    NodeRuntimeService._delete_runtime_class("lab-a", 2, nowhere)
+    NodeRuntimeService._discard_inactive_runtime(registry["lab-a:2"], nowhere)
     assert service.running_nodes_by_lab() == {"lab-b": 1}
 
-    NodeRuntimeService._delete_runtime_class("lab-b", 1, nowhere)
+    NodeRuntimeService._discard_inactive_runtime(registry["lab-b:1"], nowhere)
     assert service.running_nodes_by_lab() == {}
 
 

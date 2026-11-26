@@ -11,6 +11,7 @@ from __future__ import annotations
 import socket
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -369,6 +370,46 @@ def test_stop_node_reconstructs_nio_names_for_legacy_runtime(
     assert "vm delete nv_lab_n3" in client.commands
     assert "nio delete nv_lab_n3_i0" in client.commands
     assert "nio delete nv_lab_n3_i1" in client.commands
+
+
+def test_confirmed_stop_keeps_runtime_after_a_protocol_failure(tmp_path):
+    class Client:
+        def __init__(self):
+            self.present = True
+            self.fail = True
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+        def request(self, command):
+            if command == "vm list":
+                return SimpleNamespace(lines=["fixture (c3725)", "OK"] if self.present else ["OK"])
+            if command == "vm get_status fixture":
+                return SimpleNamespace(lines=["2"])
+            if command == "vm stop fixture" and self.fail:
+                raise DynamipsError("protocol timeout")
+            if command == "vm delete fixture":
+                self.present = False
+            assert command in {"vm stop fixture", "vm delete fixture"}
+            return SimpleNamespace(lines=["OK"])
+
+    launcher = DynamipsLauncher()
+    client = Client()
+    launcher._client = client
+    launcher._hypervisor_proc = SimpleNamespace(poll=lambda: None)
+    launcher._hypervisor_port = 1000
+    sidecar = tmp_path / "dynamips.json"
+    sidecar.write_text("{}")
+    runtime = {"vm_name": "fixture", "hypervisor_port": 1000, "work_dir": str(tmp_path)}
+
+    with pytest.raises(DynamipsError, match="protocol timeout"):
+        launcher.stop_node(runtime, confirm_stopped=True)
+
+    assert sidecar.exists() and client.present and client.closed == 2
+    client.fail = False
+    launcher.stop_node(runtime, confirm_stopped=True)
+    assert not sidecar.exists() and not client.present
 
 
 # ---- Persistence regression tests ----------------------------------------

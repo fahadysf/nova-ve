@@ -38,6 +38,7 @@ import subprocess
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, Optional
 
@@ -46,6 +47,7 @@ import psutil
 from app.services.lab_paths import iter_lab_json_files
 from app.config import get_settings
 from app.services import host_net, qemu_versions, runtime_pids
+from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
 from app.services.shared_network_service import bridge_identity
 
 
@@ -343,6 +345,7 @@ def _default_docker_inspect(docker_binary: str, docker_host: str, container_name
 
 class NodeRuntimeService:
     _registry: dict[str, dict[str, Any]] = {}
+    _observed_inactive: set[str] = set()
     _loaded = False
     _lock = threading.Lock()
     # Maps (lab_id, node_id) -> monotonic timestamp of last deliberate start/stop.
@@ -372,6 +375,7 @@ class NodeRuntimeService:
     def reset_registry(cls) -> None:
         with cls._lock:
             cls._registry.clear()
+            cls._observed_inactive.clear()
             cls._loaded = False
         cls._transition_timestamps.clear()
         cls._discovery_generation.clear()
@@ -399,10 +403,26 @@ class NodeRuntimeService:
             return False
         return (time.monotonic() - ts) < _TRANSITION_SUPPRESS_S
 
+    @staticmethod
+    @contextmanager
+    def _node_lifecycle_lock(lab_id: str, node_id: int):
+        try:
+            with runtime_mutex.acquire_node_sync(lab_id, node_id, timeout=0):
+                yield
+        except RuntimeMutexContention as exc:
+            raise NodeRuntimeError("A node operation is in progress. Retry the request.") from exc
+
     def start_node(self, lab_data: dict[str, Any], node_id: int) -> dict[str, Any]:
         lab_id = self._lab_id(lab_data)
+        with self._node_lifecycle_lock(lab_id, node_id):
+            return self._start_node(lab_data, lab_id, node_id)
+
+    def _start_node(self, lab_data: dict[str, Any], lab_id: str, node_id: int) -> dict[str, Any]:
         node = self._node_data(lab_data, node_id)
         key = self._key(lab_id, node_id)
+        saved = self._runtime_record(lab_id, node_id, include_stopped=True, require_valid=True)
+        if saved and saved.get("lab_cleanup_pending"):
+            raise NodeRuntimeError("Retry the pending lab deletion before starting this node.")
         runtime = self._runtime_record(lab_id, node_id, require_valid=True)
         if not runtime and node.get("type") == "docker":
             runtime = self._reconcile_docker_node_runtime(lab_data, node)
@@ -444,6 +464,7 @@ class NodeRuntimeService:
         self._record_transition(lab_id, node_id)
         with self._lock:
             self._registry[key] = runtime
+            self._observed_inactive.discard(key)
         self._persist_runtime(runtime)
 
         # Cadence: schedule live-MAC reads at t=1s/3s/8s after start. No steady-state poll.
@@ -776,44 +797,83 @@ class NodeRuntimeService:
                 return iface
         return None
 
-    def stop_node(self, lab_data: dict[str, Any], node_id: int) -> None:
+    def lab_runtime_node_ids(self, lab_id: str) -> set[int]:
+        """Include saved and in-memory nodes that no longer appear in the topology."""
+        with self._lock:
+            node_ids = {row["node_id"] for row in self._registry.values() if row.get("lab_id") == lab_id}
+        prefix = f"{lab_id}-"
+        for record in self.runtime_dir.glob("*.json"):
+            if record.stem.startswith(prefix):
+                suffix = record.stem[len(prefix):]
+                if suffix.isascii() and suffix.isdecimal():
+                    node_ids.add(int(suffix))
+        for record in (self.settings.TMP_DIR / lab_id).glob("*/dynamips.json"):
+            name = record.parent.name
+            if name.isascii() and name.isdecimal():
+                node_ids.add(int(name))
+        return node_ids
+
+    def stop_node(self, lab_data: dict[str, Any], node_id: int, *, confirm_stopped: bool = False) -> None:
         lab_id = self._lab_id(lab_data)
-        runtime = self._runtime_record(lab_id, node_id, require_valid=True)
+        with self._node_lifecycle_lock(lab_id, node_id):
+            self._stop_node(lab_data, lab_id, node_id, confirm_stopped=confirm_stopped)
+
+    def _stop_node(
+        self, lab_data: dict[str, Any], lab_id: str, node_id: int, *, confirm_stopped: bool,
+    ) -> None:
+        runtime = self._runtime_record(lab_id, node_id, include_stopped=True, require_valid=True)
+        if runtime and not confirm_stopped:
+            if runtime.get("lab_cleanup_pending"):
+                raise NodeRuntimeError("Retry the pending lab deletion to finish node cleanup.")
+            runtime = self._runtime_record(lab_id, node_id, require_valid=True)
         if not runtime:
+            if confirm_stopped:
+                if (self._work_dir(lab_id, node_id) / "dynamips.json").exists():
+                    raise NodeRuntimeError("The Dynamips node has no verified runtime record. Resolve its hypervisor state before retrying.")
+                if str(node_id) not in (lab_data.get("nodes") or {}):
+                    return
             node = self._node_data(lab_data, node_id)
             if node.get("type") == "docker":
+                if confirm_stopped:
+                    if not host_net.sandbox_mode():
+                        docker = self._resolve_binary("docker")
+                        if not docker or not self._docker_container_absent(docker, self._container_name(lab_id, node_id)):
+                            raise NodeRuntimeError("A Docker node could not be verified without its runtime record.")
+                    return
                 state = self.docker_network_state(lab_id, node_id)
                 if state and state["network_mode"] != "none":
                     raise NodeRuntimeError(self.legacy_docker_message(node, state))
             return
 
+        if confirm_stopped and not runtime.get("lab_cleanup_pending"):
+            runtime = {**runtime, "lab_cleanup_pending": True}
+            with self._lock:
+                self._persist_runtime(runtime)
+                self._registry[self._key(lab_id, node_id)] = runtime
         self._record_transition(lab_id, node_id)
         kind = runtime.get("kind")
+        stop_options = {"confirm_stopped": True} if confirm_stopped else {}
         if kind == "qemu":
-            # Issue #175 (C1): hold node mutex so stop + delete cannot
-            # interleave a concurrent reconcile/attach/start persist write.
-            from app.services.runtime_mutex import runtime_mutex
-
-            with runtime_mutex.acquire_node_sync(lab_id, node_id):
-                self._stop_qemu_runtime(runtime)
-                self._delete_runtime(lab_id, node_id)
-            return
-        if kind == "docker":
-            self._stop_docker_runtime(runtime)
+            self._stop_qemu_runtime(runtime, **stop_options)
+        elif kind == "docker":
+            self._stop_docker_runtime(runtime, **stop_options)
         elif kind == "iol":
-            self._stop_iol_runtime(runtime)
+            self._stop_iol_runtime(runtime, **stop_options)
         elif kind == "dynamips":
-            self._stop_dynamips_runtime(runtime)
+            self._stop_dynamips_runtime(runtime, **stop_options)
+        elif confirm_stopped:
+            raise NodeRuntimeError("The node runtime cannot be identified for cleanup.")
 
         self._delete_runtime(lab_id, node_id)
 
     def wipe_node(self, lab_data: dict[str, Any], node_id: int) -> None:
         lab_id = self._lab_id(lab_data)
-        self.stop_node(lab_data, node_id)
+        with self._node_lifecycle_lock(lab_id, node_id):
+            self.stop_node(lab_data, node_id)
 
-        work_dir = self._work_dir(lab_id, node_id)
-        if work_dir.exists():
-            shutil.rmtree(work_dir)
+            work_dir = self._work_dir(lab_id, node_id)
+            if work_dir.exists():
+                shutil.rmtree(work_dir)
 
     def enrich_nodes(self, lab_data: dict[str, Any]) -> dict[str, Any]:
         lab_id = self._lab_id(lab_data)
@@ -858,15 +918,14 @@ class NodeRuntimeService:
     def running_nodes_by_lab(self) -> dict[str, int]:
         """Running node count per lab id; only labs with something running.
 
-        Read straight off the registry, with no probing (#365). A start or
-        stop through the app updates the registry at once, and the heartbeat
-        prunes a record whose workload died on its own (or was killed from
-        outside) within one interval — the registry already is the system's
-        running set. Probing here instead would shell out to ``docker
-        inspect`` once per docker node on every labs listing.
+        Use heartbeat observations and lifecycle updates without probing
+        individual nodes on every lab listing (#365).
         """
         with self._lock:
-            records = list(self._registry.values())
+            records = [
+                record for key, record in self._registry.items()
+                if key not in self._observed_inactive and not record.get("lab_cleanup_pending")
+            ]
         running: dict[str, int] = {}
         for record in records:
             lab_id = record["lab_id"]
@@ -910,6 +969,12 @@ class NodeRuntimeService:
         runtime = self._runtime_record(lab_id, node_id)
         if not runtime:
             raise NodeRuntimeError(f"Node is not running: {node_id}")
+        if runtime.get("kind") == "docker":
+            with self._node_lifecycle_lock(lab_id, node_id):
+                runtime = self._runtime_record(lab_id, node_id)
+                if not runtime or runtime.get("kind") != "docker":
+                    raise NodeRuntimeError(f"Node is not running: {node_id}")
+                runtime = self._ensure_console_proxy(lab_id, node_id, runtime, mode=mode)
 
         node_name = node.get("name", f"node-{node_id}")
 
@@ -925,9 +990,6 @@ class NodeRuntimeService:
             console_mode = str(runtime.get("console", node.get("console", "telnet")))
             console_port = int(runtime.get("console_port", 0))
             connection_name = node_name
-
-        if runtime.get("kind") == "docker":
-            runtime = self._ensure_console_proxy(lab_id, node_id, runtime, mode=mode)
 
         return {
             "lab_id": lab_id,
@@ -1142,7 +1204,7 @@ class NodeRuntimeService:
             except (TypeError, ValueError):
                 continue
 
-            if cls._is_suppressed(lab_id, node_id):
+            if runtime.get("lab_cleanup_pending") or cls._is_suppressed(lab_id, node_id):
                 continue
 
             filename = lab_id_to_filename.get(lab_id)
@@ -1167,6 +1229,13 @@ class NodeRuntimeService:
             try:
                 # Waits for the lock without blocking the event loop.
                 async with locked_lab_async(filename) as lab:
+                    with cls._lock:
+                        if cls._registry.get(_key) is not runtime:
+                            continue
+                        if is_alive:
+                            cls._observed_inactive.discard(_key)
+                        else:
+                            cls._observed_inactive.add(_key)
                     nodes: dict = lab.data.get("nodes") or {}
                     node = nodes.get(str(node_id))
                     if not isinstance(node, dict):
@@ -1198,8 +1267,8 @@ class NodeRuntimeService:
             # node started through the API alone gets here with the stored
             # status already 0; skipping the cleanup on that path left a dead
             # record in the registry until something happened to probe that node.
-            if not is_alive:
-                cls._delete_runtime_class(lab_id, node_id, settings)
+            if is_alive is False:
+                cls._discard_inactive_runtime(runtime, settings)
 
             if reconciled:
                 try:
@@ -1334,6 +1403,7 @@ class NodeRuntimeService:
 
                 with cls._lock:
                     cls._registry[key] = runtime
+                    cls._observed_inactive.discard(key)
                 registered.add(key)
 
                 try:
@@ -1875,58 +1945,77 @@ class NodeRuntimeService:
             return None
 
     @staticmethod
-    def _check_alive_sync(runtime: dict[str, Any], kind: str, settings: Any) -> bool:
-        """Synchronous liveness check suitable for run_in_executor."""
+    def _check_alive_sync(runtime: dict[str, Any], kind: str, settings: Any) -> bool | None:
+        """Return False only when the workload is absent, None when cleanup remains possible."""
         if kind == "docker":
             import subprocess as _sp
             import shutil as _sh
             docker_binary = _sh.which("docker")
             if not docker_binary:
                 docker_binary = "docker"
-            container_name = runtime.get("container_name")
-            if not container_name:
-                return False
-            result = _sp.run(
-                [
-                    docker_binary,
-                    "--host",
-                    settings.DOCKER_HOST,
-                    "inspect",
-                    "-f",
-                    "{{.State.Running}}",
-                    container_name,
-                ],
-                capture_output=True,
-                text=True,
-            )
-            return result.returncode == 0 and result.stdout.strip() == "true"
+            container_id = NodeRuntimeService._saved_docker_id(runtime)
+            target = container_id or runtime.get("container_name")
+            if not target:
+                return None
+            try:
+                result = _sp.run(
+                    [
+                        docker_binary,
+                        "--host",
+                        settings.DOCKER_HOST,
+                        "container",
+                        "inspect",
+                        "-f",
+                        "{{.State.Running}}",
+                        "--",
+                        target,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            if result.returncode:
+                reason = result.stderr.lower()
+                if container_id and ("no such container" in reason or "no such object" in reason):
+                    return False
+                return None
+            return True if result.stdout.strip() == "true" else None
+
+        if kind == "dynamips":
+            from app.services.runtime.dynamips import DynamipsLauncher
+
+            return DynamipsLauncher.instance().is_alive(runtime)
 
         # QEMU / other — use psutil
         pid = runtime.get("pid")
         if not pid:
-            return False
+            return None
         try:
-            process = psutil.Process(int(pid))
-        except psutil.Error:
-            return False
-        expected_create_time = runtime.get("pid_create_time")
-        if expected_create_time and abs(process.create_time() - expected_create_time) > 1:
-            return False
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+            return NodeRuntimeService._cleanup_process(pid, runtime.get("pid_create_time")) is not None
+        except NodeRuntimeError:
+            return None
 
     @classmethod
-    def _delete_runtime_class(cls, lab_id: str, node_id: int, settings: Any) -> None:
-        """Remove registry entry and state file (class-level, no instance needed)."""
-        key = f"{lab_id}:{node_id}"
+    def _discard_inactive_runtime(cls, runtime: dict[str, Any], settings: Any) -> None:
+        """Discard a liveness snapshot only if it still describes the current runtime."""
+        lab_id, node_id = runtime["lab_id"], runtime["node_id"]
+        key = cls._key(lab_id, node_id)
+        state_path = settings.TMP_DIR / "node-runtime" / f"{lab_id}-{node_id}.json"
         with cls._lock:
+            if (
+                cls._registry.get(key) is not runtime
+                or runtime.get("lab_cleanup_pending")
+                or runtime.get("kind") in {"dynamips", "iol"}
+            ):
+                return
+            try:
+                state_path.unlink(missing_ok=True)
+            except OSError:
+                return
             cls._registry.pop(key, None)
-        runtime_dir = settings.TMP_DIR / "node-runtime"
-        state_path = runtime_dir / f"{lab_id}-{node_id}.json"
-        try:
-            if state_path.exists():
-                state_path.unlink()
-        except OSError:
-            pass
+            cls._observed_inactive.discard(key)
 
     def _read_runtime_record(self, state_path: Path, *, require_valid: bool = False) -> dict[str, Any] | None:
         try:
@@ -1983,10 +2072,9 @@ class NodeRuntimeService:
     def _delete_runtime(self, lab_id: str, node_id: int) -> None:
         key = self._key(lab_id, node_id)
         with self._lock:
+            self._state_path(lab_id, node_id).unlink(missing_ok=True)
             self._registry.pop(key, None)
-        state_path = self._state_path(lab_id, node_id)
-        if state_path.exists():
-            state_path.unlink()
+            self._observed_inactive.discard(key)
 
     def _runtime_record(
         self,
@@ -1997,13 +2085,13 @@ class NodeRuntimeService:
         require_valid: bool = False,
     ) -> dict[str, Any] | None:
         key = self._key(lab_id, node_id)
-        runtime = self._registry.get(key)
-        if not runtime:
-            runtime = self._read_runtime_record(
-                self._state_path(lab_id, node_id), require_valid=require_valid
-            )
-            if runtime is not None:
-                with self._lock:
+        with self._lock:
+            runtime = self._registry.get(key)
+            if not runtime:
+                runtime = self._read_runtime_record(
+                    self._state_path(lab_id, node_id), require_valid=require_valid
+                )
+                if runtime is not None:
                     self._registry[key] = runtime
 
         if not runtime:
@@ -2012,8 +2100,10 @@ class NodeRuntimeService:
         if include_stopped:
             return runtime
 
+        if runtime.get("lab_cleanup_pending"):
+            return None
+
         if not self._is_runtime_alive(runtime):
-            self._delete_runtime(lab_id, node_id)
             return None
         return runtime
 
@@ -3291,6 +3381,15 @@ class NodeRuntimeService:
             f"runtime_mutex.acquire(...) yourself."
         )
 
+        with runtime_mutex.acquire_node_sync(lab_id, node_id, timeout=0):
+            return self._attach_docker_interface_inner(
+                lab_id, node_id, network_id, interface_index, bridge_name=bridge_name,
+            )
+
+    def _attach_docker_interface_inner(
+        self, lab_id: str, node_id: int, network_id: int, interface_index: int,
+        *, bridge_name: str | None,
+    ) -> dict[str, Any]:
         runtime = self._runtime_record(lab_id, node_id)
         if runtime is None:
             raise NodeRuntimeError(
@@ -3439,9 +3538,20 @@ class NodeRuntimeService:
             f"({lab_id!r}, {node_id}, {interface_index})."
         )
 
+        with runtime_mutex.acquire_node_sync(lab_id, node_id, timeout=0):
+            return self._detach_docker_interface_inner(
+                lab_id, node_id, interface_index, expected_generation=expected_generation,
+            )
+
+    def _detach_docker_interface_inner(
+        self, lab_id: str, node_id: int, interface_index: int,
+        *, expected_generation: int | None,
+    ) -> dict[str, Any]:
         runtime = self._runtime_record(lab_id, node_id, include_stopped=True)
         if runtime is None:
             return {"state": "absent", "reason": "no runtime record"}
+        if runtime.get("lab_cleanup_pending"):
+            raise NodeRuntimeError("Retry the pending lab deletion to finish node cleanup.")
 
         # Locate the matching attachment record. Missing means the iface is
         # already detached — idempotent no-op.
@@ -5405,7 +5515,9 @@ class NodeRuntimeService:
             "started_at": time.time(),
         }
         with self._lock:
-            self._registry[self._key(lab_id, node_id)] = runtime
+            key = self._key(lab_id, node_id)
+            self._registry[key] = runtime
+            self._observed_inactive.discard(key)
         self._persist_runtime(runtime)
         return runtime
 
@@ -5618,15 +5730,57 @@ class NodeRuntimeService:
         attachments.sort(key=lambda item: item["interface_index"])
         return attachments
 
-    def _stop_qemu_runtime(self, runtime: dict[str, Any]) -> None:
+    @staticmethod
+    def _cleanup_process(pid: int, expected_create_time: float | None = None) -> psutil.Process | None:
+        if type(pid) is not int or pid <= 0:
+            raise NodeRuntimeError("Invalid node process identity during cleanup.")
+        if expected_create_time is not None and (
+            type(expected_create_time) not in (int, float) or not 0 < expected_create_time <= sys.float_info.max
+        ):
+            raise NodeRuntimeError("Invalid node process start time during cleanup.")
+        try:
+            process = psutil.Process(pid)
+            if expected_create_time is not None and process.create_time() != expected_create_time:
+                return None
+            if process.status() == psutil.STATUS_ZOMBIE:
+                return None
+            return process
+        except psutil.NoSuchProcess:
+            return None
+        except psutil.Error as exc:
+            raise NodeRuntimeError("Could not verify the node process during cleanup.") from exc
+
+    def _confirm_process_exit(self, pid: int, expected_create_time: float | None = None) -> None:
+        process = self._cleanup_process(pid, expected_create_time)
+        if process is None:
+            return
+        try:
+            process.wait(timeout=5)
+        except psutil.NoSuchProcess:
+            return
+        except psutil.Error as exc:
+            raise NodeRuntimeError("Could not confirm that the node process stopped.") from exc
+
+    def _stop_qemu_runtime(self, runtime: dict[str, Any], *, confirm_stopped: bool = False) -> None:
         pid = runtime.get("pid")
         if not pid:
+            if confirm_stopped:
+                raise NodeRuntimeError("QEMU runtime has no process identity to verify.")
             self._sweep_qemu_taps(runtime)
             return
+        if confirm_stopped:
+            expected = runtime.get("pid_create_time")
+            if self._cleanup_process(pid, expected) is None:
+                self._sweep_qemu_taps(runtime)
+                return
+            if expected is None:
+                raise NodeRuntimeError("QEMU runtime has no recorded process start time.")
 
         try:
             os.killpg(pid, signal.SIGTERM)
         except ProcessLookupError:
+            if confirm_stopped:
+                self._confirm_process_exit(pid, expected)
             self._sweep_qemu_taps(runtime)
             self._unregister_pid(pid)
             return
@@ -5635,13 +5789,19 @@ class NodeRuntimeService:
 
         try:
             psutil.Process(pid).wait(timeout=5)
+        except psutil.NoSuchProcess:
+            pass
         except (psutil.Error, psutil.TimeoutExpired):
-            try:
-                os.killpg(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            except PermissionError:
-                host_net.qemu_process_signal(pid, "kill")
+            if not confirm_stopped or self._cleanup_process(pid, expected) is not None:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                except PermissionError:
+                    host_net.qemu_process_signal(pid, "kill")
+
+        if confirm_stopped:
+            self._confirm_process_exit(int(pid), runtime.get("pid_create_time"))
 
         # US-302: sweep the per-NIC TAPs owned by this VM. Best-effort
         # via ``try_link_del`` so already-removed TAPs (cleanup sweeper
@@ -5673,14 +5833,49 @@ class NodeRuntimeService:
         except Exception:  # noqa: BLE001 — best-effort cleanup
             pass
 
-    def _stop_docker_runtime(self, runtime: dict[str, Any]) -> None:
+    def _docker_container_absent(self, docker: str, name: str) -> bool:
+        try:
+            result = subprocess.run(
+                [docker, "--host", self.settings.DOCKER_HOST, "container", "inspect", "--", name],
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise NodeRuntimeError("Could not verify Docker container absence.") from exc
+        if not result.returncode:
+            return False
+        reason = result.stderr.lower()
+        if "no such container" in reason or "no such object" in reason:
+            return True
+        raise NodeRuntimeError("Could not verify Docker container absence.")
+
+    @staticmethod
+    def _saved_docker_id(runtime: dict[str, Any]) -> str | None:
+        container_id = runtime.get("container_id")
+        if isinstance(container_id, str) and re.fullmatch("[0-9a-f]{64}", container_id):
+            return container_id
+        return None
+
+    def _stop_docker_runtime(self, runtime: dict[str, Any], *, confirm_stopped: bool = False) -> None:
         docker_binary = self._resolve_binary("docker")
         if not docker_binary:
+            if confirm_stopped:
+                raise NodeRuntimeError("Docker is unavailable for lab cleanup.")
             return
 
         container_name = runtime.get("container_name")
         if not container_name:
+            if confirm_stopped:
+                raise NodeRuntimeError("Docker runtime has no container identity to verify.")
             return
+        command_options = {"timeout": 15} if confirm_stopped else {}
+        target = container_name
+        if confirm_stopped:
+            container_id = self._saved_docker_id(runtime)
+            if container_id is None:
+                if self._docker_container_absent(docker_binary, container_name):
+                    return
+                raise NodeRuntimeError("Docker runtime has no verified container ID for cleanup.")
+            target = container_id
 
         # Stop the console TCP forwarder before tearing down the container so
         # in-flight client connections see a clean refused-after-stop instead
@@ -5700,16 +5895,27 @@ class NodeRuntimeService:
             except Exception:
                 pass
 
-        subprocess.run(
-            [docker_binary, "--host", self.settings.DOCKER_HOST, "stop", "-t", "5", container_name],
-            capture_output=True,
-            text=True,
-        )
-        subprocess.run(
-            [docker_binary, "--host", self.settings.DOCKER_HOST, "rm", "-f", container_name],
-            capture_output=True,
-            text=True,
-        )
+        try:
+            subprocess.run(
+                [docker_binary, "--host", self.settings.DOCKER_HOST, "stop", "-t", "5", target],
+                capture_output=True,
+                text=True,
+                **command_options,
+            )
+            removed = subprocess.run(
+                [docker_binary, "--host", self.settings.DOCKER_HOST, "rm", "-f", target],
+                capture_output=True,
+                text=True,
+                **command_options,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            if not confirm_stopped:
+                raise
+            raise NodeRuntimeError("Could not remove the Docker container during lab cleanup.") from exc
+        if confirm_stopped:
+            reason = removed.stderr.lower()
+            if removed.returncode and "no such container" not in reason and "no such object" not in reason:
+                raise NodeRuntimeError("Could not remove the Docker container during lab cleanup.")
 
         # US-203: sweep veth host-ends owned by this container. The peer end
         # was renamed into the container netns and is destroyed when the
@@ -5816,12 +6022,38 @@ class NodeRuntimeService:
                 continue
         return ids
 
-    def _stop_iol_runtime(self, runtime: dict[str, Any]) -> None:
+    def _stop_iol_runtime(self, runtime: dict[str, Any], *, confirm_stopped: bool = False) -> None:
         from app.services.runtime.iol import IolLauncher
 
+        processes = []
+        stop_record = runtime
+        if confirm_stopped:
+            if not runtime.get("pid"):
+                raise NodeRuntimeError("IOL runtime has no process identity to verify.")
+            stop_record = runtime.copy()
+            for pid_key, time_key in (("pid", "pid_create_time"), ("ubridge_pid", "ubridge_create_time")):
+                if not runtime.get(pid_key):
+                    continue
+                pid = runtime[pid_key]
+                expected = runtime.get(time_key)
+                process = self._cleanup_process(pid, expected)
+                if process is None:
+                    stop_record[pid_key] = None
+                    continue
+                if expected is None:
+                    if not IolLauncher.owns_live_process(pid):
+                        raise NodeRuntimeError("Could not verify the IOL or uBridge process identity.")
+                    expected = process.create_time()
+                    with self._lock:
+                        runtime[time_key] = expected
+                        self._persist_runtime(runtime)
+                processes.append((pid, expected))
+
         try:
-            IolLauncher.stop_runtime(runtime)
+            IolLauncher.stop_runtime(stop_record)
         except Exception as exc:  # noqa: BLE001 — best-effort cleanup
+            if confirm_stopped:
+                raise NodeRuntimeError("Could not stop the IOL or uBridge process.") from exc
             _logger.warning(
                 "iol.stop.failed",
                 extra={
@@ -5831,6 +6063,8 @@ class NodeRuntimeService:
                     "error": str(exc),
                 },
             )
+        for pid, expected in processes:
+            self._confirm_process_exit(pid, expected)
         for tap in runtime.get("tap_names", []) or []:
             host_net.try_link_del(tap)
         self._unregister_pid(runtime.get("pid"))
@@ -5972,7 +6206,7 @@ class NodeRuntimeService:
         }
         return runtime
 
-    def _stop_dynamips_runtime(self, runtime: dict[str, Any]) -> None:
+    def _stop_dynamips_runtime(self, runtime: dict[str, Any], *, confirm_stopped: bool = False) -> None:
         from app.services.runtime.dynamips import DynamipsError, DynamipsLauncher
 
         proxy_pid = runtime.get("console_proxy_pid")
@@ -5991,8 +6225,14 @@ class NodeRuntimeService:
                 )
 
         try:
-            DynamipsLauncher.instance().stop_node(runtime)
+            launcher = DynamipsLauncher.instance()
+            if confirm_stopped:
+                launcher.stop_node(runtime, confirm_stopped=True)
+            else:
+                launcher.stop_node(runtime)
         except DynamipsError as exc:
+            if confirm_stopped:
+                raise NodeRuntimeError(str(exc)) from exc
             _logger.warning(
                 "dynamips.stop.failed",
                 extra={

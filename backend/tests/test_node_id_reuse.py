@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import copy
 import json
+import signal
+import subprocess
 import threading
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
+import psutil
 
 from app.routers import labs
 from app.routers import links as link_routes
@@ -37,14 +40,14 @@ from app.services.lab_service import (
     preview_network_id,
 )
 from app.services.link_service import LinkService
-from app.services.node_runtime_service import NodeRuntimeService
+from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
+from app.services.runtime_mutex import runtime_mutex
 
 LAB = "reuse.json"
 LAB_ID = "reuse-lab"
 ADMIN = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
 
-# The fixture below stubs ``wipe_node`` for every test; this one needs it real.
-_REAL_WIPE_NODE = NodeRuntimeService.wipe_node
+_REAL_STOP_NODE = NodeRuntimeService.stop_node
 
 
 @pytest.fixture()
@@ -85,6 +88,7 @@ def settings(tmp_path, monkeypatch, instance_id):
 
     monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", no_publish)
     monkeypatch.setattr(NodeRuntimeService, "wipe_node", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", lambda *_args, **_kwargs: None)
     return s
 
 
@@ -304,16 +308,252 @@ async def test_delete_lab_holds_the_lab_lock_while_cleanup_runs(settings, monkey
 
 
 @pytest.mark.asyncio
+async def test_contended_lab_delete_preserves_state_and_can_retry(settings, monkeypatch, empty_runtime_registry):
+    _seed(settings, nodes={"1": _docker_node(1, "first"), "2": _docker_node(2, "busy")})
+    work_root = settings.TMP_DIR / LAB_ID
+    runtime_dir = settings.TMP_DIR / "node-runtime"
+    runtime_dir.mkdir()
+    for node_id in (1, 2):
+        disk = work_root / str(node_id) / "disk.img"
+        disk.parent.mkdir(parents=True)
+        disk.write_text(f"disk {node_id}")
+        (runtime_dir / f"{LAB_ID}-{node_id}.json").write_text(json.dumps({
+            "lab_id": LAB_ID, "node_id": node_id, "kind": "docker", "container_name": f"fixture-{node_id}",
+        }))
+    lab_file = _lab_file(settings)
+    original = lab_file.read_bytes()
+    stopped = []
+    networks = []
+
+    def stop_fixture(service, _data, node_id, **_kwargs):
+        with runtime_mutex.acquire_node_sync(LAB_ID, node_id, timeout=0):
+            stopped.append(node_id)
+            service._delete_runtime(LAB_ID, node_id)
+
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", stop_fixture)
+    monkeypatch.setattr(NodeRuntimeService, "wipe_node", stop_fixture)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", lambda *_: networks.append(True))
+
+    held = threading.Event()
+    release = threading.Event()
+
+    def reconcile_fixture():
+        with runtime_mutex.acquire_node_sync(LAB_ID, 2):
+            held.set()
+            release.wait(timeout=8)
+
+    worker = threading.Thread(target=reconcile_fixture)
+    worker.start()
+    db = _FakeDb()
+    try:
+        assert held.wait(timeout=2)
+        with pytest.raises(LabLockTimeout):
+            await LabService(db).delete_lab(_row())
+        assert lab_file.read_bytes() == original
+        assert db.deleted == [] and stopped == [] and networks == []
+        for node_id in (1, 2):
+            assert (work_root / str(node_id) / "disk.img").read_text() == f"disk {node_id}"
+            assert (runtime_dir / f"{LAB_ID}-{node_id}.json").is_file()
+    finally:
+        release.set()
+        worker.join(timeout=3)
+
+    await LabService(db).delete_lab(_row())
+    assert stopped == [1, 2] and networks == [True]
+    assert len(db.deleted) == 1
+    assert not lab_file.exists() and not work_root.exists()
+    assert not list(runtime_dir.glob("*.json"))
+
+
+@pytest.mark.asyncio
+async def test_lab_delete_keeps_disks_if_any_node_stop_fails(settings, monkeypatch, empty_runtime_registry):
+    _seed(settings, nodes={"1": _docker_node(1, "first"), "2": _docker_node(2, "second")})
+    work_root = settings.TMP_DIR / LAB_ID
+    for node_id in (1, 2):
+        disk = work_root / str(node_id) / "disk.img"
+        disk.parent.mkdir(parents=True)
+        disk.write_text("disk fixture")
+
+    stopped = []
+    def stop_fixture(_service, _data, node_id, **_kwargs):
+        if node_id == 2:
+            raise RuntimeError("fixture could not stop node")
+        stopped.append(node_id)
+
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", stop_fixture)
+    monkeypatch.setattr(NodeRuntimeService, "wipe_node", stop_fixture)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", lambda *_: None)
+    db = _FakeDb()
+
+    with pytest.raises(RuntimeError, match="fixture could not stop node"):
+        await LabService(db).delete_lab(_row())
+
+    assert stopped == [1]
+    assert _lab_file(settings).is_file() and db.deleted == []
+    assert all((work_root / str(node_id) / "disk.img").is_file() for node_id in (1, 2))
+
+
+@pytest.mark.asyncio
+async def test_lab_delete_retries_a_failed_docker_removal(settings, monkeypatch, empty_runtime_registry):
+    _seed(settings, nodes={"1": _docker_node(1, "runtime")})
+    disk = settings.TMP_DIR / LAB_ID / "1" / "disk.img"
+    disk.parent.mkdir(parents=True)
+    disk.write_text("disk fixture")
+    service = NodeRuntimeService()
+    container_id = "a" * 64
+    runtime = {
+        "lab_id": LAB_ID, "node_id": 1, "kind": "docker",
+        "container_name": "container-fixture", "container_id": container_id,
+    }
+    service._persist_runtime(runtime)
+    record = service._state_path(LAB_ID, 1)
+    stale_runtime = service._runtime_record(LAB_ID, 1, include_stopped=True)
+    remove_fails = True
+
+    def docker_fixture(args, **kwargs):
+        assert args[0] == "docker-fixture" and args[-1] == container_id
+        if args[3] == "rm" and remove_fails:
+            return subprocess.CompletedProcess(args, 1, "", "daemon unavailable")
+        assert args[3] in {"stop", "rm"}
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", _REAL_STOP_NODE)
+    monkeypatch.setattr(NodeRuntimeService, "_resolve_binary", lambda *_: "docker-fixture")
+    monkeypatch.setattr("app.services.node_runtime_service.subprocess.run", docker_fixture)
+    monkeypatch.setattr(host_net, "sweep_node_host_ifaces", lambda *_: None)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", lambda *_: None)
+    db = _FakeDb()
+
+    with pytest.raises(NodeRuntimeError, match="Could not remove the Docker container"):
+        await LabService(db).delete_lab(_row())
+
+    assert disk.is_file() and record.is_file() and _lab_file(settings).is_file()
+    assert not db.deleted
+    assert service._runtime_record(LAB_ID, 1) is None
+    service._discard_inactive_runtime(stale_runtime, settings)
+    NodeRuntimeService.reset_registry()
+    assert NodeRuntimeService()._runtime_record(LAB_ID, 1) is None
+    assert record.is_file() and json.loads(record.read_text())["lab_cleanup_pending"]
+
+    remove_fails = False
+    await LabService(db).delete_lab(_row())
+
+    assert not disk.exists() and not record.exists() and not _lab_file(settings).exists()
+    assert len(db.deleted) == 1
+
+
+@pytest.mark.asyncio
+async def test_lab_delete_checks_process_exit_when_qemu_group_is_absent(
+    settings, monkeypatch, empty_runtime_registry,
+):
+    _seed(settings, nodes={"1": {"id": 1, "name": "qemu fixture", "type": "qemu"}})
+    disk = settings.TMP_DIR / LAB_ID / "1" / "disk.img"
+    disk.parent.mkdir(parents=True)
+    disk.write_text("disk fixture")
+    service = NodeRuntimeService()
+    runtime = {"lab_id": LAB_ID, "node_id": 1, "kind": "qemu", "pid": 123, "pid_create_time": 1000}
+    service._persist_runtime(runtime)
+    record = service._state_path(LAB_ID, 1)
+    calls = []
+
+    def absent_group(pid, sig):
+        calls.append((pid, sig))
+        raise ProcessLookupError
+
+    def live_process(pid, expected):
+        assert (pid, expected) == (123, 1000)
+
+        def wait(timeout):
+            raise psutil.TimeoutExpired(timeout)
+
+        return SimpleNamespace(wait=wait)
+
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", _REAL_STOP_NODE)
+    monkeypatch.setattr(NodeRuntimeService, "_cleanup_process", staticmethod(live_process))
+    monkeypatch.setattr("app.services.node_runtime_service.os.killpg", absent_group)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", lambda *_: None)
+    db = _FakeDb()
+
+    with pytest.raises(NodeRuntimeError, match="Could not confirm"):
+        await LabService(db).delete_lab(_row())
+
+    assert calls == [(123, signal.SIGTERM)]
+    assert disk.is_file() and record.is_file() and _lab_file(settings).is_file()
+    assert not db.deleted
+
+
+@pytest.mark.asyncio
+async def test_lab_delete_can_retry_legacy_ubridge_after_primary_iol_exits(
+    settings, monkeypatch, empty_runtime_registry,
+):
+    from app.services.runtime.iol import IolLauncher
+
+    _seed(settings, nodes={"1": {"id": 1, "name": "iol fixture", "type": "iol"}})
+    disk = settings.TMP_DIR / LAB_ID / "1" / "disk.img"
+    disk.parent.mkdir(parents=True)
+    disk.write_text("disk fixture")
+    service = NodeRuntimeService()
+    service._persist_runtime({
+        "lab_id": LAB_ID, "node_id": 1, "kind": "iol",
+        "pid": 123, "pid_create_time": 1000, "ubridge_pid": 124,
+    })
+    record = service._state_path(LAB_ID, 1)
+    alive = {123: 1000, 124: 1200}
+    calls = []
+
+    def process_fixture(pid, expected):
+        if pid not in alive:
+            return None
+        assert expected in {None, alive[pid]}
+        start_time = alive[pid]
+
+        def wait(timeout):
+            raise psutil.TimeoutExpired(timeout)
+
+        return SimpleNamespace(wait=wait, create_time=lambda: start_time)
+
+    def stop_fixture(runtime):
+        calls.append((runtime["pid"], runtime["ubridge_pid"]))
+        if runtime["pid"] is not None:
+            alive.pop(runtime["pid"])
+        else:
+            alive.pop(runtime["ubridge_pid"])
+
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", _REAL_STOP_NODE)
+    monkeypatch.setattr(NodeRuntimeService, "_cleanup_process", staticmethod(process_fixture))
+    monkeypatch.setattr(IolLauncher, "owns_live_process", lambda pid: pid == 124 and not calls)
+    monkeypatch.setattr(IolLauncher, "stop_runtime", stop_fixture)
+    monkeypatch.setattr(NodeRuntimeService, "_unregister_pid", lambda *_: None)
+    monkeypatch.setattr(host_net, "sweep_node_host_ifaces", lambda *_: None)
+    monkeypatch.setattr("app.services.lab_service._cleanup_lab_network_runtime", lambda *_: None)
+    db = _FakeDb()
+
+    with pytest.raises(NodeRuntimeError, match="Could not confirm"):
+        await LabService(db).delete_lab(_row())
+
+    assert disk.is_file() and not db.deleted and calls == [(123, 124)]
+    assert json.loads(record.read_text())["ubridge_create_time"] == 1200
+    NodeRuntimeService.reset_registry()
+    assert NodeRuntimeService()._runtime_record(LAB_ID, 1) is None
+
+    await LabService(db).delete_lab(_row())
+
+    assert not disk.exists() and not record.exists() and not _lab_file(settings).exists()
+    assert calls == [(123, 124), (None, 124)] and len(db.deleted) == 1
+
+
+@pytest.mark.asyncio
 async def test_delete_lab_stops_and_wipes_its_nodes(settings, monkeypatch, empty_runtime_registry):
     """The real node cleanup runs under the delete. Only the layer that would
     talk to Docker is stubbed: node 2 is running, node 1 is only on disk."""
-    monkeypatch.setattr(NodeRuntimeService, "wipe_node", _REAL_WIPE_NODE)
-    monkeypatch.setattr(NodeRuntimeService, "_is_docker_running", lambda self, runtime: True)
+    monkeypatch.setattr(NodeRuntimeService, "stop_node", _REAL_STOP_NODE)
+    monkeypatch.setattr(NodeRuntimeService, "_resolve_binary", lambda *_: "docker-fixture")
+    monkeypatch.setattr(NodeRuntimeService, "_docker_container_absent", lambda *_: True)
     stopped: list[str] = []
     monkeypatch.setattr(
         NodeRuntimeService,
         "_stop_docker_runtime",
-        lambda self, runtime: stopped.append(runtime["container_name"]),
+        lambda self, runtime, **_: stopped.append(runtime["container_name"]),
     )
     _seed(settings, nodes={"1": _docker_node(1, "stopped"), "2": _docker_node(2, "running")})
 
@@ -333,7 +573,7 @@ async def test_delete_lab_stops_and_wipes_its_nodes(settings, monkeypatch, empty
 
     await LabService(_FakeDb()).delete_lab(_row())
 
-    assert stopped == ["c-2"]
+    assert stopped == ["c-2", "c-9"]
     assert not work_root.exists()
     assert list(records.glob("*.json")) == []
 
