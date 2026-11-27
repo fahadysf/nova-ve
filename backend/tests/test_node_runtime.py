@@ -3765,6 +3765,82 @@ def test_merge_qemu_args_malformed_extra_raises_value_error():
 # The range no longer depends on EXTERNAL_CONSOLE_HOST; that setting gates
 # link advertisement only.
 # ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_concurrent_starts_reserve_primary_and_secondary_console_ports(monkeypatch, patched_settings):
+    from threading import Barrier
+
+    service = NodeRuntimeService()
+    barrier = Barrier(2, timeout=3)
+    monkeypatch.setattr("app.services.host_net.sandbox_mode", lambda: False)
+    monkeypatch.setattr("app.services.node_runtime_service._console_port_range", lambda mode: (19500, 19503))
+    monkeypatch.setattr(service, "_port_available", lambda port, bind_host: True)
+    monkeypatch.setattr(service, "_reconcile_docker_node_runtime", lambda *_: None)
+
+    def start_fixture(data, node):
+        primary = service._allocate_console_port("telnet")
+        secondary = service._allocate_console_port("vnc") if node["id"] == 1 else None
+        # Neither listener has bound yet, so an OS-only probe sees the same
+        # first port from either worker.
+        barrier.wait()
+        return {
+            "lab_id": data["id"], "node_id": node["id"], "kind": node["type"],
+            "console_port": primary, "second_console_port": secondary,
+        }
+
+    monkeypatch.setattr(service, "_start_qemu_node", start_fixture)
+    monkeypatch.setattr(service, "_start_docker_node", start_fixture)
+    lab = {"id": "fixture-console", "nodes": {"1": {"id": 1, "type": "qemu"}, "2": {"id": 2, "type": "docker"}}}
+
+    qemu, docker = await asyncio.gather(
+        asyncio.to_thread(service.start_node, lab, 1),
+        asyncio.to_thread(service.start_node, lab, 2),
+    )
+
+    assert sorted([qemu["console_port"], qemu["second_console_port"], docker["console_port"]]) == [19500, 19501, 19502]
+    assert service._allocate_console_port("telnet") == 19503
+
+
+def test_failed_start_releases_its_console_port_reservation(monkeypatch, patched_settings):
+    service = NodeRuntimeService()
+    chosen = []
+    monkeypatch.setattr("app.services.host_net.sandbox_mode", lambda: False)
+    monkeypatch.setattr("app.services.node_runtime_service._console_port_range", lambda mode: (19500, 19501))
+    monkeypatch.setattr(service, "_port_available", lambda port, bind_host: True)
+
+    def start_fixture(data, node):
+        port = service._allocate_console_port("telnet")
+        chosen.append(port)
+        if len(chosen) == 1:
+            raise NodeRuntimeError("fixture launch failed before binding")
+        return {"lab_id": data["id"], "node_id": node["id"], "kind": node["type"], "console_port": port}
+
+    monkeypatch.setattr(service, "_start_qemu_node", start_fixture)
+    lab = {"id": "fixture-console", "nodes": {"1": {"id": 1, "type": "qemu"}}}
+    with pytest.raises(NodeRuntimeError, match="fixture launch failed"):
+        service.start_node(lab, 1)
+    assert service.start_node(lab, 1)["console_port"] == 19500
+    assert chosen == [19500, 19500]
+
+
+def test_docker_adoption_reserves_both_ports_before_opening_either_proxy(monkeypatch, patched_settings):
+    service = NodeRuntimeService()
+    monkeypatch.setattr("app.services.node_runtime_service._console_port_range", lambda mode: (19500, 19500))
+    monkeypatch.setattr(service, "_port_available", lambda port, bind_host: True)
+    monkeypatch.setattr(service, "_resolve_binary", lambda *_: "/fixture/docker")
+    monkeypatch.setattr(service, "_docker_container_running_by_name", lambda *_: True)
+    monkeypatch.setattr(service, "docker_network_state", lambda *_: {"network_mode": "none", "pid": 123})
+    monkeypatch.setattr("app.services.runtime_pids.register", lambda *_: pytest.fail("unexpected PID registration"))
+    monkeypatch.setattr("app.services.host_net.console_proxy_start", lambda **_: pytest.fail("unexpected proxy"))
+    node = {"id": 1, "type": "docker", "console": "telnet", "second_console": "vnc"}
+    lab = {"id": "fixture-adopt", "nodes": {"1": node}}
+
+    with pytest.raises(NodeRuntimeError, match="No vnc console ports available"):
+        service.start_node(lab, 1)
+
+    assert service._allocate_console_port("telnet") == 19500
+    assert service._runtime_record("fixture-adopt", 1) is None
+
+
 def test_allocate_console_port_returns_range_start_per_mode(monkeypatch, patched_settings):
     probed = []
 
