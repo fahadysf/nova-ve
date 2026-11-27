@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from app.dependencies import get_current_user
 from app.routers import labs
-from app.schemas.node import NodeFromPairedTemplate, NodeFromTemplate
+from app.schemas.node import NodeBatchCreate, NodeCreate, NodeFromPairedTemplate, NodeFromTemplate
 from app.services import host_net
 from app.services.link_service import LinkService
 from app.services.template_service import TemplateService
@@ -748,6 +748,80 @@ async def test_206_synthetic_child_key_rejected_by_single_node_endpoint(patched_
     assert "synthetic" in response["message"].lower()
     assert "juniper-vmx" in response["message"]
     assert "from-paired-template" in response["message"]
+
+
+@pytest.mark.asyncio
+async def test_209_raw_create_rejects_synthetic_child_before_mutation(patched_split):
+    _seed_paired_template(patched_split, VMX_PAIRED_TEMPLATE)
+    lab_path = _seed_empty_lab(patched_split)
+    before = lab_path.read_bytes()
+
+    response = await labs.create_node(
+        "demo.json",
+        NodeCreate(
+            name="standalone-vcp",
+            type="qemu",
+            template="juniper-vmx__vcp",
+            image="vmx-vcp-22.4.qcow2",
+            console="telnet",
+        ),
+        current_user=_admin(),
+    )
+
+    assert response["code"] == 400, response
+    assert "synthetic" in response["message"].lower()
+    assert "juniper-vmx" in response["message"]
+    assert "from-paired-template" in response["message"]
+    assert lab_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_209_batch_create_rejects_synthetic_child_before_mutation(patched_split):
+    _seed_paired_template(patched_split, VMX_PAIRED_TEMPLATE)
+    lab_path = _seed_empty_lab(patched_split)
+    before = lab_path.read_bytes()
+
+    response = await labs.create_nodes_batch(
+        "demo.json",
+        NodeBatchCreate(
+            name_prefix="standalone-vcp",
+            count=2,
+            type="qemu",
+            template="juniper-vmx__vcp",
+            image="vmx-vcp-22.4.qcow2",
+            console="telnet",
+        ),
+        current_user=_admin(),
+    )
+
+    assert response["code"] == 400, response
+    assert "synthetic" in response["message"].lower()
+    assert "juniper-vmx" in response["message"]
+    assert "from-paired-template" in response["message"]
+    assert lab_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_209_raw_create_allows_standalone_key_with_double_underscore(patched_split):
+    _seed_generated_key_collision(patched_split)
+    _seed_empty_lab(patched_split)
+    image_dir = patched_split.IMAGES_DIR / "qemu"
+    image_dir.mkdir()
+    (image_dir / "Standalone definition.qcow2").write_text("fixture")
+
+    response = await labs.create_node(
+        "demo.json",
+        NodeCreate(
+            name="standalone",
+            type="qemu",
+            template="pair__child",
+            image="Standalone definition",
+        ),
+        current_user=_admin(),
+    )
+
+    assert response["code"] == 200, response
+    assert response["data"]["template"] == "pair__child"
 
 
 def test_206_paired_catalog_children_carry_synthetic_template_key(patched_split):
