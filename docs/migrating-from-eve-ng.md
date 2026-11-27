@@ -37,6 +37,19 @@ The importer migrates addon assets and templates, not saved EVE-NG lab topologie
 
 `--dry-run` and `--help` may be run without sudo. The real import requires sudo because it writes nova-ve-owned image, template, and manifest files.
 
+## Required QEMU Destination Layout
+
+QEMU looks for runtime media in a typed per-image directory under the nova-ve image store.
+
+```
+/var/lib/nova-ve/images/qemu/<image-key>/hda.qcow2
+/var/lib/nova-ve/images/qemu/<image-key>/cdrom.iso
+```
+
+Each `<image-key>` directory holds its `.qcow2` disks and `.iso` files. QEMU prefers the canonical filenames `hda.qcow2` and `cdrom.iso`, then selects the lexicographically first matching disk or ISO. Runtime media paths include the `qemu/` type directory, as in `/var/lib/nova-ve/images/qemu/<image-key>/`.
+
+The importer accepts QCOW2 disks and ISO files from EVE-NG, UNetLab, and PNETLab QEMU addon directories and places every supported source import in the typed layout automatically.
+
 ## Plan First
 
 Run a dry run before the first real import:

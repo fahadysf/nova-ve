@@ -265,7 +265,15 @@ async def test_legacy_reference_still_protects_iol_image(client, lib_settings, n
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "locator",
-    ["shared-directory", "legacy-backing", "absolute-file", "file-link", "cross-file", "chained-directory"],
+    [
+        "shared-directory",
+        "glob-backing",
+        "iso-backing",
+        "absolute-file",
+        "file-link",
+        "cross-file",
+        "chained-directory",
+    ],
 )
 async def test_delete_protects_the_resolved_image_file(client, lib_settings, locator):
     iol_dir = lib_settings.IMAGES_DIR / "iol" / "veos"
@@ -286,14 +294,22 @@ async def test_delete_protects_the_resolved_image_file(client, lib_settings, loc
         alias_dir.mkdir(parents=True)
         (alias_dir / "hda.qcow2").symlink_to(disk)
         node = {"type": "qemu", "image": "veos"}
-    elif locator in {"shared-directory", "legacy-backing"}:
+    elif locator == "shared-directory":
         disk = iol_dir / "hda.qcow2"
-        (lib_settings.IMAGES_DIR / "veos").symlink_to(iol_dir, target_is_directory=True)
+        qemu_dir = lib_settings.IMAGES_DIR / "qemu"
+        qemu_dir.mkdir()
+        (qemu_dir / "veos").symlink_to(iol_dir, target_is_directory=True)
         node = {"type": "qemu", "image": "veos"}
-        if locator == "legacy-backing":
-            _seed_veos(lib_settings)
-            preferred = lib_settings.IMAGES_DIR / "qemu" / "veos" / "hda.qcow2"
-            preferred.write_bytes(b"new-image")
+    elif locator in {"glob-backing", "iso-backing"}:
+        disk = iol_dir / ("actual.iso" if locator == "iso-backing" else "actual.qcow2")
+        alias_dir = lib_settings.IMAGES_DIR / "qemu" / "veos"
+        alias_dir.mkdir(parents=True)
+        if locator == "glob-backing":
+            (alias_dir / "hda.qcow2").write_bytes(b"preferred-image")
+            (alias_dir / "backing.qcow2").symlink_to(disk)
+        else:
+            (alias_dir / "cdrom.iso").symlink_to(disk)
+        node = {"type": "qemu", "image": "veos"}
     else:
         disk = iol_dir / "veos.bin"
         node = {"type": "iou", "image": str(disk)}
