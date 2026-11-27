@@ -119,7 +119,7 @@ class GuacamoleDatabaseService:
                 conn = await asyncpg.connect(self._asyncpg_dsn(), ssl=False)
                 async with conn.transaction():
                     entity_id = await self._ensure_entity(conn, username)
-                    await self._ensure_user(conn, entity_id, password)
+                    await self._ensure_user(conn, entity_id, password, refresh_existing=True)
                     root_group_id = await self._ensure_root_connection_group(conn)
                     group_id = await self._ensure_connection_group(conn, username, root_group_id)
                     connection_id = await self._ensure_connection(
@@ -202,77 +202,46 @@ class GuacamoleDatabaseService:
         return base64.b64encode(raw).decode("utf-8")
 
     async def _ensure_entity(self, conn, username: str) -> int:
-        entity_id = await conn.fetchval(
-            """
-            SELECT entity_id
-            FROM guacamole_entity
-            WHERE type = 'USER' AND name = $1
-            """,
-            username,
-        )
-        if entity_id is not None:
-            return int(entity_id)
-
-        entity_id = await conn.fetchval(
-            """
-            INSERT INTO guacamole_entity (name, type)
-            VALUES ($1, 'USER')
-            RETURNING entity_id
-            """,
-            username,
-        )
+        lookup = "SELECT entity_id FROM guacamole_entity WHERE type = 'USER' AND name = $1"
+        entity_id = await conn.fetchval(lookup, username)
+        if entity_id is None:
+            entity_id = await conn.fetchval(
+                """
+                INSERT INTO guacamole_entity (name, type)
+                VALUES ($1, 'USER')
+                ON CONFLICT (type, name) DO NOTHING
+                RETURNING entity_id
+                """,
+                username,
+            )
+            if entity_id is None:
+                # A console open and login can provision at the same time.
+                # Read again to see the other transaction's committed row.
+                entity_id = await conn.fetchval(lookup, username)
+                if entity_id is None:
+                    raise GuacamoleDatabaseError("Guacamole account was removed during provisioning.")
         return int(entity_id)
 
-    async def _ensure_user(self, conn, entity_id: int, password: str) -> int:
-        password_hash = bytes.fromhex(hashlib.sha256(password.encode("utf-8")).hexdigest())
-        user_id = await conn.fetchval(
-            """
-            SELECT user_id
-            FROM guacamole_user
-            WHERE entity_id = $1
-            """,
-            entity_id,
-        )
-        if user_id is None:
-            user_id = await conn.fetchval(
-                """
-                INSERT INTO guacamole_user (
-                    entity_id,
-                    password_hash,
-                    password_salt,
-                    password_date,
-                    disabled,
-                    expired
-                )
-                VALUES (
-                    $1,
-                    $2,
-                    NULL,
-                    NOW(),
-                    FALSE,
-                    FALSE
-                )
-                RETURNING user_id
-                """,
-                entity_id,
-                password_hash,
-            )
-            return int(user_id)
-
+    async def _ensure_user(self, conn, entity_id: int, password: str, *, refresh_existing: bool) -> None:
+        password_hash = hashlib.sha256(password.encode("utf-8")).digest()
         await conn.execute(
             """
-            UPDATE guacamole_user
-            SET password_hash = $1,
-                password_salt = NULL,
-                password_date = NOW(),
-                disabled = FALSE,
-                expired = FALSE
-            WHERE user_id = $2
+            INSERT INTO guacamole_user (
+                entity_id, password_hash, password_salt, password_date, disabled, expired
+            )
+            VALUES ($1, $2, NULL, NOW(), FALSE, FALSE)
+            ON CONFLICT (entity_id) DO UPDATE SET
+                password_hash = EXCLUDED.password_hash,
+                password_salt = EXCLUDED.password_salt,
+                password_date = EXCLUDED.password_date,
+                disabled = EXCLUDED.disabled,
+                expired = EXCLUDED.expired
+            WHERE $3::boolean
             """,
+            entity_id,
             password_hash,
-            int(user_id),
+            refresh_existing,
         )
-        return int(user_id)
 
     async def _ensure_root_connection_group(self, conn) -> int:
         group_id = await conn.fetchval(
@@ -503,6 +472,37 @@ class GuacamoleDatabaseService:
         auth_token = await self._request_auth_token(username, password)
         _AUTH_TOKEN_CACHE[cache_key] = auth_token
         return auth_token
+
+    async def prepare_login(self, username: str) -> None:
+        """Create a missing DB-backed account before warming its token (#282)."""
+        username = str(username).strip() or "user"
+        try:
+            conn = await asyncpg.connect(self._asyncpg_dsn(), ssl=False, timeout=5, command_timeout=5)
+            try:
+                async with conn.transaction():
+                    exists = await conn.fetchval(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM guacamole_entity AS e
+                            JOIN guacamole_user AS u USING (entity_id)
+                            WHERE e.type = 'USER' AND e.name = $1
+                        )
+                        """,
+                        username,
+                    )
+                    if not exists:
+                        entity_id = await self._ensure_entity(conn, username)
+                        password = self._token_password_for(username)
+                        await self._ensure_user(conn, entity_id, password, refresh_existing=False)
+            finally:
+                await conn.close(timeout=5)
+        except Exception:  # noqa: BLE001 — best-effort background provisioning
+            logger.debug("guacamole login provisioning failed for %s", username, exc_info=True)
+            return
+
+        # Guacamole must be able to read the committed account.
+        await self.warm_auth_token(username)
 
     async def warm_auth_token(self, username: str, *, track_activity: bool = True) -> None:
         """Populate the token cache for *username* off the critical path (#282).
