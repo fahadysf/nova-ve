@@ -5,6 +5,7 @@
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +20,7 @@ from app.dependencies import get_current_user
 from app.main import app
 from app.services.console_recording import ConsoleRecordingService, lab_recordings_dir
 from app.services.folder_service import FolderService
+from app.services.recording_retention import expire_recordings
 
 
 @pytest.fixture()
@@ -515,3 +517,210 @@ async def test_failed_recording_start_cleans_partial_file_pair(monkeypatch, lab_
         assert session.stop_recording()["recording"] is False
     finally:
         await service.close_all()
+
+
+@pytest.mark.asyncio
+async def test_recording_retention_defaults_to_off(lab_file, recordings_dir, monkeypatch):
+    monkeypatch.delenv("RECORDINGS_RETENTION_DAYS", raising=False)
+    monkeypatch.delenv("NOVA_VE_RECORDINGS_RETENTION_DAYS", raising=False)
+    get_settings.cache_clear()
+    cast, log = _write_recording(recordings_dir)
+    for path in (cast, log):
+        os.utime(path, (1, 1))
+    assert get_settings().RECORDINGS_RETENTION_DAYS == 0
+    assert await expire_recordings(get_settings(), ConsoleRecordingService()) == 0
+    assert cast.exists() and log.exists()
+
+
+@pytest.mark.asyncio
+async def test_recording_retention_cleans_both_layouts_without_harming_other_files(
+    lab_file, recordings_dir, monkeypatch,
+):
+    monkeypatch.setenv("NOVA_VE_RECORDINGS_RETENTION_DAYS", "2")
+    get_settings.cache_clear()
+    local = lab_recordings_dir(lab_file, "lab-uuid-1").parent
+    old_cast, old_log = _write_recording(local, name="old-local")
+    extensionless_sidecar = lab_recordings_dir(lab_file.with_name("extensionless"), "lab-uuid-1").parent
+    extensionless_cast, extensionless_log = _write_recording(extensionless_sidecar, name="old-extensionless")
+    legacy_cast, legacy_log = _write_recording(recordings_dir, name="old-legacy")
+    legacy_log.unlink()
+    recent_cast, recent_log = _write_recording(local, name="recent-log")
+    invalid_cast, invalid_log = _write_recording(local, name="invalid")
+    invalid_cast.write_text("unrelated data\n")
+    redirected_cast, redirected_log = _write_recording(local, name="redirected")
+    redirected_log.unlink()
+    redirected_log.symlink_to(recent_log)
+    for path in (
+        old_cast, old_log, extensionless_cast, extensionless_log, legacy_cast,
+        recent_cast, invalid_cast, invalid_log, redirected_cast,
+    ):
+        os.utime(path, (1, 1))
+    external_root = recordings_dir.parent / "external"
+    external_cast, external_log = _write_recording(external_root)
+    os.utime(external_cast, (1, 1))
+    os.utime(external_log, (1, 1))
+    (recordings_dir / "linked-lab").symlink_to(external_root / "lab-uuid-1", target_is_directory=True)
+    staging = get_settings().LABS_DIR / ".folder-deletions" / "contents" / ".recordings" / "saved.json"
+    staged_cast, staged_log = _write_recording(staging)
+    os.utime(staged_cast, (1, 1))
+    os.utime(staged_log, (1, 1))
+
+    assert await expire_recordings(get_settings(), ConsoleRecordingService()) == 3
+    assert not any(path.exists() for path in (old_cast, old_log, extensionless_cast, extensionless_log, legacy_cast))
+    assert all(path.exists() for path in (
+        recent_cast, recent_log, invalid_cast, invalid_log, redirected_cast, redirected_log,
+        external_cast, external_log, staged_cast, staged_log,
+    ))
+
+
+@pytest.mark.asyncio
+async def test_recording_retention_skips_active_recording_and_download(lab_file, recordings_dir, monkeypatch):
+    monkeypatch.setenv("RECORDINGS_RETENTION_DAYS", "1")
+    get_settings.cache_clear()
+    service = ConsoleRecordingService()
+    session = await service.start_session(
+        lab_id="lab-uuid-1", lab_file=lab_file, lab_name="Test lab", node_id=3, node_name="r1",
+        target_host="127.0.0.1", target_port=1, username="tester", listen_host="127.0.0.1",
+    )
+    try:
+        session.start_recording()
+        cast = next(lab_recordings_dir(lab_file, "lab-uuid-1").rglob("*.cast"))
+        log = cast.with_suffix(".log")
+        for path in (cast, log):
+            os.utime(path, (1, 1))
+        assert await expire_recordings(get_settings(), service) == 0
+        session.stop_recording()
+        for path in (cast, log):
+            os.utime(path, (1, 1))
+        with service.downloading(cast):
+            assert await expire_recordings(get_settings(), service) == 0
+            assert cast.exists() and log.exists()
+        assert await expire_recordings(get_settings(), service) == 1
+        assert not cast.exists() and not log.exists()
+    finally:
+        await service.close_all()
+
+
+@pytest.mark.asyncio
+async def test_recording_retention_waits_for_http_download(api_client, recordings_dir, monkeypatch):
+    from app.config import Settings
+
+    service = ConsoleRecordingService()
+    monkeypatch.setattr("app.routers.recordings.get_console_recorder", lambda: service)
+    cast, log = _write_recording(recordings_dir, name="streaming")
+    for path in (cast, log):
+        os.utime(path, (1, 1))
+    settings = Settings(RECORDINGS_RETENTION_DAYS=1)
+    body = log.read_bytes()
+    response_started = asyncio.Event()
+    release_response = asyncio.Event()
+
+    async def pause_download(scope, receive, send):
+        async def pause_after_headers(message):
+            await send(message)
+            if message["type"] == "http.response.start":
+                response_started.set()
+                await release_response.wait()
+
+        await app(scope, receive, pause_after_headers)
+
+    async with AsyncClient(transport=ASGITransport(app=pause_download), base_url="http://testserver") as client:
+        request = asyncio.create_task(client.get("/api/labs/test-lab.json/recordings/3--streaming.cast/log"))
+        try:
+            await asyncio.wait_for(response_started.wait(), timeout=5)
+            assert await expire_recordings(settings, service) == 0
+            assert cast.exists() and log.exists()
+        finally:
+            release_response.set()
+            response = await asyncio.wait_for(request, timeout=5)
+        assert response.status_code == 200
+        assert response.content == body
+    assert await expire_recordings(settings, service) == 1
+    assert not cast.exists() and not log.exists()
+
+
+@pytest.mark.asyncio
+async def test_recording_retention_rechecks_candidate_changed_after_discovery(lab_file, recordings_dir, monkeypatch):
+    from app.config import Settings
+    from app.services import recording_retention
+
+    settings = Settings(RECORDINGS_RETENTION_DAYS=1)
+    cast, log = _write_recording(recordings_dir, name="changed")
+    for path in (cast, log):
+        os.utime(path, (1, 1))
+    scan = recording_retention._expired_candidates
+
+    def refresh_candidate_after_scan(settings, cutoff):
+        for candidate in scan(settings, cutoff):
+            os.utime(log)
+            yield candidate
+
+    monkeypatch.setattr(recording_retention, "_expired_candidates", refresh_candidate_after_scan)
+    assert await expire_recordings(settings, ConsoleRecordingService()) == 0
+    assert cast.exists() and log.exists()
+
+
+@pytest.mark.asyncio
+async def test_recording_retention_follows_backend_startup_and_shutdown(lab_file, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from app import main
+    from app.config import Settings
+    from app.services import recording_retention
+
+    sweep = AsyncMock()
+    monkeypatch.setattr(recording_retention, "run_recording_retention", sweep)
+    monkeypatch.setattr(main, "engine", SimpleNamespace(dispose=AsyncMock()))
+    monkeypatch.setattr(main, "settings", Settings())
+    await main.start_recording_retention()
+    assert not hasattr(app.state, "recording_retention_task")
+    sweep.assert_not_awaited()
+
+    running = asyncio.Event()
+
+    async def run(settings, recorder):
+        assert settings.RECORDINGS_RETENTION_DAYS == 1
+        running.set()
+        await asyncio.Future()
+
+    sweep.side_effect = run
+    monkeypatch.setattr(main, "settings", Settings(RECORDINGS_RETENTION_DAYS=1))
+    await main.start_recording_retention()
+    task = app.state.recording_retention_task
+    try:
+        await asyncio.wait_for(running.wait(), timeout=5)
+        sweep.assert_awaited_once()
+    finally:
+        await main.shutdown()
+    assert task.cancelled()
+    assert not hasattr(app.state, "recording_retention_task")
+
+
+@pytest.mark.asyncio
+async def test_recording_retention_preserves_downloading_pair_after_moves(lab_file):
+    from app.config import Settings
+
+    settings = Settings(RECORDINGS_RETENTION_DAYS=1)
+    service = ConsoleRecordingService()
+    old_recording_dir = lab_recordings_dir(lab_file, "lab-uuid-1")
+    cast, log = _write_recording(old_recording_dir.parent, name="moving")
+    for path in (cast, log):
+        os.utime(path, (1, 1))
+    moved_lab = lab_file.parent / "folder" / "moved.json"
+    moved_dir = lab_recordings_dir(moved_lab, "lab-uuid-1")
+    moved_dir.parent.mkdir(parents=True)
+    moved_cast = moved_dir / cast.relative_to(old_recording_dir)
+    renamed_folder = moved_lab.parent.with_name("renamed")
+    renamed_cast = renamed_folder / moved_cast.relative_to(moved_lab.parent)
+    with service.downloading(cast):
+        lab_file.rename(moved_lab)
+        old_recording_dir.rename(moved_dir)
+        service.relocate_lab(lab_file, moved_lab)
+        assert await expire_recordings(settings, service) == 0
+        assert moved_cast.exists()
+        moved_lab.parent.rename(renamed_folder)
+        service.relocate_folder(moved_lab.parent, renamed_folder)
+        assert await expire_recordings(settings, service) == 0
+        assert renamed_cast.exists()
+    assert await expire_recordings(settings, service) == 1
+    assert not renamed_cast.exists() and not renamed_cast.with_suffix(".log").exists()

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+from contextlib import suppress
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -222,11 +223,27 @@ async def startup():
             _logger.exception("startup orphan-sweep failed (non-fatal)")
 
 
+@app.on_event("startup")
+async def start_recording_retention():
+    if settings.RECORDINGS_RETENTION_DAYS > 0:
+        from app.services.console_recording import get_console_recorder
+        from app.services.recording_retention import run_recording_retention
+
+        app.state.recording_retention_task = asyncio.create_task(
+            run_recording_retention(settings, get_console_recorder())
+        )
+
 
 @app.on_event("shutdown")
 async def shutdown():
     from app.services.console_recording import get_console_recorder
 
+    retention_task = getattr(app.state, "recording_retention_task", None)
+    if retention_task is not None:
+        retention_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await retention_task
+        del app.state.recording_retention_task
     await get_console_recorder().close_all()
     await engine.dispose()
 

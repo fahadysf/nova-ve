@@ -69,6 +69,21 @@ After install, open `http://<host>/` and log in with the admin credentials repor
 
 For development workflows (running the backend with `--reload`, the frontend dev server, or a Rancher Desktop loop on macOS), see the [Deployment contract](docs/development/deployment-contract.md) and the helper scripts in [`deploy/scripts/`](deploy/scripts/).
 
+### Console recording retention
+
+Saved telnet console recordings are kept until manually deleted by default.
+To enable automatic expiration, set `NOVA_VE_RECORDINGS_RETENTION_DAYS` in the
+backend environment to a positive whole number and restart the backend. Set
+it to `0` to disable expiration. The backend checks lab-local and legacy
+recording storage at startup and hourly, using the newer modification time
+of the cast and its matching log. Active recordings and downloads are
+skipped. Invalid casts, standalone logs and files staged by a failed deletion
+require manual inspection.
+
+Enabling expiration can immediately remove existing recordings that have
+reached the configured age. Download any recordings you want to keep before
+enabling it.
+
 ## Project Structure
 
 ```
