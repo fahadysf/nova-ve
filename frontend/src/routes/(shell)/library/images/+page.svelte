@@ -11,11 +11,12 @@
   import { onMount } from 'svelte';
   import { Check, Copy, Pencil, Plus, RefreshCw, ShieldAlert, Trash2, Upload } from 'lucide-svelte';
   import PageHeader from '$lib/components/shell/PageHeader.svelte';
+  import DiskImageUploadDialog from '$lib/components/manage/DiskImageUploadDialog.svelte';
   import TemplateActionDialog from '$lib/components/manage/TemplateActionDialog.svelte';
   import TemplateDialog from '$lib/components/manage/TemplateDialog.svelte';
   import { apiRequest } from '$lib/api';
   import { toastStore } from '$lib/stores/toasts';
-  import type { LibraryImage, LibraryTemplate, LibraryTemplateCreate, LibraryTemplateEdit, LibraryTemplateType } from '$lib/types';
+  import type { LibraryDiskUpload, LibraryImage, LibraryTemplate, LibraryTemplateCreate, LibraryTemplateEdit, LibraryTemplateType } from '$lib/types';
 
   let tab: 'templates' | 'images' = 'templates';
   let templates: LibraryTemplate[] = [];
@@ -32,6 +33,9 @@
   let templateAction: TemplateAction | null = null;
   let savingTemplate = false;
   let templateSaveError = '';
+  let showDiskUpload = false;
+  let uploadingDisk = false;
+  let diskUploadError = '';
   let refreshGeneration = 0;
 
   const TYPE_OPTIONS: readonly LibraryTemplateType[] = ['qemu', 'docker', 'iol', 'dynamips'];
@@ -178,6 +182,42 @@
     templateAction = action;
   }
 
+  function openDiskUpload() {
+    diskUploadError = '';
+    showDiskUpload = true;
+  }
+
+  async function uploadDisk(event: CustomEvent<LibraryDiskUpload>) {
+    if (uploadingDisk) return;
+    const { type, imageName, file } = event.detail;
+    const body = new FormData();
+    body.append('image', file);
+    if (imageName) body.append('image_name', imageName);
+    uploadingDisk = true;
+    diskUploadError = '';
+    try {
+      await apiRequest(`/library/images/${type}`, {
+        method: 'POST',
+        body,
+        suppressToast: true,
+      });
+      showDiskUpload = false;
+      search = '';
+      typeFilter = type;
+      toastStore.push('Disk image uploaded.', 'success');
+    } catch (error) {
+      diskUploadError = error instanceof Error ? error.message : 'Unable to upload the disk image.';
+      return;
+    } finally {
+      uploadingDisk = false;
+    }
+    try {
+      await refresh();
+    } catch {
+      /* toasted */
+    }
+  }
+
   async function mutateTemplate(
     path: string,
     method: 'POST' | 'PATCH' | 'DELETE',
@@ -269,6 +309,14 @@
           >
             <Upload class="h-3 w-3" />
             Upload YAML
+          </button>
+        {:else}
+          <button
+            class="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-2 text-[10px] font-medium uppercase tracking-[0.05em] text-white transition hover:bg-blue-500"
+            on:click={openDiskUpload}
+          >
+            <Upload class="h-3 w-3" />
+            Upload disk image
           </button>
         {/if}
         <button
@@ -544,6 +592,16 @@
     on:upload={handleTemplateUpload}
     on:remove={handleTemplateRemove}
     on:close={() => (templateAction = null)}
+  />
+{/if}
+
+{#if showDiskUpload}
+  <DiskImageUploadDialog
+    initialType={typeFilter === 'iol' || typeFilter === 'dynamips' ? typeFilter : 'qemu'}
+    busy={uploadingDisk}
+    error={diskUploadError}
+    on:upload={uploadDisk}
+    on:close={() => (showDiskUpload = false)}
   />
 {/if}
 

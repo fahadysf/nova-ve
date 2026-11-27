@@ -93,6 +93,13 @@ export interface LibraryTemplateImage {
 
 export type TemplateInterfaceNaming = { format: string } | { explicit: string[] };
 export type LibraryTemplateType = 'qemu' | 'docker' | 'iol' | 'dynamips';
+export type LibraryDiskType = Exclude<LibraryTemplateType, 'docker'>;
+
+export interface LibraryDiskUpload {
+  type: LibraryDiskType;
+  imageName: string;
+  file: File;
+}
 
 export interface LibraryTemplate {
   type: string;

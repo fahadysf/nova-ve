@@ -5,7 +5,7 @@ from app.dependencies import get_current_admin, get_current_user
 from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services import audit_service
-from app.services.template_service import TemplateError, TemplateService
+from app.services.template_service import ImageUploadConflict, TemplateError, TemplateService
 
 router = APIRouter(prefix="/api/list", tags=["list"], responses=COMMON_RESPONSES)
 
@@ -84,6 +84,8 @@ async def upload_image(
             source=image.file,
             image_name=image_name,
         )
+    except ImageUploadConflict as exc:
+        return {"code": 409, "status": "fail", "message": str(exc)}
     except TemplateError as exc:
         return {
             "code": 400,

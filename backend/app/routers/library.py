@@ -8,6 +8,7 @@ Admin-gated endpoints behind the Library nav entry:
   image matches (missing-image state is explicit).
 * ``GET  /api/library/images``           — full inventory with size, cached
   sha256, mtime, referencing labs, and the templates resolving to each image.
+* ``POST /api/library/images/{t}`` — upload a disk image for a filesystem runtime.
 * ``POST /api/library/images/{t}/{n}/verify`` — force sha256 recompute.
 * ``DELETE /api/library/images/{t}/{n}``  — guarded by lab references.
 * ``PATCH /api/library/templates/{t}/{k}`` — persist editable fields (edits
@@ -21,8 +22,9 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends, File, UploadFile
+from fastapi import APIRouter, Depends, File, Request, UploadFile
 from pydantic import BaseModel, Field
+from starlette.datastructures import UploadFile as MultipartUploadFile
 from typing import Any, Literal
 
 from app.dependencies import get_current_admin
@@ -30,6 +32,7 @@ from app.openapi import COMMON_RESPONSES
 from app.schemas.user import UserRead
 from app.services import audit_service
 from app.services.image_library_service import (
+    FILESYSTEM_IMAGE_TYPES,
     MAX_TEMPLATE_YAML_BYTES,
     ImageLibraryError,
     ImageLibraryService,
@@ -41,7 +44,7 @@ from app.services.image_library_service import (
     TemplateUpdateInvalid,
     editable_template_extras_schema,
 )
-from app.services.template_service import TemplateError, TemplateService
+from app.services.template_service import ImageUploadConflict, TemplateError, TemplateService
 
 router = APIRouter(
     prefix="/api/library",
@@ -209,6 +212,60 @@ async def list_library_images(
             }
         )
     return _ok("Library images listed.", {"images": images})
+
+
+@router.post(
+    "/images/{image_type}",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "multipart/form-data": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["image"],
+                        "properties": {
+                            "image": {"type": "string", "format": "binary"},
+                            "image_name": {"type": "string"},
+                        },
+                    },
+                },
+            },
+        },
+    },
+)
+async def upload_library_disk_image(
+    image_type: str,
+    request: Request,
+    current_user: UserRead = Depends(get_current_admin),
+):
+    if image_type not in FILESYSTEM_IMAGE_TYPES:
+        return _fail("Choose QEMU, IOL, or Dynamips for a disk image upload.")
+    try:
+        # Parsing can spool a large upload to disk. Authenticate before doing it.
+        async with request.form(max_files=1, max_fields=1) as form:
+            image = form.get("image")
+            image_name = form.get("image_name")
+            if not isinstance(image, MultipartUploadFile) or image.size == 0:
+                return _fail("Choose a non-empty disk image.")
+            if image_name is not None and not isinstance(image_name, str):
+                return _fail("Image name must be text.")
+            data, size = await TemplateService().upload_disk_image(
+                image_type, image.filename or "", image.file, image_name,
+            )
+    except ImageUploadConflict as exc:
+        return _fail(str(exc), code=409)
+    except TemplateError as exc:
+        return _fail(str(exc))
+    await audit_service.record(
+        "image.upload",
+        actor=current_user.username,
+        target_type="image",
+        target_id=f"{image_type}/{data['image']}",
+        target_name=data["image"],
+        detail={"image_type": image_type, "bytes": size},
+    )
+    return _ok("Disk image uploaded.", data)
 
 
 @router.post("/images/{image_type}/{image_name:path}/verify")

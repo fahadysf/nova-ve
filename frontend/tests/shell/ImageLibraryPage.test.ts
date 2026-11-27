@@ -284,6 +284,54 @@ describe('Images & Templates library page (#264, live)', () => {
     expect(screen.queryByRole('combobox', { name: 'Filter templates by image availability' })).not.toBeInTheDocument();
   });
 
+  it('uploads a disk from the Images tab, keeps a rejected selection and refreshes after success', async () => {
+    const images = [...IMAGES];
+    mockApi(TEMPLATES, images);
+    const readApi = apiRequest.getMockImplementation()!;
+    const file = new File(['fixture bytes'], 'fixture.bin');
+    const payloads: FormData[] = [];
+    let rejectFirstUpload: () => void = () => {};
+    apiRequest.mockImplementation(async (path, options) => {
+      if (path === '/library/images/iol' && options?.method === 'POST') {
+        payloads.push(options.body);
+        if (payloads.length === 1) {
+          return new Promise((_resolve, reject) => {
+            rejectFirstUpload = () => reject(new Error('Rename a conflicting file first.'));
+          });
+        }
+        images.push({
+          ...IMAGES[1], type: 'iol', name: 'appliance', filename: file.name,
+          path: '/images/iol/appliance', files: [file.name], size: file.size,
+        });
+      }
+      return readApi(path, options);
+    });
+    render(LibraryPage);
+    await screen.findByTestId('template-card-veos');
+    expect(screen.queryByRole('button', { name: 'Upload disk image' })).not.toBeInTheDocument();
+    await fireEvent.click(screen.getByTestId('images-tab-images'));
+    await fireEvent.click(screen.getByRole('button', { name: 'Upload disk image' }));
+    const dialog = within(screen.getByRole('dialog', { name: 'Upload disk image' }));
+    const submit = dialog.getByRole('button', { name: 'Upload disk image' });
+    expect(submit).toBeDisabled();
+    const kind = dialog.getByLabelText('Image type');
+    expect(within(kind).queryByRole('option', { name: /docker/i })).not.toBeInTheDocument();
+    await fireEvent.change(kind, { target: { value: 'iol' } });
+    await fireEvent.input(dialog.getByLabelText('Image name'), { target: { value: 'appliance' } });
+    await fireEvent.change(dialog.getByLabelText('Disk file'), { target: { files: [file] } });
+    await fireEvent.click(submit);
+    expect(screen.getByRole('dialog', { name: 'Upload disk image' })).toHaveFocus();
+    expect(dialog.getByRole('button', { name: 'Uploading…' })).toBeDisabled();
+    rejectFirstUpload();
+    expect(await dialog.findByRole('alert')).toHaveTextContent('Rename a conflicting file first.');
+    expect(dialog.getByLabelText('Image name')).toHaveValue('appliance');
+    expect(payloads[0].get('image')).toBe(file);
+    expect(payloads[0].get('image_name')).toBe('appliance');
+    await fireEvent.click(submit);
+    await screen.findByText('fixture.bin');
+    expect(screen.queryByRole('dialog', { name: 'Upload disk image' })).not.toBeInTheDocument();
+  });
+
   it('creates a template and refreshes templates and image associations', async () => {
     const templates = [...TEMPLATES];
     mockApi(templates);
