@@ -125,12 +125,18 @@ with zipfile.ZipFile(f"{workdir}/guacamole.war") as source:
             output.writestr(patch_name, Path(patch_js).read_bytes())
 PYEOF
   if [[ "${patch_rc}" -eq 10 ]]; then
-    return 0
+    if docker exec "${container_id}" test -r "${war_path}"; then
+      return 0
+    fi
+    docker exec -u 0 "${container_id}" chmod 0644 "${war_path}" || return 1
+    return 3
   fi
   if [[ "${patch_rc}" -ne 0 ]]; then
     return 1
   fi
 
+  # docker cp preserves the local file mode. Tomcat runs without root.
+  chmod 0644 "${workdir}/guacamole-patched.war" || return 1
   docker cp "${workdir}/guacamole-patched.war" "${container_id}:${war_path}" || return 1
   return 3
 }
@@ -177,13 +183,27 @@ if [[ "${war_rc}" -eq 3 ]]; then
   # patched archive, then wait for it to answer again.
   echo "guacamole: WAR patched, restarting webapp to apply"
   docker compose -f "${COMPOSE_FILE}" restart guacamole >/dev/null
-  for _ in $(seq 1 60); do
-    if curl -fsS -o /dev/null "http://127.0.0.1:8081/html5/"; then
-      break
-    fi
-    sleep 2
-  done
 elif [[ "${war_rc}" -ne 0 ]]; then
   echo "guacamole: failed to patch the webapp" >&2
   exit "${war_rc}"
 fi
+
+published="$(docker compose -f "${COMPOSE_FILE}" port guacamole 8080)" || published=""
+published="${published%%$'\n'*}"
+if [[ ! "${published}" =~ ^.+:[0-9]+$ ]]; then
+  echo "Guacamole has no published port for readiness checks. Check the compose configuration." >&2
+  exit 1
+fi
+case "${published}" in
+  0.0.0.0:*) published="127.0.0.1:${published##*:}" ;;
+  '[::]:'*) published="[::1]:${published##*:}" ;;
+esac
+
+for _ in $(seq 1 60); do
+  if curl --max-time 5 -fsS -o /dev/null "http://${published}/html5/"; then
+    exit 0
+  fi
+  sleep 2
+done
+echo "Guacamole did not become ready at /html5/. Check the webapp container logs." >&2
+exit 1
