@@ -141,8 +141,10 @@ NODE_EDIT_FIELDS = [
 ]
 
 
-def _build_node_catalog(*, strict_docker: bool = True) -> dict:
-    catalog = TemplateService().build_node_catalog(strict_docker=strict_docker)
+def _build_node_catalog(*, discover_docker_images: bool = True) -> dict:
+    catalog = TemplateService().build_node_catalog(
+        strict_docker=True, discover_docker_images=discover_docker_images,
+    )
     catalog["create_fields"] = NODE_CREATE_FIELDS
     catalog["edit_fields"] = NODE_EDIT_FIELDS
     catalog["runtime_editability"] = {
@@ -155,7 +157,7 @@ def _build_node_catalog(*, strict_docker: bool = True) -> dict:
 
 def _build_partial_node_catalog(error: Exception) -> dict | None:
     if isinstance(error, (DockerImageError, subprocess.TimeoutExpired)):
-        return _build_node_catalog(strict_docker=False)
+        return _build_node_catalog(discover_docker_images=False)
     return None
 
 

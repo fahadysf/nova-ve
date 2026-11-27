@@ -1375,7 +1375,9 @@ class TemplateService:
         except (FileNotFoundError, NotADirectoryError, PermissionError):
             return []
 
-    def build_node_catalog(self, *, strict_docker: bool = False) -> dict[str, Any]:
+    def build_node_catalog(
+        self, *, strict_docker: bool = False, discover_docker_images: bool = True,
+    ) -> dict[str, Any]:
         templates: list[dict[str, Any]] = []
         loaded_templates = self._load_templates()
         icon_assets = self.list_icon_assets()
@@ -1384,7 +1386,7 @@ class TemplateService:
             | {template.icon for template in loaded_templates}
             | set(icon_assets)
         )
-        needs_docker_images = any(
+        needs_docker_images = discover_docker_images and any(
             template.type == "docker"
             and template.paired_parent is None
             and not str(template.raw.get("image") or "").strip()

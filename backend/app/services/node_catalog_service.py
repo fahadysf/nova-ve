@@ -119,7 +119,7 @@ class NodeCatalogService:
             if cold and self._build_degraded_catalog is not None:
                 degraded = self._build_degraded_catalog(error)
                 if degraded is not None:
-                    _logger.warning("Serving a partial node catalog while discovery is unavailable.")
+                    _logger.warning("Serving a partial node catalog after discovery failed: %s", error)
                     return degraded, True
             raise
 
@@ -148,6 +148,7 @@ class NodeCatalogService:
         async with self._lock:
             if self._closed:
                 raise asyncio.CancelledError
+            changed = self._built_at is None or self._snapshot != catalog
             self._snapshot = catalog
             self._snapshot_key = cache_key
             now = self._clock()
@@ -156,7 +157,7 @@ class NodeCatalogService:
             if self._task is task:
                 self._task = None
                 self._building_key = None
-            if not pending:
+            if not pending and changed:
                 self._generation += 1
                 self._schedule_notification_locked(self._generation)
         return catalog, pending

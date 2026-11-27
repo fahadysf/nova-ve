@@ -282,6 +282,59 @@ async def test_cold_catalog_keeps_non_docker_templates_available_while_discovery
 
 
 @pytest.mark.asyncio
+async def test_cold_catalog_times_out_docker_discovery_only_once(tmp_path, monkeypatch):
+    service = TemplateService.__new__(TemplateService)
+    service.images_dir = tmp_path
+    qemu = _template("qemu")
+    qemu.type = "qemu"
+    monkeypatch.setattr(service, "_load_templates", lambda: [qemu, _template("docker")])
+    monkeypatch.setattr(service, "list_icon_assets", lambda: [])
+    monkeypatch.setattr(service, "_build_paired_catalog", lambda: [])
+    monkeypatch.setattr(labs, "TemplateService", lambda: service)
+    probes = []
+
+    def docker_discovery(*, strict=False):
+        probes.append(strict)
+        if strict:
+            raise subprocess.TimeoutExpired("docker image ls", 5)
+        return {}
+
+    monkeypatch.setattr(service, "_docker_image_catalog", docker_discovery)
+    catalog_service = NodeCatalogService(
+        labs._build_node_catalog, build_degraded=labs._build_partial_node_catalog,
+    )
+    try:
+        catalog, pending = await catalog_service.get_with_pending()
+        assert pending
+        assert "qemu" in [template["type"] for template in catalog["templates"]]
+        assert probes == [True]
+    finally:
+        await catalog_service.close()
+
+
+@pytest.mark.asyncio
+async def test_unchanged_rebuild_renews_freshness_without_sending_an_update():
+    now = 0.0
+    generations = []
+
+    async def publish(generation):
+        generations.append(generation)
+
+    service = NodeCatalogService(
+        lambda: {"templates": [{"key": "same"}]}, on_updated=publish, clock=lambda: now,
+    )
+    try:
+        original = await service.get()
+        now = 31.0
+        assert await service.get_with_pending() == (original, True)
+        await service._task
+        assert await service.get_with_pending() == (original, False)
+        assert generations == [1]
+    finally:
+        await service.close()
+
+
+@pytest.mark.asyncio
 async def test_stale_snapshot_returns_promptly_and_publishes_replacement():
     now = 0.0
     release = threading.Event()
