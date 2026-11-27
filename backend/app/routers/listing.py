@@ -77,12 +77,11 @@ async def upload_image(
     current_user: UserRead = Depends(get_current_admin),
 ):
     try:
-        content = await image.read()
-        data = await TemplateService().upload_image(
+        data, size = await TemplateService().upload_image(
             template_type=template_type,
             template_key=template_key,
             filename=image.filename or "",
-            content=content,
+            source=image.file,
             image_name=image_name,
         )
     except TemplateError as exc:
@@ -103,7 +102,7 @@ async def upload_image(
         detail={
             "image_type": template_type,
             "template": template_key,
-            "bytes": len(content),
+            "bytes": size,
         },
     )
     return {
