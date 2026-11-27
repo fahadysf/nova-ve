@@ -81,6 +81,10 @@ class ImageNotFound(ImageLibraryError):
     pass
 
 
+class ImageNameConflict(ImageLibraryError):
+    pass
+
+
 class ImageReferenced(ImageLibraryError):
     def __init__(self, message: str, references: list[dict[str, Any]]):
         super().__init__(message)
@@ -432,17 +436,17 @@ class ImageLibraryService:
                 size += len(chunk)
         return digest.hexdigest(), size
 
-    async def verify_checksum(self, path: Path | str) -> dict[str, Any]:
+    async def verify_checksum(self, image_type: str, name: str) -> dict[str, Any]:
         """Force-recompute the sha256 of the image's primary file.
 
         Runs in the default executor — hashing multi-GB disks must not
         block the event loop. The result is persisted keyed by
         (path, size, mtime_ns) so later requests reuse it.
         """
-        path = Path(path)
+        path = self._find_image_path(image_type, name)
         target = _primary_file(path)
         if target is None:
-            raise ImageNotFound(f"No file to hash under {path}.")
+            raise ImageLibraryError(f"No file to hash under {path}.")
         import asyncio
 
         sha256, size = await asyncio.get_running_loop().run_in_executor(
@@ -464,14 +468,35 @@ class ImageLibraryService:
     # ------------------------------------------------------------------
     # Inventory
     # ------------------------------------------------------------------
+    def _filesystem_image_entries(self, image_type: str) -> Iterator[tuple[str, Path]]:
+        type_root = self.images_dir / image_type
+        if not type_root.is_dir():
+            return
+        for child in sorted(type_root.iterdir()):
+            if child.is_dir():
+                yield child.name, child
+            elif child.is_file():
+                yield child.stem, child
+
+    def _find_image_path(self, image_type: str, name: str) -> Path:
+        if image_type == "docker" and any(image["name"] == name for image in self._scan_docker_images()):
+            raise ImageLibraryError("Docker image checksums are managed by the Docker daemon.")
+        if image_type in FILESYSTEM_IMAGE_TYPES:
+            matches = [path for key, path in self._filesystem_image_entries(image_type) if key == name]
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                raise ImageNameConflict(
+                    f"More than one {image_type} image has the name {name}. "
+                    "Image names must be unique within a runtime to verify or delete an image."
+                )
+        raise ImageNotFound(f"Image {name} ({image_type}) not found.")
+
     def _scan_filesystem_images(self) -> list[dict[str, Any]]:
         cache = self._load_cache()
         images: list[dict[str, Any]] = []
         for image_type in FILESYSTEM_IMAGE_TYPES:
-            type_root = self.images_dir / image_type
-            if not type_root.exists():
-                continue
-            for child in sorted(type_root.iterdir()):
+            for name, child in self._filesystem_image_entries(image_type):
                 if child.is_dir():
                     files = sorted(f.name for f in child.iterdir() if f.is_file())
                     size = sum(f.stat().st_size for f in child.iterdir() if f.is_file())
@@ -490,7 +515,7 @@ class ImageLibraryService:
                         sha256 = entry["sha256"]
                 images.append(
                     {
-                        "name": child.name if child.is_dir() else child.stem,
+                        "name": name,
                         "filename": child.name,
                         "type": image_type,
                         "path": str(child),
@@ -799,19 +824,7 @@ class ImageLibraryService:
         if image_type not in FILESYSTEM_IMAGE_TYPES:
             raise ImageLibraryError(f"Unsupported image type: {image_type}")
 
-        # Name lookup matches the inventory scan: directories keep their
-        # full name, flat files resolve by stem.
-        target: Path | None = None
-        type_root = self.images_dir / image_type
-        if type_root.exists():
-            for child in sorted(type_root.iterdir()):
-                child_name = child.name if child.is_dir() else child.stem
-                if child_name == name:
-                    target = child
-                    break
-        if target is None:
-            raise ImageNotFound(f"Image {name} ({image_type}) not found.")
-
+        target = self._find_image_path(image_type, name)
         resolved = target.resolve()
         images_root = self.images_dir.resolve()
         if images_root not in resolved.parents:
