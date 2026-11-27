@@ -80,6 +80,36 @@ _legacy_layout_logger = logging.getLogger("nova-ve.legacy_image_layout")
 _LEGACY_LAYOUT_LOGGED: set[str] = set()
 
 
+def iter_qemu_media_candidates(
+    images_dir: Path, image_name: str, *, iso: bool = False,
+) -> Iterator[tuple[Path, str | None]]:
+    if not image_name:
+        return
+    filename, pattern, kind = (
+        ("cdrom.iso", "*.iso", "qemu_iso") if iso else ("hda.qcow2", "*.qcow2", "qemu_image")
+    )
+    typed = images_dir / "qemu" / image_name
+    legacy = images_dir / image_name
+    for directory, is_legacy in ((typed, False), (legacy, True)):
+        path = directory / filename
+        if path.exists():
+            yield path, f"{kind}_{path.stem}" if is_legacy else None
+    for directory, is_legacy in ((typed, False), (legacy, True)):
+        if directory.exists():
+            for path in sorted(directory.glob(pattern)):
+                yield path, f"{kind}_dir" if is_legacy else None
+
+
+def _resolve_qemu_media(images_dir: Path, image_name: str, *, iso: bool = False) -> Path | None:
+    match = next(iter_qemu_media_candidates(images_dir, image_name, iso=iso), None)
+    if match is None:
+        return None
+    path, legacy_kind = match
+    if legacy_kind:
+        _log_legacy_image_fallback(path, legacy_kind)
+    return path
+
+
 def _log_legacy_image_fallback(path: Path, fallback_kind: str) -> None:
     """Emit a one-shot DEPRECATION warning when the legacy un-nested IMAGES_DIR
     layout resolves an image or iso path.
@@ -6411,54 +6441,10 @@ class NodeRuntimeService:
         raise NodeRuntimeError(f"QEMU base image not found for node image: {node.get('image')}")
 
     def _resolve_qemu_image(self, node: dict[str, Any]) -> Path | None:
-        image_name = str(node.get("image", "")).strip()
-        if not image_name:
-            return None
-
-        nested_disk = self.settings.IMAGES_DIR / "qemu" / image_name / "hda.qcow2"
-        legacy_disk = self.settings.IMAGES_DIR / image_name / "hda.qcow2"
-        if nested_disk.exists():
-            return nested_disk
-        if legacy_disk.exists():
-            _log_legacy_image_fallback(legacy_disk, "qemu_image_hda")
-            return legacy_disk
-
-        nested_dir = self.settings.IMAGES_DIR / "qemu" / image_name
-        legacy_dir = self.settings.IMAGES_DIR / image_name
-        for directory, is_legacy in ((nested_dir, False), (legacy_dir, True)):
-            if directory.exists():
-                qcow_images = sorted(directory.glob("*.qcow2"))
-                if qcow_images:
-                    if is_legacy:
-                        _log_legacy_image_fallback(qcow_images[0], "qemu_image_dir")
-                    return qcow_images[0]
-
-        return None
+        return _resolve_qemu_media(self.settings.IMAGES_DIR, str(node.get("image", "")).strip())
 
     def _resolve_qemu_iso(self, node: dict[str, Any]) -> Path | None:
-        image_name = str(node.get("image", "")).strip()
-        if not image_name:
-            return None
-
-        nested_iso = self.settings.IMAGES_DIR / "qemu" / image_name / "cdrom.iso"
-        legacy_iso = self.settings.IMAGES_DIR / image_name / "cdrom.iso"
-        if nested_iso.exists():
-            return nested_iso
-        if legacy_iso.exists():
-            _log_legacy_image_fallback(legacy_iso, "qemu_iso_cdrom")
-            return legacy_iso
-
-        nested_dir = self.settings.IMAGES_DIR / "qemu" / image_name
-        legacy_dir = self.settings.IMAGES_DIR / image_name
-        for directory, is_legacy in ((nested_dir, False), (legacy_dir, True)):
-            if directory.exists():
-                iso_images = sorted(directory.glob("*.iso"))
-                if iso_images:
-                    if is_legacy:
-                        _log_legacy_image_fallback(iso_images[0], "qemu_iso_dir")
-                    return iso_images[0]
-
-        return None
+        return _resolve_qemu_media(self.settings.IMAGES_DIR, str(node.get("image", "")).strip(), iso=True)
 
     def _runtime_metrics(self, runtime: dict[str, Any]) -> dict[str, Any]:
         metrics = {

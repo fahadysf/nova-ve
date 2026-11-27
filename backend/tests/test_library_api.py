@@ -115,6 +115,124 @@ async def test_inventory_lists_images_with_size_and_references(client, lib_setti
 
 
 @pytest.mark.asyncio
+async def test_same_named_images_keep_references_with_their_runtime(client, lib_settings):
+    qemu_file, _ = _seed_veos(lib_settings)
+    _seed_referencing_lab(lib_settings)
+    iol_dir = lib_settings.IMAGES_DIR / "iol" / "veos"
+    iol_dir.mkdir(parents=True)
+    (iol_dir / "veos.bin").write_bytes(b"iol-image")
+    templates = lib_settings.TEMPLATES_DIR / "iol"
+    templates.mkdir()
+    (templates / "fixture.yml").write_text(
+        "type: iol\nname: IOL fixture\ncpu: 1\nram: 512\nethernet: 4\n"
+        "console_type: telnet\nicon_type: router\nimage_aliases: [veos]\n"
+    )
+
+    response = await client.get("/api/library/images")
+    images = {
+        image["type"]: image
+        for image in response.json()["data"]["images"]
+        if image["name"] == "veos"
+    }
+    assert [item["lab"] for item in images["qemu"]["referenced_by"]] == ["arc-lab.json"]
+    assert images["iol"]["referenced_by"] == []
+    assert [(item["type"], item["key"]) for item in images["qemu"]["templates"]] == [("qemu", "veos")]
+    assert [(item["type"], item["key"]) for item in images["iol"]["templates"]] == [("iol", "fixture")]
+
+    blocked = await client.delete("/api/library/images/qemu/veos")
+    assert blocked.json()["code"] == 409
+    deleted = await client.delete("/api/library/images/iol/veos")
+    assert deleted.json()["code"] == 200
+    assert qemu_file.is_file()
+    assert not iol_dir.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_type", ["iou", ""])
+async def test_legacy_reference_still_protects_iol_image(client, lib_settings, node_type):
+    iol_dir = lib_settings.IMAGES_DIR / "iol" / "veos"
+    iol_dir.mkdir(parents=True)
+    (iol_dir / "veos.bin").write_bytes(b"iol-image")
+    lab = {"nodes": {"1": {"id": 1, "image": "veos"}}}
+    if node_type:
+        lab["nodes"]["1"]["type"] = node_type
+    (lib_settings.LABS_DIR / "legacy.json").write_text(json.dumps(lab))
+
+    response = await client.delete("/api/library/images/iol/veos")
+
+    assert response.json()["code"] == 409
+    assert response.json()["data"]["references"][0]["lab"] == "legacy.json"
+    assert iol_dir.is_dir()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "locator",
+    ["shared-directory", "legacy-backing", "absolute-file", "file-link", "cross-file", "chained-directory"],
+)
+async def test_delete_protects_the_resolved_image_file(client, lib_settings, locator):
+    iol_dir = lib_settings.IMAGES_DIR / "iol" / "veos"
+    iol_dir.mkdir(parents=True)
+    if locator == "chained-directory":
+        media_dir = lib_settings.IMAGES_DIR.parent / "other-storage"
+        media_dir.mkdir()
+        disk = media_dir / "hda.qcow2"
+        intermediary = iol_dir / "alias"
+        intermediary.symlink_to(media_dir, target_is_directory=True)
+        qemu_dir = lib_settings.IMAGES_DIR / "qemu"
+        qemu_dir.mkdir()
+        (qemu_dir / "veos").symlink_to(intermediary, target_is_directory=True)
+        node = {"type": "qemu", "image": "veos"}
+    elif locator == "cross-file":
+        disk = iol_dir / "actual.qcow2"
+        alias_dir = lib_settings.IMAGES_DIR / "qemu" / "veos"
+        alias_dir.mkdir(parents=True)
+        (alias_dir / "hda.qcow2").symlink_to(disk)
+        node = {"type": "qemu", "image": "veos"}
+    elif locator in {"shared-directory", "legacy-backing"}:
+        disk = iol_dir / "hda.qcow2"
+        (lib_settings.IMAGES_DIR / "veos").symlink_to(iol_dir, target_is_directory=True)
+        node = {"type": "qemu", "image": "veos"}
+        if locator == "legacy-backing":
+            _seed_veos(lib_settings)
+            preferred = lib_settings.IMAGES_DIR / "qemu" / "veos" / "hda.qcow2"
+            preferred.write_bytes(b"new-image")
+    else:
+        disk = iol_dir / "veos.bin"
+        node = {"type": "iou", "image": str(disk)}
+    if locator == "file-link":
+        media = lib_settings.IMAGES_DIR.parent / "original.bin"
+        media.write_bytes(b"in-use-image")
+        disk.symlink_to(media)
+    else:
+        disk.write_bytes(b"in-use-image")
+    (lib_settings.LABS_DIR / "saved.json").write_text(json.dumps({"nodes": {"1": node}}))
+
+    images = (await client.get("/api/library/images")).json()["data"]["images"]
+    image = next(image for image in images if image["type"] == "iol")
+    assert [ref["lab"] for ref in image["referenced_by"]] == ["saved.json"]
+    response = await client.delete("/api/library/images/iol/veos")
+    assert response.json()["code"] == 409
+    assert disk.read_bytes() == b"in-use-image"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_type, suffix", [("qemu", "qcow2"), ("iol", "bin")])
+async def test_cyclic_disk_symlink_does_not_break_inventory(client, lib_settings, image_type, suffix):
+    image_dir = lib_settings.IMAGES_DIR / image_type / "veos"
+    image_dir.mkdir(parents=True)
+    filename = f"disk.{suffix}"
+    (image_dir / filename).symlink_to(filename)
+    lab = {"nodes": {"1": {"name": "fixture", "type": image_type, "image": "veos"}}}
+    (lib_settings.LABS_DIR / "saved.json").write_text(json.dumps(lab))
+
+    images = (await client.get("/api/library/images")).json()["data"]["images"]
+    image = next(image for image in images if image["type"] == image_type)
+    assert image["state"] == "missing"
+    assert [reference["node"] for reference in image["referenced_by"]] == ["fixture"]
+
+
+@pytest.mark.asyncio
 async def test_templates_list_with_matches_and_missing_state(client, lib_settings):
     _seed_veos(lib_settings)
 
