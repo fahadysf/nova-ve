@@ -27,7 +27,7 @@ select(2). The worker exits when either side closes; the parent keeps
 accepting.
 
 Invocation (root):
-    nova-ve-console-proxy.py <node_pid> <listen_port> <target_port>
+    nova-ve-console-proxy.py <node_pid> <listen_port> <target_port> [log_id]
         node_pid = 0 → no setns (default netns target)
         node_pid > 1 → setns into /proc/<node_pid>/ns/net
 
@@ -38,14 +38,79 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import fcntl
 import os
+import re
 import select
 import signal
 import socket
+import stat
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import NoReturn
 
 CLONE_NEWNET = 0x40000000
+_LOG_DIR = Path("/var/log/nova-ve-console-proxy")
+_MAX_LOG_BYTES = 64 * 1024
+_MAX_LOG_FILES = 1024
+_LOG_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def _make_log_room(directory: int) -> None:
+    logs = []
+    for name in os.listdir(directory):
+        if not name.endswith(".log") or _LOG_ID.fullmatch(name[:-4]) is None:
+            continue
+        info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if stat.S_ISREG(info.st_mode) and info.st_uid == os.geteuid() and info.st_nlink == 1:
+            logs.append((info.st_mtime_ns, name))
+    for _, name in sorted(logs)[:max(0, len(logs) + 1 - _MAX_LOG_FILES)]:
+        os.unlink(name, dir_fd=directory)
+
+
+def _log_event(log_id: str | None, event: str, error: BaseException | None = None) -> None:
+    """Best-effort diagnostics with no guest payload or caller-supplied path."""
+    if log_id is None or _LOG_ID.fullmatch(log_id) is None:
+        return
+    suffix = ""
+    if isinstance(error, OSError) and error.errno is not None:
+        suffix = f" errno={error.errno}"
+    elif error is not None:
+        suffix = f" error={type(error).__name__}"
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record = f"{stamp} {event}{suffix}\n".encode("ascii")
+    try:
+        _LOG_DIR.mkdir(mode=0o700, exist_ok=True)
+        directory = os.open(_LOG_DIR, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            info = os.fstat(directory)
+            if info.st_uid != os.geteuid() or info.st_mode & 0o077:
+                return
+            fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            flags = os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK
+            name = f"{log_id}.log"
+            try:
+                fd = os.open(name, flags, dir_fd=directory)
+            except FileNotFoundError:
+                _make_log_room(directory)
+                fd = os.open(name, flags | os.O_CREAT | os.O_EXCL, mode=0o600, dir_fd=directory)
+            try:
+                info = os.fstat(fd)
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                        or info.st_nlink != 1 or info.st_mode & 0o077):
+                    return
+                if os.fstat(fd).st_size + len(record) > _MAX_LOG_BYTES:
+                    os.ftruncate(fd, 0)
+                os.write(fd, record)
+            finally:
+                os.close(fd)
+        finally:
+            os.close(directory)
+    except BlockingIOError:
+        return
+    except OSError:
+        print("console proxy diagnostics unavailable", file=sys.stderr)
 
 
 def _setns_to_pid(pid: int) -> None:
@@ -92,7 +157,7 @@ def _splice(a: socket.socket, b: socket.socket) -> None:
                 pass
 
 
-def _serve_one(client: socket.socket, target_pid: int, target_port: int) -> NoReturn:
+def _serve_one(client: socket.socket, target_pid: int, target_port: int, log_id: str | None) -> NoReturn:
     """Worker: dial ``127.0.0.1:target_port`` and splice bytes to the client.
 
     When ``target_pid > 0`` the worker first enters that pid's network
@@ -106,7 +171,8 @@ def _serve_one(client: socket.socket, target_pid: int, target_port: int) -> NoRe
             _setns_to_pid(target_pid)
         upstream = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         upstream.connect(("127.0.0.1", target_port))
-    except OSError:
+    except OSError as exc:
+        _log_event(log_id, "upstream-connect-failed", exc)
         try:
             client.close()
         except OSError:
@@ -117,8 +183,13 @@ def _serve_one(client: socket.socket, target_pid: int, target_port: int) -> NoRe
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        print("usage: nova-ve-console-proxy.py <pid> <listen_port> <target_port>", file=sys.stderr)
+    if len(sys.argv) not in (4, 5):
+        print("usage: nova-ve-console-proxy.py <pid> <listen_port> <target_port> [log_id]", file=sys.stderr)
+        return 2
+
+    log_id = sys.argv[4] if len(sys.argv) == 5 else None
+    if log_id is not None and _LOG_ID.fullmatch(log_id) is None:
+        print("invalid console proxy log identifier", file=sys.stderr)
         return 2
 
     try:
@@ -137,12 +208,21 @@ def main() -> int:
         print("argument out of range", file=sys.stderr)
         return 2
 
+    try:
+        return _serve(target_pid, listen_port, target_port, log_id)
+    except Exception as exc:
+        _log_event(log_id, "proxy-failed", exc)
+        raise
+
+
+def _serve(target_pid: int, listen_port: int, target_port: int, log_id: str | None) -> int:
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # Bind 0.0.0.0 so guacd (in its own compose container) can reach this
     # listener via host.docker.internal — matches stock docker-proxy.
     listener.bind(("0.0.0.0", listen_port))
     listener.listen(64)
+    _log_event(log_id, "listening")
 
     # Reap zombie workers.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
@@ -150,7 +230,7 @@ def main() -> int:
     while True:
         try:
             client, _addr = listener.accept()
-        except OSError:
+        except (InterruptedError, ConnectionAbortedError):
             continue
         # Refuse to forward if the target netns has gone away (container
         # died). Skipped for the pid=0 path — dynamips' default-netns
@@ -160,6 +240,7 @@ def main() -> int:
                 client.close()
             except OSError:
                 pass
+            _log_event(log_id, "target-namespace-missing")
             return 0
         worker = os.fork()
         if worker == 0:
@@ -167,7 +248,7 @@ def main() -> int:
                 listener.close()
             except OSError:
                 pass
-            _serve_one(client, target_pid, target_port)
+            _serve_one(client, target_pid, target_port, log_id)
         else:
             try:
                 client.close()

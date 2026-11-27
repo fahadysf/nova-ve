@@ -1655,6 +1655,9 @@ def cmd_console_proxy_start(args: argparse.Namespace) -> int:
         target_pid = authorize_pid(args.pid)
     listen_port = _validate_port(args.listen_port, label="listen_port")
     target_port = _validate_port(args.target_port, label="target_port")
+    log_id = getattr(args, "log_id", None)
+    if log_id is not None and re.fullmatch(r"[0-9a-f]{32}", log_id) is None:
+        raise _ValidationError("invalid console proxy log identifier")
     if listen_port < 1024:
         raise _ValidationError(
             "listen_port must be a non-privileged port (>=1024)"
@@ -1679,22 +1682,16 @@ def cmd_console_proxy_start(args: argparse.Namespace) -> int:
             second = os.fork()
             if second == 0:
                 # Grandchild: replace with the proxy.
-                os.close(pipe_w)
                 devnull = os.open(os.devnull, os.O_RDWR)
                 os.dup2(devnull, 0)
                 os.dup2(devnull, 1)
                 os.dup2(devnull, 2)
                 if devnull > 2:
                     os.close(devnull)
-                os.execv(
-                    CONSOLE_PROXY_BIN,
-                    [
-                        CONSOLE_PROXY_BIN,
-                        str(target_pid),
-                        str(listen_port),
-                        str(target_port),
-                    ],
-                )
+                argv = [CONSOLE_PROXY_BIN, str(target_pid), str(listen_port), str(target_port)]
+                if log_id is not None:
+                    argv.append(log_id)
+                os.execv(CONSOLE_PROXY_BIN, argv)
             else:
                 os.write(pipe_w, f"{second}\n".encode("ascii"))
                 os._exit(0)
@@ -1704,15 +1701,16 @@ def cmd_console_proxy_start(args: argparse.Namespace) -> int:
             except OSError:
                 pass
             os._exit(1)
-    # Parent: read the grandchild PID, reap the first child, then return.
+    # Both children close the non-inheritable pipe on exit or successful exec.
+    # Read through EOF so an exec error also reaches the caller.
     os.close(pipe_w)
     with os.fdopen(pipe_r, "r") as r:
-        line = r.readline().strip()
+        lines = r.read().splitlines()
     os.waitpid(pid, 0)
-    if line.startswith("err:") or not line.isdigit():
-        print(f"console proxy spawn failed: {line}", file=sys.stderr)
+    if len(lines) != 1 or not lines[0].isdigit():
+        print(f"console proxy spawn failed: {' '.join(lines)}", file=sys.stderr)
         return 1
-    print(line)
+    print(lines[0])
     return 0
 
 
@@ -1990,6 +1988,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("pid")
     p.add_argument("listen_port")
     p.add_argument("target_port")
+    p.add_argument("--log-id")
 
     p = sub.add_parser(
         "console-proxy-stop",

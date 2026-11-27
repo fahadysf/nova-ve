@@ -1015,7 +1015,7 @@ class NodeRuntimeService:
                 runtime = self._runtime_record(lab_id, node_id)
                 if not runtime or runtime.get("kind") != "docker":
                     raise NodeRuntimeError(f"Node is not running: {node_id}")
-                runtime = self._ensure_console_proxy(lab_id, node_id, runtime, mode=mode)
+                runtime = self._ensure_console_proxy(lab_id, node_id, runtime, mode=mode, node_extras=_node_extras(node))
 
         node_name = node.get("name", f"node-{node_id}")
 
@@ -1075,6 +1075,8 @@ class NodeRuntimeService:
         node_id: int,
         runtime: dict[str, Any],
         mode: str = "primary",
+        *,
+        node_extras: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Re-spawn a dead console proxy for a running Docker node.
 
@@ -1126,7 +1128,8 @@ class NodeRuntimeService:
             new_pid = host_net.console_proxy_start(
                 node_pid=int(container_pid),
                 listen_port=listen_port,
-                target_port=self._container_console_port(console_mode),
+                target_port=self._docker_container_console_port(console_mode, node_extras or {}),
+                log_id=host_net.console_proxy_log_id(lab_id, node_id, mode),
             )
         except Exception as exc:
             _logger.warning(
@@ -3085,6 +3088,7 @@ class NodeRuntimeService:
                 node_pid=pid,
                 listen_port=int(console_port),
                 target_port=int(container_console_port),
+                log_id=host_net.console_proxy_log_id(lab_id, node_id),
             )
         except Exception as exc:
             _logger.warning(
@@ -3101,6 +3105,7 @@ class NodeRuntimeService:
                     node_pid=pid,
                     listen_port=int(second_console_port),
                     target_port=int(second_container_console_port),
+                    log_id=host_net.console_proxy_log_id(lab_id, node_id, "second"),
                 )
             except Exception as exc:
                 _logger.warning(
@@ -5527,7 +5532,8 @@ class NodeRuntimeService:
             console_proxy_pid = host_net.console_proxy_start(
                 node_pid=pid,
                 listen_port=int(console_port),
-                target_port=int(self._container_console_port(console_mode)),
+                target_port=self._docker_container_console_port(console_mode, _node_extras(node)),
+                log_id=host_net.console_proxy_log_id(lab_id, node_id),
             )
         except Exception as exc:
             _logger.warning(
@@ -5551,6 +5557,7 @@ class NodeRuntimeService:
                             second_console_mode, _node_extras(node)
                         )
                     ),
+                    log_id=host_net.console_proxy_log_id(lab_id, node_id, "second"),
                 )
             except Exception as exc:
                 _logger.warning(
@@ -6263,6 +6270,7 @@ class NodeRuntimeService:
                 node_pid=0,
                 listen_port=console_port,
                 target_port=int(launcher_record["console_internal_port"]),
+                log_id=host_net.console_proxy_log_id(lab_id, node_id),
             )
         except Exception:
             # If the proxy fails to start, tear the VM back down so the

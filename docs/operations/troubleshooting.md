@@ -43,6 +43,10 @@ sudo bash /var/lib/nova-ve/nova-ve-git/deploy/scripts/smoke-check.sh
 | Network name collision (HTTP 409 on create) | A network with the same display name already exists in the lab. | Pick a different name — the canvas's smart default auto-skips collisions. |
 | Lab editor hangs while loading | Backend WebSocket failed to upgrade. | Check Caddy is forwarding `/ws/*` and that `nova-ve-backend` is reachable on `127.0.0.1:8000`. |
 
+## Console proxy diagnostics
+
+Docker and Dynamips console forwarders record listener startup, connection failures, and fatal proxy errors in root-readable logs under `/var/log/nova-ve-console-proxy/`. Each console has a stable log identifier across proxy restarts. Look for `--log-id` on the corresponding proxy-start entry in the system's sudo log, then open `<log-id>.log` in that directory. Each file retains up to 64 KiB and starts fresh when it reaches that limit. The directory retains up to 1,024 logs and removes the least recently updated log when a new one needs room. Diagnostics may skip entries when another proxy is writing. Console traffic is carried separately on sockets.
+
 ## Lab JSON files
 
 ```bash

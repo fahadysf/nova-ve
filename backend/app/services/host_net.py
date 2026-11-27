@@ -643,7 +643,12 @@ def link_netns(iface: str, pid: int) -> None:
     _invoke_helper("link-netns", iface, str(int(pid)))
 
 
-def console_proxy_start(node_pid: int, listen_port: int, target_port: int) -> int:
+def console_proxy_log_id(lab_id: str, node_id: int, mode: str = "primary") -> str:
+    identity = json.dumps([str(lab_id), int(node_id), mode], separators=(",", ":"))
+    return hashlib.blake2s(identity.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def console_proxy_start(node_pid: int, listen_port: int, target_port: int, *, log_id: str | None = None) -> int:
     """Spawn the console TCP forwarder for a manual-veth Docker container.
 
     Returns the daemonized proxy pid so the caller can persist it on the
@@ -657,12 +662,10 @@ def console_proxy_start(node_pid: int, listen_port: int, target_port: int) -> in
     """
     if sandbox_mode():
         return 0
-    proc = _invoke_helper(
-        "console-proxy-start",
-        str(int(node_pid)),
-        str(int(listen_port)),
-        str(int(target_port)),
-    )
+    args = [str(int(node_pid)), str(int(listen_port)), str(int(target_port))]
+    if log_id is not None:
+        args.extend(["--log-id", log_id])
+    proc = _invoke_helper("console-proxy-start", *args)
     text = (proc.stdout or "").strip()
     if not text.isdigit():
         raise HostNetError(
