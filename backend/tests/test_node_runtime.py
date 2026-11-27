@@ -993,6 +993,49 @@ def test_token_password_for_matches_guacamole_password_material(runtime_settings
 
 
 @pytest.mark.asyncio
+async def test_token_keepalive_does_not_extend_user_activity(monkeypatch, runtime_settings):
+    from unittest.mock import AsyncMock
+
+    from app.services import guacamole_db_service as guac_module
+
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = "postgresql://guacdb-test"
+    monkeypatch.setattr(guac_module, "GuacamoleDatabaseService", lambda: service)
+    last_use = {}
+    monkeypatch.setattr(guac_module, "_AUTH_TOKEN_LAST_USE", last_use)
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(guac_module, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(service, "_request_auth_token", AsyncMock(return_value="fixture-token"))
+    validate = AsyncMock(return_value=True)
+    monkeypatch.setattr(service, "_token_is_valid", validate)
+
+    key = (runtime_settings.GUACAMOLE_INTERNAL_URL, "fixture")
+    await service.warm_auth_token(key[1])
+    assert last_use[key] == 100.0
+
+    window = guac_module._TOKEN_KEEPALIVE_ACTIVE_WINDOW_S
+    times = iter((100.0 + window - 10.0, 100.0 + window + 10.0))
+
+    async def advance_clock(interval):
+        assert interval == guac_module._TOKEN_KEEPALIVE_INTERVAL_S
+        timestamp = next(times, None)
+        if timestamp is None:
+            raise asyncio.CancelledError
+        clock.now = timestamp
+
+    monkeypatch.setattr(guac_module.asyncio, "sleep", advance_clock)
+    with pytest.raises(asyncio.CancelledError):
+        await guac_module._token_keepalive_loop()
+    validate.assert_awaited_once_with("fixture-token")
+    assert key not in last_use
+
+    # Opening the console after the idle window records new user activity.
+    assert await service._auth_token(key[1], service._token_password_for(key[1])) == "fixture-token"
+    assert last_use[key] == clock.now
+
+
+@pytest.mark.asyncio
 async def test_token_keepalive_start_is_idempotent():
     from app.services import guacamole_db_service as guac_module
 
