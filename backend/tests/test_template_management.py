@@ -1,13 +1,17 @@
 from base64 import b64decode
+from io import BytesIO
+import os
 from pathlib import Path
+import struct
 from types import SimpleNamespace
 import subprocess
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from starlette.datastructures import UploadFile
 
-from app.dependencies import get_current_user
+from app.dependencies import get_current_admin, get_current_user
 from app.main import app
 from app.routers import labs, listing
 from app.schemas.node import NodeBatchCreate, NodeCreate, NodeFromTemplate, NodeUpdate
@@ -111,6 +115,176 @@ async def test_list_templates_images_and_upload(prepared_template_data):
     catalog = TemplateService().build_node_catalog()
     assert catalog["templates"][0]["defaults"]["icon"] == "Router.png"
     assert "Router.png" in catalog["icon_options"]
+
+
+@pytest.mark.asyncio
+async def test_image_upload_copies_bounded_chunks(prepared_template_data):
+    class ChunkedImage(BytesIO):
+        def read(self, size=-1):
+            assert 0 < size <= 1024 * 1024
+            return super().read(size)
+
+    contents = b"disk-block" * 150_000
+    result = await listing.upload_image(
+        "qemu",
+        "csr",
+        image=UploadFile(filename="hda.qcow2", file=ChunkedImage(contents)),
+        image_name="csr-alternate",
+        current_user=SimpleNamespace(username="admin", role="admin"),
+    )
+
+    assert result["code"] == 200
+    assert result["data"]["files"] == ["hda.qcow2"]
+    disk = prepared_template_data.IMAGES_DIR / "qemu" / "csr-alternate" / "hda.qcow2"
+    assert disk.read_bytes() == contents
+
+
+@pytest.mark.asyncio
+async def test_multipart_image_upload_reports_published_size(prepared_template_data, monkeypatch):
+    audit = AsyncMock()
+    monkeypatch.setattr(listing.audit_service, "record", audit)
+    monkeypatch.setitem(
+        app.dependency_overrides,
+        get_current_admin,
+        lambda: SimpleNamespace(username="admin", role="admin"),
+    )
+    contents = b"disk-block" * 150_000
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/list/images/qemu/csr",
+            data={"image_name": "csr-alternate"},
+            files={"image": ("hda.qcow2", contents, "application/octet-stream")},
+        )
+
+    assert response.json()["code"] == 200
+    disk = prepared_template_data.IMAGES_DIR / "qemu" / "csr-alternate" / "hda.qcow2"
+    assert disk.read_bytes() == contents
+    assert audit.await_args.kwargs["detail"]["bytes"] == len(contents)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing", [True, False])
+async def test_image_upload_failure_preserves_existing_file(prepared_template_data, existing):
+    class InterruptedImage(BytesIO):
+        def read(self, size=-1):
+            if self.tell() > 0:
+                raise OSError("fixture read was interrupted")
+            return super().read(2)
+
+    image_name = "csr1000v" if existing else "csr-new"
+    directory = prepared_template_data.IMAGES_DIR / "qemu" / image_name
+    disk = directory / "hda.qcow2"
+    if existing:
+        disk.chmod(0o640)
+    current_user = SimpleNamespace(username="admin", role="admin")
+    interrupted = await listing.upload_image(
+        "qemu", "csr", UploadFile(filename=disk.name, file=InterruptedImage(b"replacement")),
+        image_name, current_user,
+    )
+    assert interrupted["code"] == 400
+    if existing:
+        assert disk.read_bytes() == b"image"
+        assert list(directory.iterdir()) == [disk]
+    else:
+        assert not directory.exists()
+
+    completed = await listing.upload_image(
+        "qemu", "csr", UploadFile(filename=disk.name, file=BytesIO(b"replacement")),
+        image_name, current_user,
+    )
+    assert completed["code"] == 200
+    assert disk.read_bytes() == b"replacement"
+    if existing:
+        assert disk.stat().st_mode & 0o777 == 0o640
+    assert list(directory.iterdir()) == [disk]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not hasattr(os, "getxattr"), reason="Linux access ACL support required")
+async def test_image_upload_retains_existing_access_acl(prepared_template_data):
+    disk = prepared_template_data.IMAGES_DIR / "qemu" / "csr1000v" / "hda.qcow2"
+    unspecified = 0xFFFFFFFF
+    other_uid = 65534 if os.getuid() != 65534 else 65533
+    acl = struct.pack("<I", 2) + b"".join(
+        struct.pack("<HHI", tag, permissions, uid)
+        for tag, permissions, uid in [
+            (1, 6, unspecified), (2, 4, other_uid), (4, 0, unspecified),
+            (16, 4, unspecified), (32, 0, unspecified),
+        ]
+    )
+    try:
+        os.setxattr(disk, "system.posix_acl_access", acl)
+    except OSError as exc:
+        pytest.skip(f"File system does not support test ACLs: {exc}")
+
+    result = await listing.upload_image(
+        "qemu", "csr", UploadFile(filename=disk.name, file=BytesIO(b"replacement")),
+        "csr1000v", SimpleNamespace(username="admin", role="admin"),
+    )
+
+    assert result["code"] == 200
+    assert disk.read_bytes() == b"replacement"
+    assert os.getxattr(disk, "system.posix_acl_access") == acl
+
+
+@pytest.mark.asyncio
+async def test_image_upload_reports_success_after_cleanup_error(prepared_template_data, monkeypatch):
+    audit = AsyncMock()
+    monkeypatch.setattr(listing.audit_service, "record", audit)
+    remove = os.rmdir
+
+    def fail_staging_cleanup(path, **kwargs):
+        if str(path).startswith(".upload-"):
+            raise PermissionError("fixture staging cleanup failed")
+        return remove(path, **kwargs)
+
+    with monkeypatch.context() as temporary:
+        temporary.setattr(os, "rmdir", fail_staging_cleanup)
+        result = await listing.upload_image(
+            "qemu", "csr", UploadFile(filename="hda.qcow2", file=BytesIO(b"updated")),
+            "csr1000v", SimpleNamespace(username="admin", role="admin"),
+        )
+
+    directory = prepared_template_data.IMAGES_DIR / "qemu" / "csr1000v"
+    for staging in directory.glob(".upload-*"):
+        staging.rmdir()
+    assert result["code"] == 200
+    assert (directory / "hda.qcow2").read_bytes() == b"updated"
+    assert audit.await_args.kwargs["detail"]["bytes"] == len(b"updated")
+
+
+@pytest.mark.asyncio
+async def test_image_upload_requires_one_directory_component(prepared_template_data):
+    response = await listing.upload_image(
+        "qemu", "csr", UploadFile(filename="hda.qcow2", file=BytesIO(b"image")),
+        "collection/image", SimpleNamespace(username="admin", role="admin"),
+    )
+    assert response["code"] == 400
+    assert not (prepared_template_data.IMAGES_DIR / "qemu" / "collection").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("linked", ["directory", "file"])
+async def test_image_upload_refuses_linked_destinations(prepared_template_data, tmp_path, linked):
+    isolated = tmp_path / "separate-storage"
+    isolated.mkdir()
+    original = isolated / "hda.qcow2"
+    original.write_bytes(b"original")
+    directory = prepared_template_data.IMAGES_DIR / "qemu" / "linked-image"
+    if linked == "directory":
+        directory.symlink_to(isolated, target_is_directory=True)
+    else:
+        directory.mkdir()
+        (directory / original.name).symlink_to(original)
+
+    response = await listing.upload_image(
+        "qemu", "csr", UploadFile(filename=original.name, file=BytesIO(b"replacement")),
+        "linked-image", SimpleNamespace(username="admin", role="admin"),
+    )
+
+    assert response["code"] == 400
+    assert original.read_bytes() == b"original"
+    assert list(directory.iterdir()) == [directory / original.name]
 
 
 @pytest.mark.asyncio

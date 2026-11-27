@@ -1,13 +1,18 @@
+from contextlib import ExitStack, suppress
 from dataclasses import dataclass, field
+import errno
 from fnmatch import fnmatchcase
 from pathlib import Path
 import logging
 import os
 import shutil
+from stat import S_ISREG
 import subprocess
-from typing import Any, Iterator
+from typing import Any, BinaryIO, Iterator
+from uuid import uuid4
 
 import yaml
+from starlette.concurrency import run_in_threadpool
 
 from app.config import get_settings
 from app.schemas.node import validate_second_console_mode_for_type
@@ -17,6 +22,9 @@ _logger = logging.getLogger("nova-ve.template_service")
 
 
 SUPPORTED_TEMPLATE_TYPES = {"qemu", "docker", "iol", "dynamips"}
+_IMAGE_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY
+_IMAGE_COPY_CHUNK_BYTES = 1024 * 1024
+_IMAGE_ACCESS_ACL = "system.posix_acl_access"
 
 QEMU_MACHINE_OPTIONS = {"q35", "pc"}
 _QEMU_MAX_NICS_DEFAULT = 8
@@ -1511,27 +1519,137 @@ class TemplateService:
         template_type: str,
         template_key: str,
         filename: str,
-        content: bytes,
+        source: BinaryIO,
         image_name: str | None = None,
-    ) -> dict[str, Any]:
-        self.get_template(template_type, template_key)
-        safe_filename = Path(filename).name
-        if not safe_filename:
-            raise TemplateError("Uploaded image filename is empty.")
+    ) -> tuple[dict[str, Any], int]:
+        template_type = self.get_template(template_type, template_key).type
+        safe_filename = Path(filename.replace("\\", "/")).name
+        if safe_filename in {"", ".", ".."} or "\x00" in safe_filename:
+            raise TemplateError("Uploaded image filename is invalid.")
 
         target_image_name = (image_name or Path(safe_filename).stem).strip()
-        if not target_image_name:
-            raise TemplateError("Image name is invalid.")
+        if target_image_name in {"", ".", ".."} or any(
+            char in target_image_name for char in ("/", "\\", "\x00")
+        ):
+            raise TemplateError("Image name must be a single directory name.")
 
-        target_dir = self.images_dir / template_type / target_image_name
-        target_dir.mkdir(parents=True, exist_ok=True)
-        target_path = target_dir / safe_filename
-        target_path.write_bytes(content)
-        return self._image_info(target_dir) or {
-            "image": target_image_name,
-            "filename": safe_filename,
-            "path": str(target_path),
-        }
+        try:
+            return await run_in_threadpool(
+                self._store_image, template_type, target_image_name, safe_filename, source,
+            )
+        except OSError as exc:
+            raise TemplateError("Could not save the image inside the image directory.") from exc
+
+    def _store_image(
+        self, template_type: str, image_name: str, filename: str, source: BinaryIO,
+    ) -> tuple[dict[str, Any], int]:
+        self.images_dir.mkdir(parents=True, exist_ok=True)
+        with ExitStack() as opened:
+            root = os.open(self.images_dir, _IMAGE_DIR_FLAGS)
+            opened.callback(os.close, root)
+            with suppress(FileExistsError):
+                os.mkdir(template_type, dir_fd=root)
+            type_dir = os.open(template_type, _IMAGE_DIR_FLAGS | os.O_NOFOLLOW, dir_fd=root)
+            opened.callback(os.close, type_dir)
+
+            created = False
+            try:
+                os.mkdir(image_name, dir_fd=type_dir)
+                created = True
+            except FileExistsError:
+                pass
+            try:
+                directory = os.open(image_name, _IMAGE_DIR_FLAGS | os.O_NOFOLLOW, dir_fd=type_dir)
+                opened.callback(os.close, directory)
+                with os.scandir(directory) as entries:
+                    files = {entry.name for entry in entries if entry.is_file()}
+                size = self._publish_image(directory, filename, source)
+            except BaseException:
+                if created:
+                    # It may already have been used by another uploader.
+                    self._remove_image_upload_dir(type_dir, image_name)
+                raise
+        return {
+            "image": image_name,
+            "files": sorted(files | {filename}),
+            "path": str(self.images_dir / template_type / image_name),
+        }, size
+
+    @staticmethod
+    def _remove_image_upload_dir(directory: int, name: str) -> None:
+        try:
+            os.rmdir(name, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _logger.warning("Could not remove an image upload directory.", exc_info=True)
+
+    @staticmethod
+    def _publish_image(directory: int, filename: str, source: BinaryIO) -> int:
+        existing_stat = None
+        access_acl = None
+        try:
+            entry = os.stat(filename, dir_fd=directory, follow_symlinks=False)
+        except FileNotFoundError:
+            pass
+        else:
+            if not S_ISREG(entry.st_mode):
+                raise TemplateError("Only regular image files can be replaced.")
+            # Preserve the previous requirement for write access to the file itself.
+            existing = os.open(filename, os.O_WRONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                existing_stat = os.fstat(existing)
+                if not S_ISREG(existing_stat.st_mode):
+                    raise TemplateError("Only regular image files can be replaced.")
+                if hasattr(os, "getxattr"):
+                    try:
+                        access_acl = os.getxattr(existing, _IMAGE_ACCESS_ACL)
+                    except OSError as exc:
+                        if exc.errno not in (errno.ENODATA, errno.ENOTSUP):
+                            raise
+            finally:
+                os.close(existing)
+
+        # A same-filesystem staging directory stays out of the inventory's file list.
+        staging = f".upload-{uuid4().hex}"
+        os.mkdir(staging, mode=0o700, dir_fd=directory)
+        try:
+            staging_fd = os.open(staging, _IMAGE_DIR_FLAGS | os.O_NOFOLLOW, dir_fd=directory)
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+                with os.fdopen(os.open("image", flags, 0o666, dir_fd=staging_fd), "wb") as destination:
+                    shutil.copyfileobj(source, destination, length=_IMAGE_COPY_CHUNK_BYTES)
+                    size = destination.tell()
+                    destination.flush()
+                    descriptor = destination.fileno()
+                    if existing_stat is not None:
+                        staged_stat = os.fstat(descriptor)
+                        if (staged_stat.st_uid, staged_stat.st_gid) != (existing_stat.st_uid, existing_stat.st_gid):
+                            os.fchown(descriptor, existing_stat.st_uid, existing_stat.st_gid)
+                        os.fchmod(descriptor, existing_stat.st_mode & 0o777)
+                        if access_acl is not None:
+                            os.setxattr(descriptor, _IMAGE_ACCESS_ACL, access_acl)
+                        elif hasattr(os, "removexattr"):
+                            # The new file may have inherited a directory ACL.
+                            try:
+                                os.removexattr(descriptor, _IMAGE_ACCESS_ACL)
+                            except OSError as exc:
+                                if exc.errno not in (errno.ENODATA, errno.ENOTSUP):
+                                    raise
+                    os.fsync(descriptor)
+                os.replace("image", filename, src_dir_fd=staging_fd, dst_dir_fd=directory)
+                return size
+            finally:
+                try:
+                    os.unlink("image", dir_fd=staging_fd)
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    _logger.warning("Could not discard a staged image file.", exc_info=True)
+                finally:
+                    os.close(staging_fd)
+        finally:
+            TemplateService._remove_image_upload_dir(directory, staging)
 
     def _iter_template_paths(self) -> list[tuple[Path, str]]:
         """Return (path, source) for every *.yml/*.json template file across both dirs.

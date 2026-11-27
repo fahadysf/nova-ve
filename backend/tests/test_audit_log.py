@@ -2325,7 +2325,7 @@ class _FakeTemplateUpload:
     async def upload_image(self, **kwargs):
         if type(self).reject:
             raise TemplateError("Unsupported image type.")
-        return {"image": "csr1000v.qcow2", "path": "/images/qemu/csr/csr1000v.qcow2"}
+        return {"image": "csr1000v.qcow2", "path": "/images/qemu/csr/csr1000v.qcow2"}, 12
 
 
 class TestImageAndSystemEvents:
