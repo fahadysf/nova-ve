@@ -24,6 +24,15 @@ def _guard_dnsmasq_capability_probe(monkeypatch):
     monkeypatch.setattr(host_net, "_invoke_helper", guarded)
 
 
+def _unregistered_lab_db():
+    """Model an imported lab with no registered owner."""
+    from unittest.mock import AsyncMock, Mock
+
+    result = Mock()
+    result.scalar_one_or_none.return_value = None
+    return AsyncMock(execute=AsyncMock(return_value=result))
+
+
 def _stub_host_net_for_qemu_start(monkeypatch):
     """Issue #174 / #175 (S3): stub the host_net surface used by the QEMU
     start path so tests run without a privileged helper or real

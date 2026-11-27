@@ -455,7 +455,7 @@ class DynamipsLauncher:
                 #    image, idle-PC, console port) lives in the ``vm``
                 #    namespace; only hardware-shape knobs (chassis, NPE)
                 #    live under the platform module.
-                ram = int(template.get("ram") or _PLATFORM_RAM_DEFAULT_MB[platform])
+                ram = self.configured_ram_mib(template)
                 client.request(f"vm set_ram {vm_name} {ram}")
                 if nvram is not None:
                     client.request(f"vm set_nvram {vm_name} {nvram}")
@@ -608,25 +608,37 @@ class DynamipsLauncher:
             raise DynamipsError("Could not verify the hypervisor's VM list.")
         return any(line.partition(" (")[0] == vm_name for line in lines[:-1])
 
-    def is_alive(self, runtime: dict[str, Any]) -> bool:
+    def _vm_status(self, runtime: dict[str, Any]) -> str | None:
         vm_name = str(runtime.get("vm_name") or "")
         if not vm_name:
+            return None
+        with self._lock:
+            if self._hypervisor_proc is None or runtime.get("hypervisor_port") != self._hypervisor_port:
+                return None
+            if not self._hypervisor_running():
+                return "0"
+            client = self._client
+            if client is None:
+                return None
+            try:
+                lines = client.request(f"vm get_status {vm_name}").lines
+            except (DynamipsError, OSError):
+                # Discard replies that might arrive after a timed-out command.
+                client.close()
+                return None
+            return lines[-1].strip() if lines else None
+
+    def is_alive(self, runtime: dict[str, Any]) -> bool:
+        return self._vm_status(runtime) == "2"
+
+    def quota_liveness(self, runtime: dict[str, Any]) -> bool | None:
+        """An unreachable hypervisor cannot prove that a VM freed its quota."""
+        status = self._vm_status(runtime)
+        if status in ("1", "2"):
+            return True
+        if status == "0":
             return False
-        try:
-            with self._lock:
-                if not self._hypervisor_running() or self._client is None or runtime.get("hypervisor_port") != self._hypervisor_port:
-                    return False
-                client = self._client
-                reply = client.request(f"vm get_status {vm_name}")
-                # Dynamips returns the status as the terminator payload:
-                # ``100-0`` (stopped), ``100-1`` (suspended), ``100-2``
-                # (running). We treat running as alive.
-                if reply.lines:
-                    text = reply.lines[-1].strip()
-                    return text == "2"
-                return False
-        except (DynamipsError, OSError):
-            return False
+        return None
 
     # ------------------------------------------------------------------
     # Idle-PC calibration
@@ -799,6 +811,14 @@ class DynamipsLauncher:
             f"interface_index {interface_index} exceeds total port count "
             f"{total} from slot inventory {inventory}"
         )
+
+    @classmethod
+    def configured_ram_mib(cls, template: dict[str, Any]) -> int:
+        platform = cls._resolve_platform(template)
+        try:
+            return int(template.get("ram") or _PLATFORM_RAM_DEFAULT_MB[platform])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise DynamipsError("Invalid Dynamips RAM allocation.") from exc
 
     @staticmethod
     def _resolve_platform(template: dict[str, Any]) -> str:

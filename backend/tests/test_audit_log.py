@@ -1024,7 +1024,7 @@ def lab_env(tmp_path, monkeypatch):
 
     # The runtime backends need a hypervisor; only their effect on lab.json
     # matters here. Like the real ones, they refuse a node that is not there.
-    def _start(self, data, node_id):
+    def _start(self, data, node_id, *, quota=None):
         if str(node_id) not in (data.get("nodes") or {}):
             raise NodeRuntimeError("Node does not exist")
         return {"status": 2}
@@ -1046,6 +1046,15 @@ async def _lab(client, method, suffix, **kwargs):
     return await client.request(method, f"/api/labs/{LAB_FILE}{suffix}", **kwargs)
 
 
+@pytest.fixture
+def unregistered_lab_api(monkeypatch):
+    from tests.conftest import _unregistered_lab_db
+
+    db = _unregistered_lab_db()
+    monkeypatch.setitem(app.dependency_overrides, get_db, lambda: db)
+
+
+@pytest.mark.usefixtures("unregistered_lab_api")
 class TestNodeEvents:
     async def test_start_stop_and_wipe_name_the_node_and_its_lab(
         self, audit_events, lab_env, client
@@ -1069,7 +1078,7 @@ class TestNodeEvents:
         ]
 
     async def test_an_action_that_fails_leaves_no_row(self, audit_events, lab_env, client, monkeypatch):
-        def _refuse(self, data, node_id):
+        def _refuse(self, data, node_id, *, quota=None):
             raise NodeRuntimeError("bridge missing")
 
         monkeypatch.setattr(NodeRuntimeService, "start_node", _refuse)

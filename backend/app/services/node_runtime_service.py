@@ -28,6 +28,7 @@ import hashlib
 import ipaddress
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -288,6 +289,85 @@ class NodeRuntimeError(Exception):
     pass
 
 
+def _option_value(tokens: list[str], *names: str) -> str | None:
+    value = None
+    for index, token in enumerate(tokens):
+        for name in names:
+            if token == name and index + 1 < len(tokens):
+                value = tokens[index + 1]
+            elif token.startswith(name + "="):
+                value = token.split("=", 1)[1]
+    return value
+
+
+def _quota_cpu(value: Any, *, default: Any = 1) -> int | float:
+    raw = str(default if value is None else value).strip()
+    first = raw.split(",", 1)[0]
+    if first.startswith("cpus="):
+        first = first.split("=", 1)[1]
+    try:
+        parsed = float(first)
+    except (TypeError, ValueError) as exc:
+        raise NodeRuntimeError(f"Invalid CPU allocation: {raw}") from exc
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise NodeRuntimeError(f"Invalid CPU allocation: {raw}")
+    return int(parsed) if parsed.is_integer() else parsed
+
+
+def _qemu_smp_cpus(value: Any, *, default: Any = 1) -> int | float:
+    if value is None:
+        return _quota_cpu(default)
+    fields = str(value).strip().split(",")
+    options = dict(
+        field.split("=", 1) for field in fields[1 if "=" not in fields[0] else 0:] if "=" in field
+    )
+    if "=" not in fields[0]:
+        return _quota_cpu(fields[0])
+    if "cpus" in options:
+        return _quota_cpu(options["cpus"])
+    if "maxcpus" in options:
+        return _quota_cpu(options["maxcpus"])
+    topology = 1
+    for name in ("sockets", "dies", "clusters", "cores", "threads"):
+        if name in options:
+            topology *= _quota_cpu(options[name])
+    return topology
+
+
+def _quota_ram_mb(value: Any, *, default: Any = 1024, bare_bytes: bool = False) -> int:
+    raw = str(default if value is None else value).strip().lower().split(",", 1)[0]
+    if raw.startswith("size="):
+        raw = raw.split("=", 1)[1]
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kmgtp]?)(?:i?b)?", raw)
+    if match is None:
+        raise NodeRuntimeError(f"Invalid RAM allocation: {raw}")
+    number = float(match.group(1))
+    if not math.isfinite(number) or number <= 0:
+        raise NodeRuntimeError(f"Invalid RAM allocation: {raw}")
+    unit = match.group(2)
+    if not unit and (bare_bytes or raw.endswith("b")):
+        factor = 1 / (1024 * 1024)
+    else:
+        factor = 1024 ** ("kmgtp".index(unit) - 1) if unit else 1
+    return max(1, math.ceil(number * factor))
+
+
+def _command_quota_cpu(command: list[str], node: dict[str, Any], *, docker: bool = False) -> int | float:
+    if docker:
+        return _quota_cpu(_option_value(command, "--cpus"), default=node.get("cpu", 1))
+    return _qemu_smp_cpus(_option_value(command, "-smp"), default=node.get("cpu", 1))
+
+
+def _command_quota_ram(command: list[str], node: dict[str, Any], *, docker: bool = False) -> int:
+    names = ("--memory", "-m") if docker else ("-m",)
+    value = _option_value(command, *names)
+    return _quota_ram_mb(
+        value,
+        default=node.get("ram", 1024),
+        bare_bytes=docker and value is not None,
+    )
+
+
 class NodeRuntimeQMPTimeout(NodeRuntimeError):
     """US-303 codex iter1 HIGH-1: raised when a QMP transport-level
     error or socket timeout is observed while sending a command.
@@ -452,10 +532,12 @@ class NodeRuntimeService:
         except RuntimeMutexContention as exc:
             raise NodeRuntimeError("A node operation is in progress. Retry the request.") from exc
 
-    def start_node(self, lab_data: dict[str, Any], node_id: int) -> dict[str, Any]:
+    def start_node(
+        self, lab_data: dict[str, Any], node_id: int, *, quota: Any | None = None,
+    ) -> dict[str, Any]:
         lab_id = self._lab_id(lab_data)
         with self._node_lifecycle_lock(lab_id, node_id), self._reserve_console_ports():
-            return self._start_node(lab_data, lab_id, node_id)
+            return self._start_node(lab_data, lab_id, node_id, quota=quota)
 
     @contextmanager
     def _reserve_console_ports(self):
@@ -472,7 +554,9 @@ class NodeRuntimeService:
                 self._reserved_console_ports.difference_update(ports)
             del self._console_port_scope.ports
 
-    def _start_node(self, lab_data: dict[str, Any], lab_id: str, node_id: int) -> dict[str, Any]:
+    def _start_node(
+        self, lab_data: dict[str, Any], lab_id: str, node_id: int, *, quota: Any | None = None,
+    ) -> dict[str, Any]:
         node = self._node_data(lab_data, node_id)
         key = self._key(lab_id, node_id)
         saved = self._runtime_record(lab_id, node_id, include_stopped=True, require_valid=True)
@@ -483,6 +567,10 @@ class NodeRuntimeService:
             runtime = self._reconcile_docker_node_runtime(lab_data, node)
         if runtime:
             return runtime
+
+        quota_cpu, quota_ram = self.node_quota_resources(node, quota=quota)
+        if quota is not None:
+            self._enforce_node_quota(quota, quota_cpu, quota_ram)
 
         # Sandbox mode (#253): nodes are createable/editable data but never
         # launch — fail with a clear, typed message instead of leaking the
@@ -516,6 +604,8 @@ class NodeRuntimeService:
         else:
             raise NodeRuntimeError(f"Unsupported node type: {node.get('type')}")
 
+        runtime["quota_cpu"] = quota_cpu
+        runtime["quota_ram"] = quota_ram
         self._record_transition(lab_id, node_id)
         with self._lock:
             self._registry[key] = runtime
@@ -528,6 +618,246 @@ class NodeRuntimeService:
             self._schedule_live_mac_cadence(lab_data, lab_id, node_id, interfaces)
 
         return runtime
+
+    def node_quota_resources(
+        self, node: dict[str, Any], *, quota: Any | None = None,
+    ) -> tuple[int | float | None, int | None]:
+        kind = str(node.get("type") or "")
+        extras = _node_extras(node)
+        tokens: list[str] = []
+        if kind in {"qemu", "docker"}:
+            option_name = "qemu_options" if kind == "qemu" else "extra_args"
+            try:
+                tokens = shlex.split(_extra_str(extras, option_name))
+            except ValueError as exc:
+                if quota is not None and (quota.cpu_limit != -1 or quota.ram_limit != -1):
+                    raise NodeRuntimeError(f"Invalid {option_name}: {exc}") from exc
+
+        template: dict[str, Any] = {}
+        if kind == "dynamips":
+            template = self._dynamips_template_for_node(node)
+
+        try:
+            if kind in {"qemu", "docker"}:
+                cpu = _command_quota_cpu(tokens, node, docker=kind == "docker")
+            else:
+                cpu = _quota_cpu(node.get("cpu", 1))
+        except NodeRuntimeError:
+            if quota is not None and quota.cpu_limit != -1:
+                raise
+            cpu = None
+
+        try:
+            if kind in {"qemu", "docker"}:
+                ram = _command_quota_ram(tokens, node, docker=kind == "docker")
+            elif kind == "dynamips":
+                from app.services.runtime.dynamips import DynamipsError, DynamipsLauncher
+
+                try:
+                    dynamips_ram = DynamipsLauncher.configured_ram_mib(template)
+                except DynamipsError as exc:
+                    raise NodeRuntimeError(str(exc)) from exc
+                ram = _quota_ram_mb(dynamips_ram)
+            else:
+                node_ram = node.get("ram")
+                if kind == "iol" and node_ram is None:
+                    node_ram = extras.get("ram", 1024)
+                ram = _quota_ram_mb(node_ram)
+        except NodeRuntimeError:
+            if quota is not None and quota.ram_limit != -1:
+                raise
+            ram = None
+        return cpu, ram
+
+    def _quota_lab_node(self, runtime: dict[str, Any], quota: Any) -> dict[str, Any]:
+        filename = quota.lab_files.get(str(runtime.get("lab_id") or ""))
+        if not filename:
+            return {}
+        root = self.settings.LABS_DIR.resolve()
+        data = read_canonical_lab(root, root / filename)
+        candidate = (data or {}).get("nodes", {}).get(str(runtime.get("node_id")))
+        return candidate if isinstance(candidate, dict) else {}
+
+    def _docker_state_quota_resources(
+        self, state: dict[str, Any], node: dict[str, Any],
+    ) -> tuple[int | float | None, int | None]:
+        cpu, ram = self.node_quota_resources(node)
+        nano_cpus = state.get("nano_cpus")
+        memory_bytes = state.get("memory_bytes")
+        if type(nano_cpus) in (int, float):
+            cpu = nano_cpus / 1_000_000_000 if nano_cpus > 0 else None
+        if type(memory_bytes) is int:
+            ram = math.ceil(memory_bytes / (1024 * 1024)) if memory_bytes > 0 else None
+        return cpu, ram
+
+    def _runtime_quota_resources(
+        self, runtime: dict[str, Any], quota: Any,
+    ) -> tuple[int | float | None, int | None]:
+        if "quota_cpu" in runtime and "quota_ram" in runtime:
+            try:
+                cpu = _quota_cpu(runtime["quota_cpu"]) if runtime["quota_cpu"] is not None else None
+            except NodeRuntimeError:
+                cpu = None
+            try:
+                ram = _quota_ram_mb(runtime["quota_ram"]) if runtime["quota_ram"] is not None else None
+            except NodeRuntimeError:
+                ram = None
+            return cpu, ram
+        node = self._quota_lab_node(runtime, quota)
+        if runtime.get("kind") == "docker":
+            try:
+                state = self.docker_network_state(
+                    str(runtime["lab_id"]), int(runtime["node_id"]),
+                    container_name=runtime.get("container_name") or None,
+                )
+            except NodeRuntimeError:
+                state = None
+            if state is not None:
+                return self._docker_state_quota_resources(state, node)
+            try:
+                cpu = _quota_cpu(runtime["quota_cpu"]) if runtime.get("quota_cpu") is not None else None
+            except NodeRuntimeError:
+                cpu = None
+            try:
+                ram = _quota_ram_mb(runtime["quota_ram"]) if runtime.get("quota_ram") is not None else None
+            except NodeRuntimeError:
+                ram = None
+            return cpu, ram
+        command = runtime.get("command")
+        if not (isinstance(command, list) and all(isinstance(arg, str) for arg in command)):
+            command = []
+        kind = runtime.get("kind")
+
+        try:
+            if "quota_cpu" in runtime:
+                cpu = _quota_cpu(runtime["quota_cpu"]) if runtime["quota_cpu"] is not None else None
+            elif kind in {"qemu", "docker"}:
+                cpu = _command_quota_cpu(command, node, docker=kind == "docker")
+            else:
+                cpu = _quota_cpu(node.get("cpu", 1))
+        except NodeRuntimeError:
+            cpu = None
+
+        try:
+            if "quota_ram" in runtime:
+                ram = _quota_ram_mb(runtime["quota_ram"]) if runtime["quota_ram"] is not None else None
+            elif kind in {"qemu", "docker"}:
+                ram = _command_quota_ram(command, node, docker=kind == "docker")
+            elif kind == "iol":
+                ram = _quota_ram_mb(_option_value(command, "-m"), default=node.get("ram", 1024))
+            elif kind == "dynamips" and node:
+                _, ram = self.node_quota_resources(node)
+            else:
+                ram = _quota_ram_mb(node.get("ram", 1024))
+        except NodeRuntimeError:
+            ram = None
+        return cpu, ram
+
+    def _quota_runtime_liveness(self, runtime: dict[str, Any]) -> bool | None:
+        kind = runtime.get("kind")
+        if kind == "dynamips":
+            from app.services.runtime.dynamips import DynamipsLauncher
+
+            return DynamipsLauncher.instance().quota_liveness(runtime)
+        return self._check_alive_sync(runtime, kind, self.settings, True)
+
+    def _ledger_docker_runtimes(
+        self, quota: Any, known_keys: set[str],
+    ) -> list[dict[str, Any]]:
+        recovered = []
+        for entry in runtime_pids.list_entries():
+            lab_id = str(entry.get("lab_id") or "")
+            node_id = entry.get("node_id")
+            pid = entry.get("pid")
+            if (
+                entry.get("kind") != "docker"
+                or quota.lab_owners.get(lab_id) != quota.owner
+                or type(node_id) is not int
+                or type(pid) is not int
+                or pid <= 0
+                or self._key(lab_id, node_id) in known_keys
+            ):
+                continue
+            runtime = dict(entry)
+            try:
+                state = self.docker_network_state(lab_id, node_id)
+            except NodeRuntimeError:
+                state = None
+                identity_unverified = True
+            else:
+                identity_unverified = state is not None and state.get("pid") != pid
+            if state is None and not identity_unverified:
+                continue
+            if identity_unverified:
+                runtime["quota_cpu"] = None
+                runtime["quota_ram"] = None
+                recovered.append(runtime)
+                continue
+            cpu, ram = self._docker_state_quota_resources(
+                state, self._quota_lab_node(runtime, quota)
+            )
+            runtime["quota_cpu"] = cpu
+            runtime["quota_ram"] = ram
+            recovered.append(runtime)
+        return recovered
+
+    def _enforce_node_quota(
+        self,
+        quota: Any,
+        requested_cpu: int | float | None,
+        requested_ram: int | None,
+    ) -> None:
+        if quota.cpu_limit != -1 and requested_cpu is None:
+            raise NodeRuntimeError("CPU allocation could not be determined for quota enforcement.")
+        if quota.ram_limit != -1 and requested_ram is None:
+            raise NodeRuntimeError("RAM allocation could not be determined for quota enforcement.")
+        if quota.cpu_limit == -1 and quota.ram_limit == -1:
+            return
+        used_cpu: int | float = 0
+        used_ram = 0
+        with self._lock:
+            records = list(self._registry.values())
+        accounted_docker_keys: set[str] = set()
+
+        def account(runtime: dict[str, Any]) -> None:
+            nonlocal used_cpu, used_ram
+            cpu, ram = self._runtime_quota_resources(runtime, quota)
+            if quota.cpu_limit != -1:
+                if cpu is None:
+                    raise NodeRuntimeError("Existing CPU usage could not be determined for quota enforcement.")
+                used_cpu += cpu
+            if quota.ram_limit != -1:
+                if ram is None:
+                    raise NodeRuntimeError("Existing RAM usage could not be determined for quota enforcement.")
+                used_ram += ram
+
+        for runtime in records:
+            lab_id = str(runtime.get("lab_id") or "")
+            if quota.lab_owners.get(lab_id) != quota.owner:
+                continue
+            node_id = runtime.get("node_id")
+            if type(node_id) is not int:
+                continue
+            live = self._runtime_record(
+                lab_id, node_id, include_stopped=True, require_valid=True,
+            )
+            if live is None or self._quota_runtime_liveness(live) is False:
+                continue
+            account(live)
+            if live.get("kind") == "docker":
+                accounted_docker_keys.add(self._key(lab_id, node_id))
+        for runtime in self._ledger_docker_runtimes(quota, accounted_docker_keys):
+            account(runtime)
+        if quota.cpu_limit != -1 and used_cpu + requested_cpu > quota.cpu_limit:
+            raise NodeRuntimeError(
+                f"CPU quota exceeded for the lab owner: {used_cpu} in use plus "
+                f"{requested_cpu} requested exceeds the {quota.cpu_limit} vCPU limit."
+            )
+        if quota.ram_limit != -1 and used_ram + requested_ram > quota.ram_limit:
+            raise NodeRuntimeError(
+                f"RAM quota exceeded for the lab owner: {used_ram} MiB in use plus "
+                f"{requested_ram} MiB requested exceeds the {quota.ram_limit} MiB limit."
+            )
 
     def _schedule_live_mac_cadence(
         self,
@@ -1617,11 +1947,22 @@ class NodeRuntimeService:
             else:
                 machine = machine_arg.split(",", 1)[0]
 
+        try:
+            quota_cpu = _command_quota_cpu(cmdline, node)
+        except NodeRuntimeError:
+            quota_cpu = None
+        try:
+            quota_ram = _command_quota_ram(cmdline, node)
+        except NodeRuntimeError:
+            quota_ram = None
+
         return {
             "lab_id": lab_id,
             "node_id": node_id,
             "kind": "qemu",
             "name": node.get("name"),
+            "quota_cpu": quota_cpu,
+            "quota_ram": quota_ram,
             "console": console_mode,
             "console_port": console_port,
             "second_console": second_console_mode,
@@ -2010,8 +2351,10 @@ class NodeRuntimeService:
             return None
 
     @staticmethod
-    def _check_alive_sync(runtime: dict[str, Any], kind: str, settings: Any) -> bool | None:
-        """Return False only when the workload is absent, None when cleanup remains possible."""
+    def _check_alive_sync(
+        runtime: dict[str, Any], kind: str, settings: Any, quota_mode: bool = False,
+    ) -> bool | None:
+        """Quota mode also releases verified stopped Docker; heartbeat retains its None metadata state."""
         if kind == "docker":
             import subprocess as _sp
             import shutil as _sh
@@ -2046,7 +2389,12 @@ class NodeRuntimeService:
                 if container_id and ("no such container" in reason or "no such object" in reason):
                     return False
                 return None
-            return True if result.stdout.strip() == "true" else None
+            state = result.stdout.strip()
+            if state == "true":
+                return True
+            if state == "false":
+                return False if quota_mode else None
+            return None
 
         if kind == "dynamips":
             from app.services.runtime.dynamips import DynamipsLauncher
@@ -5602,11 +5950,14 @@ class NodeRuntimeService:
         network_specs = self._docker_network_specs(lab_data, node)
         work_dir = self._work_dir(lab_id, node_id)
         work_dir.mkdir(parents=True, exist_ok=True)
+        quota_cpu, quota_ram = self._docker_state_quota_resources(state, node)
         runtime = {
             "lab_id": lab_id,
             "node_id": node_id,
             "kind": "docker",
             "name": node.get("name"),
+            "quota_cpu": quota_cpu,
+            "quota_ram": quota_ram,
             "console": console_mode,
             "console_port": console_port,
             "second_console": second_console_mode,
@@ -5722,7 +6073,14 @@ class NodeRuntimeService:
             pid = info["State"]["Pid"]
             if not isinstance(mode, str) or not mode or not isinstance(pid, int) or pid <= 0:
                 raise ValueError("missing network mode or container PID")
-            return {"container_name": name, "network_mode": mode, "pid": pid}
+            host_config = info["HostConfig"]
+            return {
+                "container_name": name,
+                "network_mode": mode,
+                "pid": pid,
+                "memory_bytes": host_config.get("Memory"),
+                "nano_cpus": host_config.get("NanoCpus"),
+            }
         except (KeyError, TypeError, ValueError) as exc:
             raise NodeRuntimeError("Could not inspect Docker networking; retry before linking.") from exc
 
@@ -6225,31 +6583,7 @@ class NodeRuntimeService:
                     f"before starting the node."
                 )
 
-        # Resolve the template once, then merge any per-node extras the
-        # frontend may override (idle_pc, platform, slot bindings, ...).
-        # ``image`` lives at the top level on the node (matches QEMU's
-        # convention) and is the catalog's image selection — typically a
-        # stem like ``c3725-...`` rather than a full filename, because
-        # ``TemplateService._image_info`` reports the directory name (no
-        # extension) for the EVE-NG per-image-subdir layout. The launcher's
-        # resolver handles both stem and full-filename forms.
-        template = self._resolve_template_for_node(node)
-        template = dict(template)  # shallow copy — we may overlay extras
-        extras = _node_extras(node)
-        # ``slot0..slot6`` covers both c3725 (3 bays) and c7200 (7 bays).
-        # Without forwarding slotN>0, network modules selected in the
-        # NodeConfigModal never reach the launcher and IOS doesn't see them.
-        slot_keys = tuple(f"slot{i}" for i in range(7))
-        for key in (
-            "platform", "image", "ram", "idlepc", "idle_pc", "npe", "nvram", "midplane", "disk0",
-            *slot_keys,
-        ):
-            value = extras.get(key)
-            if value or (key in slot_keys and key in extras):
-                template[key] = value
-        node_image = node.get("image")
-        if node_image:
-            template["image"] = node_image
+        template = self._dynamips_template_for_node(node)
 
         provisioned_taps: list[str] = []
         # Driver-by-interface lookup for the closure below — keyed off the
@@ -6373,6 +6707,21 @@ class NodeRuntimeService:
 
         for tap in runtime.get("tap_names", []) or []:
             host_net.try_link_del(tap)
+
+    def _dynamips_template_for_node(self, node: dict[str, Any]) -> dict[str, Any]:
+        template = dict(self._resolve_template_for_node(node))
+        extras = _node_extras(node)
+        slot_keys = tuple(f"slot{i}" for i in range(7))
+        for key in (
+            "platform", "image", "ram", "idlepc", "idle_pc", "npe", "nvram", "midplane", "disk0",
+            *slot_keys,
+        ):
+            value = extras.get(key)
+            if value or (key in slot_keys and key in extras):
+                template[key] = value
+        if node.get("image"):
+            template["image"] = node["image"]
+        return template
 
     def _resolve_template_for_node(self, node: dict[str, Any]) -> dict[str, Any]:
         """Return the template payload (as_response) for a node.

@@ -13,7 +13,7 @@ from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.services.lab_service import LabService
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateService
-from tests.conftest import _stub_host_net_for_qemu_start
+from tests.conftest import _stub_host_net_for_qemu_start, _unregistered_lab_db
 
 
 @pytest.fixture(autouse=True)
@@ -306,7 +306,7 @@ async def test_qemu_runtime_honors_qemu_options_and_nic(monkeypatch, populated_t
     recorded = []
     _stub_qemu_subprocess(monkeypatch, recorded)
 
-    response = await labs.start_node("qemu.json", 1, current_user=_admin())
+    response = await labs.start_node("qemu.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 200
 
     qemu_cmd = next(cmd for cmd in recorded if os.path.basename(cmd[0]).startswith("qemu-system"))
@@ -322,7 +322,7 @@ async def test_qemu_runtime_uses_arch_specific_binary(monkeypatch, populated_tem
     recorded = []
     _stub_qemu_subprocess(monkeypatch, recorded)
 
-    response = await labs.start_node("qemu.json", 1, current_user=_admin())
+    response = await labs.start_node("qemu.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 200
     qemu_cmd = next(cmd for cmd in recorded if "qemu-system" in os.path.basename(cmd[0]))
     assert os.path.basename(qemu_cmd[0]) == "qemu-system-aarch64"
@@ -334,7 +334,7 @@ async def test_qemu_runtime_rejects_invalid_qemu_options(monkeypatch, populated_
     recorded = []
     _stub_qemu_subprocess(monkeypatch, recorded)
 
-    response = await labs.start_node("qemu.json", 1, current_user=_admin())
+    response = await labs.start_node("qemu.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 400
     assert "qemu_options" in response["message"].lower()
 
@@ -416,7 +416,7 @@ async def test_docker_runtime_honors_env_restart_and_extra_args(monkeypatch, pop
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 200
 
     run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
@@ -474,7 +474,7 @@ async def test_docker_vnc_runtime_uses_configured_container_port(monkeypatch, po
         fake_console_proxy_start,
     )
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 200
 
     run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
@@ -523,7 +523,7 @@ async def test_docker_runtime_honors_command_string(monkeypatch, populated_templ
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 200
 
     run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
@@ -542,7 +542,7 @@ async def test_docker_runtime_honors_command_list(monkeypatch, populated_templat
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 200
 
     run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
@@ -560,7 +560,7 @@ async def test_docker_runtime_rejects_malformed_command_string(monkeypatch, popu
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 400
     assert "command" in response["message"].lower()
 
@@ -575,7 +575,7 @@ async def test_docker_runtime_rejects_command_list_with_non_string(monkeypatch, 
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 400
     assert "command" in response["message"].lower()
 
@@ -590,7 +590,7 @@ async def test_docker_runtime_command_empty_is_no_op(monkeypatch, populated_temp
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 200
 
     run_cmd = next(cmd for cmd in recorded if "run" in cmd and "--name" in cmd)
@@ -628,7 +628,7 @@ async def test_docker_runtime_rejects_invalid_restart_policy(monkeypatch, popula
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    response = await labs.start_node("docker.json", 1, current_user=_admin())
+    response = await labs.start_node("docker.json", 1, current_user=_admin(), db=_unregistered_lab_db())
     assert response["code"] == 400
     assert "restart_policy" in response["message"].lower()
 
