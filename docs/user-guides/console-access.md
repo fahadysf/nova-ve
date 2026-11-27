@@ -32,6 +32,14 @@ The top bar has a **Console layout** selector with two modes:
 
 You can flip modes any time — existing consoles re-flow into the new layout.
 
+## Switching and reloading consoles
+
+Click a console tab or focus it and press Enter. The selected console receives keyboard focus and keeps its established session. Select **Reload** to open a fresh session for the selected console. Other consoles keep their sessions.
+
+Leaving the lab or refreshing the browser page clears the console tabs. Reopen the consoles when you return. Refreshing the topology preserves open consoles for nodes that are still running.
+
+These console actions leave the node running.
+
 ## Console types per runtime
 
 | Runtime | Default console | Notes |

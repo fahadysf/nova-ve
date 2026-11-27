@@ -697,6 +697,18 @@
     return document.querySelector(`iframe[data-console-tab-id="${targetTabId}"]`);
   }
 
+  const consoleFocusTargets = new WeakMap<HTMLIFrameElement, HTMLElement>();
+
+  function trackConsoleFocus(iframe: HTMLIFrameElement) {
+    consoleFocusTargets.delete(iframe);
+    iframe.contentDocument?.addEventListener('focusin', (event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.focus && target !== iframe.contentDocument?.body) {
+        consoleFocusTargets.set(iframe, target);
+      }
+    });
+  }
+
   function focusGuacamoleWindow(tabId?: number, attempts = 4) {
     if (hideConsoles) return;
 
@@ -711,6 +723,10 @@
     iframe.focus();
     try {
       iframe.contentWindow?.focus();
+      const contentDocument = iframe.contentDocument;
+      if (contentDocument && contentDocument.activeElement === contentDocument.body) {
+        consoleFocusTargets.get(iframe)?.focus();
+      }
     } catch (_error) {
       if (attempts > 0) {
         requestAnimationFrame(() => focusGuacamoleWindow(tabId, attempts - 1));
@@ -1602,7 +1618,8 @@
                       data-console-tab-id={tab.id}
                       tabindex="-1"
                       class="h-full w-full border-0"
-                      on:load={() => {
+                      on:load={(event) => {
+                        trackConsoleFocus(event.currentTarget as HTMLIFrameElement);
                         if (consoleWorkspace?.activeTabId === tab.id) {
                           focusGuacamoleWindow(tab.id);
                         }

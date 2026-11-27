@@ -222,6 +222,50 @@ for (const closing of ['active', 'inactive'] as const) {
   });
 }
 
+for (const activation of ['pointer', 'keyboard'] as const) {
+  test(`switching loaded tabs by ${activation} preserves sessions and routes immediate typing only to the selected console`, async ({ page }) => {
+    await setUpConsoleLab(page, true);
+    await page.getByRole('button', { name: 'Tabbed', exact: true }).click();
+    await clickNodeConsole(page, 1);
+    const workspace = page.getByRole('dialog', { name: 'Console workspace' });
+    const iframe = (node: number) => workspace.locator(`iframe[title="Guacamole console for Router ${node}"]`);
+    const input = (node: number) => workspace.frameLocator(`iframe[title="Guacamole console for Router ${node}"]`)
+      .locator('input[aria-label="Console input"]');
+    const tab = (node: number) => workspace.getByRole('button', { name: `Router ${node}`, exact: true });
+    await input(1).fill('first');
+    await clickNodeConsole(page, 2);
+    await input(2).fill('second');
+
+    const firstIdentity = await iframe(1).evaluateHandle((element) => element);
+    const secondIdentity = await iframe(2).evaluateHandle((element) => element);
+    const firstSrc = await iframe(1).getAttribute('src');
+    const secondSrc = await iframe(2).getAttribute('src');
+    const expected = { 1: 'first', 2: 'second' };
+
+    for (const selected of [1, 2] as const) {
+      if (activation === 'pointer') {
+        await tab(selected).click();
+      } else {
+        await tab(selected).focus();
+        await page.keyboard.press('Enter');
+      }
+      const typed = selected === 1 ? '-one' : '-two';
+      await page.keyboard.type(typed);
+      expected[selected] += typed;
+      await expect(iframe(selected)).toBeFocused();
+      await expect(input(selected)).toHaveValue(expected[selected]);
+      await expect(input(selected === 1 ? 2 : 1)).toHaveValue(expected[selected === 1 ? 2 : 1]);
+    }
+
+    expect(await iframe(1).evaluate((element, previous) => element === previous, firstIdentity)).toBe(true);
+    expect(await iframe(2).evaluate((element, previous) => element === previous, secondIdentity)).toBe(true);
+    await expect(iframe(1)).toHaveAttribute('src', firstSrc!);
+    await expect(iframe(2)).toHaveAttribute('src', secondSrc!);
+    await firstIdentity.dispose();
+    await secondIdentity.dispose();
+  });
+}
+
 test('a topology reconnect and resnapshot preserve two tabbed consoles and keyboard focus', async ({ page }) => {
   let socket: WebSocketRoute | undefined;
   let reconnect = false;
