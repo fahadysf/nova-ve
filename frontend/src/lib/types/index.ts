@@ -513,6 +513,7 @@ export interface NodeCatalogPairedTemplate {
 }
 
 export interface NodeCatalog {
+  pending?: boolean;
   templates: NodeCatalogTemplate[];
   paired_templates?: NodeCatalogPairedTemplate[];
   dynamips_profiles?: Record<string, NodeCatalogExtraField[]>;

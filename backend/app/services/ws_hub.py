@@ -10,6 +10,9 @@ from typing import Any
 from fastapi import WebSocket
 
 
+_CATALOG_SEND_TIMEOUT_S = 1.0
+
+
 @dataclass
 class WsEvent:
     seq: int
@@ -36,6 +39,22 @@ class WsHub:
         if lab_id not in self._labs:
             self._labs[lab_id] = _LabState(events=deque(maxlen=self._ring_size))
         return self._labs[lab_id]
+
+    async def notify_catalog_updated(self, generation: int) -> None:
+        # This advisory hint must never move the topology replay cursor.
+        message = {"type": "node_catalog_updated", "payload": {"generation": generation}}
+        async with self._lock:
+            subscribers = [ws for state in self._labs.values() for ws in state.subscribers]
+
+        async def send(ws: WebSocket) -> None:
+            try:
+                async with asyncio.timeout(_CATALOG_SEND_TIMEOUT_S):
+                    await ws.send_json(message)
+            except Exception:
+                # HTTP rechecks repair lost hints. The connection owns its cleanup.
+                pass
+
+        await asyncio.gather(*(send(ws) for ws in subscribers))
 
     async def publish(
         self,

@@ -18,6 +18,7 @@
   export let open = false;
   export let mode: 'create' | 'edit' = 'create';
   export let catalog: NodeCatalog | null = null;
+  export let catalogUnavailable = false;
   export let node: NodeData | null = null;
   export let submitting = false;
   export let labPath = '';
@@ -161,8 +162,8 @@
     return `${template.type}:${template.key}`;
   }
 
-  function templateForId(templateValue: string): NodeCatalogTemplate | undefined {
-    return (catalog?.templates ?? []).find((template) => templateId(template) === templateValue);
+  function templateForId(templateValue: string, source = catalog): NodeCatalogTemplate | undefined {
+    return source?.templates.find((template) => templateId(template) === templateValue);
   }
 
   function templatesForType(type: NodeTypeKey): NodeCatalogTemplate[] {
@@ -558,11 +559,13 @@
     }
 
     if (pairedTemplateKey) {
+      const paired = pairedTemplateForKey(pairedTemplateKey);
+      if (!paired || paired.valid === false) return;
       const sanitizedOverrides: Record<string, string> = {};
-      for (const [childId, value] of Object.entries(pairedNameOverrides)) {
-        const trimmed = value.trim();
+      for (const child of paired.children) {
+        const trimmed = pairedNameOverrides[child.id]?.trim();
         if (trimmed) {
-          sanitizedOverrides[childId] = trimmed;
+          sanitizedOverrides[child.id] = trimmed;
         }
       }
       dispatch('submit', {
@@ -612,13 +615,16 @@
     applyTemplateDefaults(next);
   }
 
-  $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
-  $: if (open && catalog && signature !== lastSignature) {
+  // A catalog update changes the available choices, not the editing session.
+  $: signature = `${mode}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
+  $: if (!open) {
+    lastSignature = '';
+  } else if (catalog && signature !== lastSignature) {
     lastSignature = signature;
     lastImageConsoleDefaultsSignature = '';
     initializeForm();
   }
-  $: selectedTemplate = templateForId(selectedTemplateId);
+  $: selectedTemplate = templateForId(selectedTemplateId, catalog);
   $: activeExtrasSchema = extrasSchemaFor(selectedTemplate, extras.platform);
   $: dynamipsPorts = dynamipsEthernetCount(activeExtrasSchema, extras);
   $: dynamipsMissingIoCard = activeExtrasSchema.find((field) => field.key === 'slot0')?.options
@@ -639,8 +645,8 @@
   }
   $: visibleTemplates = catalog ? templatesForType(selectedType) : [];
   $: visiblePairedTemplates = catalog ? pairedTemplates() : [];
-  $: selectedPairedTemplate = pairedTemplateKey ? pairedTemplateForKey(pairedTemplateKey) : undefined;
-  $: pairedActive = mode === 'create' && Boolean(selectedPairedTemplate);
+  $: selectedPairedTemplate = visiblePairedTemplates.find((entry) => entry.key === pairedTemplateKey);
+  $: pairedActive = mode === 'create' && Boolean(pairedTemplateKey);
   $: iourcRelevant = !pairedActive && selectedTemplate?.type === 'iol';
   $: interfaceNamingError = interfaceNamingErrorFor(interfaceNamingScheme, selectedType);
   $: selectedInterfaceNamingPreset = presetValueFor(interfaceNamingScheme);
@@ -790,7 +796,9 @@
       </div>
 
       {#if !catalog}
-        <div class="px-5 py-10 text-sm text-slate-400">Loading node catalog…</div>
+        <div role="status" class="px-5 py-10 text-sm text-slate-400">
+          {catalogUnavailable ? 'Node catalog temporarily unavailable. Retrying…' : 'Loading node catalog…'}
+        </div>
       {:else}
         <form class="flex flex-1 flex-col overflow-hidden" on:submit|preventDefault={submitForm}>
           <div class="flex-1 space-y-5 overflow-y-auto px-5 py-5">
@@ -815,7 +823,7 @@
               {/each}
             </div>
 
-            {#if mode === 'create' && visiblePairedTemplates.length > 0}
+            {#if mode === 'create' && (visiblePairedTemplates.length > 0 || pairedActive)}
               <div class="rounded-2xl border border-purple-500/30 bg-purple-500/5 p-4">
                 <div class="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -828,6 +836,9 @@
                       class="rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                     >
                       <option value="">— Single node —</option>
+                      {#if pairedActive && !selectedPairedTemplate}
+                        <option value={pairedTemplateKey} disabled>Selected paired template is unavailable</option>
+                      {/if}
                       {#each visiblePairedTemplates as paired}
                         {@const invalid = paired.valid === false}
                         <option value={paired.key} disabled={invalid}>
@@ -901,6 +912,9 @@
                     class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100"
                     on:change={onTemplateChange}
                   >
+                    {#if !selectedTemplate}
+                      <option value={selectedTemplateId} disabled>Select an available template</option>
+                    {/if}
                     {#each visibleTemplates as template}
                       <option value={templateId(template)}>{template.name}</option>
                     {/each}
@@ -1334,7 +1348,9 @@
             </button>
             <button
               type="submit"
-              disabled={submitting || (!pairedActive && (!selectedTemplate || !image)) || (!pairedActive && !!interfaceNamingError) || (pairedActive && selectedPairedTemplate?.valid === false)}
+              disabled={submitting || (pairedActive
+                ? !selectedPairedTemplate || selectedPairedTemplate.valid === false
+                : !selectedTemplate || !image || !!interfaceNamingError)}
               class="rounded-full border border-blue-500/40 bg-blue-500/15 px-4 py-2 text-sm text-blue-100 transition hover:bg-blue-500/25 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {#if submitting}

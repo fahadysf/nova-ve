@@ -639,8 +639,9 @@ cpulimit: 1
         ]
     )
 
-    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
         assert "docker" in cmd[0]
+        assert timeout == 5
         return SimpleNamespace(returncode=0, stdout=docker_ls_stdout, stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_run)

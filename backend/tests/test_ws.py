@@ -419,3 +419,95 @@ def test_ring_evicts_oldest():
     assert len(ring_events) == 200
     assert ring_events[0].seq == 51
     assert ring_events[-1].seq == 250
+
+
+@pytest.mark.asyncio
+async def test_catalog_fanout_bounds_a_stalled_socket(monkeypatch):
+    hub = WsHub()
+    delivered = []
+
+    class StalledSocket:
+        async def send_json(self, _message):
+            await asyncio.Event().wait()
+
+    class ListeningSocket:
+        async def send_json(self, message):
+            delivered.append(message)
+
+    monkeypatch.setattr(ws_hub_module, "_CATALOG_SEND_TIMEOUT_S", 0.01, raising=False)
+    await hub.subscribe("one.json", StalledSocket())
+    await hub.subscribe("two.json", ListeningSocket())
+
+    await asyncio.wait_for(
+        hub.notify_catalog_updated(4), 0.35,
+    )
+
+    assert delivered == [
+        {"type": "node_catalog_updated", "payload": {"generation": 4}}
+    ]
+    replay, needs_resnapshot = hub.replay_since("one.json", 0)
+    assert not needs_resnapshot
+    assert replay == []
+    assert hub.head_seq("one.json") == 0
+
+
+@pytest.mark.asyncio
+async def test_concurrent_catalog_hint_does_not_consume_topology_sequence():
+    hub = WsHub()
+    topology_started = asyncio.Event()
+    release_topology = asyncio.Event()
+    messages = []
+
+    class Socket:
+        async def send_json(self, message):
+            if message["type"] == "node_updated":
+                topology_started.set()
+                await release_topology.wait()
+            messages.append(message)
+
+    await hub.subscribe("one.json", Socket())
+    topology_task = asyncio.create_task(hub.publish("one.json", "node_updated", {"id": 1}))
+    await asyncio.wait_for(topology_started.wait(), 0.1)
+    try:
+        await hub.notify_catalog_updated(4)
+        assert messages == [
+            {"type": "node_catalog_updated", "payload": {"generation": 4}}
+        ]
+    finally:
+        release_topology.set()
+        topology = await topology_task
+
+    assert topology.seq == 1
+    assert hub.head_seq("one.json") == 1
+    replay, needs_resnapshot = hub.replay_since("one.json", 0)
+    assert not needs_resnapshot
+    assert [event.type for event in replay] == ["node_updated"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_fanout_sends_to_subscribers_concurrently():
+    hub = WsHub()
+    release = asyncio.Event()
+
+    class Socket:
+        def __init__(self):
+            self.started = asyncio.Event()
+
+        async def send_json(self, _message):
+            self.started.set()
+            await release.wait()
+
+    first = Socket()
+    second = Socket()
+    await hub.subscribe("one.json", first)
+    await hub.subscribe("one.json", second)
+    publish_task = asyncio.create_task(
+        hub.notify_catalog_updated(4)
+    )
+    await asyncio.wait_for(first.started.wait(), 0.1)
+    await asyncio.sleep(0)
+    try:
+        assert second.started.is_set()
+    finally:
+        release.set()
+        await publish_task

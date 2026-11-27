@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ from app.schemas.user import UserRead
 from app.services.async_utils import notify_after_mutation, run_mutation, wait_for_mutation
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
+from app.services.docker_image_service import DockerImageError
 from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_paths import find_runtime_lab_path, publish_runtime_event
@@ -56,6 +58,7 @@ from app.services.lab_service import (
     locked_lab_async,
 )
 from app.services.network_service import NetworkServiceError, network_service
+from app.services.node_catalog_service import NodeCatalogService
 from app.services.cloud_inventory_service import SharedCloudReferenceError
 from app.services.shared_network_service import patch_violation
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
@@ -136,6 +139,46 @@ NODE_EDIT_FIELDS = [
     "delay",
     "extras",
 ]
+
+
+def _build_node_catalog(*, discover_docker_images: bool = True) -> dict:
+    catalog = TemplateService().build_node_catalog(
+        strict_docker=True, discover_docker_images=discover_docker_images,
+    )
+    catalog["create_fields"] = NODE_CREATE_FIELDS
+    catalog["edit_fields"] = NODE_EDIT_FIELDS
+    catalog["runtime_editability"] = {
+        "always": sorted(NODE_FIELDS_EDITABLE_WHILE_RUNNING),
+        "stopped_only": sorted(NODE_FIELDS_EDITABLE_WHILE_STOPPED),
+        "immutable": ["type", "template", "uuid"],
+    }
+    return catalog
+
+
+def _build_partial_node_catalog(error: Exception) -> dict | None:
+    if isinstance(error, (DockerImageError, subprocess.TimeoutExpired)):
+        return _build_node_catalog(discover_docker_images=False)
+    return None
+
+
+async def _publish_node_catalog_updated(generation: int) -> None:
+    await ws_hub.notify_catalog_updated(generation)
+
+
+node_catalog_service = NodeCatalogService(
+    _build_node_catalog,
+    build_degraded=_build_partial_node_catalog,
+    on_updated=_publish_node_catalog_updated,
+)
+
+
+def _node_catalog_cache_key() -> tuple[str, str, str]:
+    service = TemplateService()
+    return (
+        str(service.templates_dir),
+        str(service.user_templates_dir or ""),
+        str(service.images_dir),
+    )
 
 
 def _read_lab_data(lab_path: str) -> dict:
@@ -1008,14 +1051,17 @@ async def node_catalog(
             "message": str(e),
         }
 
-    catalog = TemplateService().build_node_catalog()
-    catalog["create_fields"] = NODE_CREATE_FIELDS
-    catalog["edit_fields"] = NODE_EDIT_FIELDS
-    catalog["runtime_editability"] = {
-        "always": sorted(NODE_FIELDS_EDITABLE_WHILE_RUNNING),
-        "stopped_only": sorted(NODE_FIELDS_EDITABLE_WHILE_STOPPED),
-        "immutable": ["type", "template", "uuid"],
-    }
+    try:
+        snapshot, pending = await node_catalog_service.get_with_pending(
+            _node_catalog_cache_key()
+        )
+    except Exception:
+        return {
+            "code": 503,
+            "status": "fail",
+            "message": "Node catalog is temporarily unavailable; retry shortly.",
+        }
+    catalog = {**snapshot, "pending": pending}
     return {
         "code": 200,
         "status": "success",
