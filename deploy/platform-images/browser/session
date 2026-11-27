@@ -7,7 +7,7 @@ xwallpaper --daemon --screen 0 --center "$WALLPAPER" &
 
 openbox &
 wm_pid=$!
-tint2 -c /usr/local/share/nova-ve/tint2rc >/dev/null 2>&1 &
+/usr/local/bin/tint2 -c /usr/local/share/nova-ve/tint2rc >/dev/null 2>&1 &
 
 PROFILE="$HOME/.config/nova-ve/firefox"
 mkdir -p "$PROFILE"
