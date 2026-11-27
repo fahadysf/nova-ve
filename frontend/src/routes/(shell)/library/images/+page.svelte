@@ -38,6 +38,7 @@
 
   $: templateGroups = groupByType(filteredTemplates(templates, search, typeFilter, templateImageFilter));
   $: visibleImages = filteredImages(images, search, typeFilter);
+  $: nameConflicts = duplicateImageNames(images);
 
   async function refresh() {
     const generation = ++refreshGeneration;
@@ -101,6 +102,18 @@
         image.referenced_by.some((ref) => ref.lab.toLowerCase().includes(needle))
       );
     });
+  }
+
+  function duplicateImageNames(list: LibraryImage[]): Set<string> {
+    const seen = new Set<string>();
+    const conflicts = new Set<string>();
+    for (const image of list) {
+      if (image.type === 'docker') continue;
+      const key = `${image.type}/${image.name}`;
+      if (seen.has(key)) conflicts.add(key);
+      seen.add(key);
+    }
+    return conflicts;
   }
 
   function groupByType(list: LibraryTemplate[]): { type: string; items: LibraryTemplate[] }[] {
@@ -397,6 +410,11 @@
       </div>
     {:else}
       <section class="overflow-hidden rounded-2xl border border-gray-800 bg-gray-900/95" data-testid="images-panel">
+        {#if visibleImages.some((image) => nameConflicts.has(`${image.type}/${image.name}`))}
+          <p id="image-name-conflict-help" class="border-b border-amber-800/60 bg-amber-950/30 px-5 py-3 text-sm text-amber-200">
+            Review lab and template references. Rename a conflicting file or folder on the host so its filename stem or folder name is unique within the image type, then refresh.
+          </p>
+        {/if}
         <table class="w-full text-left text-sm">
           <thead>
             <tr class="border-b border-gray-800 text-[10px] uppercase tracking-[0.05em] text-gray-500">
@@ -411,9 +429,13 @@
           </thead>
           <tbody>
             {#each visibleImages as image (image.path)}
+              {@const nameConflict = nameConflicts.has(`${image.type}/${image.name}`)}
               <tr class="border-b border-gray-800/60 align-top last:border-0 hover:bg-gray-800/40" data-testid={`image-row-${image.name}`}>
                 <td class="px-5 py-3">
                   <div class="font-medium text-gray-100">{image.filename}</div>
+                  {#if nameConflict}
+                    <span class="text-xs text-amber-300">Name conflict</span>
+                  {/if}
                   <div class="mt-0.5 flex flex-wrap gap-1">
                     {#each image.templates as match (match.key)}
                       <span
@@ -444,8 +466,9 @@
                     </span>
                   {:else if image.type !== 'docker'}
                     <button
-                      class="rounded-md border border-gray-700 px-2 py-1 text-[10px] uppercase tracking-[0.05em] text-gray-400 transition hover:border-blue-500 hover:text-white"
-                      disabled={verifying === `${image.type}/${image.name}`}
+                      class="rounded-md border border-gray-700 px-2 py-1 text-[10px] uppercase tracking-[0.05em] text-gray-400 transition enabled:hover:border-blue-500 enabled:hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={nameConflict || verifying === `${image.type}/${image.name}`}
+                      aria-describedby={nameConflict ? 'image-name-conflict-help' : undefined}
                       on:click={() => void verifyImage(image)}
                       data-testid={`image-verify-${image.name}`}
                     >
@@ -484,7 +507,9 @@
                     </span>
                   {:else}
                     <button
-                      class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-400 transition hover:border-red-500 hover:text-red-300"
+                      class="rounded-md border border-gray-700 px-2.5 py-1.5 text-[10px] uppercase tracking-[0.05em] text-gray-400 transition enabled:hover:border-red-500 enabled:hover:text-red-300 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={nameConflict}
+                      aria-describedby={nameConflict ? 'image-name-conflict-help' : undefined}
                       on:click={() => (deleteTarget = image)}
                       data-testid={`image-delete-${image.name}`}
                     >Delete</button>
