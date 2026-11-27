@@ -330,7 +330,7 @@ class DynamipsLauncher:
         # dynamips on the host. Choose explicitly.
         port = self._pick_free_tcp_port()
         proc = subprocess.Popen(
-            [_DYNAMIPS_BINARY, "-H", str(port)],
+            [_DYNAMIPS_BINARY, "-H", f"{_HYPERVISOR_HOST}:{port}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -345,7 +345,7 @@ class DynamipsLauncher:
                 )
             try:
                 with socket.create_connection(
-                    ("127.0.0.1", port), timeout=0.5
+                    (_HYPERVISOR_HOST, port), timeout=0.5
                 ) as probe:
                     probe.close()
                 break

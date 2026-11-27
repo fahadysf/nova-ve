@@ -12,14 +12,34 @@ import socket
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock
 
 import pytest
 
+from app.services.runtime import dynamips
 from app.services.runtime.dynamips import (
     DynamipsError,
     DynamipsLauncher,
     HypervisorClient,
 )
+
+
+def test_hypervisor_launch_binds_to_loopback(monkeypatch) -> None:
+    launcher = DynamipsLauncher()
+    process = Mock()
+    process.poll.return_value = None
+    spawn = Mock(return_value=process)
+    client = Mock()
+    monkeypatch.setattr(dynamips.shutil, "which", lambda binary: binary)
+    monkeypatch.setattr(dynamips.subprocess, "Popen", spawn)
+    monkeypatch.setattr(dynamips.socket, "create_connection", MagicMock())
+    monkeypatch.setattr(dynamips, "HypervisorClient", Mock(return_value=client))
+    monkeypatch.setattr(launcher, "_pick_free_tcp_port", lambda: 17200)
+
+    launcher._start_hypervisor()
+
+    assert spawn.call_args.args[0] == [dynamips._DYNAMIPS_BINARY, "-H", "127.0.0.1:17200"]
+    client.connect.assert_called_once_with()
 
 
 def _serve_replies(replies: list[bytes]) -> tuple[int, threading.Event]:
