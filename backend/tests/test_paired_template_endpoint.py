@@ -1907,3 +1907,295 @@ async def test_208medium_node_phase_422_path_rolls_back_lab(patched_split):
     restored = json.loads(lab_path.read_text())
     assert restored.get("nodes") == {}, restored
     assert restored.get("links") == [], restored
+
+
+# ---- generated-key collisions with standalone templates -----------------
+
+
+def _seed_generated_key_collision(settings) -> None:
+    paired = {
+        "kind": "paired",
+        "name": "Paired fixture",
+        "nodes": [
+            {
+                "id": "child",
+                "name": "Generated child",
+                "kind": " QEMU ",
+                "image": "generated.qcow2",
+                "ethernet": 1,
+            },
+            {
+                "id": "other",
+                "name": "Unrelated generated child",
+                "kind": "qemu",
+                "image": "other.qcow2",
+                "ethernet": 1,
+            },
+        ],
+        "links": [],
+    }
+    _seed_paired_template(settings, paired, key="pair")
+    (settings.USER_TEMPLATES_DIR / "pair__child.yml").write_text(
+        "type: ' QEMU '\n"
+        "name: Standalone definition\n"
+        "description: private-standalone-detail\n"
+        "cpu: 7\n"
+        "ram: 4096\n"
+        "ethernet: 2\n"
+    )
+
+
+def test_real_template_wins_generated_key_collision(patched_split):
+    _seed_generated_key_collision(patched_split)
+    service = TemplateService()
+
+    listed = service.list_templates("qemu")
+    assert listed["pair__child"]["name"] == "Standalone definition"
+    assert listed["pair__child"]["paired_parent"] is None
+    assert listed["pair__other"]["paired_parent"] == "pair"
+
+    direct = service.get_template("qemu", "pair__child")
+    assert direct.name == "Standalone definition"
+    assert direct.paired_parent is None
+
+    catalog = service.build_node_catalog()
+    matching = [
+        entry
+        for entry in catalog["templates"]
+        if entry["key"] == "pair__child" and entry["type"] == "qemu"
+    ]
+    assert len(matching) == 1
+    assert matching[0]["name"] == "Standalone definition"
+    assert matching[0]["paired_parent"] is None
+    assert any(entry["key"] == "pair__other" for entry in catalog["templates"])
+
+
+def test_only_colliding_generated_child_is_skipped(patched_split, caplog):
+    import logging
+
+    _seed_generated_key_collision(patched_split)
+    service = TemplateService()
+    with caplog.at_level(logging.WARNING, logger="nova-ve.template_service"):
+        generated = service._load_synthetic_paired_child_templates()
+
+    by_key = {template.key: template for template in generated}
+    assert set(by_key) == {"pair__other"}
+    assert by_key["pair__other"].paired_parent == "pair"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "standalone" in record.getMessage().lower()
+    ]
+    assert len(warnings) == 1
+    assert "pair__child" in warnings[0]
+    assert str(patched_split.USER_TEMPLATES_DIR) not in warnings[0]
+    assert "private-standalone-detail" not in warnings[0]
+
+
+def test_generated_key_collision_is_scoped_to_runtime_kind(patched_split):
+    paired = {
+        "kind": "paired",
+        "nodes": [
+            {"id": "child", "kind": " QEMU ", "ethernet": 1},
+            {"id": "other", "kind": "qemu", "ethernet": 1},
+        ],
+        "links": [],
+    }
+    _seed_paired_template(patched_split, paired, key="pair")
+    (patched_split.USER_TEMPLATES_DIR / "pair__child.yml").write_text(
+        "type: docker\nname: Standalone container\nimage: fixture:latest\n"
+    )
+    service = TemplateService()
+
+    generated = service._load_synthetic_paired_child_templates()
+    assert {template.key for template in generated} == {"pair__child", "pair__other"}
+    assert service.get_template("docker", "pair__child").paired_parent is None
+    assert service.get_template("qemu", "pair__child").paired_parent == "pair"
+
+
+def test_collision_marks_pair_invalid_with_actionable_reason(patched_split):
+    _seed_generated_key_collision(patched_split)
+
+    entry = TemplateService().build_node_catalog()["paired_templates"][0]
+    assert entry["valid"] is False
+    assert "pair__child" in entry["invalid_reason"]
+    assert "qemu" in entry["invalid_reason"]
+    assert "rename" in entry["invalid_reason"].lower()
+    assert str(patched_split.USER_TEMPLATES_DIR) not in entry["invalid_reason"]
+    assert "private-standalone-detail" not in entry["invalid_reason"]
+
+
+@pytest.mark.asyncio
+async def test_collision_preflight_rejects_before_lab_access_or_id_allocation(
+    patched_split, monkeypatch
+):
+    _seed_generated_key_collision(patched_split)
+    invalid_reason = TemplateService()._build_paired_catalog()[0]["invalid_reason"]
+
+    def unexpected_access(*args, **kwargs):
+        raise AssertionError(
+            "collision preflight must finish before lab access or ID allocation"
+        )
+
+    monkeypatch.setattr(labs, "_locked_lab", unexpected_access)
+    monkeypatch.setattr(labs, "allocate_node_id", unexpected_access)
+    monkeypatch.setattr(labs, "allocate_network_id", unexpected_access)
+
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+    body = _response_json(response)
+    assert _response_status(response) == 422
+    assert body["code"] == 422
+    assert invalid_reason in body["message"]
+    assert "rename" in body["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_malformed_standalone_does_not_block_paired_creation(
+    patched_split,
+):
+    _seed_paired_template(patched_split, VMX_PAIRED_TEMPLATE)
+    (patched_split.USER_TEMPLATES_DIR / "unrelated.yml").write_text(
+        "type: qemu\nname: [unterminated\n"
+    )
+    _seed_empty_lab(patched_split)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 200, response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"type: [unterminated\n", b"\xff"])
+async def test_matching_malformed_standalone_returns_safe_preflight_error(
+    patched_split, content,
+):
+    _seed_generated_key_collision(patched_split)
+    (patched_split.USER_TEMPLATES_DIR / "pair__child.yml").write_bytes(content)
+
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+    body = _response_json(response)
+    assert _response_status(response) == 422
+    assert "pair__child" in body["message"]
+    assert "change the paired child id" in body["message"].lower()
+    assert "rename the standalone template file" in body["message"].lower()
+    assert str(patched_split.USER_TEMPLATES_DIR) not in body["message"]
+    assert "unterminated" not in body["message"]
+
+
+@pytest.mark.asyncio
+async def test_non_mapping_candidate_fails_catalog_and_rejects_post_safely(
+    patched_split,
+):
+    from app.services.template_service import TemplateError
+
+    _seed_generated_key_collision(patched_split)
+    candidate = patched_split.USER_TEMPLATES_DIR / "pair__child.yml"
+    candidate.write_text("- invalid\n")
+
+    with pytest.raises(TemplateError) as caught:
+        TemplateService().build_node_catalog()
+    catalog_error = str(caught.value)
+    assert "pair__child" in catalog_error
+    assert "mapping" in catalog_error
+    assert str(candidate) not in catalog_error
+    assert "invalid" not in catalog_error
+
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+    body = _response_json(response)
+    assert _response_status(response) == 422
+    assert "change the paired child id" in body["message"].lower()
+    assert "rename the standalone template file" in body["message"].lower()
+    assert str(candidate) not in body["message"]
+    assert "invalid" not in body["message"]
+
+
+def test_paired_semantic_error_precedes_collision(patched_split):
+    _seed_generated_key_collision(patched_split)
+    paired = TemplateService().get_paired_user_template("pair")
+    paired["nodes"][0]["cpu"] = "not-an-int"
+
+    reason = TemplateService().paired_template_invalid_reason("pair", paired)
+    assert "cpu" in reason
+    assert "integer" in reason
+    assert "collides" not in reason
+
+
+def test_paired_document_in_runtime_folder_does_not_collide(patched_split):
+    _seed_generated_key_collision(patched_split)
+    (patched_split.USER_TEMPLATES_DIR / "pair__child.yml").unlink()
+    runtime_dir = patched_split.USER_TEMPLATES_DIR / "qemu"
+    runtime_dir.mkdir()
+    (runtime_dir / "pair__child.yml").write_text(
+        json.dumps(
+            {
+                "kind": "paired",
+                "nodes": [{"id": "nested", "kind": "qemu"}],
+                "links": [],
+            }
+        )
+    )
+    service = TemplateService()
+    paired = service.get_paired_user_template("pair")
+
+    assert service.paired_template_invalid_reason("pair", paired) is None
+    assert service.get_template("qemu", "pair__child").paired_parent == "pair"
+
+
+@pytest.mark.asyncio
+async def test_paired_lookup_and_preflight_use_to_thread(patched_split, monkeypatch):
+    import asyncio
+
+    _seed_generated_key_collision(patched_split)
+    calls = []
+    real_to_thread = asyncio.to_thread
+
+    async def tracked_to_thread(func, /, *args, **kwargs):
+        calls.append(func.__name__)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(labs.asyncio, "to_thread", tracked_to_thread)
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+
+    assert _response_status(response) == 422
+    assert calls == ["get_paired_user_template", "paired_template_invalid_reason"]
+
+
+def test_node_catalog_does_not_reread_template_files(patched_split, monkeypatch):
+    _seed_generated_key_collision(patched_split)
+    template_paths = {
+        patched_split.USER_TEMPLATES_DIR / "pair.json",
+        patched_split.USER_TEMPLATES_DIR / "pair__child.yml",
+    }
+    reads = []
+    real_read_text = Path.read_text
+
+    def counted_read_text(path, *args, **kwargs):
+        if path in template_paths:
+            reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    TemplateService().build_node_catalog()
+
+    assert {path: reads.count(path) for path in template_paths} == {
+        path: 1 for path in template_paths
+    }

@@ -8,7 +8,7 @@ import os
 import shutil
 from stat import S_ISREG
 import subprocess
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO, Iterable, Iterator
 from uuid import uuid4
 
 import yaml
@@ -53,6 +53,50 @@ def normalize_paired_child_kind(raw: Any) -> str:
     if kind not in {"qemu", "docker", "iol", "dynamips"}:
         return "qemu"
     return kind
+
+
+def _standalone_template_type(payload: Any, path: Path) -> str | None:
+    if not isinstance(payload, dict) or payload.get("kind") == "paired":
+        return None
+    template_type = str(payload.get("type") or path.parent.name).strip().lower()
+    if template_type not in SUPPORTED_TEMPLATE_TYPES:
+        return None
+    return template_type
+
+
+def _paired_child_collision_reason(
+    paired_key: str,
+    child_id: str,
+    child: dict[str, Any],
+    standalone_keys: set[tuple[str, str]],
+) -> str | None:
+    child_kind = normalize_paired_child_kind(child.get("kind"))
+    generated_key = synthetic_paired_child_key(paired_key, child_id)
+    if (child_kind, generated_key) not in standalone_keys:
+        return None
+    return (
+        f"child {child_id!r} generated key {generated_key!r} for normalized "
+        f"runtime kind {child_kind!r} collides with a standalone template. "
+        "Change the paired child ID or rename the standalone template file so "
+        "the generated key is unique."
+    )
+
+
+def _paired_template_collision_reason(
+    paired_key: str,
+    data: dict[str, Any],
+    standalone_keys: set[tuple[str, str]],
+) -> str | None:
+    for index, child in enumerate(data.get("nodes") or []):
+        if not isinstance(child, dict):
+            continue
+        child_id = str(child.get("id") or f"child-{index}")
+        reason = _paired_child_collision_reason(
+            paired_key, child_id, child, standalone_keys
+        )
+        if reason is not None:
+            return reason
+    return None
 
 
 def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
@@ -1233,24 +1277,33 @@ class TemplateService:
                 return template
         raise TemplateError(f"Template {key} does not exist for type {template_type}.")
 
-    def _iter_paired_user_templates(self) -> Iterator[tuple[Path, dict[str, Any]]]:
+    def _read_user_template_payloads(self) -> Iterator[tuple[Path, Any]]:
+        user_templates_dir = getattr(self, "user_templates_dir", None)
+        if user_templates_dir is None or not user_templates_dir.exists():
+            return
+        paths = [
+            *user_templates_dir.rglob("*.yml"),
+            *user_templates_dir.rglob("*.json"),
+        ]
+        for path in sorted(paths):
+            try:
+                data = yaml.safe_load(path.read_text()) or {}
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                continue
+            yield path, data
+
+    def _iter_paired_user_templates(
+        self, *, parsed_templates: Iterable[tuple[Path, Any]] | None = None
+    ) -> Iterator[tuple[Path, dict[str, Any]]]:
         """Yield (path, payload) for every well-formed ``kind="paired"`` template
         under ``USER_TEMPLATES_DIR``. Tolerates I/O + parse errors, skips
         non-paired files, and enforces the minimal structural invariant
         (non-empty ``nodes`` list + ``links`` list). Shared by the loader,
         the catalog builder, and the per-key lookup so they cannot drift.
         """
-        if self.user_templates_dir is None or not self.user_templates_dir.exists():
-            return
-        paths = [
-            *self.user_templates_dir.rglob("*.yml"),
-            *self.user_templates_dir.rglob("*.json"),
-        ]
-        for path in sorted(paths):
-            try:
-                data = yaml.safe_load(path.read_text()) or {}
-            except (OSError, yaml.YAMLError):
-                continue
+        if parsed_templates is None:
+            parsed_templates = self._read_user_template_payloads()
+        for path, data in parsed_templates:
             if not isinstance(data, dict) or data.get("kind") != "paired":
                 continue
             nodes = data.get("nodes")
@@ -1272,6 +1325,60 @@ class TemplateService:
             if path.stem == template_key:
                 return data
         return None
+
+    def _standalone_keys_for_paired_template(
+        self, template_key: str, data: dict[str, Any]
+    ) -> tuple[set[tuple[str, str]], str | None]:
+        generated_keys = {
+            synthetic_paired_child_key(
+                template_key, str(child.get("id") or f"child-{index}")
+            )
+            for index, child in enumerate(data.get("nodes") or [])
+            if isinstance(child, dict)
+        }
+        standalone_keys: set[tuple[str, str]] = set()
+        for path, _source in self._iter_template_paths():
+            if path.stem not in generated_keys:
+                continue
+            try:
+                payload = yaml.safe_load(path.read_text()) or {}
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                payload = None
+            if not isinstance(payload, dict):
+                return set(), (
+                    f"template candidate for generated key {path.stem!r} could "
+                    "not be parsed as a standalone template. Change the paired "
+                    "child ID or rename the standalone template file, or fix "
+                    "the candidate's YAML."
+                )
+            standalone_type = _standalone_template_type(payload, path)
+            if standalone_type is not None:
+                standalone_keys.add((standalone_type, path.stem))
+        return standalone_keys, None
+
+    def paired_template_invalid_reason(
+        self,
+        template_key: str,
+        data: dict[str, Any],
+        *,
+        standalone_templates: list[TemplateDefinition] | None = None,
+    ) -> str | None:
+        semantic_reason = validate_paired_template(data)
+        if semantic_reason is not None:
+            return semantic_reason
+        if standalone_templates is None:
+            standalone_keys, candidate_reason = (
+                self._standalone_keys_for_paired_template(template_key, data)
+            )
+            if candidate_reason is not None:
+                return candidate_reason
+        else:
+            standalone_keys = {
+                (template.type, template.key) for template in standalone_templates
+            }
+        return _paired_template_collision_reason(
+            template_key, data, standalone_keys
+        )
 
     def is_paired_user_template(self, template_key: str) -> bool:
         """Boolean check used by the single-node from-template endpoint to 400 paired keys."""
@@ -1379,7 +1486,14 @@ class TemplateService:
         self, *, strict_docker: bool = False, discover_docker_images: bool = True,
     ) -> dict[str, Any]:
         templates: list[dict[str, Any]] = []
-        loaded_templates = self._load_templates()
+        parsed_templates = list(self._read_user_template_payloads())
+        paired_templates = list(
+            self._iter_paired_user_templates(parsed_templates=parsed_templates)
+        )
+        loaded_templates = self._load_templates(
+            paired_templates=paired_templates,
+            parsed_templates=parsed_templates,
+        )
         icon_assets = self.list_icon_assets()
         icon_options = sorted(
             {"Router.png", "Server.png"}
@@ -1429,9 +1543,15 @@ class TemplateService:
                     "paired_parent": template.paired_parent,
                 }
             )
+        paired_catalog = self._build_paired_catalog(
+            standalone_templates=[
+                template for template in loaded_templates if template.paired_parent is None
+            ],
+            paired_templates=paired_templates,
+        )
         return {
             "templates": templates,
-            "paired_templates": self._build_paired_catalog(),
+            "paired_templates": paired_catalog,
             "icon_options": icon_options,
             "icon_assets": icon_assets,
             "dynamips_profiles": {
@@ -1440,7 +1560,12 @@ class TemplateService:
             },
         }
 
-    def _build_paired_catalog(self) -> list[dict[str, Any]]:
+    def _build_paired_catalog(
+        self,
+        *,
+        standalone_templates: list[TemplateDefinition] | None = None,
+        paired_templates: list[tuple[Path, dict[str, Any]]] | None = None,
+    ) -> list[dict[str, Any]]:
         """Enumerate paired user-templates (#202) for the node catalog response.
 
         Paired templates live as YAML or legacy JSON files under ``USER_TEMPLATES_DIR``
@@ -1451,15 +1576,26 @@ class TemplateService:
         and routes submissions to ``POST /nodes/from-paired-template`` instead of
         the single-node ``/nodes/batch`` path.
         """
+        if standalone_templates is None or paired_templates is None:
+            parsed_templates = list(self._read_user_template_payloads())
+        if standalone_templates is None:
+            standalone_templates = self._load_standalone_templates(
+                parsed_templates=parsed_templates
+            )
+        if paired_templates is None:
+            paired_templates = list(
+                self._iter_paired_user_templates(parsed_templates=parsed_templates)
+            )
+
         result: list[dict[str, Any]] = []
-        for path, data in self._iter_paired_user_templates():
+        for path, data in paired_templates:
             nodes = data["nodes"]
             links = data["links"]
             paired_key = path.stem
             # #208 codex-iter3 — int casts are scoped to ``_safe_paired_child_int``
             # so a malformed scalar can't crash the whole node-catalog response;
-            # ``validate_paired_template`` below sets ``valid:false`` so the
-            # operator still sees the real reason in the catalog payload.
+            # Pre-flight below sets ``valid:false`` so the operator still sees
+            # the real reason in the catalog payload.
             child_summary = [
                 {
                     "id": str(child.get("id") or f"child-{i}"),
@@ -1490,7 +1626,9 @@ class TemplateService:
                 for link in links
                 if isinstance(link, dict)
             ]
-            invalid_reason = validate_paired_template(data)
+            invalid_reason = self.paired_template_invalid_reason(
+                paired_key, data, standalone_templates=standalone_templates
+            )
             if invalid_reason is not None:
                 _logger.warning(
                     "Paired template %s pre-flight failed: %s — instantiation "
@@ -1777,7 +1915,9 @@ class TemplateService:
             user_template_path=path if user else None,
         )
 
-    def _load_templates(self) -> list[TemplateDefinition]:
+    def _load_standalone_templates(
+        self, *, parsed_templates: list[tuple[Path, Any]] | None = None
+    ) -> list[TemplateDefinition]:
         if not self.templates_dir.exists() and (
             self.user_templates_dir is None or not self.user_templates_dir.exists()
         ):
@@ -1787,11 +1927,19 @@ class TemplateService:
         seen_keys_by_type: dict[tuple[str, str], str] = {}  # (type, key) -> source
         builtin_aliases: dict[tuple[str, str], list[str]] = {}
 
+        parsed_by_path = dict(parsed_templates) if parsed_templates is not None else {}
         templates: list[TemplateDefinition] = []
         for template_path, source in self._iter_template_paths():
-            payload = yaml.safe_load(template_path.read_text()) or {}
-            template_type = str(payload.get("type") or template_path.parent.name).strip().lower()
-            if template_type not in SUPPORTED_TEMPLATE_TYPES:
+            if template_path in parsed_by_path:
+                payload = parsed_by_path[template_path]
+            else:
+                payload = yaml.safe_load(template_path.read_text()) or {}
+            if not isinstance(payload, dict):
+                raise TemplateError(
+                    f"Template {template_path.stem!r} must contain a mapping at the YAML document root."
+                )
+            template_type = _standalone_template_type(payload, template_path)
+            if template_type is None:
                 continue
 
             key = template_path.stem
@@ -1822,28 +1970,68 @@ class TemplateService:
             if source == "builtin":
                 builtin_aliases[type_key] = template.image_aliases
             templates.append(template)
+        return templates
+
+    def _load_templates(
+        self,
+        *,
+        paired_templates: list[tuple[Path, dict[str, Any]]] | None = None,
+        parsed_templates: list[tuple[Path, Any]] | None = None,
+    ) -> list[TemplateDefinition]:
+        if parsed_templates is None:
+            parsed_templates = list(self._read_user_template_payloads())
+        if paired_templates is None:
+            paired_templates = list(
+                self._iter_paired_user_templates(parsed_templates=parsed_templates)
+            )
+        standalone_templates = self._load_standalone_templates(
+            parsed_templates=parsed_templates
+        )
 
         # #206 — append synthetic per-child entries for every paired template so
         # node.template lookups (edit, capability gates, image validation) resolve
         # cleanly. These entries advertise paired_parent so frontends can hide
         # them from the standalone create-flow type-tab picker.
-        templates.extend(self._load_synthetic_paired_child_templates())
-        return templates
+        return [
+            *standalone_templates,
+            *self._load_synthetic_paired_child_templates(
+                standalone_templates=standalone_templates,
+                paired_templates=paired_templates,
+            ),
+        ]
 
-    def _load_synthetic_paired_child_templates(self) -> list[TemplateDefinition]:
+    def _load_synthetic_paired_child_templates(
+        self,
+        *,
+        standalone_templates: list[TemplateDefinition] | None = None,
+        paired_templates: list[tuple[Path, dict[str, Any]]] | None = None,
+    ) -> list[TemplateDefinition]:
         """Synthesize per-child :class:`TemplateDefinition` entries from paired
         user templates (``USER_TEMPLATES_DIR`` files with ``kind="paired"``).
 
         Each child becomes a first-class catalog entry keyed
         ``<paired_key>__<child_id>``. Capability/interface_naming blocks on the
-        child are validated via the same helpers used for real templates so a
-        broken child raises :class:`TemplateError` at load time rather than
-        silently flowing through to runtime. The child's ``image`` is recorded
-        on the synthetic ``raw`` so :meth:`list_images` can surface it (see
-        the override in that method).
+        child are validated via the same helpers used for real templates, and a
+        broken child is skipped. The child's ``image`` is recorded on the
+        synthetic ``raw`` so :meth:`list_images` can surface it (see the override
+        in that method).
         """
+        if standalone_templates is None or paired_templates is None:
+            parsed_templates = list(self._read_user_template_payloads())
+        if standalone_templates is None:
+            standalone_templates = self._load_standalone_templates(
+                parsed_templates=parsed_templates
+            )
+        if paired_templates is None:
+            paired_templates = list(
+                self._iter_paired_user_templates(parsed_templates=parsed_templates)
+            )
+        standalone_keys = {
+            (template.type, template.key) for template in standalone_templates
+        }
+
         synthetic: list[TemplateDefinition] = []
-        for path, data in self._iter_paired_user_templates():
+        for path, data in paired_templates:
             nodes = data["nodes"]
             paired_key = path.stem
             for index, child in enumerate(nodes):
@@ -1852,12 +2040,21 @@ class TemplateService:
                 child_id = str(child.get("id") or f"child-{index}")
                 child_kind = normalize_paired_child_kind(child.get("kind"))
                 synthetic_key = synthetic_paired_child_key(paired_key, child_id)
+                collision_reason = _paired_child_collision_reason(
+                    paired_key, child_id, child, standalone_keys
+                )
+                if collision_reason is not None:
+                    _logger.warning(
+                        "Synthetic paired-child template skipped: %s",
+                        collision_reason,
+                    )
+                    continue
                 source = f"{path}::nodes[{index}]"
                 # #208 codex-iter3 — paired imports may be malformed (bad
                 # scalars, busted interface_naming/capabilities). Don't take
                 # down the entire template catalog because of one broken
                 # child; the parent paired entry already gets ``valid:false``
-                # in ``_build_paired_catalog`` via ``validate_paired_template``
+                # in ``_build_paired_catalog`` via the shared pre-flight
                 # so the operator sees the real reason. Skip-but-log the
                 # synthetic child instead.
                 try:

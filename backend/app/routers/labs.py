@@ -1380,10 +1380,10 @@ async def create_nodes_from_paired_template(
     children and ALL auto-links in a single transaction; on partial failure
     lab.json is rolled back from a snapshot taken before the first mutation.
     """
-    from app.services.template_service import validate_paired_template
-
     template_service = TemplateService()
-    paired = template_service.get_paired_user_template(request.template_key)
+    paired = await asyncio.to_thread(
+        template_service.get_paired_user_template, request.template_key
+    )
     if paired is None:
         return _json_error(
             404,
@@ -1401,7 +1401,11 @@ async def create_nodes_from_paired_template(
     # whose link refs reference interfaces no child will expose (e.g. paired
     # JSONs without ``interface_naming.explicit``). Surface as 422 so the UI
     # can render a fix-the-template message instead of a generic 500.
-    pre_flight_reason = validate_paired_template(paired)
+    pre_flight_reason = await asyncio.to_thread(
+        template_service.paired_template_invalid_reason,
+        request.template_key,
+        paired,
+    )
     if pre_flight_reason is not None:
         return _json_error(
             422,
