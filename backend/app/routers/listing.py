@@ -29,7 +29,11 @@ async def list_templates(
     current_user: UserRead = Depends(get_current_user),
 ):
     try:
-        data = TemplateService().list_templates(template_type)
+        data = {
+            key: template
+            for key, template in TemplateService().list_templates(template_type).items()
+            if template.get("paired_parent") is None
+        }
     except TemplateError as exc:
         return {
             "code": 400,

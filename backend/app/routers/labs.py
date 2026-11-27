@@ -637,6 +637,21 @@ def _validate_create_console_request(request: NodeCreate | NodeBatchCreate, temp
     return None
 
 
+def _synthetic_paired_child_create_error(template) -> dict | None:
+    if template.paired_parent is None:
+        return None
+    return {
+        "code": 400,
+        "status": "fail",
+        "message": (
+            f"Template {template.key!r} is a synthetic per-child entry "
+            f"of paired template {template.paired_parent!r}; "
+            "use POST /api/labs/{lab_path}/nodes/from-paired-template with "
+            f"template_key={template.paired_parent!r} instead (see #206)."
+        ),
+    }
+
+
 @router.post("/")
 async def create_lab(
     request: LabMetaCreate,
@@ -1106,6 +1121,9 @@ async def create_node(
             "status": "fail",
             "message": str(exc),
         }
+    paired_child_error = _synthetic_paired_child_create_error(template)
+    if paired_child_error is not None:
+        return paired_child_error
     console_error = _validate_create_console_request(request, template)
     if console_error:
         return {
@@ -1201,23 +1219,9 @@ async def create_node_from_template(
             "message": str(exc),
         }
 
-    # #206 codex-iter2: synthetic per-child template entries (paired_parent set,
-    # e.g. ``juniper-vmx__vcp``) must NOT be instantiable via the single-node
-    # route. They live in the catalog only so node.template lookups in edit
-    # mode + capability gates resolve; their console_type can violate
-    # ``NodeCreate.console`` Literal (Juniper children declare ``serial``),
-    # raising an uncaught Pydantic ValidationError. Reject explicitly.
-    if template_def.paired_parent is not None:
-        return {
-            "code": 400,
-            "status": "fail",
-            "message": (
-                f"Template {request.template_key!r} is a synthetic per-child entry "
-                f"of paired template {template_def.paired_parent!r}; "
-                "use POST /api/labs/{lab_path}/nodes/from-paired-template with "
-                f"template_key={template_def.paired_parent!r} instead (see #206)."
-            ),
-        }
+    paired_child_error = _synthetic_paired_child_create_error(template_def)
+    if paired_child_error is not None:
+        return paired_child_error
 
     # Build a NodeCreate from the template defaults, allowing per-request overrides.
     console_mode = request.console or template_def.console_type or "telnet"
@@ -1743,6 +1747,9 @@ async def create_nodes_batch(
             "status": "fail",
             "message": str(exc),
         }
+    paired_child_error = _synthetic_paired_child_create_error(template)
+    if paired_child_error is not None:
+        return paired_child_error
     console_error = _validate_create_console_request(request, template)
     if console_error:
         return {
