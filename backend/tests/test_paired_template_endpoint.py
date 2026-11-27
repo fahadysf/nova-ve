@@ -2051,3 +2051,120 @@ async def test_collision_preflight_rejects_before_lab_access_or_id_allocation(
     assert body["code"] == 422
     assert invalid_reason in body["message"]
     assert "rename" in body["message"].lower()
+
+
+@pytest.mark.asyncio
+async def test_unrelated_malformed_standalone_does_not_block_paired_creation(
+    patched_split,
+):
+    _seed_paired_template(patched_split, VMX_PAIRED_TEMPLATE)
+    (patched_split.USER_TEMPLATES_DIR / "unrelated.yml").write_text(
+        "type: qemu\nname: [unterminated\n"
+    )
+    _seed_empty_lab(patched_split)
+
+    response = await labs.create_nodes_from_paired_template(
+        "demo.json",
+        NodeFromPairedTemplate(template_key="juniper-vmx"),
+        current_user=_admin(),
+    )
+    assert response["code"] == 200, response
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content", [b"type: [unterminated\n", b"\xff"])
+async def test_matching_malformed_standalone_returns_safe_preflight_error(
+    patched_split, content,
+):
+    _seed_generated_key_collision(patched_split)
+    (patched_split.USER_TEMPLATES_DIR / "pair__child.yml").write_bytes(content)
+
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+    body = _response_json(response)
+    assert _response_status(response) == 422
+    assert "pair__child" in body["message"]
+    assert "change the paired child id" in body["message"].lower()
+    assert "rename the standalone template file" in body["message"].lower()
+    assert str(patched_split.USER_TEMPLATES_DIR) not in body["message"]
+    assert "unterminated" not in body["message"]
+
+
+def test_paired_semantic_error_precedes_collision(patched_split):
+    _seed_generated_key_collision(patched_split)
+    paired = TemplateService().get_paired_user_template("pair")
+    paired["nodes"][0]["cpu"] = "not-an-int"
+
+    reason = TemplateService().paired_template_invalid_reason("pair", paired)
+    assert "cpu" in reason
+    assert "integer" in reason
+    assert "collides" not in reason
+
+
+def test_paired_document_in_runtime_folder_does_not_collide(patched_split):
+    _seed_generated_key_collision(patched_split)
+    (patched_split.USER_TEMPLATES_DIR / "pair__child.yml").unlink()
+    runtime_dir = patched_split.USER_TEMPLATES_DIR / "qemu"
+    runtime_dir.mkdir()
+    (runtime_dir / "pair__child.yml").write_text(
+        json.dumps(
+            {
+                "kind": "paired",
+                "nodes": [{"id": "nested", "kind": "qemu"}],
+                "links": [],
+            }
+        )
+    )
+    service = TemplateService()
+    paired = service.get_paired_user_template("pair")
+
+    assert service.paired_template_invalid_reason("pair", paired) is None
+    assert service.get_template("qemu", "pair__child").paired_parent == "pair"
+
+
+@pytest.mark.asyncio
+async def test_paired_lookup_and_preflight_use_to_thread(patched_split, monkeypatch):
+    import asyncio
+
+    _seed_generated_key_collision(patched_split)
+    calls = []
+    real_to_thread = asyncio.to_thread
+
+    async def tracked_to_thread(func, /, *args, **kwargs):
+        calls.append(func.__name__)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(labs.asyncio, "to_thread", tracked_to_thread)
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+
+    assert _response_status(response) == 422
+    assert calls == ["get_paired_user_template", "paired_template_invalid_reason"]
+
+
+def test_node_catalog_does_not_reread_template_files(patched_split, monkeypatch):
+    _seed_generated_key_collision(patched_split)
+    template_paths = {
+        patched_split.USER_TEMPLATES_DIR / "pair.json",
+        patched_split.USER_TEMPLATES_DIR / "pair__child.yml",
+    }
+    reads = []
+    real_read_text = Path.read_text
+
+    def counted_read_text(path, *args, **kwargs):
+        if path in template_paths:
+            reads.append(path)
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", counted_read_text)
+    TemplateService().build_node_catalog()
+
+    assert {path: reads.count(path) for path in template_paths} == {
+        path: 1 for path in template_paths
+    }

@@ -44,9 +44,11 @@ def test_catalog_build_loads_templates_and_docker_images_once(tmp_path, monkeypa
     loads = 0
     docker_loads = 0
 
-    def load_templates():
+    def load_templates(*, paired_templates, parsed_templates):
         nonlocal loads
         loads += 1
+        assert paired_templates == []
+        assert parsed_templates == []
         return templates
 
     def load_docker_images(*, strict=False):
@@ -55,24 +57,31 @@ def test_catalog_build_loads_templates_and_docker_images_once(tmp_path, monkeypa
         assert strict is False
         return {}
 
+    def build_paired_catalog(*, standalone_templates, paired_templates):
+        assert standalone_templates == templates
+        assert paired_templates == []
+        return []
+
     monkeypatch.setattr(service, "_load_templates", load_templates)
     monkeypatch.setattr(service, "_docker_image_catalog", load_docker_images)
     monkeypatch.setattr(service, "list_icon_assets", lambda: [])
-    monkeypatch.setattr(service, "_build_paired_catalog", lambda: [])
+    monkeypatch.setattr(service, "_build_paired_catalog", build_paired_catalog)
 
     catalog = service.build_node_catalog()
 
     assert [entry["key"] for entry in catalog["templates"]] == ["one", "two"]
     assert loads == 1
     assert docker_loads == 1
+    assert not hasattr(service, "_catalog_paired_templates")
+    assert not hasattr(service, "_catalog_standalone_templates")
 
 
 def test_catalog_build_strict_docker_is_opt_in(tmp_path, monkeypatch):
     service = TemplateService.__new__(TemplateService)
     service.images_dir = tmp_path
-    monkeypatch.setattr(service, "_load_templates", lambda: [_template("docker")])
+    monkeypatch.setattr(service, "_load_templates", lambda **_: [_template("docker")])
     monkeypatch.setattr(service, "list_icon_assets", lambda: [])
-    monkeypatch.setattr(service, "_build_paired_catalog", lambda: [])
+    monkeypatch.setattr(service, "_build_paired_catalog", lambda **_: [])
 
     def load_docker_images(*, strict=False):
         assert strict is True
@@ -91,9 +100,9 @@ def test_legacy_catalog_keeps_non_docker_templates_available_when_docker_is_offl
     qemu.type = "qemu"
     iol = _template("iol")
     iol.type = "iol"
-    monkeypatch.setattr(service, "_load_templates", lambda: [qemu, iol, _template("docker")])
+    monkeypatch.setattr(service, "_load_templates", lambda **_: [qemu, iol, _template("docker")])
     monkeypatch.setattr(service, "list_icon_assets", lambda: [])
-    monkeypatch.setattr(service, "_build_paired_catalog", lambda: [])
+    monkeypatch.setattr(service, "_build_paired_catalog", lambda **_: [])
     monkeypatch.setattr("app.services.template_service._qemu_version_options", lambda: [])
 
     def offline_docker(*, strict=False):
@@ -118,9 +127,9 @@ def test_strict_catalog_skips_docker_discovery_when_it_is_not_needed(
     template = _template(template_type)
     template.type = template_type
     template.raw = raw
-    monkeypatch.setattr(service, "_load_templates", lambda: [template])
+    monkeypatch.setattr(service, "_load_templates", lambda **_: [template])
     monkeypatch.setattr(service, "list_icon_assets", lambda: [])
-    monkeypatch.setattr(service, "_build_paired_catalog", lambda: [])
+    monkeypatch.setattr(service, "_build_paired_catalog", lambda **_: [])
     monkeypatch.setattr("app.services.template_service._qemu_version_options", lambda: [])
 
     def unexpected_docker_discovery(*, strict=False):
@@ -287,9 +296,9 @@ async def test_cold_catalog_times_out_docker_discovery_only_once(tmp_path, monke
     service.images_dir = tmp_path
     qemu = _template("qemu")
     qemu.type = "qemu"
-    monkeypatch.setattr(service, "_load_templates", lambda: [qemu, _template("docker")])
+    monkeypatch.setattr(service, "_load_templates", lambda **_: [qemu, _template("docker")])
     monkeypatch.setattr(service, "list_icon_assets", lambda: [])
-    monkeypatch.setattr(service, "_build_paired_catalog", lambda: [])
+    monkeypatch.setattr(service, "_build_paired_catalog", lambda **_: [])
     monkeypatch.setattr(labs, "TemplateService", lambda: service)
     probes = []
 
@@ -435,9 +444,9 @@ async def test_failed_refresh_keeps_snapshot_and_next_request_retries():
 async def test_offline_docker_refresh_keeps_warm_template_catalog(tmp_path, monkeypatch):
     template_service = TemplateService.__new__(TemplateService)
     template_service.images_dir = tmp_path
-    monkeypatch.setattr(template_service, "_load_templates", lambda: [_template("docker")])
+    monkeypatch.setattr(template_service, "_load_templates", lambda **_: [_template("docker")])
     monkeypatch.setattr(template_service, "list_icon_assets", lambda: [])
-    monkeypatch.setattr(template_service, "_build_paired_catalog", lambda: [])
+    monkeypatch.setattr(template_service, "_build_paired_catalog", lambda **_: [])
     now = 0.0
     docker_online = True
 
