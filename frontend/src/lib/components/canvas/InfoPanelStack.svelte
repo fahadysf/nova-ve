@@ -83,7 +83,7 @@
         {:else}
           {@const network = networksById[String(entry.refId)]}
           {#if network}
-            <NetworkInfoContent {labId} {network} />
+            <NetworkInfoContent {labId} {network} active={!concealed} />
           {:else}
             <div class="text-gray-500">Network no longer exists.</div>
           {/if}

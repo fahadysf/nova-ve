@@ -17,7 +17,7 @@
  * assignments) or patch single entries; all of them notify synchronously.
  */
 
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
 import type { LabDefaults, LabMeta, Link, NetworkData, NodeData, TopologyLink } from '$lib/types';
 
 export interface LabEditorState {
@@ -321,26 +321,15 @@ function createLabState() {
      */
     applyDragStop(kind: 'node' | 'network', id: number, left: number, top: number): boolean {
       const key = String(id);
-      let applied = false;
-      store.update((state) => {
-        if (kind === 'node') {
-          const current = state.nodes[key];
-          if (!current) return state;
-          applied = true;
-          return {
-            ...state,
-            nodes: { ...state.nodes, [key]: { ...current, left, top } },
-          };
-        }
-        const current = state.networks[key];
-        if (!current) return state;
-        applied = true;
-        return {
-          ...state,
-          networks: { ...state.networks, [key]: { ...current, left, top } },
-        };
+      const state = get(store);
+      const bucket = kind === 'node' ? 'nodes' : 'networks';
+      const current = state[bucket][key];
+      if (!current || (current.left === left && current.top === top)) return false;
+      store.set({
+        ...state,
+        [bucket]: { ...state[bucket], [key]: { ...current, left, top } },
       });
-      return applied;
+      return true;
     },
 
     reset(): void {

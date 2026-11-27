@@ -11,6 +11,7 @@
 
   export let labId: string;
   export let network: NetworkData;
+  export let active = true;
 
   type Field = { label: string; value: string };
   const REFRESH_MS = 10_000;
@@ -19,8 +20,10 @@
   let error = '';
   let requestId = 0;
   let mounted = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   async function load() {
+    if (!active) return;
     const current = ++requestId;
     try {
       const next = await apiGetData<NetworkInfo>(`/labs/${labId}/networks/${network.id}/info`, {
@@ -39,15 +42,22 @@
   // Reload at once when something visible in the panel changes on the canvas.
   $: dhcpKey = ['cidr', 'dhcp', 'dhcp_server', 'dhcp_start', 'dhcp_end'].map((key) => String(network.config?.[key] ?? '')).join(',');
   $: changeKey = `${labId}|${network.id}|${network.name}|${network.count ?? 0}|${network.shared === true}|${dhcpKey}`;
-  $: if (mounted && changeKey) void load();
+  $: if (mounted && active && changeKey) void load();
+  $: updatePolling(mounted && active);
+
+  function updatePolling(enabled: boolean) {
+    if (enabled) {
+      pollTimer ??= setInterval(() => void load(), REFRESH_MS);
+    } else if (pollTimer !== null) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+      requestId += 1;
+    }
+  }
 
   onMount(() => {
     mounted = true;
-    const timer = setInterval(() => void load(), REFRESH_MS);
-    return () => {
-      requestId += 1;
-      clearInterval(timer);
-    };
+    return () => updatePolling(false);
   });
 
   function when(value: string | null): string {

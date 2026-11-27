@@ -17,7 +17,7 @@
     iconSources?: string[];
     status?: number;
     transientStatus?: 'starting' | 'stopping';
-    onLifecycleAction?: (action: 'start' | 'stop') => void;
+    onLifecycleAction?: (nodeId: number, action: 'start' | 'stop') => void;
     type?: string;
     template?: string;
     console?: string;
@@ -48,7 +48,9 @@
 
   function runLifecycle(event: MouseEvent) {
     event.stopPropagation();
-    if (!transitioning) data.onLifecycleAction?.(running ? 'stop' : 'start');
+    if (!transitioning && typeof nodeId === 'number') {
+      data.onLifecycleAction?.(nodeId, running ? 'stop' : 'start');
+    }
   }
 
   // Flat neutral card face (#254): type is carried by the icon glyph only —

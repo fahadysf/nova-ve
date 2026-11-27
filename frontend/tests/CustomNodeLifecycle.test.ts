@@ -21,12 +21,12 @@ describe('node card lifecycle action', () => {
     card.addEventListener('click', onCardClick);
     await fireEvent.click(screen.getByRole('button', { name: 'Start edge-a' }));
     expect(onLifecycleAction).toHaveBeenCalledOnce();
-    expect(onLifecycleAction).toHaveBeenCalledWith('start');
+    expect(onLifecycleAction).toHaveBeenCalledWith(1, 'start');
     expect(onCardClick).not.toHaveBeenCalled();
 
     await rerender({ data: { ...props, status: 2 } });
     await fireEvent.click(screen.getByRole('button', { name: 'Stop edge-a' }));
-    expect(onLifecycleAction).toHaveBeenLastCalledWith('stop');
+    expect(onLifecycleAction).toHaveBeenLastCalledWith(1, 'stop');
     expect(onCardClick).not.toHaveBeenCalled();
   });
 

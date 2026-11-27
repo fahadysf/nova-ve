@@ -240,6 +240,52 @@ afterEach(() => {
   cleanup();
 });
 
+it('keeps the flow projection when only the lab revision changes', async () => {
+  const node = makeNode(1, 'fixture-router', 0, { hotplug: true, max_nics: 8, machine: 'q35' });
+  renderCanvas({ '1': node }, {});
+  const flow = screen.getByTestId('svelte-flow-mock');
+  await tick();
+  await tick();
+  const initialNodes = flow.getAttribute('data-node-publications');
+  const initialEdges = flow.getAttribute('data-edge-publications');
+
+  labState.setRevision(123);
+  await tick();
+  expect(flow.getAttribute('data-node-publications')).toBe(initialNodes);
+  expect(flow.getAttribute('data-edge-publications')).toBe(initialEdges);
+
+  labState.applyDragStop('node', 1, node.left + 10, node.top + 10);
+  await tick();
+  expect(Number(flow.getAttribute('data-node-publications'))).toBeGreaterThan(Number(initialNodes));
+});
+
+it('projects the latest topology after an unchanged drag ends', async () => {
+  const capabilities = { hotplug: true, max_nics: 8, machine: 'q35' };
+  const node = makeNode(1, 'fixture-router', 0, capabilities);
+  renderCanvas({ '1': node }, {});
+  const flow = screen.getByTestId('svelte-flow-mock');
+  await tick();
+  await tick();
+  const start = flow.getAttribute('data-node-publications');
+  await fireEvent(flow, new CustomEvent('mock-flow-event', {
+    detail: { type: 'nodedragstart', detail: {} },
+  }));
+
+  labState.upsertNode(2, makeNode(2, 'remote-router', 0, capabilities));
+  await tick();
+  expect(flow.getAttribute('data-node-publications')).toBe(start);
+
+  await fireEvent(flow, new CustomEvent('mock-flow-event', {
+    detail: {
+      type: 'nodedragstop',
+      detail: { targetNode: { id: 'node1', position: { x: node.left, y: node.top } } },
+    },
+  }));
+  expect(JSON.parse(flow.getAttribute('data-flow-nodes') ?? '[]').map((entry: { id: string }) => entry.id))
+    .toContain('node2');
+  expect(Number(flow.getAttribute('data-node-publications'))).toBe(Number(start) + 1);
+});
+
 describe('TopologyCanvas lab controls', () => {
   const capabilities = { hotplug: true, max_nics: 8, machine: 'q35' };
   const catalogPath = '/labs/lab-hotplug/node-catalog';
