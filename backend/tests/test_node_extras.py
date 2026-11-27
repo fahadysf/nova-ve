@@ -461,11 +461,11 @@ async def test_docker_vnc_runtime_uses_configured_container_port(monkeypatch, po
     containers: dict[str, dict] = {}
     _stub_docker_subprocess(monkeypatch, recorded, containers)
 
-    proxy_calls: list[dict[str, int]] = []
+    proxy_calls: list[dict[str, int | str]] = []
 
-    def fake_console_proxy_start(*, node_pid: int, listen_port: int, target_port: int) -> int:
+    def fake_console_proxy_start(*, node_pid: int, listen_port: int, target_port: int, log_id: str) -> int:
         proxy_calls.append(
-            {"node_pid": int(node_pid), "listen_port": int(listen_port), "target_port": int(target_port)}
+            {"node_pid": node_pid, "listen_port": listen_port, "target_port": target_port, "log_id": log_id}
         )
         return 4321
 
@@ -482,6 +482,9 @@ async def test_docker_vnc_runtime_uses_configured_container_port(monkeypatch, po
     assert published.endswith(":5901")
     assert proxy_calls
     assert proxy_calls[0]["target_port"] == 5901
+    from app.services.host_net import console_proxy_log_id
+
+    assert proxy_calls[0]["log_id"] == console_proxy_log_id(lab_data["id"], 1)
 
 
 def _docker_lab_with_command(command_value):

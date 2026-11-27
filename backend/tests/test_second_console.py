@@ -31,6 +31,7 @@ from app.schemas.node import (
     NodeFromTemplate,
     NodeUpdate,
 )
+from app.services.host_net import console_proxy_log_id
 from app.services.image_library_service import ImageLibraryService, TemplateUpdateInvalid
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateError, TemplateService
@@ -944,7 +945,8 @@ def test_docker_console_info_second_mode_resolves_secondary_session(
 
     lab_data = _docker_second_console_lab()
     _mock_runtime_binaries(monkeypatch)
-    respawns: list[dict[str, int]] = []
+    lab_data["nodes"]["1"].setdefault("extras", {})["vnc_port"] = 5901
+    respawns: list[dict[str, int | str]] = []
 
     def fake_proxy_start(**kwargs):
         respawns.append(dict(kwargs))
@@ -1003,7 +1005,10 @@ def test_docker_console_info_second_mode_resolves_secondary_session(
     assert second["port"] == 5905
     assert second["name"] == "alpine-1-second"
     # The dead secondary proxy was re-spawned into the container netns.
-    assert respawns == [{"node_pid": 4242, "listen_port": 5905, "target_port": 5900}]
+    assert respawns == [{
+        "node_pid": 4242, "listen_port": 5905, "target_port": 5901,
+        "log_id": console_proxy_log_id("lab-268-docker", 1, "second"),
+    }]
     with service._lock:
         assert (
             service._registry[service._key("lab-268-docker", 1)]["second_console_proxy_pid"]
