@@ -952,9 +952,7 @@ def test_207_predictor_handles_interface_naming_format_string(patched_split):
 
 
 def test_207_predictor_handles_interface_naming_format_list(patched_split):
-    """The predictor must also handle the pre-normalization list shape from
-    #179 (e.g. ``format: [\"fxp0\", \"ge-0/0/{n}\"]``) — it should join and
-    render the same way the runtime does."""
+    """Preflight and creation use the same labels for a saved format list."""
     from app.services.template_service import validate_paired_template
 
     template = {
@@ -972,19 +970,23 @@ def test_207_predictor_handles_interface_naming_format_list(patched_split):
         ],
     }
     assert validate_paired_template(template) is None
+    child = template["nodes"][0]
+    payload = labs._build_paired_child_payload(
+        node_id=7, template_key="list-format", child=child,
+        child_id="a", name="A", left=0, top=0,
+    )
+    assert [iface["name"] for iface in payload["interfaces"]] == ["fxp0", "ge-0/0/0", "ge-0/0/1"]
+    assert labs._resolve_iface_index(payload, child, "ge-0/0/0") == 1
 
 
 def test_207_predictor_overlays_explicit_onto_kind_default_base(patched_split):
     """Codex-iter2 fix: when interface_naming.explicit is shorter than
-    ethernet count, runtime overlays explicit onto a kind-default base
-    (qemu→Gi{n+1}, others→eth{n}) at positions 0..len(explicit)-1. The
-    predictor must mirror this — pre-fix it returned just the explicit
-    list and wrongly rejected links to the un-overlaid trailing
-    interfaces.
+    ethernet count, the remaining ports use neutral defaults and old links
+    can still use the former QEMU labels for those ports.
     """
     from app.services.template_service import validate_paired_template
 
-    # qemu child: ethernet=2, explicit=["mgmt0"] → ["mgmt0", "Gi2"]
+    # qemu child: ethernet=2, explicit=["mgmt0"] → ["mgmt0", "eth1"]
     template = {
         "kind": "paired",
         "nodes": [
@@ -994,7 +996,7 @@ def test_207_predictor_overlays_explicit_onto_kind_default_base(patched_split):
              "interface_naming": {"explicit": ["mgmt0"]}},
         ],
         "links": [
-            # Link references the runtime-overlaid trailing iface "Gi2"
+            # Link uses the old label for the automatically named second port.
             {"from_node": "a", "from_iface": "Gi2",
              "to_node": "b", "to_iface": "mgmt0"},
         ],
@@ -1328,7 +1330,7 @@ async def test_208e_paired_iface_lookup_error_returns_422(patched_split, monkeyp
 
     real_resolve = labs_module._resolve_iface_index
 
-    def angry_resolve(node, iface_name):
+    def angry_resolve(node, _child, iface_name):
         raise labs_module._PairedIfaceLookupError(
             f"Simulated post-pre-flight defect: interface {iface_name!r} on "
             f"node {node.get('name')!r} disappeared."
@@ -1717,13 +1719,7 @@ def test_208iter3_synthetic_child_load_uses_safe_default_for_bad_scalar(patched_
 
 
 def test_207iter3_predictor_normalizes_unsupported_kind_to_qemu(patched_split):
-    """Codex re-review caught predictor/runtime drift on unsupported child
-    kinds. Runtime ``_build_paired_child_payload`` coerces any kind outside
-    ``{qemu, docker, iol, dynamips}`` to ``qemu`` (→ ``Gi{n+1}`` fallback
-    naming). Pre-fix predictor treated every non-qemu kind as ``eth{n}``,
-    so a ``kind:"weirdkind"`` child linked via ``Gi1`` was rejected by
-    pre-flight while runtime would have built ``Gi1`` cleanly. Verify the
-    pre-flight reason matches runtime now."""
+    """Older paired recipes can use the former QEMU fallback as an alias."""
     from app.services.template_service import validate_paired_template
 
     weird_template = {
@@ -1739,14 +1735,30 @@ def test_207iter3_predictor_normalizes_unsupported_kind_to_qemu(patched_split):
              "ethernet": 1, "console": "telnet"},
         ],
         "links": [
-            # ``Gi1`` is the qemu-fallback name for ethernet index 0 on a
-            # weirdkind child (which runtime coerces to qemu).
+            # This recipe predates the neutral QEMU interface names.
             {"from_node": "a", "from_iface": "Gi1", "to_node": "b", "to_iface": "Gi1"},
         ],
     }
 
     reason = validate_paired_template(weird_template)
     assert reason is None, f"Predictor drifted from runtime — got reason: {reason}"
+    child = weird_template["nodes"][0]
+    payload = labs._build_paired_child_payload(
+        node_id=7, template_key="weird-paired", child=child,
+        child_id="a", name="A", left=0, top=0,
+    )
+    assert [iface["name"] for iface in payload["interfaces"]] == ["eth0", "eth1"]
+    assert labs._resolve_iface_index(payload, child, "Gi1") == 0
+
+
+@pytest.mark.parametrize("naming", [{"format": "eth{n}"}, {"explicit": ["eth0"]}])
+def test_legacy_qemu_fallback_alias_does_not_override_template_names(naming):
+    from app.services.template_service import _paired_child_iface_names, paired_child_iface_index
+
+    child = {"kind": "qemu", "ethernet": 1, "interface_naming": naming}
+    available = _paired_child_iface_names(child)
+    assert paired_child_iface_index(child, "eth0", available) == 0
+    assert paired_child_iface_index(child, "Gi1", available) is None
 
 
 def test_207iter3_predictor_and_runtime_share_kind_normalization():
@@ -1787,10 +1799,10 @@ def test_207iter3_predictor_blank_kind_falls_back_to_qemu():
     from app.services.template_service import _paired_child_iface_names
 
     blank = {"ethernet": 2, "kind": ""}
-    assert _paired_child_iface_names(blank) == ["Gi1", "Gi2"]
+    assert _paired_child_iface_names(blank) == ["eth0", "eth1"]
 
     missing = {"ethernet": 1}
-    assert _paired_child_iface_names(missing) == ["Gi1"]
+    assert _paired_child_iface_names(missing) == ["eth0"]
 
 
 def test_208iter3_validate_paired_template_flags_bad_cpu(patched_split):

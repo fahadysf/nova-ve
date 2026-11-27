@@ -401,7 +401,7 @@ async def test_create_node_applies_template_explicit_interface_names(prepared_te
 
     assert response["code"] == 200
     assert [port["name"] for port in response["data"]["interfaces"]] == [
-        "management", "uplink", "Gi3", "Gi4"
+        "management", "uplink", "eth2", "eth3"
     ]
 
 
