@@ -1934,6 +1934,10 @@ class TemplateService:
                 payload = parsed_by_path[template_path]
             else:
                 payload = yaml.safe_load(template_path.read_text()) or {}
+            if not isinstance(payload, dict):
+                raise TemplateError(
+                    f"Template {template_path.stem!r} must contain a mapping at the YAML document root."
+                )
             template_type = _standalone_template_type(payload, template_path)
             if template_type is None:
                 continue

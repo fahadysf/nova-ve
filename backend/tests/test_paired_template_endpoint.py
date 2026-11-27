@@ -2093,6 +2093,37 @@ async def test_matching_malformed_standalone_returns_safe_preflight_error(
     assert "unterminated" not in body["message"]
 
 
+@pytest.mark.asyncio
+async def test_non_mapping_candidate_fails_catalog_and_rejects_post_safely(
+    patched_split,
+):
+    from app.services.template_service import TemplateError
+
+    _seed_generated_key_collision(patched_split)
+    candidate = patched_split.USER_TEMPLATES_DIR / "pair__child.yml"
+    candidate.write_text("- invalid\n")
+
+    with pytest.raises(TemplateError) as caught:
+        TemplateService().build_node_catalog()
+    catalog_error = str(caught.value)
+    assert "pair__child" in catalog_error
+    assert "mapping" in catalog_error
+    assert str(candidate) not in catalog_error
+    assert "invalid" not in catalog_error
+
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+    body = _response_json(response)
+    assert _response_status(response) == 422
+    assert "change the paired child id" in body["message"].lower()
+    assert "rename the standalone template file" in body["message"].lower()
+    assert str(candidate) not in body["message"]
+    assert "invalid" not in body["message"]
+
+
 def test_paired_semantic_error_precedes_collision(patched_split):
     _seed_generated_key_collision(patched_split)
     paired = TemplateService().get_paired_user_template("pair")
