@@ -27,6 +27,7 @@ from typing import Any
 from app.config import get_settings
 
 MARKER_NAMESPACE = "nova-ve-lab"
+DOCKER_DISCOVERY_TIMEOUT_SECONDS = 5
 _MARKER_PREFIX = f"{MARKER_NAMESPACE}/"
 _SANITIZE_RE = re.compile(r"[^a-z0-9_.\-]+")
 
@@ -52,13 +53,20 @@ def _resolve_docker() -> _DockerCmd | None:
     return _DockerCmd(binary=binary, env=env)
 
 
-def _run(cmd: _DockerCmd, args: list[str], *, check: bool = True) -> subprocess.CompletedProcess:
+def _run(
+    cmd: _DockerCmd,
+    args: list[str],
+    *,
+    check: bool = True,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess:
     proc = subprocess.run(
         [cmd.binary, *args],
         capture_output=True,
         text=True,
         check=False,
         env=cmd.env,
+        timeout=timeout,
     )
     if check and proc.returncode != 0:
         stderr = (proc.stderr or "").strip() or (proc.stdout or "").strip() or "docker command failed"
@@ -147,7 +155,7 @@ class DockerImageService:
         "nova-ve/desktop:latest",
     )
 
-    def list_all_images(self) -> list[ImageRecord]:
+    def list_all_images(self, *, strict: bool = False) -> list[ImageRecord]:
         """Return every local image, grouped by image ID.
 
         Images with only marker tags pointing at them are still returned so
@@ -157,8 +165,21 @@ class DockerImageService:
         cmd = _resolve_docker()
         if cmd is None:
             return []
-        proc = _run(cmd, ["image", "ls", "--no-trunc", "--format", "{{json .}}"], check=False)
+        try:
+            proc = _run(
+                cmd,
+                ["image", "ls", "--no-trunc", "--format", "{{json .}}"],
+                check=False,
+                timeout=DOCKER_DISCOVERY_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            if strict:
+                raise
+            return []
         if proc.returncode != 0:
+            if strict:
+                stderr = (proc.stderr or "").strip() or "docker image ls failed"
+                raise DockerImageError(stderr)
             return []
 
         records: dict[str, ImageRecord] = {}
@@ -194,7 +215,7 @@ class DockerImageService:
                     record.repo_tags.append(reference)
         return list(records.values())
 
-    def list_marked_image_names(self) -> list[str]:
+    def list_marked_image_names(self, *, strict: bool = False) -> list[str]:
         """Return the canonical ``repo:tag`` strings that are marked.
 
         This is the data the node catalog actually wants -- it should advertise
@@ -210,7 +231,7 @@ class DockerImageService:
         if sandbox_mode():
             return list(self._SANDBOX_MARKED_IMAGES)
         out: list[str] = []
-        for record in self.list_all_images():
+        for record in self.list_all_images(strict=strict):
             if not record.marked:
                 continue
             non_marker = record.repo_tags
@@ -221,13 +242,30 @@ class DockerImageService:
         # Stable sort: case-insensitive by name.
         return sorted(set(out), key=str.lower)
 
-    def console_hints(self, reference: str) -> ImageConsoleHints:
+    def console_hints(self, reference: str, *, strict: bool = False) -> ImageConsoleHints:
         """Return console defaults inferred from a local image's config."""
+        from app.services.host_net import sandbox_mode
+
+        if sandbox_mode():
+            return ImageConsoleHints()
         cmd = _resolve_docker()
         if cmd is None or not reference:
             return ImageConsoleHints()
-        proc = _run(cmd, ["image", "inspect", reference], check=False)
+        try:
+            proc = _run(
+                cmd,
+                ["image", "inspect", reference],
+                check=False,
+                timeout=DOCKER_DISCOVERY_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            if strict:
+                raise
+            return ImageConsoleHints()
         if proc.returncode != 0:
+            if strict:
+                stderr = (proc.stderr or "").strip() or "docker image inspect failed"
+                raise DockerImageError(stderr)
             return ImageConsoleHints()
         try:
             payload = json.loads(proc.stdout or "[]")

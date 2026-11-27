@@ -83,9 +83,21 @@ vi.mock('$lib/services/labApi', () => ({
   },
 }));
 
+const { wsHandlers } = vi.hoisted(() => ({
+  wsHandlers: new Map<string, Set<(message: { type: string }) => void>>(),
+}));
+
 vi.mock('$lib/services/wsClient', () => ({
   createWsClient: () => ({
-    on: vi.fn(),
+    on: vi.fn((type: string, handler: (message: { type: string }) => void) => {
+      let handlers = wsHandlers.get(type);
+      if (!handlers) {
+        handlers = new Set();
+        wsHandlers.set(type, handlers);
+      }
+      handlers.add(handler);
+      return () => handlers.delete(handler);
+    }),
     connect: vi.fn(),
     close: vi.fn(),
   }),
@@ -210,6 +222,10 @@ function renderCanvas(
   });
 }
 
+function emitWs(type: string) {
+  for (const handler of wsHandlers.get(type) ?? []) handler({ type });
+}
+
 function makeSharingNetwork(overrides: Partial<NetworkData> = {}): NetworkData {
   return {
     id: 7, name: 'core', type: 'linux_bridge', left: 100, top: 100, icon: '',
@@ -237,6 +253,7 @@ afterEach(() => {
   dragLinkStore.cancel();
   selectedPortInfoStore.set(null);
   labState.reset();
+  wsHandlers.clear();
   cleanup();
 });
 
@@ -285,6 +302,30 @@ it('projects the latest topology after an unchanged drag ends', async () => {
     .toContain('node2');
   expect(Number(flow.getAttribute('data-node-publications'))).toBe(Number(start) + 1);
 });
+
+it.each(['node_catalog_updated', '__open'])(
+  '%s refreshes only the node catalog',
+  async (eventType) => {
+    const snapshotNeeded = vi.fn();
+    render(CanvasChangedHarness, {
+      props: { labId: 'lab-hotplug', snapshotNeeded },
+    });
+    const apiMock = vi.mocked(apiRequest);
+    await waitFor(() => expect(apiMock).toHaveBeenCalledWith(
+      '/labs/lab-hotplug/node-catalog',
+      expect.anything(),
+    ));
+    apiMock.mockClear();
+
+    emitWs(eventType);
+
+    await waitFor(() => expect(apiMock).toHaveBeenCalledTimes(1));
+    expect(apiMock).toHaveBeenCalledWith('/labs/lab-hotplug/node-catalog', {
+      suppressToast: true,
+    });
+    expect(snapshotNeeded).not.toHaveBeenCalled();
+  },
+);
 
 describe('TopologyCanvas lab controls', () => {
   const capabilities = { hotplug: true, max_nics: 8, machine: 'q35' };

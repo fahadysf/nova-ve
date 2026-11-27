@@ -478,7 +478,7 @@ async def test_update_topology_route_is_not_shadowed_by_update_lab(monkeypatch, 
 async def test_node_catalog_and_batch_routes_are_available(monkeypatch, patched_route_settings):
     monkeypatch.setattr(
         "app.services.template_service.TemplateService._docker_image_catalog",
-        lambda _self: {
+        lambda _self, **_kwargs: {
             "nova-ve/alpine-telnet:latest": {
                 "image": "nova-ve/alpine-telnet:latest",
                 "files": [],

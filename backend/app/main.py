@@ -111,6 +111,7 @@ app.add_exception_handler(labs.LabMembershipPathError, labs.lab_access_denied_ha
 
 @app.on_event("startup")
 async def startup():
+    labs.node_catalog_service.start()
     # Refuse to serve while a privileged server still reads a service-owned config.
     from app.services.dnsmasq_layout import require_secure_dnsmasq_layout
 
@@ -238,6 +239,7 @@ async def start_recording_retention():
 async def shutdown():
     from app.services.console_recording import get_console_recorder
 
+    await labs.node_catalog_service.close()
     retention_task = getattr(app.state, "recording_retention_task", None)
     if retention_task is not None:
         retention_task.cancel()

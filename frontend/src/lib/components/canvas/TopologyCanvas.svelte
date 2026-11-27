@@ -84,6 +84,7 @@
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
   import { labState, type LabEditorState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
+  import { createNodeCatalogLoader, type NodeCatalogLoader } from '$lib/services/nodeCatalogLoader';
   import { deriveEdges, attachRouteObstacles, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
   import { createdFromLinkResponse, type LinkCreateResponse } from '$lib/services/linkCreate';
   import {
@@ -352,6 +353,7 @@
   let addMenuKind: 'network' | null = null;
   let canvasLocked = false;
   let nodeCatalog: NodeCatalog | null = null;
+  let catalogLoader: NodeCatalogLoader | null = null;
   let nodeModalOpen = false;
   let nodeModalMode: 'create' | 'edit' = 'create';
   let nodeModalNode: NodeData | null = null;
@@ -1282,19 +1284,31 @@
     };
   }
 
-  onMount(async () => {
-    try {
-      const catalogResponse = await apiRequest<NodeCatalog>(`/labs/${labId}/node-catalog`, {
-        suppressToast: true
-      });
-      nodeCatalog = catalogResponse.data;
-      nodesStore.update(projectNodeIcons);
-      paletteItems = NETWORK_PALETTE;
-    } catch (_error) {
-      paletteItems = NETWORK_PALETTE;
-    } finally {
-      paletteLoading = false;
-    }
+  onMount(() => {
+    const loader = createNodeCatalogLoader({
+      load: async () => {
+        const response = await apiRequest<NodeCatalog>(`/labs/${labId}/node-catalog`, {
+          suppressToast: true
+        });
+        return response.data;
+      },
+      onCatalog: (catalog) => {
+        nodeCatalog = catalog;
+        nodesStore.update(projectNodeIcons);
+        paletteItems = NETWORK_PALETTE;
+        paletteLoading = false;
+      },
+      onError: () => {
+        paletteItems = NETWORK_PALETTE;
+        paletteLoading = false;
+      },
+    });
+    catalogLoader = loader;
+    loader.refresh();
+    return () => {
+      loader.close();
+      if (catalogLoader === loader) catalogLoader = null;
+    };
   });
 
   function decodeId(elementId: string): { type: 'node' | 'network'; id: number } | null {
@@ -2291,6 +2305,8 @@
       ]) {
         client.on(event, () => dispatch('snapshot-needed'));
       }
+      client.on('node_catalog_updated', () => catalogLoader?.refresh());
+      client.on('__open', () => catalogLoader?.refresh());
       client.on('lab_topology', (_msg: WsMessage) => {
         // lab_topology resets the reconciliation store (done inside labWs);
         // republish edges so overlays clear from the canvas immediately.

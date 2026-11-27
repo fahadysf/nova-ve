@@ -10,6 +10,9 @@ from typing import Any
 from fastapi import WebSocket
 
 
+_CATALOG_SEND_TIMEOUT_S = 1.0
+
+
 @dataclass
 class WsEvent:
     seq: int
@@ -24,6 +27,7 @@ class _LabState:
     events: deque = field(default_factory=deque)
     next_seq: int = 1
     subscribers: dict[WebSocket, str | None] = field(default_factory=dict)
+    pending_subscribers: set[WebSocket] = field(default_factory=set)
 
 
 class WsHub:
@@ -37,6 +41,22 @@ class WsHub:
             self._labs[lab_id] = _LabState(events=deque(maxlen=self._ring_size))
         return self._labs[lab_id]
 
+    def register(self, lab_id: str, ws: WebSocket) -> None:
+        self._get_or_create(lab_id).pending_subscribers.add(ws)
+
+    async def publish_all(self, event_type: str, payload: dict) -> list[WsEvent]:
+        async with self._lock:
+            lab_ids = [
+                lab_id
+                for lab_id, state in self._labs.items()
+                if state.subscribers or state.pending_subscribers
+            ]
+        events = await asyncio.gather(*(
+            self.publish(lab_id, event_type, payload, send_timeout=_CATALOG_SEND_TIMEOUT_S)
+            for lab_id in lab_ids
+        ))
+        return [event for event in events if event is not None]
+
     async def publish(
         self,
         lab_id: str,
@@ -46,6 +66,7 @@ class WsHub:
         *,
         identity: str | None = None,
         guard: AbstractAsyncContextManager[bool] | None = None,
+        send_timeout: float | None = None,
     ) -> WsEvent | None:
         async with guard if guard is not None else nullcontext(True) as valid:
             if not valid:
@@ -65,9 +86,17 @@ class WsHub:
         dead: list[WebSocket] = []
         for ws in subscribers:
             try:
-                await ws.send_json(
-                    {"seq": event.seq, "type": event.type, "rev": event.rev, "payload": event.payload}
-                )
+                message = {"seq": event.seq, "type": event.type, "rev": event.rev, "payload": event.payload}
+                if send_timeout is None:
+                    await ws.send_json(message)
+                else:
+                    async with asyncio.timeout(send_timeout):
+                        await ws.send_json(message)
+            except TimeoutError:
+                # Catalog sends are best effort. The event remains replayable,
+                # and a slow socket can still receive its normal lab events.
+                if send_timeout is None:
+                    dead.append(ws)
             except Exception:
                 dead.append(ws)
 
@@ -87,6 +116,7 @@ class WsHub:
             state = self._get_or_create(lab_id)
             if after_seq is not None and after_seq != state.next_seq - 1:
                 return False
+            state.pending_subscribers.discard(ws)
             state.subscribers[ws] = identity
             return True
 
@@ -95,6 +125,7 @@ class WsHub:
             state = self._labs.get(lab_id)
             if state:
                 state.subscribers.pop(ws, None)
+                state.pending_subscribers.discard(ws)
 
     def replay_since(
         self, lab_id: str, last_seq: int, *, identity: str | None = None,

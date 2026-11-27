@@ -6,6 +6,7 @@
 
   export let labId: string;
   export let reasons: string[] = [];
+  export let snapshotNeeded: () => void = () => {};
 </script>
 
 <TopologyCanvas
@@ -13,4 +14,5 @@
   consoleSelectorWindows={[]}
   consoleMinimizedWindows={[]}
   on:changed={(event) => reasons.push(event.detail.reason)}
+  on:snapshot-needed={snapshotNeeded}
 />

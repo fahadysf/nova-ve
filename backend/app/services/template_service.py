@@ -1279,7 +1279,13 @@ class TemplateService:
 
     def list_images(self, template_type: str, template_key: str) -> dict[str, dict[str, Any]]:
         template = self.get_template(template_type, template_key)
+        return self._list_images(template)
 
+    def _list_images(
+        self,
+        template: TemplateDefinition,
+        docker_images: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         # #206 — synthetic paired children declare their image explicitly in
         # the paired template JSON. Surface only that image so validation in
         # validate_node_request matches what the paired-create endpoint uses.
@@ -1291,7 +1297,7 @@ class TemplateService:
 
         images: dict[str, dict[str, Any]] = {}
 
-        if template_type == "docker":
+        if template.type == "docker":
             # Platform container templates (#288) declare their image in the
             # YAML ``image:`` key — pin the template to it so the catalog's
             # ``defaults.image`` and node-request validation resolve to the
@@ -1304,20 +1310,20 @@ class TemplateService:
             # ``/var/lib/nova-ve/images/docker/`` walk entirely so legacy
             # placeholder directories cannot leak un-curated entries into the
             # add-node modal.
-            images.update(self._docker_image_catalog())
+            if docker_images is None:
+                docker_images = self._docker_image_catalog()
+            images.update(docker_images)
             return images
 
-        image_root = self.images_dir / template_type
+        image_root = self.images_dir / template.type
         if image_root.exists():
-            apply_name_filter = template_type != "docker"
             for child in sorted(image_root.iterdir()):
                 image_info = self._image_info(child)
                 if not image_info:
                     continue
-                if apply_name_filter:
-                    folder_match = str(image_info["image"])
-                    if not _matches_template_image_name(template, folder_match):
-                        continue
+                folder_match = str(image_info["image"])
+                if not _matches_template_image_name(template, folder_match):
+                    continue
                 images[image_info["image"]] = image_info
 
         return images
@@ -1371,10 +1377,22 @@ class TemplateService:
 
     def build_node_catalog(self) -> dict[str, Any]:
         templates: list[dict[str, Any]] = []
+        loaded_templates = self._load_templates()
         icon_assets = self.list_icon_assets()
-        icon_options = sorted(set(self.list_icon_options()) | set(icon_assets))
-        for template in self._load_templates():
-            images = list(self.list_images(template.type, template.key).values())
+        icon_options = sorted(
+            {"Router.png", "Server.png"}
+            | {template.icon for template in loaded_templates}
+            | set(icon_assets)
+        )
+        needs_docker_images = any(
+            template.type == "docker"
+            and template.paired_parent is None
+            and not str(template.raw.get("image") or "").strip()
+            for template in loaded_templates
+        )
+        docker_images = self._docker_image_catalog(strict=True) if needs_docker_images else {}
+        for template in loaded_templates:
+            images = list(self._list_images(template, docker_images).values())
             default_image = images[0]["image"] if images else ""
             extras_schema = _extras_schema_for(template.type, template.extras)
             defaults_extras = self._compose_extras(extras_schema, template.extras)
@@ -1919,7 +1937,7 @@ class TemplateService:
             }
         return None
 
-    def _docker_image_catalog(self) -> dict[str, dict[str, Any]]:
+    def _docker_image_catalog(self, *, strict: bool = False) -> dict[str, dict[str, Any]]:
         """Surface only docker images that have been marked for lab use.
 
         See ``app.services.docker_image_service`` for the marker-tag
@@ -1930,8 +1948,8 @@ class TemplateService:
 
         images: dict[str, dict[str, Any]] = {}
         service = DockerImageService()
-        for image_name in service.list_marked_image_names():
-            hints = service.console_hints(image_name)
+        for image_name in service.list_marked_image_names(strict=strict):
+            hints = service.console_hints(image_name, strict=strict)
             images[image_name] = {
                 "image": image_name,
                 "files": [],

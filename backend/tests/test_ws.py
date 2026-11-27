@@ -419,3 +419,31 @@ def test_ring_evicts_oldest():
     assert len(ring_events) == 200
     assert ring_events[0].seq == 51
     assert ring_events[-1].seq == 250
+
+
+@pytest.mark.asyncio
+async def test_catalog_fanout_bounds_a_stalled_socket(monkeypatch):
+    hub = WsHub()
+    delivered = []
+
+    class StalledSocket:
+        async def send_json(self, _message):
+            await asyncio.Event().wait()
+
+    class ListeningSocket:
+        async def send_json(self, message):
+            delivered.append(message)
+
+    monkeypatch.setattr(ws_hub_module, "_CATALOG_SEND_TIMEOUT_S", 0.01, raising=False)
+    await hub.subscribe("one.json", StalledSocket())
+    await hub.subscribe("two.json", ListeningSocket())
+
+    events = await asyncio.wait_for(
+        hub.publish_all("node_catalog_updated", {"generation": 4}), 0.35,
+    )
+
+    assert len(events) == 2
+    assert delivered[0]["payload"] == {"generation": 4}
+    replay, needs_resnapshot = hub.replay_since("one.json", 0)
+    assert not needs_resnapshot
+    assert replay[0].payload == {"generation": 4}

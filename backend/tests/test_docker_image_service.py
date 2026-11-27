@@ -27,7 +27,7 @@ def _stub_docker(monkeypatch, ls_stdout: str, recorder: list[list[str]] | None =
     """Make ``shutil.which('docker')`` succeed and replace subprocess.run."""
     monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker" if b == "docker" else None)
 
-    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
         if recorder is not None:
             recorder.append(list(cmd))
         # docker image ls
@@ -119,7 +119,7 @@ def test_list_all_images_returns_empty_when_docker_missing(monkeypatch):
 def test_console_hints_prefers_vnc_port_env(monkeypatch):
     monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker" if b == "docker" else None)
 
-    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
         if cmd[1:3] == ["image", "inspect"]:
             return SimpleNamespace(
                 returncode=0,
@@ -136,7 +136,7 @@ def test_console_hints_prefers_vnc_port_env(monkeypatch):
 def test_console_hints_uses_exposed_vnc_port(monkeypatch):
     monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker" if b == "docker" else None)
 
-    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
         if cmd[1:3] == ["image", "inspect"]:
             return SimpleNamespace(
                 returncode=0,
@@ -166,7 +166,7 @@ def test_mark_invokes_docker_tag_with_canonical_marker(monkeypatch):
 def test_mark_rejects_image_not_present_locally(monkeypatch):
     monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker")
 
-    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
         if cmd[1:3] == ["image", "inspect"]:
             return SimpleNamespace(returncode=1, stdout="", stderr="No such image")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -188,7 +188,7 @@ def test_unmark_removes_only_the_marker_tag(monkeypatch):
 def test_unmark_is_idempotent_when_marker_missing(monkeypatch):
     monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker")
 
-    def fake_run(cmd, capture_output=False, text=False, check=False, env=None):
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
         return SimpleNamespace(returncode=1, stdout="", stderr="Error: No such image: nova-ve-lab/alpine:3.22")
 
     monkeypatch.setattr(svc.subprocess, "run", fake_run)
@@ -220,6 +220,47 @@ def test_pull_can_skip_marking(monkeypatch):
     result = svc.DockerImageService().pull("alpine:3.22", mark_after=False)
     assert result["marker"] is None
     assert not any(c[1] == "tag" for c in seen)
+
+
+def test_discovery_has_a_finite_timeout_but_pull_does_not(monkeypatch):
+    monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker")
+    timeouts = []
+
+    def fake_run(cmd, capture_output=False, text=False, check=False, env=None, timeout=None):
+        timeouts.append((cmd[1:3], timeout))
+        if cmd[1:3] == ["image", "ls"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[1:3] == ["image", "inspect"]:
+            return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(svc.subprocess, "run", fake_run)
+    service = svc.DockerImageService()
+    service.list_all_images()
+    service.console_hints("alpine:latest")
+    service.pull("alpine:latest", mark_after=False)
+
+    assert timeouts == [
+        (["image", "ls"], svc.DOCKER_DISCOVERY_TIMEOUT_SECONDS),
+        (["image", "inspect"], svc.DOCKER_DISCOVERY_TIMEOUT_SECONDS),
+        (["pull", "alpine:latest"], None),
+    ]
+
+
+def test_discovery_timeout_degrades_to_an_empty_result(monkeypatch):
+    monkeypatch.setattr(svc.shutil, "which", lambda b: "/usr/bin/docker")
+
+    def fake_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("docker", 1)
+
+    monkeypatch.setattr(svc.subprocess, "run", fake_run)
+    service = svc.DockerImageService()
+    assert service.list_all_images() == []
+    assert service.console_hints("alpine:latest") == svc.ImageConsoleHints()
+    with pytest.raises(subprocess.TimeoutExpired):
+        service.list_all_images(strict=True)
+    with pytest.raises(subprocess.TimeoutExpired):
+        service.console_hints("alpine:latest", strict=True)
 
 
 def test_parse_size_handles_units():

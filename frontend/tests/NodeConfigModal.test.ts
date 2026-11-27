@@ -660,3 +660,47 @@ describe('NodeConfigModal capabilities banner — static paths', () => {
     );
   });
 });
+
+
+it.each([false, true])('refreshes catalog choices without resetting an open draft (added template: %s)', async (added) => {
+  const template = makeTemplate();
+  const { rerender } = render(NodeConfigModalHarness, {
+    props: { open: true, mode: 'create', catalog: makeCatalog(template) },
+  });
+  await tick();
+  await fireEvent.input(screen.getByLabelText('Name prefix'), { target: { value: 'Custom router' } });
+  const refreshed = { ...template, images: [...template.images, { image: 'vyos-next' }] };
+  await rerender({
+    catalog: makeCatalog(refreshed, ...(added ? [{ ...template, key: 'extra', name: 'Extra' }] : [])),
+  });
+  await tick();
+
+  expect(screen.getByLabelText('Name prefix')).toHaveValue('Custom router');
+  expect(screen.getByLabelText('Image')).toHaveTextContent('vyos-next');
+});
+
+it('keeps paired name overrides and blocks submission if the selected pair disappears', async () => {
+  const catalog = makeCatalog(makeTemplate());
+  const pair = {
+    key: 'paired', name: 'Paired fixture', vendor: 'fixture', child_count: 1, link_count: 0,
+    children: [{ id: 'first', kind: 'qemu', name: 'Guest', image: 'vyos-1.4', cpu: 1, ram: 1024, ethernet: 4 }],
+    links: [],
+  };
+  const fullCatalog = { ...catalog, paired_templates: [pair] };
+  const { rerender } = render(NodeConfigModalHarness, {
+    props: { open: true, mode: 'create', catalog: fullCatalog },
+  });
+  await tick();
+  const picker = screen.getByRole('option', { name: /Paired fixture/ }).closest('select')!;
+  await fireEvent.change(picker, { target: { value: 'paired' } });
+  await fireEvent.input(screen.getByLabelText('Name · first'), { target: { value: 'Custom guest' } });
+
+  await rerender({ catalog });
+  const form = screen.getByRole('dialog').querySelector('form')!;
+  expect(form.querySelector('[type=submit]')).toBeDisabled();
+  await fireEvent.submit(form);
+  expect(screen.getByTestId('submit-payload').textContent).toBe('');
+
+  await rerender({ catalog: fullCatalog });
+  expect(screen.getByLabelText('Name · first')).toHaveValue('Custom guest');
+});
