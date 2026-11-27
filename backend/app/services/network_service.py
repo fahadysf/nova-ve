@@ -29,6 +29,7 @@ from app.config import get_settings
 from app.services import host_net
 from app.services.async_utils import notify_after_mutation, run_mutation
 from app.services.cloud_inventory_service import (
+    CloudNetworkRef,
     LINUX_BRIDGE_TYPE,
     bridge_dhcp_config_on,
     bridge_dhcp_enabled,
@@ -782,18 +783,25 @@ def _member_summaries(members: List[LabNetwork]) -> List[dict]:
     ]
 
 
-def _ensure_shared_bridge(owner: LabNetwork, bridge: str) -> None:
+def _ensure_shared_bridge(
+    owner: LabNetwork | CloudNetworkRef, bridge: str, *, require_owner: bool = False,
+) -> None:
     """Provision a shared bridge under its owner's identity if it is missing."""
     if not host_net.bridge_exists(bridge):
         try:
             host_net.bridge_add(bridge)
-        except host_net.HostNetEEXIST:
-            pass  # the other lab was opened at the same moment
+        except host_net.HostNetEEXIST as exc:
+            if host_net.bridge_fingerprint_check(bridge, owner.lab_id, owner.network_id) != "match":
+                raise host_net.HostNetBridgeOwnershipError(
+                    _bridge_ownership_message(bridge, owner.lab_id, owner.network_id)
+                ) from exc
+            return
         host_net.bridge_fingerprint_write(bridge, owner.lab_id, owner.network_id)
         return
-    if host_net.bridge_fingerprint_check(
-        bridge, owner.lab_id, owner.network_id
-    ) == "mismatch" and not reclaim_fingerprint(bridge, owner.lab_id, owner.network_id):
+    status = host_net.bridge_fingerprint_check(bridge, owner.lab_id, owner.network_id)
+    if (status == "absent" and require_owner) or (
+        status == "mismatch" and not reclaim_fingerprint(bridge, owner.lab_id, owner.network_id)
+    ):
         raise host_net.HostNetBridgeOwnershipError(
             _bridge_ownership_message(bridge, owner.lab_id, owner.network_id)
         )
@@ -803,6 +811,25 @@ def _bridge_gateway_cidr(config: dict) -> str:
     cidr = _validate_cidr(config.get("cidr"))
     gateway = _validate_ipv4(config.get("gateway"), "config.gateway")
     return f"{gateway}/{cidr.prefixlen}"
+
+
+def _current_nat_cloud_owner(data: dict, owner: CloudNetworkRef, bridge: str) -> dict:
+    """Resolve the same owner after taking its lab lock."""
+    network = (data.get("networks") or {}).get(str(owner.network_id))
+    if (
+        str(data.get("id") or owner.lab_path) != owner.lab_id
+        or not isinstance(network, dict)
+        or network.get("type") != NAT_CLOUD_TYPE
+    ):
+        raise NetworkServiceError(409, "Shared NAT-Cloud owner changed during reconciliation.")
+    config = network.get("config") or {}
+    runtime = network.get("runtime") or {}
+    if not isinstance(config, dict) or not isinstance(runtime, dict):
+        raise NetworkServiceError(409, "Shared NAT-Cloud owner has invalid bridge metadata.")
+    current_bridge = runtime.get("bridge_name") or host_net.bridge_name(owner.lab_id, owner.network_id)
+    if config.get("shared_cloud_id") or current_bridge != bridge:
+        raise NetworkServiceError(409, "Shared NAT-Cloud owner changed during reconciliation.")
+    return network
 
 
 def _serialize_network(network: dict, count: int) -> dict:
@@ -967,7 +994,9 @@ def _reconcile_qemu_nic_link_state(
 
 
 class NetworkService:
-    def _ensure_nat_cloud_runtime(self, network: dict, bridge: str) -> bool:
+    def _ensure_nat_cloud_runtime(
+        self, network: dict, bridge: str, *, prune_owner: tuple[str, int] | None = None,
+    ) -> bool:
         """Ensure host L3/NAT/DHCP state for a ``nat_cloud`` network.
 
         Returns True when persisted runtime fields changed.
@@ -1003,6 +1032,9 @@ class NetworkService:
         else:
             host_net.dnsmasq_stop(bridge)
 
+        if prune_owner is not None:
+            self._prune_nat_cloud_ipv4(bridge, gateway_cidr, prune_owner)
+
         desired = {
             "bridge_name": bridge,
             "driver": NAT_CLOUD_TYPE,
@@ -1020,6 +1052,32 @@ class NetworkService:
                 runtime[key] = value
                 changed = True
         return changed
+
+    @staticmethod
+    def _prune_nat_cloud_ipv4(bridge: str, gateway_cidr: str, owner: tuple[str, int]) -> None:
+        """Remove stale addresses only after the verified owner's setup succeeds."""
+        gateway = ipaddress.IPv4Interface(gateway_cidr)
+        try:
+            addresses = {
+                ipaddress.IPv4Interface(cidr)
+                for name, cidr in host_net.list_ipv4_addrs()
+                if name == bridge
+            }
+        except ValueError as exc:
+            raise host_net.HostNetError("Could not verify the NAT-Cloud bridge IPv4 addresses.") from exc
+        stale = addresses - {gateway}
+        if not stale:
+            return
+        if gateway not in addresses:
+            raise host_net.HostNetError("Configured NAT-Cloud gateway is missing after setup.")
+        if host_net.bridge_fingerprint_check(bridge, *owner) != "match":
+            raise host_net.HostNetBridgeOwnershipError(_bridge_ownership_message(bridge, *owner))
+        try:
+            for address in sorted(stale):
+                host_net.bridge_addr_del(bridge, str(address))
+        finally:
+            # Linux can remove secondary addresses with an old primary.
+            host_net.bridge_addr_add(bridge, gateway_cidr)
 
     def _cleanup_nat_cloud_runtime(
         self,
@@ -1282,10 +1340,12 @@ class NetworkService:
                         )
                         continue
                     try:
-                        owner_network = networks.get(str(owner.network_id))
-                        if isinstance(owner_network, dict):
-                            if self._ensure_nat_cloud_runtime(owner_network, owner_bridge):
-                                dirty = True
+                        owner_network = _current_nat_cloud_owner(data, owner, owner_bridge)
+                        _ensure_shared_bridge(owner, owner_bridge, require_owner=True)
+                        if self._ensure_nat_cloud_runtime(
+                            owner_network, owner_bridge, prune_owner=(owner.lab_id, owner.network_id),
+                        ):
+                            dirty = True
                         nat_cloud.append(
                             {
                                 "network_id": network_id,
@@ -1370,6 +1430,10 @@ class NetworkService:
                             })
                             continue
                         if status == "absent":
+                            if str(network.get("type", "")) == NAT_CLOUD_TYPE:
+                                raise host_net.HostNetBridgeOwnershipError(
+                                    _bridge_ownership_message(bridge, bridge_lab_id, bridge_network_id)
+                                )
                             try:
                                 host_net.bridge_fingerprint_write(
                                     bridge, bridge_lab_id, bridge_network_id
@@ -1380,15 +1444,20 @@ class NetworkService:
                     else:
                         try:
                             host_net.bridge_add(bridge)
-                        except host_net.HostNetEEXIST:
-                            pass  # another lab on this bridge got there first
-                        try:
-                            host_net.bridge_fingerprint_write(
-                                bridge, bridge_lab_id, bridge_network_id
-                            )
-                        except host_net.HostNetError:
-                            pass
-                        created.append(bridge)
+                        except host_net.HostNetEEXIST as exc:
+                            if host_net.bridge_fingerprint_check(bridge, bridge_lab_id, bridge_network_id) != "match":
+                                raise host_net.HostNetBridgeOwnershipError(
+                                    _bridge_ownership_message(bridge, bridge_lab_id, bridge_network_id)
+                                ) from exc
+                            ensured.append(bridge)
+                        else:
+                            try:
+                                host_net.bridge_fingerprint_write(
+                                    bridge, bridge_lab_id, bridge_network_id
+                                )
+                            except host_net.HostNetError:
+                                pass
+                            created.append(bridge)
                 except host_net.HostNetError as exc:
                     skipped.append({
                         "bridge": bridge,
@@ -1420,7 +1489,8 @@ class NetworkService:
                     dirty = True
                 if str(network.get("type", "")) == NAT_CLOUD_TYPE:
                     try:
-                        if self._ensure_nat_cloud_runtime(network, bridge):
+                        prune_owner = (bridge_lab_id, bridge_network_id) if member_owner is None else None
+                        if self._ensure_nat_cloud_runtime(network, bridge, prune_owner=prune_owner):
                             dirty = True
                         nat_cloud.append(
                             {
@@ -1463,12 +1533,12 @@ class NetworkService:
 
         for network_id, shared_cloud_id, owner, owner_bridge in foreign_nat_owners:
             try:
-                _ensure_shared_bridge(owner, owner_bridge)
                 with lab_lock(owner.lab_path, labs_dir, create_parent=False):
                     owner_data = LabService.read_lab_json_static(owner.lab_path)
-                    owner_network = (owner_data.get("networks") or {}).get(str(owner.network_id))
-                    if isinstance(owner_network, dict) and self._ensure_nat_cloud_runtime(
-                        owner_network, owner_bridge
+                    owner_network = _current_nat_cloud_owner(owner_data, owner, owner_bridge)
+                    _ensure_shared_bridge(owner, owner_bridge, require_owner=True)
+                    if self._ensure_nat_cloud_runtime(
+                        owner_network, owner_bridge, prune_owner=(owner.lab_id, owner.network_id),
                     ):
                         # #248: reconcile bookkeeping, not an edit.
                         LabService.write_lab_json_static(
@@ -1802,7 +1872,7 @@ class NetworkService:
                                 )
                             raise
                     if network_type == NAT_CLOUD_TYPE and not shared_cloud_id:
-                        self._ensure_nat_cloud_runtime(network, bridge)
+                        self._ensure_nat_cloud_runtime(network, bridge, prune_owner=(lab_id, next_id))
                     if bridge_dhcp:
                         # Rolls its own host steps back when one fails.
                         pid = _switch_bridge_dhcp(bridge, {}, normalized_config)
