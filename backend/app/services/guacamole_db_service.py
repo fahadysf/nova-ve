@@ -59,12 +59,17 @@ async def _token_keepalive_loop() -> None:
             service = GuacamoleDatabaseService()
         except GuacamoleDatabaseError:
             continue  # not configured — nothing to keep warm
-        now = time.monotonic()
-        for cache_key, last_use in list(_AUTH_TOKEN_LAST_USE.items()):
-            if now - last_use > _TOKEN_KEEPALIVE_ACTIVE_WINDOW_S:
+        current_url = service.settings.GUACAMOLE_INTERNAL_URL.strip()
+        for cache_key in list(_AUTH_TOKEN_LAST_USE):
+            # Re-read activity after each await. A user may have signed in
+            # while an earlier account was being refreshed.
+            last_use = _AUTH_TOKEN_LAST_USE[cache_key]
+            if time.monotonic() - last_use > _TOKEN_KEEPALIVE_ACTIVE_WINDOW_S:
+                _AUTH_TOKEN_LAST_USE.pop(cache_key)
                 continue
-            _internal_url, username = cache_key
-            await service.warm_auth_token(username)
+            internal_url, username = cache_key
+            if internal_url == current_url:
+                await service.warm_auth_token(username, track_activity=False)
 
 
 _token_keepalive_task: asyncio.Task | None = None
@@ -450,7 +455,9 @@ class GuacamoleDatabaseService:
             raise GuacamoleDatabaseError("Guacamole token exchange returned no auth token.")
         return auth_token
 
-    async def _auth_token(self, username: str, password: str, *, warmup: bool = False) -> str:
+    async def _auth_token(
+        self, username: str, password: str, *, warmup: bool = False, track_activity: bool = True,
+    ) -> str:
         cache_key = (self.settings.GUACAMOLE_INTERNAL_URL.strip(), username)
         request = self._token_request(cache_key, username, password, warmup=warmup)
         try:
@@ -463,7 +470,8 @@ class GuacamoleDatabaseService:
             # Guacamole user. Retry once after the foreground provisioning.
             retry = self._token_request(cache_key, username, password, warmup=False)
             auth_token = await asyncio.shield(retry.task)
-        _AUTH_TOKEN_LAST_USE[cache_key] = time.monotonic()
+        if track_activity:
+            _AUTH_TOKEN_LAST_USE[cache_key] = time.monotonic()
         return auth_token
 
     def _token_request(
@@ -496,7 +504,7 @@ class GuacamoleDatabaseService:
         _AUTH_TOKEN_CACHE[cache_key] = auth_token
         return auth_token
 
-    async def warm_auth_token(self, username: str) -> None:
+    async def warm_auth_token(self, username: str, *, track_activity: bool = True) -> None:
         """Populate the token cache for *username* off the critical path (#282).
 
         The fresh-token request against an idle Guacamole webapp costs
@@ -509,7 +517,7 @@ class GuacamoleDatabaseService:
             return
         try:
             password = self._token_password_for(username)
-            await self._auth_token(username, password, warmup=True)
+            await self._auth_token(username, password, warmup=True, track_activity=track_activity)
             logger.debug("guacamole token pre-warmed for %s", username)
         except Exception:  # noqa: BLE001 — best-effort warm-up
             logger.debug("guacamole token pre-warm failed for %s", username, exc_info=True)
