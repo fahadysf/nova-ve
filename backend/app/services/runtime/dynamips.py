@@ -60,7 +60,7 @@ _HYPERVISOR_HOST = "127.0.0.1"
 _HYPERVISOR_CONNECT_TIMEOUT_S = 5.0
 # ``vm start`` triggers IOS image load + decompress + initial MIPS
 # translation; for a stock c3725 with 12.4 IOS this can take 30-50s
-# before the hypervisor returns ``100 OK``. Give it room.
+# before the hypervisor returns ``100-OK``. Give it room.
 _HYPERVISOR_READ_TIMEOUT_S = 120.0
 _DYNAMIPS_BINARY = os.environ.get("NOVA_VE_DYNAMIPS_BIN", "dynamips")
 
@@ -177,9 +177,9 @@ class HypervisorClient:
     def request(self, command: str) -> _Reply:
         """Send one command, read until the terminal reply line.
 
-        Dynamips replies use ``CODE-text`` lines for continuations and a
-        terminal ``CODE text`` line. A single-line success or error is
-        therefore also space-separated, e.g. ``100 OK`` or ``209 invalid``.
+        Dynamips uses ``CODE text`` for intermediate lines and ``CODE-text``
+        for the completed reply. A single-line success or error also ends
+        with a hyphen-separated reply such as ``100-OK`` or ``209-invalid``.
         """
         if self._sock is None:
             self.connect()
@@ -196,9 +196,9 @@ class HypervisorClient:
             sep = raw[3]
             payload = raw[4:]
             lines.append(payload)
-            if sep == " ":
+            if sep == "-":
                 break
-            if sep != "-":
+            if sep != " ":
                 raise DynamipsError(f"unknown reply separator {sep!r} in {raw!r}")
         reply = _Reply(code=code, lines=lines)
         if not reply.ok:
