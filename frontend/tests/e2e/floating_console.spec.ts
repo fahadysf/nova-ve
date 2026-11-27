@@ -17,7 +17,7 @@ async function setUpConsoleLab(
 ) {
   const router = {
     id: 1, name: nodeName, type: 'qemu', template: 'linux', image: 'linux',
-    status: 2, console: 'telnet', cpu: 1, ram: 256, ethernet: 0, delay: 0,
+    status: 2, console: 'telnet', second_console: 'vnc', cpu: 1, ram: 256, ethernet: 0, delay: 0,
     left: 400, top: 160, interfaces: []
   };
   await page.route('**/api/**', async (route) => {
@@ -58,7 +58,7 @@ async function openFloatingConsole(page: Page, secondNode = false) {
   return { window, input };
 }
 
-async function clickNodeConsole(page: Page, nodeId: number) {
+async function clickNodeConsole(page: Page, nodeId: number, mode: 'primary' | 'second' = 'primary') {
   const icon = page.locator(`.svelte-flow__node[data-id="node${nodeId}"]`).getByTestId('node-icon-container');
   await expect(icon).toBeVisible();
   await icon.evaluate((element) => {
@@ -68,7 +68,7 @@ async function clickNodeConsole(page: Page, nodeId: number) {
       clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2,
     }));
   });
-  await page.getByTestId('node-menu-console-primary').click();
+  await page.getByTestId(`node-menu-console-${mode === 'second' ? 'secondary' : 'primary'}`).click();
 }
 
 async function openNodeConsole(page: Page, nodeId: number, name: string) {
@@ -186,6 +186,38 @@ test('restoring a second console preserves its own opening position and the firs
   await expect.poll(() => visibleBounds(first)).toEqual(resizedFirst);
   await expect(input).toHaveValue('show version');
 });
+
+for (const layout of ['Tabbed', 'Floating'] as const) {
+  for (const mode of ['primary', 'second'] as const) {
+    const modeLabel = mode === 'second' ? 'secondary' : 'primary';
+    test(`reloading the ${modeLabel} console in ${layout} mode preserves its target and starts a fresh session`, async ({ page }) => {
+      await setUpConsoleLab(page);
+      await page.getByRole('button', { name: layout, exact: true }).click();
+      await clickNodeConsole(page, 1, mode);
+      const consoleName = mode === 'second' ? `${nodeName} (second)` : nodeName;
+      const container = layout === 'Tabbed'
+        ? page.getByRole('dialog', { name: 'Console workspace' })
+        : page.getByRole('dialog', { name: `Console window for ${consoleName}` });
+      const iframe = container.locator(`iframe[title="Guacamole console for ${consoleName}"]`);
+      await expect(iframe).toBeVisible();
+      const openingSrc = (await iframe.getAttribute('src'))!;
+      const openingUrl = new URL(openingSrc, 'http://nova.test');
+      expect(openingUrl.pathname).toBe(`${labApi}/nodes/1/html5`);
+      expect(openingUrl.searchParams.get('console')).toBe(mode === 'second' ? 'second' : null);
+      expect(Number(openingUrl.searchParams.get('ts'))).toBeGreaterThan(0);
+
+      const reloadName = layout === 'Tabbed' ? 'Reload console' : `Reload ${consoleName} console`;
+      await container.getByRole('button', { name: reloadName, exact: true }).click();
+      await expect(iframe).not.toHaveAttribute('src', openingSrc);
+      const reloadedUrl = new URL((await iframe.getAttribute('src'))!, 'http://nova.test');
+      expect(reloadedUrl.pathname).toBe(openingUrl.pathname);
+      expect(reloadedUrl.searchParams.get('console')).toBe(mode === 'second' ? 'second' : null);
+      expect(Number(reloadedUrl.searchParams.get('ts'))).toBeGreaterThan(Number(openingUrl.searchParams.get('ts')));
+      expect([...reloadedUrl.searchParams.keys()].sort()).toEqual(mode === 'second' ? ['console', 'ts'] : ['ts']);
+      await expect(container).toBeVisible();
+    });
+  }
+}
 
 for (const closing of ['active', 'inactive'] as const) {
   test(`closing the ${closing} tab returns keyboard input to the remaining console`, async ({ page }) => {

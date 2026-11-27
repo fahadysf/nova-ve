@@ -34,9 +34,9 @@ You can flip modes any time — existing consoles re-flow into the new layout.
 
 ## Switching and reloading consoles
 
-Click a console tab or focus it and press Enter. The selected console receives keyboard focus and keeps its established session. Select **Reload** to open a fresh session for the selected console. Other consoles keep their sessions.
+Click a console tab or focus it and press Enter to restore input focus to the selected same-origin Guacamole console. Select **Reload** to open a fresh session for the selected console with the same primary or secondary target.
 
-Leaving the lab or refreshing the browser page clears the console tabs. Reopen the consoles when you return. Refreshing the topology preserves open consoles for nodes that are still running.
+Background topology resnapshots preserve open console sessions for nodes that remain running. Leaving the lab or refreshing the browser page clears the console tabs. Reopen the consoles when you return.
 
 These console actions leave the node running.
 

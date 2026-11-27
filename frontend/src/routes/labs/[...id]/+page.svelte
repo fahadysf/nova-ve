@@ -846,6 +846,10 @@
     updateFloatingWindow(tabId, { minimized: !tab.floating.minimized });
   }
 
+  function buildHtml5ConsoleUrl(nodeId: number, mode: ConsoleTab['mode']): string {
+    return `/api/labs/${labId}/nodes/${nodeId}/html5?ts=${Date.now()}${mode === 'second' ? '&console=second' : ''}`;
+  }
+
   function reloadFloatingConsole(tabId: number) {
     if (!consoleWorkspace) return;
     bringFloatingWindowToFront(tabId);
@@ -855,7 +859,7 @@
         tab.id === tabId
           ? {
               ...tab,
-              src: `/api/labs/${labId}/nodes/${tab.nodeId}/html5?ts=${Date.now()}`,
+              src: buildHtml5ConsoleUrl(tab.nodeId, tab.mode),
               requestId: Date.now(),
               floating: { ...tab.floating, minimized: false }
             }
@@ -953,7 +957,7 @@
       nodeId: node.id,
       nodeName: mode === 'second' ? `${node.name} (second)` : node.name,
       mode,
-      src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}${mode === 'second' ? '&console=second' : ''}`,
+      src: buildHtml5ConsoleUrl(node.id, mode),
       requestId: Date.now(),
       floating: defaultFloatingWindowBounds(offsetIndex)
     };
@@ -1031,7 +1035,7 @@
       minimized: false,
       tabs: consoleWorkspace.tabs.map((tab) =>
         tab.id === activeTab.id
-          ? { ...tab, src: `/api/labs/${labId}/nodes/${activeTab.nodeId}/html5?ts=${Date.now()}`, requestId: Date.now() }
+          ? { ...tab, src: buildHtml5ConsoleUrl(activeTab.nodeId, activeTab.mode), requestId: Date.now() }
           : tab
       )
     };
