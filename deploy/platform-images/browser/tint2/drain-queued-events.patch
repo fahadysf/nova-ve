@@ -1,0 +1,12 @@
+--- a/src/main.c
++++ b/src/main.c
+@@ -768,6 +768,8 @@
+         // Wait for an event and handle it
+         ts_event_read = 0;
+-        if (( fdn = pselect( max_fd + 1, &fds, NULL, NULL, get_duration_to_next_timer_expiration(), NULL)) > 0)
++        if (XEventsQueued(server.display, QueuedAlready) > 0) {
++            handle_x_events();
++        } else if (( fdn = pselect( max_fd + 1, &fds, NULL, NULL, get_duration_to_next_timer_expiration(), NULL)) > 0)
+         {
+ #ifdef HAVE_TRACING
+             start_tracing((void*)run_tint2_event_loop);

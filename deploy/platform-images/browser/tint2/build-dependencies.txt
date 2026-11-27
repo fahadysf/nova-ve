@@ -1,0 +1,17 @@
+build-base
+cairo-dev
+cmake
+curl
+glib-dev
+gtk+3.0-dev
+imlib2-dev
+librsvg-dev
+libxcomposite-dev
+libxdamage-dev
+libxinerama-dev
+libxrandr-dev
+linux-headers
+pango-dev
+patch
+samurai
+startup-notification-dev

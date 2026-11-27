@@ -3,6 +3,11 @@ RUN apk add --no-cache rsvg-convert
 COPY browser/wallpaper.svg /tmp/wallpaper.svg
 RUN rsvg-convert -o /tmp/wallpaper.png /tmp/wallpaper.svg
 
+FROM alpine:3.24 AS tint2-build
+COPY browser/tint2/ /tint2-source/
+RUN xargs apk add --no-cache < /tint2-source/build-dependencies.txt \
+ && sh /tint2-source/build.sh /out/tint2
+
 FROM alpine:3.24
 
 # Browser Station keeps VNC available for existing lab nodes. Its Openbox
@@ -46,6 +51,9 @@ RUN apk add --no-cache \
  && /tmp/slim-image.sh \
  && rm /tmp/configure-rdp /tmp/slim-image.sh
 
+# Alpine's tint2 package supplies the runtime libraries and supporting files.
+COPY --from=tint2-build /out/tint2 /usr/local/bin/tint2
+COPY --from=tint2-build /tint2-source/ /usr/local/share/nova-ve/tint2-source/
 COPY browser/entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENV DISPLAY=:0 \

@@ -142,8 +142,10 @@ case "$kind" in
       run 'pgrep -x openbox >/dev/null' || fail "window manager is not running"
       say "window manager running"
 
-      run 'pgrep -x tint2 >/dev/null' || fail "taskbar (tint2) is not running"
-      say "taskbar (tint2) running"
+      run 'pids=$(pidof tint2) && for pid in $pids; do
+        [ "$(readlink "/proc/$pid/exe")" = /usr/local/bin/tint2 ] || exit 1
+      done' || fail "patched taskbar executable is not running"
+      say "patched taskbar running"
     fi
 
     verify_wallpaper
