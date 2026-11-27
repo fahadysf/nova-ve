@@ -82,7 +82,7 @@
   } from '$lib/services/portLayout';
   import type { Obstacle } from '$lib/services/router';
   import { createWsClient, type WsClient, type WsMessage } from '$lib/services/wsClient';
-  import { labState } from '$lib/stores/labState';
+  import { labState, type LabEditorState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
   import { deriveEdges, attachRouteObstacles, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
   import { createdFromLinkResponse, type LinkCreateResponse } from '$lib/services/linkCreate';
@@ -189,6 +189,8 @@
   const edgeTypes = {
     link: LinkEdge
   } as unknown as Record<string, never>;
+  const defaultEdgeOptions = { type: 'default' };
+  const proOptions = { hideAttribution: true };
   const { fitView, screenToFlowPosition, zoomIn, zoomOut, getViewport } = useSvelteFlow();
 
   // #248: every mutating endpoint response carries the post-write lab
@@ -652,8 +654,14 @@
     return focusNodes;
   }
 
+  let lastProjectedLab: LabEditorState | undefined;
+  let projectionDeferred = false;
+
   function publishFlowState() {
-    if (activeNodeDrag) return;
+    if (activeNodeDrag) {
+      projectionDeferred = true;
+      return;
+    }
     if (requestedFrameId !== null && frameRows(requestedFrameId).length === 0) requestedFrameId = null;
     // Compute the expanded obstacle once per projection, not once per edge.
     activeFrameBox = requestedFrameId !== null && frameZoomHigh && frameHasSpace(requestedFrameId)
@@ -692,6 +700,8 @@
         ? { ...edge, class: `${edge.class ? `${edge.class} ` : ''}nv-focus-dimmed` }
         : edge;
     }));
+    lastProjectedLab = $labState;
+    projectionDeferred = false;
   }
 
   function setExplicitFocus(targetId: string | null) {
@@ -700,11 +710,20 @@
     publishFlowState();
   }
 
-  // #245: the canvas is a pure view of the shared labState store. Any store
-  // change — canvas mutations, loadLab snapshots, WS-driven updates —
-  // repaints the flow elements. The old props/lastXRef identity-diff sync
-  // and its local deep clones are gone.
-  $: if ($labState) publishFlowState();
+  function projectLabChanges(state: LabEditorState, dragging: boolean) {
+    if (dragging) return;
+    if (
+      projectionDeferred ||
+      lastProjectedLab?.nodes !== state.nodes ||
+      lastProjectedLab.networks !== state.networks ||
+      lastProjectedLab.links !== state.links ||
+      lastProjectedLab.defaults !== state.defaults
+    ) {
+      publishFlowState();
+    }
+  }
+
+  $: projectLabChanges($labState, !!activeNodeDrag);
 
   $: networkPaletteItems = paletteItems.filter(
     (item): item is PaletteNetworkItem => item.kind === 'network'
@@ -1021,6 +1040,12 @@
     });
   }
 
+  function handleCardLifecycle(nodeId: number, action: LabNodeAction) {
+    const current = $labState.nodes[String(nodeId)];
+    if (!current || !isEligibleForLabAction(current, action)) return;
+    void handleNodeAction(action, `node${nodeId}`);
+  }
+
   function buildFlowNodes(): Node[] {
     const flowNodes: Node[] = [];
     const connectionPointPositions = buildConnectionPointPositions();
@@ -1034,11 +1059,7 @@
           label: node.name,
           status: node.status,
           transientStatus: node.transientStatus,
-          onLifecycleAction: (action: LabNodeAction) => {
-            const current = $labState.nodes[String(node.id)];
-            if (!current || !isEligibleForLabAction(current, action)) return;
-            void handleNodeAction(action, `node${node.id}`);
-          },
+          onLifecycleAction: handleCardLifecycle,
           type: node.type,
           template: node.template,
           console: node.console,
@@ -2488,8 +2509,8 @@
     selectionOnDrag={!canvasLocked}
     autoPanOnConnect={!canvasLocked}
     autoPanOnNodeDrag={!canvasLocked}
-    defaultEdgeOptions={{ type: 'default' }}
-    proOptions={{ hideAttribution: true }}
+    {defaultEdgeOptions}
+    {proOptions}
     on:nodedragstart={beginNodeDrag}
     on:nodedragstop={handleNodeDragStop}
     onMoveEnd={(_event, viewport) => handleViewportEnd(viewport)}

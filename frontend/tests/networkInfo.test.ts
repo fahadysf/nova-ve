@@ -227,6 +227,30 @@ describe('NetworkInfoContent (#318)', () => {
     vi.useRealTimers();
     expect(apiGetData).toHaveBeenCalledTimes(2);
   });
+
+  it('pauses hidden polling and refreshes once when shown', async () => {
+    vi.useFakeTimers();
+    const view = render(NetworkInfoContent, { labId: 'a.json', network: network(), active: false });
+    try {
+      await tick();
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(apiGetData).not.toHaveBeenCalled();
+
+      await view.rerender({ active: true });
+      expect(apiGetData).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(apiGetData).toHaveBeenCalledTimes(2);
+
+      await view.rerender({ active: false, network: network({ count: 2 }) });
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(apiGetData).toHaveBeenCalledTimes(2);
+      await view.rerender({ active: true });
+      expect(apiGetData).toHaveBeenCalledTimes(3);
+    } finally {
+      view.unmount();
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('InfoPanelStack (#318)', () => {

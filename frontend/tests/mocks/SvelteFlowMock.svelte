@@ -35,9 +35,12 @@
   // the subscribe callbacks below would not invalidate the template.
   let nodeSummary = $state('[]');
   let edgeSummary = $state('[]');
+  let nodePublications = $state(0);
+  let edgePublications = $state(0);
   if (typeof (rest.nodes as { subscribe?: unknown } | undefined)?.subscribe === 'function') {
     (rest.nodes as { subscribe: (run: (value: unknown) => void) => void }).subscribe((items) => {
       nodeSummary = summarize(items);
+      nodePublications += 1;
     });
   } else {
     nodeSummary = summarize(rest.nodes);
@@ -45,6 +48,7 @@
   if (typeof (rest.edges as { subscribe?: unknown } | undefined)?.subscribe === 'function') {
     (rest.edges as { subscribe: (run: (value: unknown) => void) => void }).subscribe((items) => {
       edgeSummary = summarize(items);
+      edgePublications += 1;
     });
   } else {
     edgeSummary = summarize(rest.edges);
@@ -55,6 +59,8 @@
   data-testid="svelte-flow-mock"
   data-flow-nodes={nodeSummary}
   data-flow-edges={edgeSummary}
+  data-node-publications={nodePublications}
+  data-edge-publications={edgePublications}
   {...rest}
   use:bridgeFlowEvents
 >

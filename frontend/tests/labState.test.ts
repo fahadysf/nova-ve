@@ -263,6 +263,26 @@ describe('labState', () => {
     expect(state.networks['9'].top).toBe(21);
   });
 
+  it('identical drag positions neither write state nor notify subscribers', () => {
+    labState.applySnapshot({
+      nodes: { '1': node(1, 10, 20) },
+      networks: { '9': network(9, 30, 40) },
+      topology: [],
+      links: [],
+    });
+    const original = get(labState);
+    let updates = 0;
+    const unsubscribe = labState.subscribe(() => { updates += 1; });
+    try {
+      expect(labState.applyDragStop('node', 1, 10, 20)).toBe(false);
+      expect(labState.applyDragStop('network', 9, 30, 40)).toBe(false);
+      expect(get(labState)).toBe(original);
+      expect(updates).toBe(1);
+    } finally {
+      unsubscribe();
+    }
+  });
+
   it('applyDragStop reports false for unknown elements without changing state', () => {
     labState.applySnapshot({
       nodes: { '1': node(1, 10, 20) },
