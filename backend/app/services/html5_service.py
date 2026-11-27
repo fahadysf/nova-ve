@@ -82,8 +82,7 @@ class Html5SessionService:
         if not openssl_binary:
             raise Html5SessionError("OpenSSL is required for Guacamole JSON auth payload generation.")
 
-        iv_bytes = secrets.token_bytes(16)
-        iv_hex = iv_bytes.hex()
+        # Guacamole JSON auth uses a zero IV and expects ciphertext alone.
         encrypted = subprocess.run(
             [
                 openssl_binary,
@@ -92,7 +91,7 @@ class Html5SessionService:
                 "-K",
                 secret_key,
                 "-iv",
-                iv_hex,
+                "00" * 16,
                 "-nosalt",
             ],
             input=signed_payload,
@@ -103,9 +102,7 @@ class Html5SessionService:
             error = encrypted.stderr.decode("utf-8", errors="ignore").strip() or "OpenSSL encryption failed."
             raise Html5SessionError(error)
 
-        # Prepend the IV to the ciphertext (standard CBC pattern expected by
-        # Guacamole's auth-json module), then base64-encode the combined result.
-        return base64.b64encode(iv_bytes + encrypted.stdout).decode("utf-8")
+        return base64.b64encode(encrypted.stdout).decode("utf-8")
 
     @staticmethod
     def _guacamole_username(current_user: UserRead) -> str:
