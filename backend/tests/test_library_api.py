@@ -7,8 +7,10 @@ checksum verify+cache, reference-guarded delete, and template edit
 (shadow-edit for builtin templates) through the admin endpoints.
 """
 
+import asyncio
 import hashlib
 import json
+from threading import Barrier
 from types import SimpleNamespace
 
 import pytest
@@ -94,6 +96,101 @@ async def client(lib_settings):
 def _audited(audit_events, event):
     """Entries of one kind left by the test (#300: the autouse capture)."""
     return [entry for entry in audit_events if entry.event == event]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "filename"), [("qemu", "disk.qcow2"), ("iol", "disk.bin"), ("dynamips", "disk.image")])
+async def test_upload_library_disk_without_template(client, lib_settings, audit_events, kind, filename):
+    content = b"fixture disk contents"
+    form = {"image_name": "appliance"} if kind == "qemu" else {}
+    upload = await client.post(
+        f"/api/library/images/{kind}", data=form, files={"image": (filename, content)},
+    )
+    assert upload.json()["code"] == 200
+    image_name = form.get("image_name", "disk")
+    path = lib_settings.IMAGES_DIR / kind / image_name / filename
+    assert path.read_bytes() == content
+    images = (await client.get("/api/library/images")).json()["data"]["images"]
+    assert any(item["name"] == image_name and item["type"] == kind and item["files"] == [filename] for item in images)
+    assert _audited(audit_events, "image.upload")[0].detail == {"image_type": kind, "bytes": len(content)}
+
+
+@pytest.mark.asyncio
+async def test_upload_library_disk_requires_unique_name(client, lib_settings, audit_events):
+    root = lib_settings.IMAGES_DIR / "qemu"
+    root.mkdir()
+    loose_file = root / "fixture.iso"
+    loose_file.write_bytes(b"original iso")
+    target = "/api/library/images/qemu"
+    upload = await client.post(target, files={"image": ("fixture.qcow2", b"new disk")})
+    assert upload.json()["code"] == 409
+    assert "rename the conflicting file" in upload.json()["message"]
+    assert not (root / "fixture").exists()
+    assert loose_file.read_bytes() == b"original iso"
+    assert not _audited(audit_events, "image.upload")
+
+    loose_file.rename(root / "rescue.iso")
+    upload = await client.post(target, files={"image": ("fixture.qcow2", b"new disk")})
+    assert upload.json()["code"] == 200
+    add_media = await client.post(target, data={"image_name": "fixture"}, files={"image": ("boot.iso", b"boot")})
+    assert add_media.json()["code"] == 200
+    assert (root / "fixture" / "fixture.qcow2").read_bytes() == b"new disk"
+    assert (root / "fixture" / "boot.iso").read_bytes() == b"boot"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_library_upload_cannot_replace_existing_file(client, lib_settings, audit_events, monkeypatch):
+    from app.services import template_service
+
+    copyfileobj = template_service.shutil.copyfileobj
+    both_uploads = Barrier(2)
+
+    def copy(source, destination, length):
+        both_uploads.wait(timeout=5)
+        copyfileobj(source, destination, length)
+
+    monkeypatch.setattr(template_service.shutil, "copyfileobj", copy)
+    url = "/api/library/images/qemu"
+    responses = await asyncio.gather(*(
+        client.post(url, files={"image": ("fixture.qcow2", content)})
+        for content in (b"first", b"second")
+    ))
+    assert sorted(response.json()["code"] for response in responses) == [200, 409]
+    expected = b"first" if responses[0].json()["code"] == 200 else b"second"
+    directory = lib_settings.IMAGES_DIR / "qemu" / "fixture"
+    assert (directory / "fixture.qcow2").read_bytes() == expected
+    assert list(directory.iterdir()) == [directory / "fixture.qcow2"]
+    assert len(_audited(audit_events, "image.upload")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("kind", "image_name"), [("docker", "fixture"), ("qemu", "../escape")])
+async def test_library_disk_upload_rejects_invalid_destination(client, lib_settings, kind, image_name):
+    response = await client.post(
+        f"/api/library/images/{kind}", data={"image_name": image_name}, files={"image": ("fixture.qcow2", b"disk")},
+    )
+    assert response.json()["code"] == 400
+    assert list(lib_settings.IMAGES_DIR.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_library_disk_upload_rejects_non_admin_before_parsing_form(lib_settings, monkeypatch):
+    from starlette.requests import Request
+
+    from app.dependencies import get_current_user
+
+    def unexpected_form(*args, **kwargs):
+        pytest.fail("The upload body was parsed before administrator authorization.")
+
+    monkeypatch.setattr(Request, "form", unexpected_form)
+    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(username="user", role="editor")
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://testserver") as client:
+            response = await client.post("/api/library/images/qemu", files={"image": ("fixture.qcow2", b"disk")})
+        assert response.status_code == 403
+        assert list(lib_settings.IMAGES_DIR.iterdir()) == []
+    finally:
+        app.dependency_overrides.pop(get_current_user)
 
 
 @pytest.mark.asyncio

@@ -964,6 +964,10 @@ class TemplateError(Exception):
     pass
 
 
+class ImageUploadConflict(TemplateError):
+    pass
+
+
 SECOND_CONSOLE_MODES = ("telnet", "vnc", "rdp")
 
 
@@ -1522,7 +1526,18 @@ class TemplateService:
         source: BinaryIO,
         image_name: str | None = None,
     ) -> tuple[dict[str, Any], int]:
-        template_type = self.get_template(template_type, template_key).type
+        image_type = self.get_template(template_type, template_key).type
+        return await self.upload_disk_image(image_type, filename, source, image_name, replace_existing=True)
+
+    async def upload_disk_image(
+        self,
+        image_type: str,
+        filename: str,
+        source: BinaryIO,
+        image_name: str | None = None,
+        *,
+        replace_existing: bool = False,
+    ) -> tuple[dict[str, Any], int]:
         safe_filename = Path(filename.replace("\\", "/")).name
         if safe_filename in {"", ".", ".."} or "\x00" in safe_filename:
             raise TemplateError("Uploaded image filename is invalid.")
@@ -1535,22 +1550,31 @@ class TemplateService:
 
         try:
             return await run_in_threadpool(
-                self._store_image, template_type, target_image_name, safe_filename, source,
+                self._store_image, image_type, target_image_name, safe_filename, source, replace_existing,
             )
         except OSError as exc:
             raise TemplateError("Could not save the image inside the image directory.") from exc
 
     def _store_image(
-        self, template_type: str, image_name: str, filename: str, source: BinaryIO,
+        self, image_type: str, image_name: str, filename: str, source: BinaryIO, replace_existing: bool,
     ) -> tuple[dict[str, Any], int]:
         self.images_dir.mkdir(parents=True, exist_ok=True)
         with ExitStack() as opened:
             root = os.open(self.images_dir, _IMAGE_DIR_FLAGS)
             opened.callback(os.close, root)
             with suppress(FileExistsError):
-                os.mkdir(template_type, dir_fd=root)
-            type_dir = os.open(template_type, _IMAGE_DIR_FLAGS | os.O_NOFOLLOW, dir_fd=root)
+                os.mkdir(image_type, dir_fd=root)
+            type_dir = os.open(image_type, _IMAGE_DIR_FLAGS | os.O_NOFOLLOW, dir_fd=root)
             opened.callback(os.close, type_dir)
+
+            # A loose file and an image folder can share the same Library name.
+            with os.scandir(type_dir) as entries:
+                for entry in entries:
+                    if Path(entry.name).stem == image_name and entry.is_file():
+                        raise ImageUploadConflict(
+                            f"The file {entry.name} already uses the image name {image_name}. "
+                            "Choose a different image name or review references and rename the conflicting file on the host."
+                        )
 
             created = False
             try:
@@ -1563,7 +1587,7 @@ class TemplateService:
                 opened.callback(os.close, directory)
                 with os.scandir(directory) as entries:
                     files = {entry.name for entry in entries if entry.is_file()}
-                size = self._publish_image(directory, filename, source)
+                size = self._publish_image(directory, filename, source, replace_existing)
             except BaseException:
                 if created:
                     # It may already have been used by another uploader.
@@ -1572,7 +1596,7 @@ class TemplateService:
         return {
             "image": image_name,
             "files": sorted(files | {filename}),
-            "path": str(self.images_dir / template_type / image_name),
+            "path": str(self.images_dir / image_type / image_name),
         }, size
 
     @staticmethod
@@ -1585,14 +1609,17 @@ class TemplateService:
             _logger.warning("Could not remove an image upload directory.", exc_info=True)
 
     @staticmethod
-    def _publish_image(directory: int, filename: str, source: BinaryIO) -> int:
+    def _publish_image(directory: int, filename: str, source: BinaryIO, replace_existing: bool) -> int:
         existing_stat = None
         access_acl = None
+        conflict_message = f"{filename} already exists in this image folder. Choose a different image name or file."
         try:
             entry = os.stat(filename, dir_fd=directory, follow_symlinks=False)
         except FileNotFoundError:
             pass
         else:
+            if not replace_existing:
+                raise ImageUploadConflict(conflict_message)
             if not S_ISREG(entry.st_mode):
                 raise TemplateError("Only regular image files can be replaced.")
             # Preserve the previous requirement for write access to the file itself.
@@ -1637,7 +1664,14 @@ class TemplateService:
                                 if exc.errno not in (errno.ENODATA, errno.ENOTSUP):
                                     raise
                     os.fsync(descriptor)
-                os.replace("image", filename, src_dir_fd=staging_fd, dst_dir_fd=directory)
+                if replace_existing:
+                    os.replace("image", filename, src_dir_fd=staging_fd, dst_dir_fd=directory)
+                else:
+                    # Publish a complete file and fail even if another upload won the race.
+                    try:
+                        os.link("image", filename, src_dir_fd=staging_fd, dst_dir_fd=directory, follow_symlinks=False)
+                    except FileExistsError as exc:
+                        raise ImageUploadConflict(conflict_message) from exc
                 return size
             finally:
                 try:
