@@ -13,7 +13,7 @@ async function setUpConsoleLab(
   page: Page,
   secondNode = false,
   onWebSocket?: (socket: WebSocketRoute) => void,
-  onNodes?: (nodes: Record<string, typeof router>) => void
+  onNodes?: (nodes: Record<string, { id: number; name: string; left: number }>) => void
 ) {
   const router = {
     id: 1, name: nodeName, type: 'qemu', template: 'linux', image: 'linux',
