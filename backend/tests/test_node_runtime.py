@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import hashlib
+import hmac
 import json
 import os
 import secrets
@@ -280,9 +282,7 @@ class _FakeProcess:
 
 
 def _decrypt_guacamole_payload_value(payload: str, secret_key: str) -> dict:
-    raw = base64.b64decode(payload.encode("utf-8"))
-    iv = raw[:16]
-    ciphertext = raw[16:]
+    ciphertext = base64.b64decode(payload, validate=True)
     decrypted = subprocess.run(
         [
             "openssl",
@@ -292,14 +292,17 @@ def _decrypt_guacamole_payload_value(payload: str, secret_key: str) -> dict:
             "-K",
             secret_key,
             "-iv",
-            iv.hex(),
+            "00" * 16,
             "-nosalt",
         ],
         input=ciphertext,
         capture_output=True,
         check=True,
     ).stdout
-    return json.loads(decrypted[32:].decode("utf-8"))
+    signature, body = decrypted[:32], decrypted[32:]
+    expected = hmac.new(bytes.fromhex(secret_key), body, hashlib.sha256).digest()
+    assert hmac.compare_digest(signature, expected)
+    return json.loads(body)
 
 
 def _decrypt_guacamole_payload(url: str, secret_key: str) -> dict:
@@ -665,6 +668,10 @@ async def test_html5_session_service_builds_direct_client_url(monkeypatch, patch
 
 @pytest.mark.asyncio
 async def test_html5_route_prefers_db_backed_service_when_configured(monkeypatch, patched_settings, sample_lab):
+    from app.services.console_recording import ConsoleRecordingService
+
+    recorder = ConsoleRecordingService()
+    monkeypatch.setattr(labs, "get_console_recorder", lambda: recorder)
     patched_settings.GUACAMOLE_DATABASE_URL = "postgresql+asyncpg://guacuser:guacuser@127.0.0.1:5433/guacdb"
     monkeypatch.setattr("app.routers.labs.get_settings", lambda: patched_settings)
     monkeypatch.setattr("app.services.guacamole_db_service.get_settings", lambda: patched_settings)
@@ -690,13 +697,16 @@ async def test_html5_route_prefers_db_backed_service_when_configured(monkeypatch
         fake_db_console_url,
     )
 
-    response = await labs.node_html5(
-        "sample.json",
-        1,
-        current_user=SimpleNamespace(username="admin", html5=True, pod=0),
-    )
-    assert response.status_code == 307
-    assert response.headers["location"] == "/html5/#/client/db-backed?token=dbtoken"
+    try:
+        response = await labs.node_html5(
+            "sample.json",
+            1,
+            current_user=SimpleNamespace(username="admin", html5=True, pod=0),
+        )
+        assert response.status_code == 307
+        assert response.headers["location"] == "/html5/#/client/db-backed?token=dbtoken"
+    finally:
+        await recorder.close_all()
 
 
 def test_guacamole_connection_name_ignores_transient_host_and_port():
