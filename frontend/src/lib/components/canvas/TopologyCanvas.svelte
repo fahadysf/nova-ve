@@ -2411,7 +2411,7 @@
             console: NodeData['console'];
             second_console: NonNullable<NodeData['secondConsole']> | null;
             delay: number;
-            extras: Record<string, unknown>;
+            extras?: Record<string, unknown>;
           };
         }
     >

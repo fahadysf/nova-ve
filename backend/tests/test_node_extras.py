@@ -11,7 +11,7 @@ import pytest
 from app.routers import labs
 from app.schemas.node import NodeBatchCreate, NodeCreate, NodeUpdate
 from app.services.lab_service import LabService
-from app.services.node_runtime_service import NodeRuntimeService
+from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import TemplateService
 from tests.conftest import _stub_host_net_for_qemu_start
 
@@ -143,6 +143,26 @@ cpulimit: 1
 
 def _admin():
     return SimpleNamespace(username="admin", role="admin", html5=True)
+
+
+def test_dynamips_launcher_receives_the_selected_image(monkeypatch, populated_templates):
+    from app.services.runtime.dynamips import DynamipsError, DynamipsLauncher
+
+    runtime = NodeRuntimeService()
+    monkeypatch.setattr(runtime, "_allocate_console_port", lambda _: 15001)
+
+    def receive(**kwargs):
+        assert kwargs["template"]["image"] == "c7200-image"
+        assert kwargs["template"]["slot1"] == ""
+        raise DynamipsError("End of fixture.")
+
+    monkeypatch.setattr(DynamipsLauncher, "instance", lambda: SimpleNamespace(start_node=receive))
+    with pytest.raises(NodeRuntimeError, match="End of fixture"):
+        runtime._start_dynamips_node(
+            {"id": "fixture", "links": [], "networks": {}},
+            {"id": 1, "type": "dynamips", "template": "c7200", "image": "c7200-image",
+             "extras": {"image": "alternate-fixture-image", "slot1": ""}},
+        )
 
 
 def test_catalog_surfaces_extras_schema_per_type(populated_templates):
@@ -639,7 +659,7 @@ async def test_dynamips_node_round_trips_slot_extras(populated_templates):
             type="dynamips",
             template="c7200",
             image="c7200-image",
-            extras={"slot0": "C7200-IO-2FE", "slot1": "PA-FE-TX", "npe": "npe-g2"},
+            extras={"slot0": "C7200-IO-2FE", "slot1": "PA-FE-TX", "slot2": "PA-4T+", "npe": "npe-g2"},
         ),
         current_user=_admin(),
     )
@@ -648,6 +668,100 @@ async def test_dynamips_node_round_trips_slot_extras(populated_templates):
     assert extras["slot0"] == "C7200-IO-2FE"
     assert extras["slot1"] == "PA-FE-TX"
     assert extras["npe"] == "npe-g2"
+    assert response["data"]["ethernet"] == 3
+    assert len(response["data"]["interfaces"]) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("batch", [False, True])
+@pytest.mark.parametrize(("extras", "message"), [
+    ({"slot1": "NM-1FE-TX"}, "NM-1FE-TX"),
+    ({"slot7": "PA-FE-TX"}, "slot7"),
+    ({"platform": "c3725"}, "template and image"),
+    ({"nvram": 0}, "NVRAM"),
+    ({"nvram": "0"}, "NVRAM"),
+])
+async def test_dynamips_rejects_invalid_hardware_before_save(populated_templates, batch, extras, message):
+    path = populated_templates.LABS_DIR / "demo.json"
+    before = path.read_bytes()
+    fields = {
+        "type": "dynamips", "template": "c7200", "image": "c7200-image",
+        "extras": extras,
+    }
+    if batch:
+        result = await labs.create_nodes_batch(
+            "demo.json", NodeBatchCreate(name_prefix="Router", count=2, **fields), current_user=_admin(),
+        )
+    else:
+        result = await labs.create_node(
+            "demo.json", NodeCreate(name="Router", **fields), current_user=_admin(),
+        )
+    assert result["code"] == 400
+    assert message in result["message"]
+    assert path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_dynamips_accepts_c7200_without_slot_zero(populated_templates):
+    from app.services.template_service import DYNAMIPS_NO_IO_CARD
+
+    result = await labs.create_node(
+        "demo.json",
+        NodeCreate(
+            name="Router", type="dynamips", template="c7200", image="c7200-image",
+            extras={"slot0": DYNAMIPS_NO_IO_CARD},
+        ),
+        current_user=_admin(),
+    )
+    assert result["code"] == 200
+    assert result["data"]["extras"]["slot0"] == DYNAMIPS_NO_IO_CARD
+    assert result["data"]["ethernet"] == 0
+    assert result["data"]["interfaces"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stored_id_format", ["integer", "string"])
+async def test_dynamips_edit_preserves_linked_port_identity(populated_templates, stored_id_format):
+    from app.services.template_service import DYNAMIPS_NO_IO_CARD
+
+    response = await labs.create_node(
+        "demo.json",
+        NodeCreate(
+            name="Router", type="dynamips", template="c7200", image="c7200-image",
+            extras={"slot1": "PA-FE-TX"},
+        ),
+        current_user=_admin(),
+    )
+    node_id = response["data"]["id"]
+    extras = response["data"]["extras"]
+    path = populated_templates.LABS_DIR / "demo.json"
+    data = json.loads(path.read_text())
+    stored_id = f"{node_id:03d}" if stored_id_format == "string" else node_id
+    data["links"] = [{"from": {"node_id": stored_id, "interface_index": 0}, "to": {"network_id": 5}}]
+    path.write_text(json.dumps(data))
+    before = path.read_bytes()
+
+    update = await labs.update_node(
+        "demo.json", node_id,
+        NodeUpdate(extras={**extras, "slot0": DYNAMIPS_NO_IO_CARD}),
+        current_user=_admin(),
+    )
+    assert update["code"] == 400
+    assert "disconnect" in update["message"].lower()
+    assert path.read_bytes() == before
+
+    update = await labs.update_node(
+        "demo.json", node_id,
+        NodeUpdate(extras={**extras, "slot2": "PA-2FE-TX", "nvram": 256, "midplane": "std", "idlepc": "0x123"}),
+        current_user=_admin(),
+    )
+    assert update["code"] == 200
+    saved = json.loads(path.read_text())["nodes"][str(node_id)]
+    assert saved["ethernet"] == 4
+    assert len(saved["interfaces"]) == 4
+    assert saved["extras"]["nvram"] == 256
+    assert saved["extras"]["midplane"] == "std"
+    assert saved["extras"]["idlepc"] == "0x123"
 
 
 @pytest.mark.asyncio
