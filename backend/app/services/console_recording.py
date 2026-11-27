@@ -28,10 +28,12 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
-from contextlib import suppress
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -45,6 +47,7 @@ CAST_WIDTH = 120
 CAST_HEIGHT = 30
 PENDING_ATTACH_TIMEOUT = 120.0
 RECORDINGS_FOLDER = ".recordings"
+RECORDING_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(cast|log)$")
 
 
 def _slug(text: object) -> str:
@@ -78,6 +81,43 @@ def recording_lab_id(lab_file: Path, data: dict) -> str:
 
 def _private_file(path: str, flags: int) -> int:
     return os.open(path, flags, 0o600)
+
+
+def read_recording_header(path: Path) -> dict:
+    try:
+        with path.open(encoding="utf-8") as cast:
+            header = json.loads(cast.readline(65536))
+        return header if isinstance(header, dict) else {}
+    except ValueError:
+        return {}
+
+
+def delete_recording_files(cast: Path) -> None:
+    log = cast.with_suffix(".log")
+    try:
+        mode = log.lstat().st_mode
+    except FileNotFoundError:
+        cast.unlink()
+        return
+    if not stat.S_ISREG(mode):
+        raise ValueError("The recording has an invalid log file.")
+
+    # Keep the log recoverable until the cast is removed. The log can hold
+    # the only recorder identity for legacy recordings, so a failed cast
+    # removal must leave the original pair readable and retryable.
+    staging_dir = Path(tempfile.mkdtemp(prefix=".delete-", dir=cast.parent))
+    staged_log = staging_dir / log.name
+    try:
+        log.rename(staged_log)
+        try:
+            cast.unlink()
+        except OSError:
+            staged_log.rename(log)
+            raise
+        staged_log.unlink()
+    finally:
+        with suppress(OSError):
+            staging_dir.rmdir()
 
 
 class RecordingSession:
@@ -341,6 +381,7 @@ class ConsoleRecordingService:
 
     def __init__(self) -> None:
         self._sessions: dict[str, RecordingSession] = {}
+        self._downloads: dict[object, Path] = {}
         self._by_key: dict[tuple[Path, str, int, str, str], RecordingSession] = {}
 
     @staticmethod
@@ -403,10 +444,28 @@ class ConsoleRecordingService:
     def is_active(self, cast_path: Path) -> bool:
         return any(s._recording and s._cast_path == cast_path for s in self._sessions.values())
 
+    @contextmanager
+    def downloading(self, cast_path: Path) -> Iterator[None]:
+        token = object()
+        self._downloads[token] = cast_path
+        try:
+            yield
+        finally:
+            del self._downloads[token]
+
+    def is_downloading(self, cast_path: Path) -> bool:
+        return cast_path in self._downloads.values()
+
+    def _relocate_downloads(self, source: Path, target: Path) -> None:
+        for token, cast_path in self._downloads.items():
+            if cast_path.is_relative_to(source):
+                self._downloads[token] = target / cast_path.relative_to(source)
+
     def relocate_lab(self, source: Path, target: Path) -> None:
         """Update open relays after a lab JSON and its sidecar move."""
         source_sidecar = lab_recordings_sidecar(source)
         target_sidecar = lab_recordings_sidecar(target)
+        self._relocate_downloads(source_sidecar, target_sidecar)
         for session in self._sessions.values():
             if session.lab_file == source:
                 key = self._key(session)
@@ -424,6 +483,7 @@ class ConsoleRecordingService:
         labs = {session.lab_file for session in self._sessions.values() if session.lab_file.is_relative_to(source)}
         for lab_file in labs:
             self.relocate_lab(lab_file, target / lab_file.relative_to(source))
+        self._relocate_downloads(source, target)
 
     def _forget(self, session: RecordingSession) -> None:
         self._sessions.pop(session.session_id, None)

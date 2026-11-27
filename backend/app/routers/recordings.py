@@ -16,16 +16,13 @@ import json
 import logging
 import math
 import re
-import stat
-import tempfile
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -35,7 +32,15 @@ from app.dependencies import get_current_user
 from app.routers.labs import LAB_ACCESS, _read_lab_data, _recording_lab_file, _scoped_lab_path
 from app.schemas.user import UserRead
 from app.services import audit_service
-from app.services.console_recording import _slug, get_console_recorder, lab_recordings_dir, recording_lab_id
+from app.services.console_recording import (
+    RECORDING_FILENAME_RE,
+    _slug,
+    delete_recording_files,
+    get_console_recorder,
+    lab_recordings_dir,
+    read_recording_header,
+    recording_lab_id,
+)
 from app.services.lab_service import LabService, lab_membership_lock
 
 _logger = logging.getLogger(__name__)
@@ -43,7 +48,6 @@ _logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/labs", tags=["labs"])
 
 CONTENT_TAIL_BYTES = 512 * 1024
-_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(cast|log)$")
 _ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 
 
@@ -107,15 +111,6 @@ async def _recording_scope(current_user: UserRead, lab_path: str, db: AsyncSessi
 
 def _is_regular_path(path: Path) -> bool:
     return path.resolve() == path and path.is_file()
-
-
-def _read_header(path: Path) -> dict:
-    try:
-        with path.open(encoding="utf-8") as cast:
-            header = json.loads(cast.readline(65536))
-        return header if isinstance(header, dict) else {}
-    except ValueError:
-        return {}
 
 
 def _recording_metadata(header: dict) -> dict:
@@ -196,7 +191,7 @@ async def _resolve_recording(
 ) -> Path:
     """Resolve a recording ID and enforce identical access for all formats."""
     node_dir, sep, filename = recording_id.partition("--")
-    if not sep or not node_dir.isascii() or not node_dir.isdigit() or not _FILENAME_RE.fullmatch(filename):
+    if not sep or not node_dir.isascii() or not node_dir.isdigit() or not RECORDING_FILENAME_RE.fullmatch(filename):
         raise FileNotFoundError("Recording not found.")
     scope = await _recording_scope(current_user, lab_path, db)
     for base in scope.directories:
@@ -204,40 +199,12 @@ async def _resolve_recording(
         path = cast_path.with_suffix(suffix)
         if not _is_regular_path(cast_path):
             continue
-        if not scope.can_view(cast_path, _read_header(cast_path)):
+        if not scope.can_view(cast_path, read_recording_header(cast_path)):
             raise PermissionError("Access denied.")
         if _is_regular_path(path):
             return path
         break
     raise FileNotFoundError("Recording not found.")
-
-
-def _delete_recording_files(cast: Path) -> None:
-    log = cast.with_suffix(".log")
-    try:
-        mode = log.lstat().st_mode
-    except FileNotFoundError:
-        cast.unlink()
-        return
-    if not stat.S_ISREG(mode):
-        raise ValueError("The recording has an invalid log file.")
-
-    # Keep the log recoverable until the cast is removed. The log can hold
-    # the only recorder identity for legacy recordings, so a failed cast
-    # removal must leave the original pair readable and retryable.
-    staging_dir = Path(tempfile.mkdtemp(prefix=".delete-", dir=cast.parent))
-    staged_log = staging_dir / log.name
-    try:
-        log.rename(staged_log)
-        try:
-            cast.unlink()
-        except OSError:
-            staged_log.rename(log)
-            raise
-        staged_log.unlink()
-    finally:
-        with suppress(OSError):
-            staging_dir.rmdir()
 
 
 @router.delete("/{lab_path:path}/recordings/{recording_id}", dependencies=[LAB_ACCESS])
@@ -260,13 +227,13 @@ async def delete_recording(
         return {"code": 409, "status": "fail", "message": "Stop the recording before deleting it."}
     # #300: describe the recording from its header before the file is gone.
     node_dir, _, _ = recording_id.partition("--")
-    header = _read_header(cast)
+    header = read_recording_header(cast)
     metadata = _recording_metadata(header)
     duration = header.get("duration")
     if not isinstance(duration, (int, float)) or not math.isfinite(duration) or duration < 0:
         duration = _cast_duration(cast)
     try:
-        _delete_recording_files(cast)
+        delete_recording_files(cast)
     except ValueError as exc:
         return {"code": 409, "status": "fail", "message": str(exc)}
     except OSError:
@@ -321,7 +288,7 @@ async def list_recordings(
                 try:
                     if not _is_regular_path(cast_path):
                         continue
-                    header = _read_header(cast_path)
+                    header = read_recording_header(cast_path)
                     if scope.can_view(cast_path, header):
                         entry = _entry_for(cast_path, int(node_dir.name), header)
                         entries.setdefault(entry["id"], entry)
@@ -329,6 +296,18 @@ async def list_recordings(
                     continue
     ordered = sorted(entries.values(), key=lambda entry: entry["started_at"], reverse=True)
     return {"code": 200, "status": "success", "message": "OK", "data": ordered}
+
+
+class RecordingFileResponse(FileResponse):
+    async def __call__(self, scope, receive, send):
+        path = self.path
+        cast = path.with_suffix(".cast")
+        if not _is_regular_path(cast) or not _is_regular_path(path):
+            response = JSONResponse({"code": 404, "status": "fail", "message": "Recording not found."})
+            await response(scope, receive, send)
+            return
+        with get_console_recorder().downloading(cast):
+            await super().__call__(scope, receive, send)
 
 
 async def _download_recording(
@@ -345,7 +324,7 @@ async def _download_recording(
         return {"code": 403, "status": "fail", "message": str(exc)}
     except (FileNotFoundError, ValueError):
         return {"code": 404, "status": "fail", "message": "Recording not found."}
-    return FileResponse(
+    return RecordingFileResponse(
         path,
         media_type=media_type,
         filename=path.name,

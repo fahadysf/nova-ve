@@ -172,6 +172,11 @@ class Settings(BaseSettings):
         default="/var/lib/nova-ve/recordings",
         validation_alias=AliasChoices("RECORDINGS_DIR", "NOVA_VE_RECORDINGS_DIR"),
     )
+    RECORDINGS_RETENTION_DAYS: int = Field(
+        default=0,
+        ge=0,
+        validation_alias=AliasChoices("RECORDINGS_RETENTION_DAYS", "NOVA_VE_RECORDINGS_RETENTION_DAYS"),
+    )
 
     @field_validator("DATABASE_URL")
     @classmethod
