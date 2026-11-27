@@ -24,7 +24,7 @@ from app.services.node_runtime_service import (
     _merge_qemu_args,
     _parse_qemu_tokens,
 )
-from tests.conftest import _stub_host_net_for_qemu_start
+from tests.conftest import _stub_host_net_for_qemu_start, _unregistered_lab_db
 
 
 @pytest.fixture(autouse=True)
@@ -495,7 +495,9 @@ async def test_start_stop_and_wipe_qemu_node(monkeypatch, patched_settings, samp
         fake_console_url,
     )
 
-    start_response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    start_response = await labs.start_node(
+        "sample.json", 1, current_user=SimpleNamespace(username="admin"), db=_unregistered_lab_db()
+    )
     assert start_response["code"] == 200
     assert os.path.basename(recorded_popen[0]["cmd"][0]) == "qemu-system-x86_64"
     overlay_path = patched_settings.TMP_DIR / "lab-123" / "1" / "virtioa.qcow2"
@@ -550,7 +552,9 @@ async def test_start_node_fails_when_qemu_image_missing(monkeypatch, patched_set
     }
     (patched_settings.LABS_DIR / "sample.json").write_text(json.dumps(missing_image_lab))
 
-    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    response = await labs.start_node(
+        "sample.json", 1, current_user=SimpleNamespace(username="admin"), db=_unregistered_lab_db()
+    )
     assert response["code"] == 400
     assert "base image not found" in response["message"].lower()
 
@@ -572,7 +576,9 @@ async def test_start_node_rejects_legacy_qemu_rdp_console(monkeypatch, patched_s
     }
     (patched_settings.LABS_DIR / "sample.json").write_text(json.dumps(rdp_lab))
 
-    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    response = await labs.start_node(
+        "sample.json", 1, current_user=SimpleNamespace(username="admin"), db=_unregistered_lab_db()
+    )
 
     assert response["code"] == 400
     assert "QEMU RDP consoles are not supported" in response["message"]
@@ -4053,7 +4059,9 @@ async def test_qemu_start_binds_telnet_wildcard_when_external_host_set(
     ))
     monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "192.168.7.9", raising=False)
 
-    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    response = await labs.start_node(
+        "sample.json", 1, current_user=SimpleNamespace(username="admin"), db=_unregistered_lab_db()
+    )
     assert response["code"] == 200
 
     serial_args = [
@@ -4109,7 +4117,9 @@ async def test_qemu_start_binds_range_port_wildcard_without_external_host(
     ))
     monkeypatch.setattr(patched_settings, "EXTERNAL_CONSOLE_HOST", "", raising=False)
 
-    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    response = await labs.start_node(
+        "sample.json", 1, current_user=SimpleNamespace(username="admin"), db=_unregistered_lab_db()
+    )
     assert response["code"] == 200
 
     cmd = recorded_popen[0]["cmd"]
@@ -4169,7 +4179,9 @@ async def test_qemu_start_vnc_binds_range_port_via_display_arithmetic(
     }
     (patched_settings.LABS_DIR / "sample.json").write_text(json.dumps(vnc_lab))
 
-    response = await labs.start_node("sample.json", 1, current_user=SimpleNamespace(username="admin"))
+    response = await labs.start_node(
+        "sample.json", 1, current_user=SimpleNamespace(username="admin"), db=_unregistered_lab_db()
+    )
     assert response["code"] == 200
 
     vnc_lab_data = json.loads((patched_settings.LABS_DIR / "sample.json").read_text())

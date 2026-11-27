@@ -59,6 +59,7 @@ from app.services.network_service import NetworkServiceError, network_service
 from app.services.cloud_inventory_service import SharedCloudReferenceError
 from app.services.shared_network_service import patch_violation
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
+from app.services.resource_quota import ResourceQuotaError, resource_quota_service
 from app.services.template_service import (
     DYNAMIPS_ETHERNET_ONLY,
     TemplateError,
@@ -2058,6 +2059,7 @@ async def start_node(
     lab_path: str,
     node_id: int,
     current_user: UserRead = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     try:
         scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
@@ -2065,9 +2067,14 @@ async def start_node(
             if error is not None:
                 return error
             data = lab.data
-            # Keep deletion out until the worker publishes its runtime record,
-            # including when the client disconnects while starting the node.
-            _, cancelled = await run_mutation(NodeRuntimeService().start_node, data, node_id)
+            # Hold both locks through runtime publication, even if the caller
+            # disconnects during launch. Different owners can start in parallel.
+            async with resource_quota_service.admission(
+                db, scoped_path, str(data.get("id", "")).strip(),
+            ) as quota:
+                _, cancelled = await run_mutation(
+                    lambda: NodeRuntimeService().start_node(data, node_id, quota=quota)
+                )
     except LegacyLabSchemaError as exc:
         return _legacy_schema_response(exc)
     except FileNotFoundError as e:
@@ -2076,7 +2083,7 @@ async def start_node(
             "status": "fail",
             "message": f"Runtime dependency or executable not found: {e}",
         }
-    except NodeRuntimeError as e:
+    except (NodeRuntimeError, ResourceQuotaError) as e:
         return {
             "code": 400,
             "status": "fail",

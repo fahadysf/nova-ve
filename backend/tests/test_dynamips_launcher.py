@@ -42,6 +42,30 @@ def test_hypervisor_launch_binds_to_loopback(monkeypatch) -> None:
     client.connect.assert_called_once_with()
 
 
+@pytest.mark.parametrize(
+    ("template", "expected"),
+    [({}, 512), ({"platform": "C3725"}, 256), ({"platform": "c7200", "ram": 384}, 384)],
+)
+def test_quota_ram_matches_dynamips_platform_defaults(template, expected):
+    assert DynamipsLauncher.configured_ram_mib(template) == expected
+
+
+@pytest.mark.parametrize(("status", "expected"), [("0", False), ("1", True), ("2", True), (None, None)])
+def test_quota_liveness_distinguishes_stopped_from_unknown(status, expected):
+    launcher = DynamipsLauncher()
+    launcher._hypervisor_proc = SimpleNamespace(poll=lambda: None)
+    launcher._hypervisor_port = 17200
+    client = Mock()
+    launcher._client = client
+    if status is None:
+        client.request.side_effect = DynamipsError("No hypervisor reply")
+    else:
+        client.request.return_value = SimpleNamespace(lines=[status])
+
+    assert launcher.quota_liveness({"vm_name": "fixture", "hypervisor_port": 17200}) is expected
+    assert client.close.call_count == (1 if status is None else 0)
+
+
 def _serve_replies(replies: list[bytes]) -> tuple[int, threading.Event]:
     """Spin up a one-shot loopback server that emits each reply per request.
 

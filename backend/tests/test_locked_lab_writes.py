@@ -32,6 +32,7 @@ from app.services.network_service import NetworkService
 LAB = "race.json"
 HOLD_S = 0.3
 ADMIN = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
+from tests.conftest import _unregistered_lab_db
 
 
 @pytest.fixture()
@@ -571,11 +572,13 @@ async def test_delete_lab_is_not_undone_by_an_in_flight_writer(settings):
 async def test_start_waiting_for_a_lab_deletion_does_not_use_the_old_lab(settings, monkeypatch):
     _seed(settings, nodes={"1": _docker_node(1, "deleting")})
     started = []
-    monkeypatch.setattr(NodeRuntimeService, "start_node", lambda *args: started.append(args))
+    monkeypatch.setattr(NodeRuntimeService, "start_node", lambda *args, **kwargs: started.append(args))
     file = settings.LABS_DIR / LAB
 
     async with lab_membership_lock(LAB, ipam=True):
-        start = asyncio.create_task(labs.start_node(LAB, 1, current_user=ADMIN))
+        start = asyncio.create_task(
+            labs.start_node(LAB, 1, current_user=ADMIN, db=_unregistered_lab_db())
+        )
         await asyncio.sleep(0.05)
         file.unlink()
 
@@ -1340,3 +1343,20 @@ async def test_move_lab_waits_off_the_loop_and_moves_the_latest_file(settings, m
     moved = json.loads((settings.LABS_DIR / "Shared" / LAB).read_text())
     assert "9" in moved["nodes"]
     assert ticks >= 10
+
+
+@pytest.mark.asyncio
+async def test_start_rejects_a_registered_lab_with_a_different_file_identity(settings, monkeypatch):
+    _seed(settings, nodes={"1": _docker_node(1, "new")})
+    started = []
+    monkeypatch.setattr(NodeRuntimeService, "start_node", lambda *args, **kwargs: started.append(args))
+    db = _unregistered_lab_db()
+    db.execute.return_value.scalar_one_or_none.return_value = SimpleNamespace(
+        id="another-lab", owner="admin",
+    )
+
+    response = await labs.start_node(LAB, 1, current_user=ADMIN, db=db)
+
+    assert response["code"] == 400
+    assert "registered identity" in response["message"]
+    assert not started
