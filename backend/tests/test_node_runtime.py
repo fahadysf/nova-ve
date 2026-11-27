@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
@@ -868,9 +869,35 @@ async def test_login_preflight_and_immediate_console_share_token_exchange(monkey
     user = UserRead(username="fixture", name="Fixture", email="fixture@example.test")
     entered = asyncio.Event()
     release = asyncio.Event()
+    provisioning = asyncio.Event()
+    finish_provisioning = asyncio.Event()
+    committed = False
     requests = []
 
+    @asynccontextmanager
+    async def transaction():
+        nonlocal committed
+        yield
+        committed = True
+
+    async def ensure_user(conn, entity_id, password, *, refresh_existing):
+        assert conn is connection and entity_id == 1
+        assert password == service._guacamole_password(user)
+        assert refresh_existing is False
+        provisioning.set()
+        await finish_provisioning.wait()
+
+    connection = SimpleNamespace(
+        transaction=transaction, fetchval=AsyncMock(return_value=False), close=AsyncMock(),
+    )
+    connect = AsyncMock(return_value=connection)
+    monkeypatch.setattr("app.services.guacamole_db_service.asyncpg.connect", connect)
+    monkeypatch.setattr(service, "_ensure_entity", AsyncMock(return_value=1))
+    monkeypatch.setattr(service, "_ensure_user", ensure_user)
+
     async def enter_exchange(username, password):
+        assert committed
+        connection.close.assert_awaited_once()
         if password != service._guacamole_password(user):
             raise AssertionError("Incorrect fixture password material")
         requests.append(username)
@@ -893,6 +920,14 @@ async def test_login_preflight_and_immediate_console_share_token_exchange(monkey
             LoginRequest(username=user.username, password="fixture-password"), Response(), db=None
         ), timeout=2)
         assert login["code"] == 200
+        await asyncio.wait_for(provisioning.wait(), timeout=2)
+        assert not committed and not entered.is_set()
+        repeated_login = await asyncio.wait_for(auth.login(
+            LoginRequest(username=user.username, password="fixture-password"), Response(), db=None
+        ), timeout=2)
+        assert repeated_login["code"] == 200
+        connect.assert_awaited_once()
+        finish_provisioning.set()
         await asyncio.wait_for(entered.wait(), timeout=2)
         password = service._guacamole_password(user)
         console = asyncio.create_task(service._auth_token(user.username, password))
@@ -902,8 +937,40 @@ async def test_login_preflight_and_immediate_console_share_token_exchange(monkey
         assert await service._auth_token(user.username, password) == "fixture-guacamole-token"
         assert requests == [user.username]
     finally:
+        finish_provisioning.set()
         release.set()
         await asyncio.gather(*(asyncio.all_tasks() - original_tasks), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_prepare_login_reuses_existing_guacamole_account(monkeypatch, runtime_settings):
+    from unittest.mock import AsyncMock
+
+    service = GuacamoleDatabaseService.__new__(GuacamoleDatabaseService)
+    service.settings = runtime_settings
+    service.database_url = "postgresql://guacdb-test"
+
+    @asynccontextmanager
+    async def transaction():
+        yield
+
+    connection = SimpleNamespace(
+        transaction=transaction, fetchval=AsyncMock(return_value=True), close=AsyncMock(),
+    )
+    connect = AsyncMock(return_value=connection)
+    existing = AsyncMock()
+    warm = AsyncMock()
+    monkeypatch.setattr("app.services.guacamole_db_service.asyncpg.connect", connect)
+    monkeypatch.setattr(service, "_ensure_entity", existing)
+    monkeypatch.setattr(service, "_ensure_user", existing)
+    monkeypatch.setattr(service, "warm_auth_token", warm)
+
+    await service.prepare_login("fixture")
+
+    connection.fetchval.assert_awaited_once()
+    connection.close.assert_awaited_once()
+    existing.assert_not_awaited()
+    warm.assert_awaited_once_with("fixture")
 
 
 @pytest.mark.asyncio

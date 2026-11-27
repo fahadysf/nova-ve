@@ -697,7 +697,7 @@ def _silence_guacamole(monkeypatch):
     """Login pre-warms the HTML5 console token off the request path."""
 
     class _NoGuacamole:
-        def warm_auth_token(self, _username):
+        def prepare_login(self, _username):
             return asyncio.sleep(0)
 
     monkeypatch.setattr("app.routers.auth.GuacamoleDatabaseService", _NoGuacamole)

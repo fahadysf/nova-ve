@@ -18,6 +18,7 @@ from app.openapi import COMMON_RESPONSES
 router = APIRouter(prefix="/api/auth", tags=["auth"], responses=COMMON_RESPONSES)
 settings = get_settings()
 SESSION_MAX_AGE_FLOOR = 14400
+_guacamole_login_tasks: dict[str, asyncio.Task[None]] = {}
 
 
 def _session_cookie_max_age() -> int:
@@ -53,14 +54,16 @@ async def login(
         expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
     )
 
-    # #282: pre-warm the user's Guacamole auth token off the login path,
-    # so the first in-browser console open doesn't pay the cold token
-    # request (~0.5s+ against an idle webapp). Fire-and-forget; warm-up
-    # swallows its own failures.
-    try:
-        asyncio.create_task(GuacamoleDatabaseService().warm_auth_token(user.username))
-    except GuacamoleDatabaseError:
-        pass  # database auth not configured — nothing to warm
+    # #282: Create a missing account and warm its token off the login path.
+    username = user.username
+    if user.html5 and username not in _guacamole_login_tasks:
+        try:
+            task = asyncio.create_task(GuacamoleDatabaseService().prepare_login(username))
+        except GuacamoleDatabaseError:
+            pass  # database auth not configured
+        else:
+            _guacamole_login_tasks[username] = task
+            task.add_done_callback(lambda _task: _guacamole_login_tasks.pop(username, None))
 
     response.set_cookie(
         key=settings.SESSION_COOKIE_NAME,
