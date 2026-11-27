@@ -64,7 +64,9 @@ from app.services.template_service import (
     TemplateService,
     _custom_icon_filename,
     _icon_filename_for,
+    _validate_interface_naming,
     normalize_paired_child_kind,
+    paired_child_iface_index,
     render_interface_name,
 )
 from app.services.ws_hub import ws_hub
@@ -279,7 +281,7 @@ def _default_interfaces(
     Priority (highest first):
     1. ``interface_naming_scheme`` — node-level override (US-105)
     2. Template-level format string or explicit names
-    3. Hard-coded fallback: ``Gi{port}`` for qemu, ``eth{n}`` for everything else
+    3. Neutral ``eth{n}`` fallback
     """
     interfaces = []
     template_naming = template_interface_naming or {}
@@ -295,8 +297,6 @@ def _default_interfaces(
             and isinstance(explicit_names[index], str)
         ):
             name = explicit_names[index]
-        elif node_type == "qemu":
-            name = f"Gi{index + 1}"
         else:
             name = f"eth{index}"
         interfaces.append({
@@ -1164,18 +1164,17 @@ class _PairedIfaceLookupError(ValueError):
     """
 
 
-def _resolve_iface_index(node: dict, iface_name: str) -> int:
+def _resolve_iface_index(node: dict, child: dict, iface_name: str) -> int:
     """Find the interface index by name on a paired-template child node (#202).
 
     Strict: raises :class:`_PairedIfaceLookupError` when no interface matches.
     """
     interfaces = node.get("interfaces") or []
-    for idx, iface in enumerate(interfaces):
-        if isinstance(iface, dict) and str(iface.get("name") or "") == iface_name:
-            return idx
-    available = ", ".join(
-        str(iface.get("name") or "") for iface in interfaces if isinstance(iface, dict)
-    )
+    names = [str(iface.get("name") or "") if isinstance(iface, dict) else "" for iface in interfaces]
+    index = paired_child_iface_index(child, iface_name, names)
+    if index is not None:
+        return index
+    available = ", ".join(name for name in names if name)
     raise _PairedIfaceLookupError(
         f"Paired-link references unknown interface {iface_name!r} on node "
         f"{node.get('name')!r} (available: {available or '<none>'}). "
@@ -1221,8 +1220,10 @@ def _build_paired_child_payload(
             extras["firstmac"] = _first_mac_for_node(lab_id, node_id)
 
     template_iface_naming = child.get("interface_naming")
-    if not isinstance(template_iface_naming, dict):
-        template_iface_naming = None
+    if template_iface_naming is not None:
+        template_iface_naming = _validate_interface_naming(
+            template_iface_naming, source=f"paired child {child_id!r}"
+        )
 
     interfaces = _default_interfaces(
         child_type,
@@ -1342,7 +1343,7 @@ async def create_nodes_from_paired_template(
         snapshot = copy.deepcopy(data)
         nodes_map = data.setdefault("nodes", {})
 
-        child_id_to_node_id: dict[str, int] = {}
+        created_by_child: dict[str, tuple[int, dict]] = {}
 
         try:
             for index, child in enumerate(paired["nodes"]):
@@ -1371,7 +1372,7 @@ async def create_nodes_from_paired_template(
                     top=top,
                 )
                 nodes_map[str(next_id)] = payload
-                child_id_to_node_id[child_id] = next_id
+                created_by_child[child_id] = (next_id, child)
                 created_nodes.append(payload)
 
             lab.save()
@@ -1426,19 +1427,21 @@ async def create_nodes_from_paired_template(
                 from_iface_name = str(link.get("from_iface") or "")
                 to_iface_name = str(link.get("to_iface") or "")
 
-                from_node_id = child_id_to_node_id.get(from_child)
-                to_node_id = child_id_to_node_id.get(to_child)
-                if from_node_id is None or to_node_id is None:
+                from_created = created_by_child.get(from_child)
+                to_created = created_by_child.get(to_child)
+                if from_created is None or to_created is None:
                     raise ValueError(
                         f"Paired link references unknown child id "
                         f"({from_child!r}↔{to_child!r}) in template {request.template_key!r}."
                     )
 
+                from_node_id, from_spec = from_created
+                to_node_id, to_spec = to_created
                 from_iface_idx = _resolve_iface_index(
-                    nodes_map[str(from_node_id)], from_iface_name
+                    nodes_map[str(from_node_id)], from_spec, from_iface_name
                 )
                 to_iface_idx = _resolve_iface_index(
-                    nodes_map[str(to_node_id)], to_iface_name
+                    nodes_map[str(to_node_id)], to_spec, to_iface_name
                 )
 
                 link_payload, _network_payload, _replayed = await link_service.create_link(

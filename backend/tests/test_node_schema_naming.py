@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from app.routers.labs import _default_interfaces
+from app.routers.labs import _default_interfaces, _resize_interfaces
 from app.schemas.node import NodeBase, NodeCreate, NodeBatchCreate, NodeFromTemplate
 from app.services.template_service import (
     TemplateError,
@@ -48,7 +48,7 @@ class TestRenderInterfaceName:
 class TestDefaultInterfaces:
     def test_fallback_qemu_no_scheme(self):
         ifaces = _default_interfaces("qemu", 3)
-        assert [i["name"] for i in ifaces] == ["Gi1", "Gi2", "Gi3"]
+        assert [i["name"] for i in ifaces] == ["eth0", "eth1", "eth2"]
 
     def test_fallback_docker_no_scheme(self):
         ifaces = _default_interfaces("docker", 2)
@@ -82,7 +82,12 @@ class TestDefaultInterfaces:
             3,
             template_interface_naming={"explicit": ["fa0/0", "fa0/1"]},
         )
-        assert [i["name"] for i in ifaces] == ["fa0/0", "fa0/1", "Gi3"]
+        assert [i["name"] for i in ifaces] == ["fa0/0", "fa0/1", "eth2"]
+
+    def test_resize_preserves_saved_qemu_names(self):
+        ifaces = _resize_interfaces([{"name": "Gi1", "network_id": 7}], "qemu", 2)
+        assert [i["name"] for i in ifaces] == ["Gi1", "eth1"]
+        assert ifaces[0]["network_id"] == 7
 
     def test_interface_structure(self):
         ifaces = _default_interfaces("docker", 1)

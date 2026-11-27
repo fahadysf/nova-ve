@@ -259,7 +259,7 @@ cpulimit: 1
         current_user=current_user,
     )
     assert create_node_response["code"] == 200
-    assert create_node_response["data"]["interfaces"][0]["name"] == "Gi1"
+    assert create_node_response["data"]["interfaces"][0]["name"] == "eth0"
 
     update_node_response = await labs.update_node(
         "nested/lab.json",

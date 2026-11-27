@@ -47,14 +47,6 @@ def normalize_paired_child_kind(raw: Any) -> str:
     return kind
 
 
-def _kind_default_iface_names(kind: str, ethernet: int) -> list[str]:
-    """Hardcoded fallback interface names by node kind. Mirrors the qemu
-    branch and ``eth{n}`` else-branch in ``_default_interfaces``."""
-    if kind == "qemu":
-        return [f"Gi{i + 1}" for i in range(ethernet)]
-    return [f"eth{i}" for i in range(ethernet)]
-
-
 def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
     """Predict the interface names a paired child will have at creation
     time. Used by :func:`validate_paired_template` to pre-flight link
@@ -67,26 +59,20 @@ def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
     1. Build the base interface list:
        a. ``interface_naming.format`` (string or list[str]) → per-index
           via :func:`render_interface_name`, OR
-       b. Hardcoded fallback by kind (qemu→``Gi{n+1}``, others→``eth{n}``).
+       b. Neutral ``eth{n}`` fallback.
     2. Overlay ``interface_naming.explicit:[name0, name1, ...]`` onto
        positions ``0..len(explicit)-1`` of the base.
 
     Codex-iter2 fix: previously this returned the explicit list verbatim,
     so a child with ``ethernet=2, explicit=["mgmt0"]`` was predicted as
-    ``["mgmt0"]`` and any link to the second interface (``Gi2``/``eth1``)
+    ``["mgmt0"]`` and any link to the second interface (``eth1``)
     was wrongly flagged invalid. The runtime overlays explicit onto a
     full-length base, so the predictor must too.
     """
     ethernet = int(child.get("ethernet", 1))
-    # #207 codex-iter3 — must mirror runtime kind coercion exactly. Runtime
-    # coerces any unsupported kind to ``qemu`` (→ ``Gi*`` naming); pre-fix
-    # predictor treated every non-qemu kind as ``eth*``, so a link to
-    # ``Gi1`` on a ``kind:"weirdkind"`` child was wrongly flagged invalid.
-    kind = normalize_paired_child_kind(child.get("kind"))
     iface_naming = child.get("interface_naming") if isinstance(child.get("interface_naming"), dict) else None
 
-    # Step 1 — base list (format if present, else kind-default).
-    base: list[str]
+    base = [f"eth{i}" for i in range(ethernet)]
     if iface_naming is not None:
         fmt = iface_naming.get("format")
         if isinstance(fmt, str) and fmt.strip():
@@ -97,15 +83,8 @@ def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
             # runtime; the predictor sees raw template JSON so normalize
             # here too.
             normalized = ",".join(str(item).strip() for item in fmt if str(item).strip())
-            base = (
-                [render_interface_name(normalized, i) for i in range(ethernet)]
-                if normalized
-                else _kind_default_iface_names(kind, ethernet)
-            )
-        else:
-            base = _kind_default_iface_names(kind, ethernet)
-    else:
-        base = _kind_default_iface_names(kind, ethernet)
+            if normalized:
+                base = [render_interface_name(normalized, i) for i in range(ethernet)]
 
     # Step 2 — overlay explicit names onto the front of the base list.
     if iface_naming is not None:
@@ -118,6 +97,22 @@ def _paired_child_iface_names(child: dict[str, Any]) -> list[str]:
                     base[idx] = name
 
     return base
+
+
+def paired_child_iface_index(child: dict, name: str, available: list[str]) -> int | None:
+    """Resolve an exact name or the former QEMU fallback for the same port."""
+    if name and name in available:
+        return available.index(name)
+    naming = child.get("interface_naming") or {}
+    if normalize_paired_child_kind(child.get("kind")) != "qemu" or naming.get("format"):
+        return None
+    explicit = naming.get("explicit") or []
+    for idx, label in enumerate(available):
+        if idx < len(explicit) and isinstance(explicit[idx], str):
+            continue
+        if label == f"eth{idx}" and name == f"Gi{idx + 1}":
+            return idx
+    return None
 
 
 _PAIRED_CHILD_INT_FIELDS: tuple[tuple[str, int], ...] = (
@@ -221,7 +216,7 @@ def validate_paired_template(data: dict[str, Any]) -> str | None:
                     f"child {child_id!r} has malformed scalar field "
                     f"(ethernet must be an int): {exc}"
                 )
-            if iface_name not in available:
+            if paired_child_iface_index(child, iface_name, available) is None:
                 return (
                     f"child {child_id!r} interface {iface_name!r} not in available "
                     f"set [{', '.join(available) or '<empty>'}]. Add "
