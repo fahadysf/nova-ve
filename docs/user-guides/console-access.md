@@ -27,7 +27,7 @@ The top bar has a **Console layout** selector with two modes:
 
 | Mode | Behaviour |
 |---|---|
-| **Tabbed** | Open consoles stack as tabs inside a single resizable pane docked to the canvas. The tab count appears as a pill in the top bar (`{n} consoles`). |
+| **Tabbed** | Console sessions open as tabs in one draggable, resizable window over the topology canvas. The tab count appears as a pill in the top bar (`{n} consoles`). |
 | **Floating** | Each console opens as its own draggable, resizable window. Useful when you want side-by-side consoles. |
 
 You can flip modes any time — existing consoles re-flow into the new layout.
