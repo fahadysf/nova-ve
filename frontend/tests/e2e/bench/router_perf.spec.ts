@@ -14,6 +14,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { expectRouterTripwire } from './routerTripwire';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { routeOrthogonal } from '$lib/services/router/orthogonal';
@@ -75,7 +76,7 @@ describe('router perf bench', () => {
         .map((s) => s.toFixed(1))
         .join(',')} p95=${p.toFixed(1)}ms`,
     );
-    expect(p).toBeLessThanOrEqual(150);
+    expectRouterTripwire(p, 150);
   }, 60_000);
 
   it('500-node fixture: p95 over 10 runs ≤ 300ms', async () => {

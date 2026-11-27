@@ -8,7 +8,8 @@
  * 200-node fixture.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it } from 'vitest';
+import { expectRouterTripwire } from './routerTripwire';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import {
@@ -105,6 +106,6 @@ describe('router quality bench', () => {
     console.log(
       `[bench] router_bench_200 quality: links=${fx.links.length} segments=${reduced.length} cross-path-crossings=${crossings} perEdge=${perEdge.toFixed(3)}`,
     );
-    expect(perEdge).toBeLessThanOrEqual(0.5);
+    expectRouterTripwire(perEdge, 0.5);
   }, 120_000);
 });
