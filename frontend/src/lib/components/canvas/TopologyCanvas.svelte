@@ -353,6 +353,7 @@
   let addMenuKind: 'network' | null = null;
   let canvasLocked = false;
   let nodeCatalog: NodeCatalog | null = null;
+  let nodeCatalogUnavailable = false;
   let catalogLoader: NodeCatalogLoader | null = null;
   let nodeModalOpen = false;
   let nodeModalMode: 'create' | 'edit' = 'create';
@@ -1293,12 +1294,14 @@
         return response.data;
       },
       onCatalog: (catalog) => {
+        nodeCatalogUnavailable = false;
         nodeCatalog = catalog;
         nodesStore.update(projectNodeIcons);
         paletteItems = NETWORK_PALETTE;
         paletteLoading = false;
       },
       onError: () => {
+        nodeCatalogUnavailable = true;
         paletteItems = NETWORK_PALETTE;
         paletteLoading = false;
       },
@@ -3241,6 +3244,7 @@
       open={nodeModalOpen}
       mode={nodeModalMode}
       catalog={nodeCatalog}
+      catalogUnavailable={nodeCatalogUnavailable}
       node={nodeModalNode}
       submitting={nodeModalSubmitting}
       labPath={labId}

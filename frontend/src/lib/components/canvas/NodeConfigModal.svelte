@@ -18,6 +18,7 @@
   export let open = false;
   export let mode: 'create' | 'edit' = 'create';
   export let catalog: NodeCatalog | null = null;
+  export let catalogUnavailable = false;
   export let node: NodeData | null = null;
   export let submitting = false;
   export let labPath = '';
@@ -795,7 +796,9 @@
       </div>
 
       {#if !catalog}
-        <div class="px-5 py-10 text-sm text-slate-400">Loading node catalog…</div>
+        <div role="status" class="px-5 py-10 text-sm text-slate-400">
+          {catalogUnavailable ? 'Node catalog temporarily unavailable. Retrying…' : 'Loading node catalog…'}
+        </div>
       {:else}
         <form class="flex flex-1 flex-col overflow-hidden" on:submit|preventDefault={submitForm}>
           <div class="flex-1 space-y-5 overflow-y-auto px-5 py-5">

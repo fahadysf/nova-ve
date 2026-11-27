@@ -34,6 +34,15 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+it('shows that the node catalog is retrying after an initial failure', async () => {
+  const { rerender } = render(NodeConfigModal, { props: { open: true } });
+  expect(screen.getByText('Loading node catalog…')).toBeVisible();
+
+  await rerender({ catalogUnavailable: true });
+
+  expect(screen.getByRole('status')).toHaveTextContent('Node catalog temporarily unavailable. Retrying');
+});
+
 it('updates Dynamips Ethernet totals and preserves an explicitly empty slot 0', async () => {
   const platform: NodeCatalogExtraField = {
     key: 'platform', label: 'Platform', type: 'select', default: 'c3725',
