@@ -586,7 +586,7 @@ class ImageLibraryService:
             return tuple(
                 path
                 for iso in (False, True)
-                for path, _ in iter_qemu_media_candidates(self.images_dir, image_name, iso=iso)
+                for path in iter_qemu_media_candidates(self.images_dir, image_name, iso=iso)
                 if path.is_file()
             )
         if image_type == "iol":

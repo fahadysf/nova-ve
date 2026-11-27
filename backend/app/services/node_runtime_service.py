@@ -72,67 +72,24 @@ _TRANSITION_SUPPRESS_S: float = 30.0
 
 _logger = logging.getLogger("nova-ve.heartbeat")
 _discovery_logger = logging.getLogger("nova-ve.discovery")
-_legacy_layout_logger = logging.getLogger("nova-ve.legacy_image_layout")
-
-# Once-per-process cache: keys are "<kind>:<path>" so each (kind, path) pair
-# warns at most once for the lifetime of the process. The EVE-NG importer
-# (#184) is the migration off this layout; removal tracked in
-# legacy-image-layout-removal-fu.
-_LEGACY_LAYOUT_LOGGED: set[str] = set()
 
 
 def iter_qemu_media_candidates(
     images_dir: Path, image_name: str, *, iso: bool = False,
-) -> Iterator[tuple[Path, str | None]]:
+) -> Iterator[Path]:
     if not image_name:
         return
-    filename, pattern, kind = (
-        ("cdrom.iso", "*.iso", "qemu_iso") if iso else ("hda.qcow2", "*.qcow2", "qemu_image")
-    )
-    typed = images_dir / "qemu" / image_name
-    legacy = images_dir / image_name
-    for directory, is_legacy in ((typed, False), (legacy, True)):
-        path = directory / filename
-        if path.exists():
-            yield path, f"{kind}_{path.stem}" if is_legacy else None
-    for directory, is_legacy in ((typed, False), (legacy, True)):
-        if directory.exists():
-            for path in sorted(directory.glob(pattern)):
-                yield path, f"{kind}_dir" if is_legacy else None
+    filename, pattern = ("cdrom.iso", "*.iso") if iso else ("hda.qcow2", "*.qcow2")
+    directory = images_dir / "qemu" / image_name
+    path = directory / filename
+    if path.exists():
+        yield path
+    if directory.exists():
+        yield from sorted(directory.glob(pattern))
 
 
 def _resolve_qemu_media(images_dir: Path, image_name: str, *, iso: bool = False) -> Path | None:
-    match = next(iter_qemu_media_candidates(images_dir, image_name, iso=iso), None)
-    if match is None:
-        return None
-    path, legacy_kind = match
-    if legacy_kind:
-        _log_legacy_image_fallback(path, legacy_kind)
-    return path
-
-
-def _log_legacy_image_fallback(path: Path, fallback_kind: str) -> None:
-    """Emit a one-shot DEPRECATION warning when the legacy un-nested IMAGES_DIR
-    layout resolves an image or iso path.
-
-    Tests assert on ``LogRecord.deprecation`` (the structured ``extra`` field),
-    not on substring matching of the human-readable message.
-    """
-    cache_key = f"{fallback_kind}:{path}"
-    if cache_key in _LEGACY_LAYOUT_LOGGED:
-        return
-    _LEGACY_LAYOUT_LOGGED.add(cache_key)
-    _legacy_layout_logger.warning(
-        "DEPRECATION: legacy un-nested IMAGES_DIR layout used for %s; "
-        "migrate the image into IMAGES_DIR/qemu/<image>/. "
-        "(Tracking removal in legacy-image-layout-removal-fu.)",
-        fallback_kind,
-        extra={
-            "deprecation": True,
-            "fallback_path": str(path),
-            "fallback_kind": fallback_kind,
-        },
-    )
+    return next(iter_qemu_media_candidates(images_dir, image_name, iso=iso), None)
 
 
 def _node_extras(node: dict[str, Any]) -> dict[str, Any]:
