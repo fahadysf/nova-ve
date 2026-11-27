@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/svelte';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 
 import UsersPage from '../../src/routes/(shell)/manage/users/+page.svelte';
+import { authStore } from '$lib/stores/session';
 
 const apiRequest = vi.fn();
 
@@ -49,6 +50,7 @@ const USERS: Record<string, unknown> = {
 
 describe('User management page (#261)', () => {
   beforeEach(() => {
+    authStore.setUser({ username: 'admin', role: 'admin' });
     apiRequest.mockReset();
     apiRequest.mockImplementation(async (path: string) => {
       if (path === '/users/') {
@@ -56,6 +58,18 @@ describe('User management page (#261)', () => {
       }
       return { code: 200, status: 'success', message: '', data: {} };
     });
+  });
+
+  afterEach(() => authStore.clear());
+
+  it.each(['user', 'editor'] as const)('blocks a direct visit by a signed-in %s', (role) => {
+    authStore.setUser({ username: 'trainee', role });
+    render(UsersPage);
+
+    expect(screen.getByText('Administrator access is required to manage users.')).toBeInTheDocument();
+    expect(screen.queryByTestId('users-add')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('users-table')).not.toBeInTheDocument();
+    expect(apiRequest).not.toHaveBeenCalled();
   });
 
   it('lists accounts with role, tenant, quotas, and lifecycle dates', async () => {
