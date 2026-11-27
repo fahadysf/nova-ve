@@ -337,6 +337,33 @@ async def test_opening_either_lab_restores_bridge_as_owner(settings, host, labs_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("marker_missing", [False, True], ids=["verified-owner", "unverified-owner"])
+async def test_member_first_reconcile_repairs_stale_nat_owner_address(
+    settings, host, labs_dir, monkeypatch, marker_missing,
+):
+    svc, _owner, member, owned, _joined = await _pair(labs_dir, net_type="nat_cloud")
+    bridge = owned["runtime"]["bridge_name"]
+    stale = "10.42.0.1/24"
+    gateway = f"{owned['config']['gateway']}/24"
+    addresses = {(bridge, stale)}
+    if marker_missing:
+        host_net.bridge_fingerprint_remove(bridge)
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: sorted(addresses))
+    monkeypatch.setattr(host_net, "bridge_addr_add", lambda name, cidr: addresses.add((name, cidr)))
+    monkeypatch.setattr(host_net, "bridge_addr_del", lambda name, cidr: addresses.remove((name, cidr)))
+
+    summary = svc.ensure_lab_bridges(member)
+
+    if marker_missing:
+        assert len(summary["skipped"]) == 1
+        assert addresses == {(bridge, stale)}
+        assert host_net.bridge_fingerprint_check(bridge, OWNER_ID, 1) == "absent"
+    else:
+        assert summary["skipped"] == []
+        assert addresses == {(bridge, gateway)}
+
+
+@pytest.mark.asyncio
 async def test_reconcile_skips_member_once_owner_stops_sharing(settings, host, labs_dir):
     svc, owner, member, _owned, _joined = await _pair(labs_dir)
     _edit(labs_dir, owner, lambda d: d["networks"]["1"].update(shared=False))

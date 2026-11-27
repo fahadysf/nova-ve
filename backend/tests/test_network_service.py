@@ -262,6 +262,29 @@ async def test_create_nat_cloud_allocates_subnet_and_provisions_l3(
 
 
 @pytest.mark.asyncio
+async def test_create_nat_cloud_repairs_reused_owned_bridge(
+    instance_id, settings, helper_mocks, stub_publish, labs_dir, monkeypatch,
+):
+    lab_id = "nat-cloud-reuse"
+    lab = _seed_lab(labs_dir, lab_id=lab_id)
+    bridge = host_net.bridge_name(lab_id, 1)
+    addresses = {(bridge, "10.54.0.1/24")}
+    monkeypatch.setattr(host_net, "_invoke_helper", lambda *_, **__: pytest.fail("real helper prohibited"))
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: name == bridge)
+    monkeypatch.setattr(host_net, "bridge_fingerprint_check", lambda *args: "match")
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: sorted(addresses))
+    monkeypatch.setattr(host_net, "bridge_addr_add", lambda name, cidr: addresses.add((name, cidr)))
+    monkeypatch.setattr(host_net, "bridge_addr_del", lambda name, cidr: addresses.remove((name, cidr)))
+
+    result = await NetworkService().create_network(
+        lab, {"name": "fixture", "type": "nat_cloud", "config": {"cidr": "10.55.0.0/24"}},
+    )
+
+    assert result["runtime"]["bridge_name"] == bridge
+    assert addresses == {(bridge, "10.55.0.1/24")}
+
+
+@pytest.mark.asyncio
 async def test_create_nat_cloud_skips_overlapping_existing_cidr(
     instance_id, settings, helper_mocks, stub_publish, labs_dir
 ):
@@ -1546,6 +1569,90 @@ def _seed_lab_with_networks(
         )
     )
     return name
+
+
+@pytest.mark.parametrize(
+    ("stale", "same_subnet", "owner_changed", "marker_missing"),
+    [
+        ("10.54.0.1/24", False, False, False),
+        ("10.55.0.2/24", True, False, False),
+        ("10.54.0.1/24", False, True, False),
+        ("10.54.0.1/24", False, False, True),
+    ],
+    ids=["different-subnet", "primary-removal", "ownership-changed", "unverified-owner"],
+)
+def test_nat_cloud_reconcile_removes_only_stale_addresses_from_owned_bridge(
+    instance_id, settings, helper_mocks, labs_dir, monkeypatch, stale, same_subnet, owner_changed, marker_missing,
+):
+    lab_id = "nat-reconcile-ipv4"
+    bridge = host_net.bridge_name(lab_id, 1)
+    current = "10.55.0.1/24"
+    sibling = host_net.bridge_name("another-fixture", 1)
+    addresses = {(bridge, current), (bridge, stale), (sibling, stale)}
+    lab = _seed_lab_with_networks(labs_dir, lab_id, {"1": {
+        "id": 1,
+        "name": "fixture",
+        "type": "nat_cloud",
+        "config": {
+            "cidr": "10.55.0.0/24",
+            "gateway": "10.55.0.1",
+            "dhcp": False,
+            "dhcp_start": "10.55.0.100",
+            "dhcp_end": "10.55.0.200",
+        },
+        "runtime": {"bridge_name": bridge, "driver": "nat_cloud"},
+    }})
+    monkeypatch.setattr(host_net, "_invoke_helper", lambda *_, **__: pytest.fail("real helper prohibited"))
+    monkeypatch.setattr(host_net, "_run", lambda *_, **__: pytest.fail("real subprocess prohibited"))
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: name == bridge)
+    ownership_checks = []
+    marker = "absent" if marker_missing else "match"
+
+    def fingerprint(*args):
+        ownership_checks.append(args)
+        return "mismatch" if owner_changed and len(ownership_checks) > 1 else marker
+
+    def remove(name, cidr):
+        addresses.remove((name, cidr))
+        if same_subnet:
+            addresses.discard((bridge, current))
+
+    monkeypatch.setattr(host_net, "bridge_fingerprint_check", fingerprint)
+    monkeypatch.setattr(host_net, "bridge_fingerprint_write", lambda *_: pytest.fail("unexpected ownership claim"))
+    monkeypatch.setattr(host_net, "list_ipv4_addrs", lambda: sorted(addresses))
+    monkeypatch.setattr(host_net, "bridge_addr_add", lambda name, cidr: addresses.add((name, cidr)))
+    monkeypatch.setattr(host_net, "bridge_addr_del", remove)
+
+    summary = NetworkService().ensure_lab_bridges(lab)
+
+    assert len(ownership_checks) == (1 if marker_missing else 2)
+    if owner_changed or marker_missing:
+        assert len(summary["skipped"]) == 1
+        assert addresses == {(bridge, current), (bridge, stale), (sibling, stale)}
+    else:
+        assert summary["skipped"] == []
+        assert addresses == {(bridge, current), (sibling, stale)}
+
+
+@pytest.mark.parametrize("competing_marker", ["absent", "mismatch"])
+def test_nat_cloud_reconcile_does_not_claim_a_competing_bridge(
+    instance_id, settings, helper_mocks, labs_dir, monkeypatch, competing_marker,
+):
+    lab = _seed_lab_with_networks(labs_dir, "race-fixture", {"1": {"id": 1, "type": "nat_cloud"}})
+
+    def competing_create(_bridge):
+        raise host_net.HostNetEEXIST("fixture another owner created the bridge")
+
+    monkeypatch.setattr(host_net, "_invoke_helper", lambda *_, **__: pytest.fail("real helper prohibited"))
+    monkeypatch.setattr(host_net, "bridge_add", competing_create)
+    monkeypatch.setattr(host_net, "bridge_fingerprint_check", lambda *_: competing_marker)
+    monkeypatch.setattr(host_net, "bridge_fingerprint_write", lambda *_: pytest.fail("unexpected ownership claim"))
+    monkeypatch.setattr(host_net, "bridge_addr_del", lambda *_: pytest.fail("unexpected address removal"))
+
+    summary = NetworkService().ensure_lab_bridges(lab)
+
+    assert len(summary["skipped"]) == 1
+    assert not summary["created"] and not helper_mocks["bridge_addr_add"]
 
 
 def test_ensure_lab_bridges_provisions_missing_bridge(
