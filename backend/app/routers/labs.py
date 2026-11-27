@@ -60,13 +60,17 @@ from app.services.cloud_inventory_service import SharedCloudReferenceError
 from app.services.shared_network_service import patch_violation
 from app.services.node_runtime_service import NodeRuntimeError, NodeRuntimeService
 from app.services.template_service import (
+    DYNAMIPS_ETHERNET_ONLY,
     TemplateError,
     TemplateService,
     _custom_icon_filename,
     _icon_filename_for,
     _validate_interface_naming,
+    dynamips_nvram_size,
+    dynamips_port_layout,
     normalize_paired_child_kind,
     paired_child_iface_index,
+    paired_dynamips_config,
     render_interface_name,
 )
 from app.services.ws_hub import ws_hub
@@ -458,6 +462,50 @@ def _node_position(index: int, left: int, top: int, placement: str) -> tuple[int
     return left + ((index % columns) * 180), top + ((index // columns) * 140)
 
 
+def _node_create_config(request: NodeCreate | NodeBatchCreate, template) -> tuple[int, dict]:
+    ethernet = request.ethernet if "ethernet" in request.model_fields_set else template.ethernet
+    template_extras = TemplateService().template_extras(request.type, request.template)
+    extras = {**template_extras, **request.extras}
+    if request.type == "dynamips":
+        platform = str(template_extras.get("platform") or "c7200").lower()
+        if str(extras.get("platform") or platform).lower() != platform:
+            raise TemplateError("Choose a template and image for the desired Dynamips platform.")
+        extras["platform"] = platform
+        extras[DYNAMIPS_ETHERNET_ONLY] = True
+        dynamips_nvram_size(extras)
+        ethernet = len(dynamips_port_layout(extras))
+    return ethernet, extras
+
+
+def _validate_dynamips_edit(data: dict, node: dict, extras: dict) -> int | None:
+    existing = node.get("extras") or {}
+    if str(extras.get("platform") or "c7200").lower() != str(existing.get("platform") or "c7200").lower():
+        raise TemplateError("Choose a new template and image to change the Dynamips platform.")
+    if extras.get("nvram") != existing.get("nvram"):
+        dynamips_nvram_size(extras)
+    layout_fields = {key for key in existing.keys() | extras.keys() if re.fullmatch(r"slot[0-9]+", key)}
+    extras.pop(DYNAMIPS_ETHERNET_ONLY, None)
+    if existing.get(DYNAMIPS_ETHERNET_ONLY) is True:
+        extras[DYNAMIPS_ETHERNET_ONLY] = True
+    if all(existing.get(key) == extras.get(key) for key in layout_fields):
+        return None
+
+    extras[DYNAMIPS_ETHERNET_ONLY] = True
+    new_ports = dynamips_port_layout(extras)
+    connected = {
+        int(end.get("interface_index", 0))
+        for link in data.get("links") or []
+        for end in (link.get("from") or {}, link.get("to") or {})
+        if end.get("node_id") is not None and int(end["node_id"]) == int(node["id"])
+    }
+    if connected:
+        old_ports = dynamips_port_layout(existing, validate_slots=False)
+        for index in sorted(connected):
+            if index < 0 or index >= min(len(old_ports), len(new_ports)) or old_ports[index] != new_ports[index]:
+                raise TemplateError(f"Disconnect interface {index} before changing its Dynamips slot binding.")
+    return len(new_ports)
+
+
 def _build_node_payload(
     *,
     lab_id: str = "",
@@ -467,12 +515,11 @@ def _build_node_payload(
     name: str,
     left: int,
     top: int,
+    config: tuple[int, dict] | None = None,
 ) -> dict:
     provided_fields = request.model_fields_set
-    ethernet = request.ethernet if "ethernet" in provided_fields else template.ethernet
-    template_extras = TemplateService().template_extras(request.type, request.template)
-    request_extras = dict(getattr(request, "extras", None) or {})
-    merged_extras = {**template_extras, **request_extras}
+    ethernet, extras = config if config is not None else _node_create_config(request, template)
+    merged_extras = dict(extras)
     icon = request.icon
     if icon is None:
         # An empty override follows the template's current custom artwork.
@@ -1021,6 +1068,11 @@ async def create_node(
         }
 
     # #328: the id and the write come from the file as it is under the lock.
+    try:
+        config = _node_create_config(request, template)
+    except TemplateError as exc:
+        return {"code": 400, "status": "fail", "message": str(exc)}
+
     async with _locked_lab(scoped_path) as (lab, error):
         if error is not None:
             return error
@@ -1036,6 +1088,7 @@ async def create_node(
             node_id=next_id,
             request=request,
             template=template,
+            config=config,
             name=request.name,
             left=request.left,
             top=request.top,
@@ -1208,8 +1261,11 @@ def _build_paired_child_payload(
     validation, capability gates, frontend modal resolution) succeed.
     """
     child_type = normalize_paired_child_kind(child.get("kind"))
-    ethernet = int(child.get("ethernet", 1))
-    extras = dict(child.get("extras") or {})
+    if child_type == "dynamips":
+        ethernet, extras = paired_dynamips_config(child)
+    else:
+        ethernet = int(child.get("ethernet", 1))
+        extras = dict(child.get("extras") or {})
     icon_type = str(child.get("icon_type") or "router")
     icon = "" if _custom_icon_filename(child.get("icon")) else _icon_filename_for(icon_type)
 
@@ -1645,6 +1701,11 @@ async def create_nodes_batch(
         }
 
     # #328: ids and the write come from the file as it is under the lock.
+    try:
+        config = _node_create_config(request, template)
+    except TemplateError as exc:
+        return {"code": 400, "status": "fail", "message": str(exc)}
+
     async with _locked_lab(scoped_path) as (lab, error):
         if error is not None:
             return error
@@ -1663,6 +1724,7 @@ async def create_nodes_batch(
                 node_id=node_id,
                 request=request,
                 template=template,
+                config=config,
                 name=f"{request.name_prefix}-{index + 1}",
                 left=left,
                 top=top,
@@ -1846,18 +1908,33 @@ async def update_node(
 
         # #297: shallow snapshot — the trail reports only what actually changed.
         before = dict(node)
+        updates = request.model_dump(exclude_unset=True)
+        if node.get("type") == "dynamips":
+            updates.pop("ethernet", None)
+            if updates.get("extras") is not None:
+                updates["extras"] = {**old_extras, **updates["extras"]}
+            try:
+                updated_count = (
+                    _validate_dynamips_edit(data, node, updates["extras"])
+                    if updates.get("extras") is not None else None
+                )
+            except TemplateError as exc:
+                return {"code": 400, "status": "fail", "message": str(exc)}
+            if updated_count is not None:
+                updates["ethernet"] = updated_count
 
-        for field, value in request.model_dump(exclude_unset=True).items():
+        for field, value in updates.items():
             # ``second_console: null`` is meaningful — it clears the secondary
             # console (#268). Every other field keeps the skip-None behavior.
             if value is not None or field == "second_console":
                 node[field] = value
 
-        node["interfaces"] = _resize_interfaces(
-            node.get("interfaces", []),
-            node.get("type", "qemu"),
-            int(node.get("ethernet", 0)),
-        )
+        if node.get("type") != "dynamips" or "ethernet" in updates:
+            node["interfaces"] = _resize_interfaces(
+                node.get("interfaces", []),
+                node.get("type", "qemu"),
+                int(node.get("ethernet", 0)),
+            )
         _apply_first_mac_edit(before, node)
         lab.save()
 

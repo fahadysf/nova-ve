@@ -37,6 +37,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from app.services.template_service import (
+    DYNAMIPS_ETHERNET_ONLY,
+    DYNAMIPS_MIDPLANE_OPTIONS,
+    DYNAMIPS_NIO_PORT_COUNT,
+    DYNAMIPS_NPE_OPTIONS,
+    TemplateError,
+    dynamips_attachment_inventory,
+    dynamips_nvram_size,
+    dynamips_slot_inventory,
+)
+
 
 _logger = logging.getLogger("nova-ve.runtime.dynamips")
 
@@ -65,37 +76,6 @@ _PLATFORM_MODULE = {
     "c7200": "c7200",
 }
 
-# Maximum number of slots per platform (slot indices 0 … N-1).
-_PLATFORM_MAX_SLOTS = {"c3725": 3, "c7200": 7}
-
-# Port count per port-adapter / network-module name. Used to map a
-# flat lab interface_index into (slot_idx, port_in_slot) for
-# vm slot_add_nio_binding.
-_PA_PORT_COUNT = {
-    # c3725 motherboard
-    "GT96100-FE": 2,
-    # c3725 NMs
-    "NM-1FE-TX": 1,
-    "NM-4T": 4,
-    "NM-16ESW": 16,
-    "NM-1E": 1,
-    "NM-4E": 4,
-    # c7200 slot-0 cards
-    "C7200-IO-FE": 1,
-    "C7200-IO-2FE": 2,
-    "C7200-IO-GE-E": 1,
-    # c7200 PAs
-    "PA-FE-TX": 1,
-    "PA-2FE-TX": 2,
-    "PA-GE": 1,
-    "PA-4E": 4,
-    "PA-8E": 8,
-    "PA-4T+": 4,
-    "PA-8T": 8,
-    "PA-A1": 1,
-    "PA-POS-OC3": 1,
-}
-
 # Dynamips' c3600 module requires `set_chassis` so it knows which c3600
 # variant to emulate (3620 / 3640 / 3660). c3725 / c3745 are SEPARATE
 # top-level modules in 0.2.14 (created via ``vm create ... c3725``) — they
@@ -109,13 +89,6 @@ _PLATFORM_CHASSIS: dict[str, str] = {}
 _PLATFORM_RAM_DEFAULT_MB = {
     "c3725": 256,
     "c7200": 512,
-}
-
-# Default port adapter in slot 0 if the template did not specify one. Each
-# platform has a distinct slot-0 PA convention.
-_PLATFORM_SLOT0_DEFAULT_PA = {
-    "c3725": "GT96100-FE",   # built-in 2x FastEthernet on the motherboard
-    "c7200": "C7200-IO-FE",  # I/O FastEthernet card in slot 0
 }
 
 # Platforms whose slot 0 is fixed hardware that dynamips pre-binds at
@@ -135,9 +108,6 @@ _PLATFORM_DEFAULT_NPE = {
 
 class DynamipsError(RuntimeError):
     """Raised on hypervisor or launcher failures."""
-
-
-# ---------- Hypervisor protocol client ----------------------------------
 
 
 @dataclass
@@ -445,6 +415,17 @@ class DynamipsLauncher:
         module = _PLATFORM_MODULE[platform]
         image_path = self._resolve_image_path(template)
         idle_pc = self._resolve_idle_pc(template, image_path)
+        try:
+            nvram = dynamips_nvram_size(template)
+        except TemplateError as exc:
+            raise DynamipsError(str(exc)) from exc
+        npe = template.get("npe") or _PLATFORM_DEFAULT_NPE.get(platform)
+        midplane = template.get("midplane")
+        if platform == "c7200":
+            if npe not in {option["value"] for option in DYNAMIPS_NPE_OPTIONS}:
+                raise DynamipsError("Unsupported c7200 NPE.")
+            if midplane and midplane not in {option["value"] for option in DYNAMIPS_MIDPLANE_OPTIONS}:
+                raise DynamipsError("Unsupported c7200 midplane.")
 
         # Allocate the port dynamips itself will bind (127.0.0.1 only —
         # dynamips' ``vm set_con_tcp_port`` has no listen-addr knob in
@@ -476,6 +457,8 @@ class DynamipsLauncher:
                 #    live under the platform module.
                 ram = int(template.get("ram") or _PLATFORM_RAM_DEFAULT_MB[platform])
                 client.request(f"vm set_ram {vm_name} {ram}")
+                if nvram is not None:
+                    client.request(f"vm set_nvram {vm_name} {nvram}")
                 client.request(f"vm set_ios {vm_name} {image_path}")
                 client.request(f"vm set_idle_pc {vm_name} {idle_pc}")
                 client.request(
@@ -487,9 +470,10 @@ class DynamipsLauncher:
                     # c3600 family needs the chassis variant (3620/3640/3660),
                     # but c3725 is its own module without a chassis command.
                     client.request(f"{module} set_chassis {vm_name} {chassis}")
-                npe = template.get("npe") or _PLATFORM_DEFAULT_NPE.get(platform)
-                if npe and platform == "c7200":
+                if platform == "c7200":
                     client.request(f"{module} set_npe {vm_name} {npe}")
+                    if midplane:
+                        client.request(f"{module} set_midplane {vm_name} {midplane}")
 
                 disk0_mb = int(
                     template.get("disk0") or _PLATFORM_DISK0_DEFAULT_MB[platform]
@@ -500,7 +484,10 @@ class DynamipsLauncher:
                 #    Build a slot inventory from the template, then emit
                 #    slot_add_binding for each slot that isn't pre-bound
                 #    at vm create time (c3725 slot 0 is motherboard-fixed).
-                inventory = self._build_slot_inventory(platform, template)
+                persisted_extras = node.get("extras") or {}
+                inventory = self._build_slot_inventory(
+                    platform, template, legacy=persisted_extras.get(DYNAMIPS_ETHERNET_ONLY) is not True,
+                )
                 for slot_idx, pa_name in inventory:
                     if slot_idx == 0 and platform in _PLATFORM_SLOT0_PREBOUND:
                         # c3725 slot 0 is pre-bound at vm create; re-binding errors.
@@ -520,10 +507,11 @@ class DynamipsLauncher:
                 # collision; the message is misleadingly generic).
                 tap_names: list[str] = []
                 nio_names: list[str] = []
+                attachment_inventory = dynamips_attachment_inventory(inventory, persisted_extras)
                 for attachment in attachments:
                     iface_idx = int(attachment["interface_index"])
                     slot_idx, port_in_slot = self._resolve_slot_port(
-                        inventory, iface_idx
+                        attachment_inventory, iface_idx
                     )
                     bridge_name = str(attachment["bridge_name"])
                     tap = tap_factory(iface_idx, bridge_name)
@@ -784,30 +772,12 @@ class DynamipsLauncher:
 
     @staticmethod
     def _build_slot_inventory(
-        platform: str, template: dict[str, Any]
+        platform: str, template: dict[str, Any], *, legacy: bool = False
     ) -> list[tuple[int, str]]:
-        """Return a sorted list of ``(slot_idx, pa_name)`` for all populated
-        slots. The slot 0 default is applied from ``_PLATFORM_SLOT0_DEFAULT_PA``
-        if the template/extras don't override it. Empty/blank slot values are
-        skipped. Unknown PA names raise ``DynamipsError``.
-        """
-        max_slots = _PLATFORM_MAX_SLOTS[platform]
-        inventory: list[tuple[int, str]] = []
-        for idx in range(max_slots):
-            raw = template.get(f"slot{idx}")
-            if idx == 0 and not raw:
-                # Apply the platform default for slot 0 when unset.
-                pa: str = _PLATFORM_SLOT0_DEFAULT_PA[platform]
-            else:
-                pa = str(raw or "").strip()
-            if not pa:
-                continue
-            if pa not in _PA_PORT_COUNT:
-                raise DynamipsError(
-                    f"unknown dynamips port adapter {pa!r} in slot {idx}"
-                )
-            inventory.append((idx, pa))
-        return inventory
+        try:
+            return dynamips_slot_inventory(platform, template, validate_slots=not legacy)
+        except TemplateError as exc:
+            raise DynamipsError(str(exc)) from exc
 
     @staticmethod
     def _resolve_slot_port(
@@ -821,7 +791,7 @@ class DynamipsLauncher:
         """
         total = 0
         for slot_idx, pa_name in inventory:
-            count = _PA_PORT_COUNT[pa_name]
+            count = DYNAMIPS_NIO_PORT_COUNT[pa_name]
             if interface_index < total + count:
                 return slot_idx, interface_index - total
             total += count

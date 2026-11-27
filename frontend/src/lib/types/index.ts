@@ -427,6 +427,7 @@ export interface NodeCatalogDefaults {
 export interface NodeCatalogExtraFieldOption {
   value: string;
   label?: string;
+  ethernetPorts?: number;
 }
 
 export interface NodeCatalogExtraField {
@@ -507,6 +508,7 @@ export interface NodeCatalogPairedTemplate {
 export interface NodeCatalog {
   templates: NodeCatalogTemplate[];
   paired_templates?: NodeCatalogPairedTemplate[];
+  dynamips_profiles?: Record<string, NodeCatalogExtraField[]>;
   icon_options: string[];
   icon_assets?: string[];
   create_fields: string[];

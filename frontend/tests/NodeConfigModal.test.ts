@@ -23,7 +23,7 @@ import NodeConfigModal from '$lib/components/canvas/NodeConfigModal.svelte';
 import NodeConfigModalHarness from './NodeConfigModalHarness.svelte';
 import { apiGetData, apiRequest } from '$lib/api';
 import { formatInterfaceName } from '$lib/services/interfaceNaming';
-import type { NodeCatalog, NodeCatalogTemplate, NodeData, TemplateCapabilities } from '$lib/types';
+import type { NodeCatalog, NodeCatalogExtraField, NodeCatalogTemplate, NodeData, TemplateCapabilities } from '$lib/types';
 
 vi.mock('$lib/api', () => ({
   apiGetData: vi.fn(),
@@ -32,6 +32,68 @@ vi.mock('$lib/api', () => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+});
+
+it('updates Dynamips Ethernet totals and preserves an explicitly empty slot 0', async () => {
+  const platform: NodeCatalogExtraField = {
+    key: 'platform', label: 'Platform', type: 'select', default: 'c3725',
+    options: [{ value: 'c3725' }, { value: 'c7200' }],
+  };
+  const slot = (index: number, options: NodeCatalogExtraField['options']): NodeCatalogExtraField => ({
+    key: `slot${index}`, label: `Slot ${index}`, type: 'select', default: options?.[0]?.value, options,
+  });
+  const c3725 = [
+    platform,
+    slot(0, [{ value: 'GT96100-FE', ethernetPorts: 2 }]),
+    slot(1, [
+      { value: '', label: '(empty)', ethernetPorts: 0 },
+      { value: 'NM-1FE-TX', ethernetPorts: 1 },
+      { value: 'NM-4T', ethernetPorts: 0 },
+    ]),
+  ];
+  const c7200 = [
+    { ...platform, default: 'c7200' },
+    slot(0, [
+      { value: 'C7200-IO-FE', ethernetPorts: 1 },
+      { value: 'none', label: '(empty)', ethernetPorts: 0 },
+    ]),
+    slot(1, [{ value: '', label: '(empty)', ethernetPorts: 0 }, { value: 'PA-GE', ethernetPorts: 1 }]),
+  ];
+  const base = makeTemplate();
+  const template: NodeCatalogTemplate = {
+    ...base,
+    key: 'c3725', name: 'C3725', type: 'dynamips',
+    defaults: { ...base.defaults, type: 'dynamips', template: 'c3725' },
+    extras_schema: c3725,
+  };
+  const catalog = makeCatalog(template, {
+    ...template,
+    key: 'c7200', name: 'C7200',
+    defaults: { ...template.defaults, template: 'c7200', image: 'c7200-image' },
+    images: [{ image: 'c7200-image' }],
+    extras_schema: c7200,
+  });
+  catalog.dynamips_profiles = { c3725, c7200 };
+  render(NodeConfigModalHarness, { props: { open: true, mode: 'create', catalog } });
+  await tick();
+  expect(screen.getByText('2 (derived from slots)')).toBeVisible();
+  await fireEvent.change(screen.getByLabelText('Slot 1'), { target: { value: 'NM-1FE-TX' } });
+  expect(screen.getByText('3 (derived from slots)')).toBeVisible();
+  await fireEvent.change(screen.getByLabelText('Slot 1'), { target: { value: 'NM-4T' } });
+  expect(screen.getByText('2 (derived from slots)')).toBeVisible();
+  expect(screen.getByLabelText('Platform')).toBeDisabled();
+  await fireEvent.change(screen.getByLabelText('Template'), { target: { value: 'dynamips:c7200' } });
+  expect(screen.getByText('1 (derived from slots)')).toBeVisible();
+  expect(screen.getByLabelText('Slot 1')).not.toHaveTextContent('NM-1FE-TX');
+  await fireEvent.change(screen.getByLabelText('Slot 0'), { target: { value: 'none' } });
+  expect(screen.getByText('0 (derived from slots)')).toBeVisible();
+  expect(screen.getByText('Slot 0 is empty. This router has no built-in I/O card.')).toBeVisible();
+  await fireEvent.submit(screen.getByRole('dialog').querySelector('form')!);
+  expect(JSON.parse(screen.getByTestId('submit-payload').textContent ?? 'null')).toMatchObject({
+    mode: 'create', payload: {
+      template: 'c7200', image: 'c7200-image', extras: { platform: 'c7200', slot0: 'none', slot1: '' },
+    },
+  });
 });
 
 function makeTemplate(caps?: TemplateCapabilities): NodeCatalogTemplate {

@@ -284,6 +284,33 @@ class _RecordingClient:
         return _R()
 
 
+@pytest.mark.parametrize("ethernet_only, ethernet_index", [(False, 4), (True, 0)])
+def test_start_uses_c7200_hardware_options_and_correct_port_order(monkeypatch, tmp_path, ethernet_only, ethernet_index):
+    launcher = DynamipsLauncher()
+    client = _RecordingClient()
+    monkeypatch.setattr("app.services.runtime.dynamips._DYNAMIPS_VM_ROOT", tmp_path)
+    monkeypatch.setattr(launcher, "_client_locked", lambda: client)
+    monkeypatch.setattr(launcher, "_resolve_image_path", lambda _: tmp_path / "router.image")
+    monkeypatch.setattr(launcher, "_pick_free_tcp_port", lambda: 20001)
+
+    launcher.start_node(
+        lab_id="fixture", node_id=1, node={"extras": {"dynamips_ethernet_only": ethernet_only}}, console_port=15001,
+        template={
+            "platform": "c7200", "idlepc": "0x123", "npe": "npe-300", "nvram": 256,
+            "midplane": "std", "slot0": "none", "slot1": "PA-4T+", "slot2": "PA-FE-TX",
+        },
+        attachments=[{"interface_index": ethernet_index, "bridge_name": "fixture"}],
+        tap_factory=lambda *_: "fixture-tap",
+    )
+
+    assert "vm set_nvram nv_fixture_n1 256" in client.commands
+    assert "c7200 set_midplane nv_fixture_n1 std" in client.commands
+    assert "c7200 set_npe nv_fixture_n1 npe-300" in client.commands
+    assert "vm set_idle_pc nv_fixture_n1 0x123" in client.commands
+    assert "vm slot_add_binding nv_fixture_n1 0 0 C7200-IO-FE" not in client.commands
+    assert f"vm slot_add_nio_binding nv_fixture_n1 2 0 nv_fixture_n1_i{ethernet_index}" in client.commands
+
+
 def test_destroy_vm_deletes_named_nios() -> None:
     """``vm delete`` does not free the per-interface NIOs from dynamips'
     global registry. The launcher must explicitly issue
@@ -475,6 +502,11 @@ def test_build_slot_inventory_applies_c3725_default_for_slot0() -> None:
     assert inventory == [(0, "GT96100-FE"), (1, "NM-16ESW")]
 
 
+def test_launcher_preserves_legacy_prebound_motherboard_slot_order():
+    extras = {"slot0": "NM-1FE-TX", "slot3": "PA-GE"}
+    assert DynamipsLauncher._build_slot_inventory("c3725", extras, legacy=True) == [(0, "NM-1FE-TX")]
+
+
 def test_build_slot_inventory_skips_empty_slots() -> None:
     """Blank slot values are omitted from the inventory — they have no ports
     and no binding should be emitted for them.
@@ -482,6 +514,37 @@ def test_build_slot_inventory_skips_empty_slots() -> None:
     template = {"slot0": "GT96100-FE", "slot1": "", "slot2": "NM-1FE-TX"}
     inventory = DynamipsLauncher._build_slot_inventory("c3725", template)
     assert inventory == [(0, "GT96100-FE"), (2, "NM-1FE-TX")]
+
+
+def test_c7200_explicitly_empty_slot_zero_stays_empty() -> None:
+    from app.services.template_service import DYNAMIPS_NO_IO_CARD
+
+    assert DynamipsLauncher._build_slot_inventory("c7200", {}) == [(0, "C7200-IO-FE")]
+    assert DynamipsLauncher._build_slot_inventory("c7200", {"slot0": ""}) == [(0, "C7200-IO-FE")]
+    assert DynamipsLauncher._build_slot_inventory("c7200", {"slot0": DYNAMIPS_NO_IO_CARD}) == []
+
+
+@pytest.mark.parametrize(
+    ("platform", "slot", "adapter"),
+    [("c7200", "slot1", "NM-1FE-TX"), ("c3725", "slot1", "GT96100-FE"), ("c7200", "slot0", "PA-GE")],
+)
+def test_dynamips_inventory_rejects_adapter_in_wrong_slot(platform, slot, adapter) -> None:
+    with pytest.raises(DynamipsError, match=adapter):
+        DynamipsLauncher._build_slot_inventory(platform, {slot: adapter})
+
+
+def test_dynamips_catalog_exposes_only_valid_slot_options() -> None:
+    from app.services.template_service import DYNAMIPS_NO_IO_CARD, _dynamips_extras_schema
+
+    c3725 = {field["key"]: field for field in _dynamips_extras_schema("c3725")}
+    c7200 = {field["key"]: field for field in _dynamips_extras_schema("c7200")}
+
+    assert {option["value"] for option in c3725["slot0"]["options"]} == {"GT96100-FE"}
+    assert "GT96100-FE" not in {option["value"] for option in c3725["slot1"]["options"]}
+    assert {option["value"] for option in c7200["slot0"]["options"]} == {
+        DYNAMIPS_NO_IO_CARD, "C7200-IO-FE", "C7200-IO-2FE", "C7200-IO-GE-E",
+    }
+    assert "C7200-IO-FE" not in {option["value"] for option in c7200["slot6"]["options"]}
 
 
 def test_build_slot_inventory_raises_on_unknown_pa() -> None:

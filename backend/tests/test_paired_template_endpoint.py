@@ -979,6 +979,26 @@ def test_207_predictor_handles_interface_naming_format_list(patched_split):
     assert labs._resolve_iface_index(payload, child, "ge-0/0/0") == 1
 
 
+def test_paired_dynamips_validates_hardware_and_uses_same_layout_at_creation():
+    from app.services.template_service import DYNAMIPS_ETHERNET_ONLY, validate_paired_template
+
+    child = {"id": "a", "kind": "dynamips", "extras": {"platform": "c3725", "slot1": "NM-4T", "slot2": "NM-1FE-TX"}}
+    template = {
+        "kind": "paired", "nodes": [child, {"id": "b", "kind": "qemu", "ethernet": 1}],
+        "links": [{"from_node": "a", "from_iface": "eth2", "to_node": "b", "to_iface": "eth0"}],
+    }
+    assert validate_paired_template(template) is None
+    payload = labs._build_paired_child_payload(
+        node_id=7, template_key="dynamips-paired", child=child,
+        child_id="a", name="A", left=0, top=0,
+    )
+    assert payload["extras"][DYNAMIPS_ETHERNET_ONLY] is True
+    assert [iface["name"] for iface in payload["interfaces"]] == ["eth0", "eth1", "eth2"]
+
+    child["extras"]["slot1"] = "PA-GE"
+    assert "PA-GE" in validate_paired_template(template)
+
+
 def test_207_predictor_overlays_explicit_onto_kind_default_base(patched_split):
     """Codex-iter2 fix: when interface_naming.explicit is shorter than
     ethernet count, the remaining ports use neutral defaults and old links

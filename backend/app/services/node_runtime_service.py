@@ -6198,21 +6198,21 @@ class NodeRuntimeService:
         # resolver handles both stem and full-filename forms.
         template = self._resolve_template_for_node(node)
         template = dict(template)  # shallow copy — we may overlay extras
-        node_image = node.get("image")
-        if node_image:
-            template["image"] = node_image
         extras = _node_extras(node)
         # ``slot0..slot6`` covers both c3725 (3 bays) and c7200 (7 bays).
         # Without forwarding slotN>0, network modules selected in the
         # NodeConfigModal never reach the launcher and IOS doesn't see them.
         slot_keys = tuple(f"slot{i}" for i in range(7))
         for key in (
-            "platform", "image", "ram", "idlepc", "idle_pc", "npe", "disk0",
+            "platform", "image", "ram", "idlepc", "idle_pc", "npe", "nvram", "midplane", "disk0",
             *slot_keys,
         ):
             value = extras.get(key)
-            if value:
+            if value or (key in slot_keys and key in extras):
                 template[key] = value
+        node_image = node.get("image")
+        if node_image:
+            template["image"] = node_image
 
         provisioned_taps: list[str] = []
         # Driver-by-interface lookup for the closure below — keyed off the

@@ -72,7 +72,7 @@
     console: NodeData['console'];
     second_console: SecondaryConsoleValue | null;
     delay: number;
-    extras: ExtrasMap;
+    extras?: ExtrasMap;
     interface_naming_scheme: string | null;
   };
 
@@ -247,8 +247,28 @@
     return chosen ? templateId(chosen) : '';
   }
 
-  function extrasSchemaFor(template: NodeCatalogTemplate | undefined): NodeCatalogExtraField[] {
-    return template?.extras_schema ?? [];
+  function extrasSchemaFor(
+    template: NodeCatalogTemplate | undefined,
+    platform?: unknown,
+  ): NodeCatalogExtraField[] {
+    const fields = template?.extras_schema ?? [];
+    if (template?.type !== 'dynamips') return fields;
+    const profile = typeof platform === 'string' ? catalog?.dynamips_profiles?.[platform] : undefined;
+    return (profile ?? fields).map((field) => field.key === 'platform' ? { ...field, type: 'readonly' } : field);
+  }
+
+  function selectValue(field: NodeCatalogExtraField, values: ExtrasMap): string {
+    if (field.key === 'slot0' && !values.slot0 && field.options?.some((option) => option.ethernetPorts !== undefined)) {
+      return String(field.default ?? '');
+    }
+    return String(values[field.key] ?? '');
+  }
+
+  function dynamipsEthernetCount(fields: NodeCatalogExtraField[], values: ExtrasMap): number {
+    return fields.reduce((total, field) => {
+      const selected = selectValue(field, values);
+      return total + (field.options?.find((option) => option.value === selected)?.ethernetPorts ?? 0);
+    }, 0);
   }
 
   /**
@@ -514,6 +534,7 @@
     // input, so a stale validation error there must NOT block submission.
     if (!pairedActive && interfaceNamingError) return;
     if (mode === 'edit' && node) {
+      const changedExtras = Object.fromEntries(Object.entries(extras).filter(([key]) => dirty[`extras.${key}`]));
       dispatch('submit', {
         mode: 'edit',
         nodeId: node.id,
@@ -527,7 +548,9 @@
           console: fallbackConsoleModeForType(node.type, consoleMode),
           second_console: secondaryConsoleValue(),
           delay,
-          extras,
+          extras: node.type === 'dynamips'
+            ? (Object.keys(changedExtras).length ? changedExtras : undefined)
+            : extras,
           interface_naming_scheme: normalizedInterfaceNamingScheme(),
         },
       });
@@ -579,8 +602,14 @@
     });
   }
 
-  function onTemplateChange() {
-    applyTemplateDefaults(selectedTemplate);
+  function onTemplateChange(event: Event) {
+    const next = templateForId((event.currentTarget as HTMLSelectElement).value);
+    if (next?.type === 'dynamips' && next.key !== selectedTemplate?.key) {
+      dirty = Object.fromEntries(Object.entries(dirty).filter(([key]) =>
+        key !== 'image' && !/^extras\.(platform|slot\d+|npe|midplane)$/.test(key)
+      ));
+    }
+    applyTemplateDefaults(next);
   }
 
   $: signature = `${open}:${mode}:${catalog?.templates.length ?? 0}:${node?.id ?? 'create'}:${node?.status ?? 0}`;
@@ -590,6 +619,10 @@
     initializeForm();
   }
   $: selectedTemplate = templateForId(selectedTemplateId);
+  $: activeExtrasSchema = extrasSchemaFor(selectedTemplate, extras.platform);
+  $: dynamipsPorts = dynamipsEthernetCount(activeExtrasSchema, extras);
+  $: dynamipsMissingIoCard = activeExtrasSchema.find((field) => field.key === 'slot0')?.options
+    ?.some((option) => option.value === extras.slot0 && option.ethernetPorts === 0) ?? false;
   $: defaultIcon = mode === 'edit' && selectedTemplate?.key !== node?.template
     ? undefined
     : selectedTemplate?.defaults.icon;
@@ -1034,23 +1067,14 @@
                 />
               </label>
               {#if selectedTemplate?.type === 'dynamips'}
-                <!--
-                  For dynamips routers the FastEthernet count is derived
-                  from the slot-0 motherboard chip plus any optional
-                  network modules (NM-1FE-TX, NM-16ESW, …) bound to
-                  slots 1+. A freeform numeric input would lie — dynamips
-                  would only honor the count if a matching NM happens to
-                  be configured. Show the derived value read-only and
-                  point the operator at slot configuration (issue #217).
-                -->
                 <div class="block">
                   <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">Ethernet ports</div>
-                  <div
-                    class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-sm text-slate-300"
-                    title="Total interface count for a Dynamips router is derived from its slot modules (slot 0 motherboard + NM/PA cards in slots 1+). Edit slot bindings in the template or per-node extras to change the count."
-                  >
-                    {ethernet} (derived from slots)
+                  <div class="w-full rounded-xl border border-slate-800 bg-slate-900/60 px-3 py-1.5 text-sm text-slate-300">
+                    {dynamipsPorts} (derived from slots)
                   </div>
+                  {#if dynamipsMissingIoCard}
+                    <p class="mt-1 text-xs text-amber-300">Slot 0 is empty. This router has no built-in I/O card.</p>
+                  {/if}
                 </div>
               {:else}
                 <label class="block">
@@ -1124,13 +1148,13 @@
               {/if}
             </div>
 
-            {#if extrasSchemaFor(selectedTemplate).length > 0}
+            {#if activeExtrasSchema.length > 0}
               <div class="space-y-3 rounded-2xl border border-slate-800 bg-slate-900/40 p-4">
                 <div class="text-[10px] uppercase tracking-[0.05em] text-slate-500">
                   {selectedTemplate?.type ?? ''} options
                 </div>
                 <div class="grid gap-4 md:grid-cols-3">
-                  {#each extrasSchemaFor(selectedTemplate) as field}
+                  {#each activeExtrasSchema as field (field.key)}
                     {#if field.type === 'textarea' || field.type === 'env'}
                       <div class="md:col-span-3">
                         <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">{field.label}</div>
@@ -1193,13 +1217,13 @@
                         <div class="mb-1 text-[10px] uppercase tracking-[0.05em] text-slate-500">{field.label}</div>
                         {#if field.type === 'select'}
                           <select
-                            value={String(extras[field.key] ?? '')}
+                            value={selectValue(field, extras)}
                             on:change={(event) => setExtra(field.key, (event.target as HTMLSelectElement).value)}
                             aria-label={field.label}
                             disabled={isExtraDisabled(field)}
                             class="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-1.5 text-sm text-slate-100 disabled:text-slate-500"
                           >
-                            {#each selectOptionsFor(field, String(extras[field.key] ?? '')) as option}
+                            {#each selectOptionsFor(field, selectValue(field, extras)) as option}
                               <option value={option.value}>{option.label ?? option.value}</option>
                             {/each}
                           </select>
