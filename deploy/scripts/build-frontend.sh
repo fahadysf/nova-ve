@@ -16,3 +16,7 @@ npm run build
 install -d "${FRONTEND_ROOT}"
 find "${FRONTEND_ROOT}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 cp -a build/. "${FRONTEND_ROOT}/"
+
+# Published assets are served by a different account from the build user.
+find "${FRONTEND_ROOT}" -type d -exec chmod 0755 {} +
+find "${FRONTEND_ROOT}" -type f -exec chmod 0644 {} +
