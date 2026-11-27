@@ -1907,3 +1907,147 @@ async def test_208medium_node_phase_422_path_rolls_back_lab(patched_split):
     restored = json.loads(lab_path.read_text())
     assert restored.get("nodes") == {}, restored
     assert restored.get("links") == [], restored
+
+
+# ---- generated-key collisions with standalone templates -----------------
+
+
+def _seed_generated_key_collision(settings) -> None:
+    paired = {
+        "kind": "paired",
+        "name": "Paired fixture",
+        "nodes": [
+            {
+                "id": "child",
+                "name": "Generated child",
+                "kind": " QEMU ",
+                "image": "generated.qcow2",
+                "ethernet": 1,
+            },
+            {
+                "id": "other",
+                "name": "Unrelated generated child",
+                "kind": "qemu",
+                "image": "other.qcow2",
+                "ethernet": 1,
+            },
+        ],
+        "links": [],
+    }
+    _seed_paired_template(settings, paired, key="pair")
+    (settings.USER_TEMPLATES_DIR / "pair__child.yml").write_text(
+        "type: ' QEMU '\n"
+        "name: Standalone definition\n"
+        "description: private-standalone-detail\n"
+        "cpu: 7\n"
+        "ram: 4096\n"
+        "ethernet: 2\n"
+    )
+
+
+def test_real_template_wins_generated_key_collision(patched_split):
+    _seed_generated_key_collision(patched_split)
+    service = TemplateService()
+
+    listed = service.list_templates("qemu")
+    assert listed["pair__child"]["name"] == "Standalone definition"
+    assert listed["pair__child"]["paired_parent"] is None
+    assert listed["pair__other"]["paired_parent"] == "pair"
+
+    direct = service.get_template("qemu", "pair__child")
+    assert direct.name == "Standalone definition"
+    assert direct.paired_parent is None
+
+    catalog = service.build_node_catalog()
+    matching = [
+        entry
+        for entry in catalog["templates"]
+        if entry["key"] == "pair__child" and entry["type"] == "qemu"
+    ]
+    assert len(matching) == 1
+    assert matching[0]["name"] == "Standalone definition"
+    assert matching[0]["paired_parent"] is None
+    assert any(entry["key"] == "pair__other" for entry in catalog["templates"])
+
+
+def test_only_colliding_generated_child_is_skipped(patched_split, caplog):
+    import logging
+
+    _seed_generated_key_collision(patched_split)
+    service = TemplateService()
+    with caplog.at_level(logging.WARNING, logger="nova-ve.template_service"):
+        generated = service._load_synthetic_paired_child_templates()
+
+    by_key = {template.key: template for template in generated}
+    assert set(by_key) == {"pair__other"}
+    assert by_key["pair__other"].paired_parent == "pair"
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if "standalone" in record.getMessage().lower()
+    ]
+    assert len(warnings) == 1
+    assert "pair__child" in warnings[0]
+    assert str(patched_split.USER_TEMPLATES_DIR) not in warnings[0]
+    assert "private-standalone-detail" not in warnings[0]
+
+
+def test_generated_key_collision_is_scoped_to_runtime_kind(patched_split):
+    paired = {
+        "kind": "paired",
+        "nodes": [
+            {"id": "child", "kind": " QEMU ", "ethernet": 1},
+            {"id": "other", "kind": "qemu", "ethernet": 1},
+        ],
+        "links": [],
+    }
+    _seed_paired_template(patched_split, paired, key="pair")
+    (patched_split.USER_TEMPLATES_DIR / "pair__child.yml").write_text(
+        "type: docker\nname: Standalone container\nimage: fixture:latest\n"
+    )
+    service = TemplateService()
+
+    generated = service._load_synthetic_paired_child_templates()
+    assert {template.key for template in generated} == {"pair__child", "pair__other"}
+    assert service.get_template("docker", "pair__child").paired_parent is None
+    assert service.get_template("qemu", "pair__child").paired_parent == "pair"
+
+
+def test_collision_marks_pair_invalid_with_actionable_reason(patched_split):
+    _seed_generated_key_collision(patched_split)
+
+    entry = TemplateService().build_node_catalog()["paired_templates"][0]
+    assert entry["valid"] is False
+    assert "pair__child" in entry["invalid_reason"]
+    assert "qemu" in entry["invalid_reason"]
+    assert "rename" in entry["invalid_reason"].lower()
+    assert str(patched_split.USER_TEMPLATES_DIR) not in entry["invalid_reason"]
+    assert "private-standalone-detail" not in entry["invalid_reason"]
+
+
+@pytest.mark.asyncio
+async def test_collision_preflight_rejects_before_lab_access_or_id_allocation(
+    patched_split, monkeypatch
+):
+    _seed_generated_key_collision(patched_split)
+    invalid_reason = TemplateService()._build_paired_catalog()[0]["invalid_reason"]
+
+    def unexpected_access(*args, **kwargs):
+        raise AssertionError(
+            "collision preflight must finish before lab access or ID allocation"
+        )
+
+    monkeypatch.setattr(labs, "_locked_lab", unexpected_access)
+    monkeypatch.setattr(labs, "allocate_node_id", unexpected_access)
+    monkeypatch.setattr(labs, "allocate_network_id", unexpected_access)
+
+    response = await labs.create_nodes_from_paired_template(
+        "missing.json",
+        NodeFromPairedTemplate(template_key="pair"),
+        current_user=_admin(),
+    )
+    body = _response_json(response)
+    assert _response_status(response) == 422
+    assert body["code"] == 422
+    assert invalid_reason in body["message"]
+    assert "rename" in body["message"].lower()
