@@ -365,6 +365,23 @@ def _primary_file(path: Path) -> Path | None:
     return None
 
 
+def _image_dependency_locations(candidate: Path) -> Iterator[Path]:
+    """Follow the image and every parent and link needed to reach it."""
+    pending = [candidate.absolute()]
+    seen: set[Path] = set()
+    while pending:
+        path = pending.pop()
+        if path in seen:
+            continue
+        seen.add(path)
+        yield path.resolve()
+        parent = path.parent
+        if parent != path:
+            pending.append(parent)
+        if path.is_symlink():
+            pending.append(parent.resolve() / path.readlink())
+
+
 class ImageLibraryService:
     def __init__(self) -> None:
         self.settings = get_settings()
@@ -534,13 +551,68 @@ class ImageLibraryService:
                     "template": str(node.get("template") or ""),
                 }
 
-    def _scan_references(self) -> dict[str, list[dict[str, Any]]]:
-        """Map image name to its references in saved labs."""
+    def _runtime_image_paths(self, image_type: str, image_name: str) -> tuple[Path, ...]:
+        if image_type == "qemu":
+            from app.services.node_runtime_service import iter_qemu_media_candidates
+
+            # An existing overlay can still use a lower-priority image.
+            return tuple(
+                path
+                for iso in (False, True)
+                for path, _ in iter_qemu_media_candidates(self.images_dir, image_name, iso=iso)
+                if path.is_file()
+            )
+        if image_type == "iol":
+            from app.services.runtime.iol import IolError, IolLauncher
+
+            try:
+                path = IolLauncher.resolve_image({"image": image_name}, self.images_dir / "iol")
+            except IolError:
+                return ()
+            return (path,) if path.is_file() else ()
+        if image_type == "dynamips":
+            from app.services.runtime.dynamips import DynamipsError, DynamipsLauncher
+
+            try:
+                return (DynamipsLauncher._resolve_image_path({"image": image_name}),)
+            except DynamipsError:
+                return ()
+        return ()
+
+    def _scan_references(self, images: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+        """Map inventory entries to saved references by runtime name and actual storage."""
+        by_name: dict[tuple[str, str], set[str]] = {}
+        by_path: dict[Path, set[str]] = {}
+        for image in images:
+            image_type, name, path = image["type"], image["name"], image["path"]
+            by_name.setdefault((image_type, name), set()).add(path)
+            if image_type in FILESYSTEM_IMAGE_TYPES:
+                by_path.setdefault(Path(path).resolve(), set()).add(path)
+
         references: dict[str, list[dict[str, Any]]] = {}
+        matched: dict[tuple[str, str], set[str]] = {}
+        image_types = (*FILESYSTEM_IMAGE_TYPES, "docker")
         for node, reference in self._iter_lab_nodes():
             image_name = str(node.get("image") or "").strip()
-            if image_name:
-                references.setdefault(image_name, []).append(reference)
+            if not image_name:
+                continue
+            image_type = str(node.get("type") or "").strip().lower()
+            if image_type == "iou":
+                image_type = "iol"
+            identity = (image_type, image_name)
+            if identity not in matched:
+                # Legacy records with no known runtime retain name-based protection.
+                matching_types = (image_type,) if image_type in image_types else image_types
+                targets: set[str] = set()
+                for matching_type in matching_types:
+                    targets.update(by_name.get((matching_type, image_name), ()))
+                if by_path:
+                    for candidate in self._runtime_image_paths(image_type, image_name):
+                        for location in _image_dependency_locations(candidate):
+                            targets.update(by_path.get(location, ()))
+                matched[identity] = targets
+            for target in matched[identity]:
+                references.setdefault(target, []).append(reference)
         return references
 
     @staticmethod
@@ -555,7 +627,7 @@ class ImageLibraryService:
 
     def inventory(self) -> dict[str, Any]:
         images = self._scan_filesystem_images() + self._scan_docker_images()
-        references = self._scan_references()
+        references = self._scan_references(images)
 
         template_service = TemplateService()
         templates: list[dict[str, Any]] = []
@@ -575,11 +647,12 @@ class ImageLibraryService:
             templates.append(entry)
 
         for image in images:
-            image["referencedBy"] = references.get(image["name"], [])
+            image["referencedBy"] = references.get(image["path"], [])
             image["templates"] = [
                 {"type": t["type"], "key": t["id"], "name": t["name"]}
                 for t in templates
-                if any(m["name"] == image["name"] for m in t["images"])
+                if t["type"] == image["type"]
+                and any(m["name"] == image["name"] for m in t["images"])
             ]
 
         return {
@@ -744,7 +817,8 @@ class ImageLibraryService:
         if images_root not in resolved.parents:
             raise ImageLibraryError("Refusing to delete outside the images directory.")
 
-        references = self._scan_references().get(name, [])
+        entry = {"type": image_type, "name": name, "path": str(target)}
+        references = self._scan_references([entry]).get(str(target), [])
         if references:
             raise ImageReferenced(
                 f"Image {name} is referenced by {len(references)} lab node(s); "
