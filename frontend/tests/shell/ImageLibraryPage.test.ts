@@ -94,13 +94,13 @@ const IMAGES: LibraryImage[] = [
   },
 ];
 
-function mockApi(templates = TEMPLATES) {
+function mockApi(templates = TEMPLATES, images = IMAGES) {
   apiRequest.mockImplementation(async (path: string) => {
     if (path === '/library/templates') {
       return { code: 200, status: 'success', message: '', data: { templates } };
     }
     if (path === '/library/images') {
-      return { code: 200, status: 'success', message: '', data: { images: IMAGES } };
+      return { code: 200, status: 'success', message: '', data: { images } };
     }
     if (path === '/library/images/qemu/vyos/verify') {
       return {
@@ -165,6 +165,39 @@ describe('Images & Templates library page (#264, live)', () => {
     expect(screen.getByTestId('image-delete-blocked-veos')).toBeInTheDocument();
     // Unreferenced images expose the delete action.
     expect(screen.getByTestId('image-delete-vyos')).toBeInTheDocument();
+  });
+
+  it('requires a host rename for duplicate image names even when search hides the duplicate', async () => {
+    const image = { ...IMAGES[1], filename: 'vyos.qcow2', path: '/images/qemu/vyos.qcow2' };
+    const duplicate = { ...image, filename: 'vyos.iso', path: '/images/qemu/vyos.iso' };
+    const otherType: LibraryImage = { ...image, type: 'iol', filename: 'vyos.bin', path: '/images/iol/vyos.bin' };
+    mockApi(TEMPLATES, [image, duplicate, otherType]);
+    render(LibraryPage);
+    await screen.findByTestId('template-card-veos');
+    await fireEvent.click(screen.getByTestId('images-tab-images'));
+
+    for (const entry of [image, duplicate]) {
+      const row = within(screen.getByText(entry.filename).closest('tr')!);
+      expect(row.getByText('Name conflict')).toBeInTheDocument();
+      expect(row.getByRole('button', { name: 'Verify' })).toBeDisabled();
+      expect(row.getByRole('button', { name: 'Delete' })).toBeDisabled();
+    }
+    expect(screen.getByText(/Rename a conflicting file or folder on the host/)).toBeInTheDocument();
+    const iol = within(screen.getByText(otherType.filename).closest('tr')!);
+    expect(iol.getByRole('button', { name: 'Verify' })).toBeEnabled();
+    expect(iol.getByRole('button', { name: 'Delete' })).toBeEnabled();
+
+    await fireEvent.input(screen.getByTestId('images-search'), { target: { value: image.filename } });
+    expect(screen.queryByText(duplicate.filename)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Verify' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeDisabled();
+
+    const renamed = { ...duplicate, name: 'rescue', filename: 'rescue.iso', path: '/images/qemu/rescue.iso' };
+    mockApi(TEMPLATES, [image, renamed, otherType]);
+    await fireEvent.click(screen.getByTestId('library-refresh'));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Verify' })).toBeEnabled());
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+    expect(screen.queryByText('Name conflict')).not.toBeInTheDocument();
   });
 
   it('verify computes the checksum through the API and shows the cached value', async () => {

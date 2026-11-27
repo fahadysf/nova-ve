@@ -488,7 +488,9 @@ class ImageLibraryService:
             if matches:
                 raise ImageNameConflict(
                     f"More than one {image_type} image has the name {name}. "
-                    "Image names must be unique within a runtime to verify or delete an image."
+                    "Review lab and template references before renaming. "
+                    "Rename a conflicting file or folder on the host so each image has "
+                    "a unique name within its runtime, then refresh the Library."
                 )
         raise ImageNotFound(f"Image {name} ({image_type}) not found.")
 

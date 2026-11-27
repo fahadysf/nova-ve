@@ -262,13 +262,26 @@ async def test_ambiguous_image_names_do_not_verify_or_delete(client, lib_setting
 
     verify = await client.post("/api/library/images/qemu/fixture/verify")
     assert verify.json()["code"] == 409
+    assert "Rename a conflicting file or folder" in verify.json()["message"]
     assert not (lib_settings.TMP_DIR / "image-checksums.json").exists()
 
     delete = await client.delete("/api/library/images/qemu/fixture")
     assert delete.json()["code"] == 409
+    assert delete.json()["message"] == verify.json()["message"]
     assert first.read_bytes() == b"first disk"
     assert second.read_bytes() == b"second disk"
     assert _audited(audit_events, "image.delete") == []
+
+    entry = second if second_kind == "flat" else second.parent
+    renamed = root / ("rescue.iso" if second_kind == "flat" else "rescue")
+    entry.rename(renamed)
+    verified = await client.post("/api/library/images/qemu/fixture/verify")
+    assert verified.json()["code"] == 200
+    assert verified.json()["data"]["file"] == first.name
+    deleted = await client.delete("/api/library/images/qemu/rescue")
+    assert deleted.json()["code"] == 200
+    assert not renamed.exists()
+    assert first.read_bytes() == b"first disk"
 
 
 @pytest.mark.asyncio
