@@ -9,7 +9,7 @@ const nodeName = 'Router 1';
 
 test.use({ viewport: { width: 1440, height: 900 } });
 
-async function openFloatingConsole(page: Page, secondNode = false) {
+async function setUpConsoleLab(page: Page, secondNode = false) {
   const router = {
     id: 1, name: nodeName, type: 'qemu', template: 'linux', image: 'linux',
     status: 2, console: 'telnet', cpu: 1, ram: 256, ethernet: 0, delay: 0,
@@ -19,7 +19,7 @@ async function openFloatingConsole(page: Page, secondNode = false) {
     const { pathname } = new URL(route.request().url());
     const ok = (data: unknown) => route.fulfill({ json: { code: 200, status: 'success', data } });
     if (pathname === '/api/auth') return ok({ username: 'admin', role: 'admin', html5: true });
-    if (pathname === labApi) return ok({ id: 'lab-id', name: 'Floating console lab', path: labPath });
+    if (pathname === labApi) return ok({ id: 'lab-id', name: 'Console fixture lab', path: labPath, revision: 1 });
     if (pathname === `${labApi}/nodes`) return ok({
       '1': router,
       ...(secondNode ? { '2': { ...router, id: 2, name: 'Router 2', left: 1080 } } : {})
@@ -32,8 +32,12 @@ async function openFloatingConsole(page: Page, secondNode = false) {
     });
     return ok([]);
   });
-  await page.routeWebSocket('**/ws/labs/**', () => {});
+  await page.routeWebSocket('**/ws/labs/**', (socket) => socket.send(JSON.stringify({ type: 'hello', seq: 1 })));
   await page.goto(`/labs${labPath}`);
+}
+
+async function openFloatingConsole(page: Page, secondNode = false) {
+  await setUpConsoleLab(page, secondNode);
   await page.getByRole('button', { name: 'Floating', exact: true }).click();
   const window = await openNodeConsole(page, 1, nodeName);
   const input = window.frameLocator(`iframe[title="Guacamole console for ${nodeName}"]`)
@@ -42,10 +46,21 @@ async function openFloatingConsole(page: Page, secondNode = false) {
   return { window, input };
 }
 
-async function openNodeConsole(page: Page, nodeId: number, name: string) {
-  await page.locator(`.svelte-flow__node[data-id="node${nodeId}"]`).getByTestId('node-icon-container')
-    .click({ button: 'right' });
+async function clickNodeConsole(page: Page, nodeId: number) {
+  const icon = page.locator(`.svelte-flow__node[data-id="node${nodeId}"]`).getByTestId('node-icon-container');
+  await expect(icon).toBeVisible();
+  await icon.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    element.dispatchEvent(new MouseEvent('contextmenu', {
+      bubbles: true, cancelable: true, button: 2,
+      clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2,
+    }));
+  });
   await page.getByTestId('node-menu-console-primary').click();
+}
+
+async function openNodeConsole(page: Page, nodeId: number, name: string) {
+  await clickNodeConsole(page, nodeId);
   const window = page.getByRole('dialog', { name: `Console window for ${name}` });
   await expect(window).toBeVisible();
   return window;
@@ -159,3 +174,38 @@ test('restoring a second console preserves its own opening position and the firs
   await expect.poll(() => visibleBounds(first)).toEqual(resizedFirst);
   await expect(input).toHaveValue('show version');
 });
+
+for (const closing of ['active', 'inactive'] as const) {
+  test(`closing the ${closing} tab returns keyboard input to the remaining console`, async ({ page }) => {
+    await setUpConsoleLab(page, true);
+    await page.getByRole('button', { name: 'Tabbed', exact: true }).click();
+    await clickNodeConsole(page, 1);
+    const workspace = page.getByRole('dialog', { name: 'Console workspace' });
+    const iframeSelector = (node: number) => `iframe[title="Guacamole console for Router ${node}"]`;
+    const input = (node: number) => workspace.frameLocator(iframeSelector(node))
+      .locator('input[aria-label="Console input"]');
+    await input(1).fill('show version');
+    await workspace.getByLabel('Console target').selectOption('2');
+    await input(2).fill('show interfaces');
+
+    const closedNode = closing === 'active' ? 2 : 1;
+    const remainingNode = closing === 'active' ? 1 : 2;
+    const remainingInput = input(remainingNode);
+    await remainingInput.evaluate((element) => {
+      element.ownerDocument.addEventListener('keydown', (event) => {
+        element.setAttribute('data-last-key', event.key);
+      });
+    });
+    const close = workspace.getByRole('button', { name: `Close Router ${closedNode}` });
+    if (closing === 'active') {
+      await close.click();
+    } else {
+      await close.focus();
+      await page.keyboard.press('Enter');
+    }
+    await expect(workspace.locator(iframeSelector(remainingNode))).toBeFocused();
+    await expect(remainingInput).toHaveValue(closing === 'active' ? 'show version' : 'show interfaces');
+    await page.keyboard.press('x');
+    await expect(remainingInput).toHaveAttribute('data-last-key', 'x');
+  });
+}

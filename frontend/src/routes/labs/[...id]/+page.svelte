@@ -992,6 +992,19 @@
     consoleWorkspace = { ...consoleWorkspace, tabs, zStack, activeTabId };
   }
 
+  async function closeWorkspaceTab(tabId: number) {
+    closeConsole(tabId);
+    const activeTabId = consoleWorkspace?.activeTabId;
+    if (activeTabId == null) return;
+
+    // The browser can move focus to the page body when the button is removed.
+    await tick();
+    if (consoleWorkspace?.mode === 'tabbed' && !consoleWorkspace.minimized &&
+        consoleWorkspace.activeTabId === activeTabId && document.activeElement === document.body) {
+      focusGuacamoleWindow(activeTabId);
+    }
+  }
+
   async function reloadConsole() {
     const activeTab = activeConsoleTab();
     if (!activeTab || !consoleWorkspace) return;
@@ -1542,7 +1555,7 @@
             </div>
             <div class="flex min-h-0 flex-1 flex-col bg-gray-950">
               <div class="flex items-center gap-1 border-b border-gray-800 bg-gray-950/90 px-3 py-1">
-                {#each consoleWorkspace.tabs as tab}
+                {#each consoleWorkspace.tabs as tab (tab.id)}
                   <div class={`flex items-center gap-0.5 rounded-md border ${tab.id === consoleWorkspace.activeTabId ? 'border-blue-500 bg-blue-500/10 text-white' : 'border-gray-700 bg-gray-900 text-gray-300 hover:border-blue-500 hover:text-white'}`}>
                     <button
                       type="button"
@@ -1563,7 +1576,7 @@
                       class="pr-1.5 text-gray-500 hover:text-red-400"
                       aria-label={`Close ${tab.nodeName}`}
                       on:pointerdown|stopPropagation
-                      on:click={() => closeConsole(tab.id)}
+                      on:click={() => closeWorkspaceTab(tab.id)}
                     >
                       ×
                     </button>

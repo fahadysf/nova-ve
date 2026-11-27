@@ -44,7 +44,7 @@ The exact console type is template-defined and constrained by node type. A node 
 
 ## Closing / minimizing
 
-- **Tabbed mode** — click the × on a tab to close, or the minimize button to send the entire workspace to a docked bar.
+- **Tabbed mode** — click the × on a tab to close it, or the minimize button to send the workspace to a docked bar. When closing a tab removes keyboard focus, the visible console receives it. Other tabs keep their sessions.
 - **Floating mode** — each window has its own header with close / minimize / maximize controls.
 
 Closing a console drops the Guacamole session; it does **not** stop the node. Re-opening reconnects.
