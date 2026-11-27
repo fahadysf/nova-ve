@@ -10,10 +10,12 @@ equality predicate.
 """
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import IntegrityError
 
 from app.main import app
 from app.database import get_db
@@ -258,6 +260,28 @@ async def test_admin_deletes_other_user(client):
     assert response.status_code == 200
     assert "alice" not in fake.users
     assert fake.deleted == ["alice"]
+
+
+@pytest.mark.asyncio
+async def test_delete_referenced_user_rolls_back_and_returns_conflict(client, monkeypatch, audit_events):
+    class ForeignKeyViolation(Exception):
+        sqlstate = "23503"
+
+    admin = _user(username="admin", role="admin")
+    alice = _user()
+    fake = FakeSession([admin, alice])
+    commit = AsyncMock(side_effect=IntegrityError(None, None, ForeignKeyViolation()))
+    rollback = AsyncMock()
+    monkeypatch.setattr(fake, "commit", commit)
+    monkeypatch.setattr(fake, "rollback", rollback, raising=False)
+    _install(admin, fake)
+
+    response = await client.delete("/api/users/alice")
+
+    assert response.status_code == 409
+    assert "reassign" in response.json()["message"].lower()
+    rollback.assert_awaited_once()
+    assert audit_events == []
 
 
 @pytest.mark.asyncio

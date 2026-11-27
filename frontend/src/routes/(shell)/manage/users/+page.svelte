@@ -116,10 +116,13 @@
   }
 
   onMount(() => {
-    void refresh();
+    if ($authStore.user?.role === 'admin') {
+      void refresh();
+    }
   });
 </script>
 
+{#if $authStore.user?.role === 'admin'}
 <div class="p-6">
   <div class="space-y-6">
     <PageHeader issue={261}>
@@ -241,13 +244,12 @@
     on:close={() => (dialogOpen = false)}
   />
 {/if}
-
 {#if confirmTarget}
   <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation" data-testid="user-delete-confirm">
     <div class="w-full max-w-sm rounded-2xl border border-gray-800 bg-gray-900 p-5 shadow-2xl">
       <h2 class="text-sm font-semibold text-gray-100">Delete {confirmTarget.username}?</h2>
       <p class="mt-2 text-[12px] text-gray-400">
-        This removes the account permanently. Labs on disk are kept.
+        This removes the account permanently. Reassign owned labs and pod assignments first.
       </p>
       <div class="mt-4 flex justify-end gap-2">
         <button
@@ -263,4 +265,7 @@
       </div>
     </div>
   </div>
+{/if}
+{:else}
+  <p class="p-6 text-sm text-gray-300" role="status">Administrator access is required to manage users.</p>
 {/if}

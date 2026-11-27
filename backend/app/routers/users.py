@@ -1,6 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from app.database import get_db
 from app.dependencies import get_current_user, get_current_admin
 from app.openapi import COMMON_RESPONSES
@@ -184,8 +186,22 @@ async def delete_user(
     # #297: describe the account before it disappears — the trail has no
     # foreign key to users and must stand on its own afterwards.
     deleted_role, deleted_name = user.role, user.name
-    await db.delete(user)
-    await db.commit()
+    try:
+        await db.delete(user)
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        # PostgreSQL rejects the delete if a lab or pod still references this user.
+        if getattr(exc.orig, "sqlstate", None) != "23503":
+            raise
+        return JSONResponse(
+            status_code=409,
+            content={
+                "code": 409,
+                "status": "fail",
+                "message": "Reassign this account's labs or pod assignments before deleting it.",
+            },
+        )
     await audit_service.record(
         "user.delete",
         actor=current_user.username,
