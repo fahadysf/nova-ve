@@ -247,6 +247,31 @@ async def test_templates_list_with_matches_and_missing_state(client, lib_setting
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("second_kind", ["flat", "directory"])
+async def test_ambiguous_image_names_do_not_verify_or_delete(client, lib_settings, audit_events, second_kind):
+    root = lib_settings.IMAGES_DIR / "qemu"
+    root.mkdir(parents=True)
+    first = root / "fixture.qcow2"
+    first.write_bytes(b"first disk")
+    if second_kind == "flat":
+        second = root / "fixture.iso"
+    else:
+        (root / "fixture").mkdir()
+        second = root / "fixture" / "hda.qcow2"
+    second.write_bytes(b"second disk")
+
+    verify = await client.post("/api/library/images/qemu/fixture/verify")
+    assert verify.json()["code"] == 409
+    assert not (lib_settings.TMP_DIR / "image-checksums.json").exists()
+
+    delete = await client.delete("/api/library/images/qemu/fixture")
+    assert delete.json()["code"] == 409
+    assert first.read_bytes() == b"first disk"
+    assert second.read_bytes() == b"second disk"
+    assert _audited(audit_events, "image.delete") == []
+
+
+@pytest.mark.asyncio
 async def test_verify_checksum_computes_and_caches(client, lib_settings):
     image_file, expected = _seed_veos(lib_settings)
 

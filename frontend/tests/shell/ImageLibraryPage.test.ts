@@ -134,6 +134,22 @@ describe('Images & Templates library page (#264, live)', () => {
     expect(screen.getByText('1.2 GB')).toBeInTheDocument();
   });
 
+  it('renders both template images when their display names match', async () => {
+    const template = TEMPLATES[0];
+    mockApi([{
+      ...template,
+      images: [
+        { ...template.images[0], filename: 'veos.qcow2' },
+        { ...template.images[0], filename: 'veos.iso' },
+      ],
+    }]);
+    render(LibraryPage);
+
+    const card = within(await screen.findByTestId('template-card-veos'));
+    expect(card.getByText('veos.qcow2')).toBeInTheDocument();
+    expect(card.getByText('veos.iso')).toBeInTheDocument();
+  });
+
   it('switches to the images tab and lists size, checksum, and lab references', async () => {
     render(LibraryPage);
     await waitFor(() => screen.getByTestId('template-card-veos'));

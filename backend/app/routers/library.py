@@ -33,6 +33,7 @@ from app.services.image_library_service import (
     MAX_TEMPLATE_YAML_BYTES,
     ImageLibraryError,
     ImageLibraryService,
+    ImageNameConflict,
     ImageNotFound,
     ImageReferenced,
     TemplateConflict,
@@ -216,20 +217,12 @@ async def verify_image_checksum(
     image_name: str,
     current_user: UserRead = Depends(get_current_admin),
 ):
-    service = ImageLibraryService()
-    inventory = service.inventory()
-    match = next(
-        (
-            image
-            for image in inventory["images"]
-            if image["type"] == image_type and image["name"] == image_name
-        ),
-        None,
-    )
-    if match is None:
-        return _fail(f"Image {image_name} ({image_type}) not found.", code=404)
     try:
-        result = await service.verify_checksum(match["path"])
+        result = await ImageLibraryService().verify_checksum(image_type, image_name)
+    except ImageNotFound as exc:
+        return _fail(str(exc), code=404)
+    except ImageNameConflict as exc:
+        return _fail(str(exc), code=409)
     except ImageLibraryError as exc:
         return _fail(str(exc))
     return _ok("Checksum computed.", result)
@@ -246,6 +239,8 @@ async def delete_library_image(
         result = service.delete_image(image_type, image_name)
     except ImageNotFound as exc:
         return _fail(str(exc), code=404)
+    except ImageNameConflict as exc:
+        return _fail(str(exc), code=409)
     except ImageReferenced as exc:
         return _fail(str(exc), code=409, data={"references": exc.references})
     except ImageLibraryError as exc:

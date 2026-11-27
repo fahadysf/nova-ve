@@ -372,7 +372,7 @@
                       </div>
                     {:else}
                       <div class="mt-1.5 flex flex-wrap gap-1.5">
-                        {#each template.images as image (image.name)}
+                        {#each template.images as image (image.filename)}
                           <span
                             class="inline-flex items-center gap-1.5 rounded-full border border-gray-700 px-2 py-0.5 text-[11px] text-gray-300"
                             title={`${image.filename} · ${formatSize(image.size)}`}
