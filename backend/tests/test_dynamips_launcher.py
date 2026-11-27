@@ -57,11 +57,14 @@ def _serve_replies(replies: list[bytes]) -> tuple[int, threading.Event]:
     return port, done
 
 
-def test_request_parses_single_line_success() -> None:
-    port, done = _serve_replies([b"100 OK\r\n"])
+def test_request_parses_consecutive_single_line_replies(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.runtime.dynamips._HYPERVISOR_READ_TIMEOUT_S", 0.5)
+    port, done = _serve_replies([b"100-0\r\n", b"100-OK\r\n"])
     client = HypervisorClient(port)
     try:
-        reply = client.request("hypervisor version")
+        status = client.request("vm get_status r1")
+        assert status.lines == ["0"]
+        reply = client.request("vm delete r1")
         assert reply.code == 100
         assert reply.ok is True
         assert reply.lines == ["OK"]
@@ -71,10 +74,9 @@ def test_request_parses_single_line_success() -> None:
 
 
 def test_request_parses_multiline_success() -> None:
-    # Multi-line replies use the "CODE-text" continuation format until the
-    # terminal "CODE text" line.
+    # Dynamips sets the hyphen only on the terminal record.
     port, done = _serve_replies(
-        [b"100-line1\r\n100-line2\r\n100 final\r\n"]
+        [b"101 line1\r\n101 line2\r\n100-final\r\n"]
     )
     client = HypervisorClient(port)
     try:
@@ -87,7 +89,7 @@ def test_request_parses_multiline_success() -> None:
 
 
 def test_request_raises_on_error_code() -> None:
-    port, done = _serve_replies([b"209 invalid argument\r\n"])
+    port, done = _serve_replies([b"209-invalid argument\r\n"])
     client = HypervisorClient(port)
     try:
         with pytest.raises(DynamipsError, match="209"):
