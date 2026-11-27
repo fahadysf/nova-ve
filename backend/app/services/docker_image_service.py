@@ -164,6 +164,8 @@ class DockerImageService:
         """
         cmd = _resolve_docker()
         if cmd is None:
+            if strict:
+                raise DockerImageError("docker CLI not available on this host")
             return []
         try:
             proc = _run(
@@ -189,12 +191,25 @@ class DockerImageService:
                 continue
             try:
                 row = json.loads(line)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                if strict:
+                    raise DockerImageError("docker image ls returned invalid JSON") from exc
                 continue
-            image_id = (row.get("ID") or "").strip()
-            repository = (row.get("Repository") or "").strip()
-            tag = (row.get("Tag") or "").strip()
-            if not image_id or not repository or repository == "<none>":
+            if not isinstance(row, dict):
+                if strict:
+                    raise DockerImageError("docker image ls returned a non-object row")
+                continue
+            reference_fields = (row.get("ID"), row.get("Repository"), row.get("Tag"))
+            if any(value is not None and not isinstance(value, str) for value in reference_fields):
+                if strict:
+                    raise DockerImageError("docker image ls returned invalid image reference fields")
+                continue
+            image_id, repository, tag = ((value or "").strip() for value in reference_fields)
+            if not image_id or not repository:
+                if strict:
+                    raise DockerImageError("docker image ls returned an incomplete row")
+                continue
+            if repository == "<none>":
                 continue
             reference = f"{repository}:{tag}" if tag and tag != "<none>" else repository
             record = records.setdefault(
@@ -246,10 +261,12 @@ class DockerImageService:
         """Return console defaults inferred from a local image's config."""
         from app.services.host_net import sandbox_mode
 
-        if sandbox_mode():
+        if sandbox_mode() or not reference:
             return ImageConsoleHints()
         cmd = _resolve_docker()
-        if cmd is None or not reference:
+        if cmd is None:
+            if strict:
+                raise DockerImageError("docker CLI not available on this host")
             return ImageConsoleHints()
         try:
             proc = _run(
@@ -269,12 +286,18 @@ class DockerImageService:
             return ImageConsoleHints()
         try:
             payload = json.loads(proc.stdout or "[]")
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
+            if strict:
+                raise DockerImageError("docker image inspect returned invalid or empty response") from exc
             return ImageConsoleHints()
-        if not payload or not isinstance(payload[0], dict):
+        if not isinstance(payload, list) or not payload or not isinstance(payload[0], dict):
+            if strict:
+                raise DockerImageError("docker image inspect returned invalid or empty response")
             return ImageConsoleHints()
-        config = payload[0].get("Config") or {}
+        config = payload[0].get("Config")
         if not isinstance(config, dict):
+            if strict:
+                raise DockerImageError("docker image inspect returned invalid or empty response")
             return ImageConsoleHints()
         return ImageConsoleHints(vnc_port=_infer_vnc_port(config))
 

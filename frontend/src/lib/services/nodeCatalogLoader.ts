@@ -16,6 +16,7 @@ export function createNodeCatalogLoader(
   options: NodeCatalogLoaderOptions
 ): NodeCatalogLoader {
   const retryDelayMs = options.retryDelayMs ?? 2000;
+  const fallbackDelayMs = 60_000;
   let closed = false;
   let inFlight = false;
   let queued = false;
@@ -32,15 +33,17 @@ export function createNodeCatalogLoader(
   async function run(version: number): Promise<void> {
     inFlight = true;
     queued = false;
-    let refreshDelayed = false;
+    let nextRefreshDelayMs = fallbackDelayMs;
     try {
       const catalog = await options.load();
-      refreshDelayed = catalog.pending === true;
+      if (catalog.pending === true) {
+        nextRefreshDelayMs = retryDelayMs;
+      }
       if (!closed && version === requestedVersion) {
         options.onCatalog(catalog);
       }
     } catch (error) {
-      refreshDelayed = true;
+      nextRefreshDelayMs = retryDelayMs;
       if (!closed && version === requestedVersion) {
         options.onError?.(error);
       }
@@ -50,12 +53,12 @@ export function createNodeCatalogLoader(
       if (queued || version !== requestedVersion) {
         queued = false;
         void run(requestedVersion);
-      } else if (refreshDelayed) {
+      } else {
         clearRetry();
         retryTimer = setTimeout(() => {
           retryTimer = null;
           refresh();
-        }, retryDelayMs);
+        }, nextRefreshDelayMs);
       }
     }
   }

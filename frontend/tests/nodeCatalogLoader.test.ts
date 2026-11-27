@@ -84,7 +84,7 @@ describe('createNodeCatalogLoader', () => {
     await flushPromises();
     expect(onCatalog).toHaveBeenCalledWith(catalog('recovered'));
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(load).toHaveBeenCalledTimes(2);
     loader.close();
   });
@@ -129,7 +129,7 @@ describe('createNodeCatalogLoader', () => {
     expect(load).toHaveBeenCalledTimes(2);
     expect(onCatalog).toHaveBeenLastCalledWith({ ...catalog('fresh'), pending: false });
 
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(59_999);
     expect(load).toHaveBeenCalledTimes(2);
     loader.close();
   });
@@ -150,6 +150,30 @@ describe('createNodeCatalogLoader', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(load).toHaveBeenCalledTimes(2);
     loader.close();
+  });
+
+  it('rechecks a fresh catalog after 60 seconds when an editor misses every hint', async () => {
+    vi.useFakeTimers();
+    const load = vi.fn()
+      .mockResolvedValueOnce(catalog('initial'))
+      .mockResolvedValueOnce(catalog('healed'));
+    const onCatalog = vi.fn();
+    const loader = createNodeCatalogLoader({ load, onCatalog, retryDelayMs: 2000 });
+
+    loader.refresh();
+    await flushPromises();
+    expect(onCatalog).toHaveBeenLastCalledWith(catalog('initial'));
+
+    await vi.advanceTimersByTimeAsync(59_999);
+    expect(load).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await flushPromises();
+
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(onCatalog).toHaveBeenLastCalledWith(catalog('healed'));
+    loader.close();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('ignores a late completion after the editor is destroyed', async () => {

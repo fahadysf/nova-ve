@@ -61,10 +61,9 @@ async def lab_ws(websocket: WebSocket, lab: str, last_seq: int = 0):
         return
 
     await websocket.accept()
-    ws_hub.register(lab, websocket)
+    await websocket.send_json({"type": "hello", "seq": ws_hub.head_seq(lab)})
 
     try:
-        await websocket.send_json({"type": "hello", "seq": ws_hub.head_seq(lab)})
         while True:
             head = ws_hub.head_seq(lab)
             events, needs_resnap = ws_hub.replay_since(lab, last_seq, identity=identity)

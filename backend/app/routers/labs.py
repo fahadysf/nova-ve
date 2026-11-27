@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import uuid
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ from app.schemas.user import UserRead
 from app.services.async_utils import notify_after_mutation, run_mutation, wait_for_mutation
 from app.services.guacamole_db_service import GuacamoleDatabaseError, GuacamoleDatabaseService
 from app.services.console_recording import get_console_recorder, lab_recordings_dir, recording_lab_id
+from app.services.docker_image_service import DockerImageError
 from app.services import audit_service
 from app.services.html5_service import Html5SessionError, Html5SessionService
 from app.services.lab_paths import find_runtime_lab_path, publish_runtime_event
@@ -139,8 +141,8 @@ NODE_EDIT_FIELDS = [
 ]
 
 
-def _build_node_catalog() -> dict:
-    catalog = TemplateService().build_node_catalog()
+def _build_node_catalog(*, strict_docker: bool = True) -> dict:
+    catalog = TemplateService().build_node_catalog(strict_docker=strict_docker)
     catalog["create_fields"] = NODE_CREATE_FIELDS
     catalog["edit_fields"] = NODE_EDIT_FIELDS
     catalog["runtime_editability"] = {
@@ -151,12 +153,19 @@ def _build_node_catalog() -> dict:
     return catalog
 
 
+def _build_partial_node_catalog(error: Exception) -> dict | None:
+    if isinstance(error, (DockerImageError, subprocess.TimeoutExpired)):
+        return _build_node_catalog(strict_docker=False)
+    return None
+
+
 async def _publish_node_catalog_updated(generation: int) -> None:
-    await ws_hub.publish_all("node_catalog_updated", {"generation": generation})
+    await ws_hub.notify_catalog_updated(generation)
 
 
 node_catalog_service = NodeCatalogService(
     _build_node_catalog,
+    build_degraded=_build_partial_node_catalog,
     on_updated=_publish_node_catalog_updated,
 )
 

@@ -263,6 +263,84 @@ def test_discovery_timeout_degrades_to_an_empty_result(monkeypatch):
         service.console_hints("alpine:latest", strict=True)
 
 
+def test_strict_discovery_rejects_missing_docker(monkeypatch):
+    monkeypatch.delenv("NOVA_VE_SANDBOX_MODE", raising=False)
+    monkeypatch.setattr(svc.shutil, "which", lambda _b: None)
+    service = svc.DockerImageService()
+
+    assert service.list_all_images() == []
+    assert service.console_hints("alpine:latest") == svc.ImageConsoleHints()
+    with pytest.raises(svc.DockerImageError, match="docker CLI not available"):
+        service.list_all_images(strict=True)
+    with pytest.raises(svc.DockerImageError, match="docker CLI not available"):
+        service.console_hints("alpine:latest", strict=True)
+
+
+def test_strict_discovery_rejects_daemon_errors(monkeypatch):
+    monkeypatch.delenv("NOVA_VE_SANDBOX_MODE", raising=False)
+    monkeypatch.setattr(svc.shutil, "which", lambda _b: "/usr/bin/docker")
+    monkeypatch.setattr(
+        svc.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=1, stdout="", stderr="Cannot connect to the Docker daemon"
+        ),
+    )
+    service = svc.DockerImageService()
+
+    assert service.list_all_images() == []
+    assert service.console_hints("alpine:latest") == svc.ImageConsoleHints()
+    with pytest.raises(svc.DockerImageError, match="Cannot connect"):
+        service.list_all_images(strict=True)
+    with pytest.raises(svc.DockerImageError, match="Cannot connect"):
+        service.console_hints("alpine:latest", strict=True)
+
+
+def test_strict_discovery_rejects_malformed_list_output(monkeypatch):
+    _stub_docker(monkeypatch, "not-json")
+    service = svc.DockerImageService()
+
+    assert service.list_all_images() == []
+    with pytest.raises(svc.DockerImageError, match="invalid JSON"):
+        service.list_all_images(strict=True)
+
+
+def test_strict_discovery_rejects_nontext_image_references(monkeypatch):
+    _stub_docker(monkeypatch, '{"ID": "sha256:abc", "Repository": 123, "Tag": "latest"}')
+    service = svc.DockerImageService()
+
+    assert service.list_all_images() == []
+    with pytest.raises(svc.DockerImageError, match="invalid image reference fields"):
+        service.list_all_images(strict=True)
+
+
+@pytest.mark.parametrize("output", ["[]", '[{"Config": "invalid"}]', "[{}]"])
+def test_strict_discovery_rejects_incomplete_inspect_output(monkeypatch, output):
+    monkeypatch.setattr(svc.shutil, "which", lambda _b: "/usr/bin/docker")
+    monkeypatch.setattr(
+        svc.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=output, stderr=""),
+    )
+    service = svc.DockerImageService()
+
+    assert service.console_hints("alpine:latest") == svc.ImageConsoleHints()
+    with pytest.raises(svc.DockerImageError, match="invalid or empty response"):
+        service.console_hints("alpine:latest", strict=True)
+
+
+def test_strict_discovery_keeps_sandbox_daemon_independent(monkeypatch):
+    monkeypatch.setattr("app.services.host_net.sandbox_mode", lambda: True)
+
+    def unexpected_resolve():
+        raise AssertionError("sandbox discovery must not resolve Docker")
+
+    monkeypatch.setattr(svc, "_resolve_docker", unexpected_resolve)
+    service = svc.DockerImageService()
+    assert service.list_marked_image_names(strict=True) == list(service._SANDBOX_MARKED_IMAGES)
+    assert service.console_hints("alpine:latest", strict=True) == svc.ImageConsoleHints()
+
+
 def test_parse_size_handles_units():
     assert svc._parse_size("0B") == 0
     assert svc._parse_size("5MB") == 5 * 1024 * 1024
