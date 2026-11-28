@@ -31,39 +31,18 @@ def test_guide_mentions_non_destructive_default(guide_text: str) -> None:
     )
 
 
-def test_guide_documents_delete_source_opt_in(guide_text: str) -> None:
-    """The guide must mention --delete-source as the destructive opt-in flag."""
-    assert "--delete-source" in guide_text, (
-        "migration guide must mention --delete-source so operators know how to "
-        "explicitly opt in to source deletion"
-    )
-
-
-def test_guide_documents_move_symlink_default(guide_text: str) -> None:
-    """The guide must lead with the #271 move+symlink default."""
-    assert "move + symlink back" in guide_text, (
-        "migration guide must describe the move + symlink back default (#271)"
-    )
-    assert "--copy-only" in guide_text, (
-        "migration guide must mention --copy-only as the conservative opt-out"
-    )
-
-
-def test_guide_documents_log_file(guide_text: str) -> None:
-    """The guide must reference the #271 log file path."""
-    assert "/var/log/eve-ng-importer.log" in guide_text
-
-
-def test_guide_documents_dry_run(guide_text: str) -> None:
-    """The guide must mention --dry-run so operators know how to plan first."""
-    assert "--dry-run" in guide_text
-
-
-def test_guide_documents_manifest_paths(guide_text: str) -> None:
-    """The guide must reference the manifest path so operators know where to inspect output."""
-    assert "import-manifest.json" in guide_text
-
-
-def test_guide_documents_needs_manual_review(guide_text: str) -> None:
-    """The guide must explain how to triage 'needs-manual-review' templates."""
-    assert "needs-manual-review" in guide_text
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "--delete-source",  # the destructive opt-in flag
+        "move + symlink back",  # the #271 default
+        "--copy-only",  # the conservative opt-out
+        "/var/log/eve-ng-importer.log",  # the #271 log file
+        "--dry-run",  # how to plan first
+        "import-manifest.json",  # where to inspect output
+        "needs-manual-review",  # how to triage flagged templates
+    ],
+)
+def test_guide_documents_operator_contract(guide_text: str, phrase: str) -> None:
+    """The guide must keep naming each flag, path and status operators rely on."""
+    assert phrase in guide_text, f"migration guide must mention {phrase!r}"

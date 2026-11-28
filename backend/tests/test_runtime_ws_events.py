@@ -94,6 +94,13 @@ async def test_worker_warning_and_live_mac_cadence_use_the_backend_loop(
     monkeypatch.setattr(service, "read_live_mac", lambda *args, **kwargs: {"state": "confirmed"})
     listener = Listener()
     await hub.subscribe(filename, listener, identity=lab_id)
+    real_sleep = asyncio.sleep
+
+    async def no_cadence_wait(delay, *args):
+        # The cadence waits 1s, 3s and 8s between reads; skip those waits.
+        await real_sleep(0 if delay >= 1 else delay, *args)
+
+    monkeypatch.setattr(asyncio, "sleep", no_cadence_wait)
 
     current_tasks = asyncio.all_tasks()
     try:

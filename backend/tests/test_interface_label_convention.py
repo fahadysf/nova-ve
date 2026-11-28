@@ -63,8 +63,10 @@ def real_templates_service(template_settings):
 def _schemes(service: TemplateService):
     """``(type, key, format)`` for every built-in template that names its ports."""
     for template_type in TEMPLATE_TYPES:
-        for key in sorted(service.list_templates(template_type)):
-            fmt = service.interface_naming(template_type, key).get("format")
+        # The listing already carries each naming block; asking the service
+        # per template reloads every template file each time.
+        for key, template in service.list_templates(template_type).items():
+            fmt = (template.get("interface_naming") or {}).get("format")
             if fmt:
                 yield template_type, key, fmt
 

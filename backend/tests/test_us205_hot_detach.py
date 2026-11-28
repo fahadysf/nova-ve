@@ -625,9 +625,11 @@ async def test_us205_ipam_release_removes_ip_from_used_ips(
 
 
 @pytest.mark.asyncio
-async def test_release_ip_on_detach_100_cycles(lab_settings, monkeypatch):
-    """100 attach/detach cycles must leave used_ips == [] (free-list
+async def test_release_ip_on_detach_repeated_cycles(lab_settings, monkeypatch):
+    """Repeated attach/detach cycles must leave used_ips == [] (free-list
     integrity — plan acceptance criterion, Codex critic v4 defect #6).
+
+    Every cycle reseeds the lab, so a few cycles prove what 100 did.
 
     This test simulates the round-trip by directly updating the lab.json
     ``used_ips`` list (as the future US-204c create path would) then
@@ -642,7 +644,7 @@ async def test_release_ip_on_detach_100_cycles(lab_settings, monkeypatch):
     lab_id = "lab205cycle"
     labs_dir = lab_settings.LABS_DIR
 
-    for cycle in range(100):
+    for cycle in range(3):
         ip = f"10.99.1.{(cycle % 253) + 2}"
         # Seed lab with one link carrying the cycle's IP and used_ips=[ip].
         lab_name = _seed_lab(

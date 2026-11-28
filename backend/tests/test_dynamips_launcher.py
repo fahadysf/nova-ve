@@ -268,24 +268,13 @@ def test_resolve_image_path_stem_only_nested_eveng_layout(
     assert resolved == actual
 
 
-def test_resolve_image_path_stem_only_flat_image_ext(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("extension", ["image", "bin"])
+def test_resolve_image_path_stem_only_flat_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extension: str
 ) -> None:
     monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
     stem = "c7200-bare-stem"
-    actual = tmp_path / f"{stem}.image"
-    actual.write_bytes(b"FAKE")
-
-    resolved = DynamipsLauncher._resolve_image_path({"image": stem})
-    assert resolved == actual
-
-
-def test_resolve_image_path_stem_only_flat_bin_ext(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr("app.services.runtime.dynamips._IMAGES_ROOT", tmp_path)
-    stem = "c7200-binary-stem"
-    actual = tmp_path / f"{stem}.bin"
+    actual = tmp_path / f"{stem}.{extension}"
     actual.write_bytes(b"FAKE")
 
     resolved = DynamipsLauncher._resolve_image_path({"image": stem})

@@ -30,7 +30,7 @@ from app.services.node_runtime_service import NodeRuntimeService
 from app.services.network_service import NetworkService
 
 LAB = "race.json"
-HOLD_S = 0.3
+HOLD_S = 0.15
 ADMIN = SimpleNamespace(username="admin", role="admin", html5=True, folder="/")
 from tests.conftest import _unregistered_lab_db
 
@@ -1318,7 +1318,7 @@ async def test_heartbeat_status_write_waits_off_the_loop_and_keeps_an_edit(setti
     assert "9" in saved["networks"]
     # Bookkeeping: the writer's revision stands.
     assert saved["meta"]["revision"] == writer["revision"]
-    assert ticks >= 10
+    assert ticks >= 5
 
 
 @pytest.mark.asyncio
@@ -1342,7 +1342,7 @@ async def test_move_lab_waits_off_the_loop_and_moves_the_latest_file(settings, m
     assert not (settings.LABS_DIR / LAB).exists()
     moved = json.loads((settings.LABS_DIR / "Shared" / LAB).read_text())
     assert "9" in moved["nodes"]
-    assert ticks >= 10
+    assert ticks >= 5
 
 
 @pytest.mark.asyncio

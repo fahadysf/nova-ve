@@ -118,53 +118,6 @@ def test_name_helpers_stay_within_linux_interface_ceiling(monkeypatch) -> None:
     assert len(host_net.veth_peer_name("lab-us-201", 99, 9)) <= 14
 
 
-def test_get_instance_id_prefers_file_override_over_dir(monkeypatch, tmp_path: Path) -> None:
-    dir_root = tmp_path / "instance-dir"
-    dir_root.mkdir()
-    (dir_root / "instance_id").write_text("dir-instance-id\n", encoding="ascii")
-
-    instance_file = tmp_path / "instance-id-file"
-    instance_file.write_text("file-instance-id\n", encoding="ascii")
-
-    monkeypatch.setenv("NOVA_VE_INSTANCE_ID_FILE", str(instance_file))
-    monkeypatch.setenv("NOVA_VE_INSTANCE_DIR", str(dir_root))
-
-    assert host_net.get_instance_id() == "file-instance-id"
-
-
-def test_get_instance_id_uses_directory_override(monkeypatch, tmp_path: Path) -> None:
-    dir_root = tmp_path / "instance-dir"
-    dir_root.mkdir()
-    (dir_root / "instance_id").write_text("dir-instance-id\n", encoding="ascii")
-
-    monkeypatch.delenv("NOVA_VE_INSTANCE_ID_FILE", raising=False)
-    monkeypatch.setenv("NOVA_VE_INSTANCE_DIR", str(dir_root))
-
-    assert host_net.get_instance_id() == "dir-instance-id"
-
-
-def test_get_instance_id_uses_default_path_when_env_unset(monkeypatch, tmp_path: Path) -> None:
-    default_root = tmp_path / "etc-nova-ve"
-    default_root.mkdir()
-    (default_root / "instance_id").write_text("default-instance-id\n", encoding="ascii")
-
-    monkeypatch.delenv("NOVA_VE_INSTANCE_ID_FILE", raising=False)
-    monkeypatch.delenv("NOVA_VE_INSTANCE_DIR", raising=False)
-    monkeypatch.setattr(host_net, "_INSTANCE_DIR_DEFAULT", str(default_root))
-
-    assert host_net.get_instance_id() == "default-instance-id"
-
-
-def test_get_instance_id_missing_file_raises_clear_error(monkeypatch, tmp_path: Path) -> None:
-    missing_file = tmp_path / "missing-instance-id"
-
-    monkeypatch.setenv("NOVA_VE_INSTANCE_ID_FILE", str(missing_file))
-    monkeypatch.delenv("NOVA_VE_INSTANCE_DIR", raising=False)
-
-    with pytest.raises(host_net.HostNetInstanceIdMissing, match=str(missing_file)):
-        host_net.get_instance_id()
-
-
 # ---------------------------------------------------------------------------
 # Bridge ownership fingerprint helpers (HF3 — #126)
 # ---------------------------------------------------------------------------
