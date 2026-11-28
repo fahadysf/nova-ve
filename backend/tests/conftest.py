@@ -76,6 +76,20 @@ def _stub_host_net_for_qemu_start(monkeypatch):
     )
 
 
+def _shorten_runtime_mutex_wait(monkeypatch, timeout: float = 0.2) -> None:
+    """Make a contended ``runtime_mutex`` acquire give up after ``timeout``.
+
+    The acquire methods bind ``DEFAULT_ACQUIRE_TIMEOUT_S`` as a keyword
+    default when the module is imported, so patching the constant changes
+    nothing and a contention test waits the full 2s.
+    """
+    from app.services.runtime_mutex import RuntimeMutexRegistry
+
+    for name in ("acquire_sync", "acquire", "acquire_node_sync"):
+        defaults = getattr(RuntimeMutexRegistry, name).__wrapped__.__kwdefaults__
+        monkeypatch.setitem(defaults, "timeout", timeout)
+
+
 @pytest.fixture(scope="session")
 def _default_state_root(tmp_path_factory):
     """One parent for every test's default runtime-state directory.

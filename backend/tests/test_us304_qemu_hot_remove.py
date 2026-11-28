@@ -50,6 +50,7 @@ from app.services.node_runtime_service import (
     NodeRuntimeService,
 )
 from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
+from tests.conftest import _shorten_runtime_mutex_wait
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +413,10 @@ def test_us304_happy_path_device_del_then_query_pci_then_netdev_and_tap(
     fake_qmp.responses["netdev_del"] = {"return": {}}
     svc._qmp_client = fake_qmp
     calls = _patch_host_net(monkeypatch)
+    # The detach waits between query-pci polls; skip the real wait.
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.time.sleep", lambda _s: None
+    )
 
     expected_tap = host_net.tap_name(lab_id, 1, 2)
     result = svc.detach_qemu_interface(lab_id, 1, 2)
@@ -778,11 +783,9 @@ def test_us304_concurrent_attach_and_detach_second_caller_gets_contention(
 
     try:
         with pytest.raises(RuntimeMutexContention):
-            # Bounded wait via the public entrypoint; we monkey-patch
-            # the registry default to keep the test fast.
-            monkeypatch.setattr(
-                "app.services.runtime_mutex.DEFAULT_ACQUIRE_TIMEOUT_S", 0.2
-            )
+            # Bounded wait via the public entrypoint, shortened to keep
+            # the test fast.
+            _shorten_runtime_mutex_wait(monkeypatch)
             svc.detach_qemu_interface(lab_id, 1, 2)
     finally:
         proceed.set()
@@ -1002,9 +1005,7 @@ async def test_us304_link_service_delete_link_409_on_qemu_mutex_contention(
     holder.start()
     assert holder_started.wait(timeout=2.0)
 
-    monkeypatch.setattr(
-        "app.services.runtime_mutex.DEFAULT_ACQUIRE_TIMEOUT_S", 0.2
-    )
+    _shorten_runtime_mutex_wait(monkeypatch)
     link_service = LinkService()
     try:
         with pytest.raises(LinkContentionError):
