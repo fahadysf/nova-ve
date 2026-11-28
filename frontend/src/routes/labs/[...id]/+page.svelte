@@ -697,6 +697,18 @@
     return document.querySelector(`iframe[data-console-tab-id="${targetTabId}"]`);
   }
 
+  const consoleFocusTargets = new WeakMap<HTMLIFrameElement, HTMLElement>();
+
+  function trackConsoleFocus(iframe: HTMLIFrameElement) {
+    consoleFocusTargets.delete(iframe);
+    iframe.contentDocument?.addEventListener('focusin', (event) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.focus && target !== iframe.contentDocument?.body) {
+        consoleFocusTargets.set(iframe, target);
+      }
+    });
+  }
+
   function focusGuacamoleWindow(tabId?: number, attempts = 4) {
     if (hideConsoles) return;
 
@@ -711,6 +723,10 @@
     iframe.focus();
     try {
       iframe.contentWindow?.focus();
+      const contentDocument = iframe.contentDocument;
+      if (contentDocument && contentDocument.activeElement === contentDocument.body) {
+        consoleFocusTargets.get(iframe)?.focus();
+      }
     } catch (_error) {
       if (attempts > 0) {
         requestAnimationFrame(() => focusGuacamoleWindow(tabId, attempts - 1));
@@ -830,6 +846,10 @@
     updateFloatingWindow(tabId, { minimized: !tab.floating.minimized });
   }
 
+  function buildHtml5ConsoleUrl(nodeId: number, mode: ConsoleTab['mode']): string {
+    return `/api/labs/${labId}/nodes/${nodeId}/html5?ts=${Date.now()}${mode === 'second' ? '&console=second' : ''}`;
+  }
+
   function reloadFloatingConsole(tabId: number) {
     if (!consoleWorkspace) return;
     bringFloatingWindowToFront(tabId);
@@ -839,7 +859,7 @@
         tab.id === tabId
           ? {
               ...tab,
-              src: `/api/labs/${labId}/nodes/${tab.nodeId}/html5?ts=${Date.now()}`,
+              src: buildHtml5ConsoleUrl(tab.nodeId, tab.mode),
               requestId: Date.now(),
               floating: { ...tab.floating, minimized: false }
             }
@@ -937,7 +957,7 @@
       nodeId: node.id,
       nodeName: mode === 'second' ? `${node.name} (second)` : node.name,
       mode,
-      src: `/api/labs/${labId}/nodes/${node.id}/html5?ts=${Date.now()}${mode === 'second' ? '&console=second' : ''}`,
+      src: buildHtml5ConsoleUrl(node.id, mode),
       requestId: Date.now(),
       floating: defaultFloatingWindowBounds(offsetIndex)
     };
@@ -1015,7 +1035,7 @@
       minimized: false,
       tabs: consoleWorkspace.tabs.map((tab) =>
         tab.id === activeTab.id
-          ? { ...tab, src: `/api/labs/${labId}/nodes/${activeTab.nodeId}/html5?ts=${Date.now()}`, requestId: Date.now() }
+          ? { ...tab, src: buildHtml5ConsoleUrl(activeTab.nodeId, activeTab.mode), requestId: Date.now() }
           : tab
       )
     };
@@ -1602,7 +1622,8 @@
                       data-console-tab-id={tab.id}
                       tabindex="-1"
                       class="h-full w-full border-0"
-                      on:load={() => {
+                      on:load={(event) => {
+                        trackConsoleFocus(event.currentTarget as HTMLIFrameElement);
                         if (consoleWorkspace?.activeTabId === tab.id) {
                           focusGuacamoleWindow(tab.id);
                         }

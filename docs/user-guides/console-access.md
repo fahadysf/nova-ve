@@ -27,10 +27,18 @@ The top bar has a **Console layout** selector with two modes:
 
 | Mode | Behaviour |
 |---|---|
-| **Tabbed** | Open consoles stack as tabs inside a single resizable pane docked to the canvas. The tab count appears as a pill in the top bar (`{n} consoles`). |
+| **Tabbed** | Console sessions open as tabs in one draggable, resizable window over the topology canvas. The tab count appears as a pill in the top bar (`{n} consoles`). |
 | **Floating** | Each console opens as its own draggable, resizable window. Useful when you want side-by-side consoles. |
 
 You can flip modes any time — existing consoles re-flow into the new layout.
+
+## Switching and reloading consoles
+
+Click a console tab or focus it and press Enter to restore input focus to the selected same-origin Guacamole console. Select **Reload** to open a fresh session for the selected console with the same primary or secondary target.
+
+Background topology resnapshots preserve open console sessions for nodes that remain running. Leaving the lab or refreshing the browser page clears the console tabs. Reopen the consoles when you return.
+
+These console actions leave the node running.
 
 ## Console types per runtime
 

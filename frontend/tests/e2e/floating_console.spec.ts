@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Fahad Yousuf <fahadysf@gmail.com>
 // SPDX-License-Identifier: Apache-2.0
 
-import { expect, test, type Locator, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page, type WebSocketRoute } from '@playwright/test';
 
 const labPath = '/floating-console-fixture.json';
 const labApi = `/api/labs${labPath}`;
@@ -9,10 +9,15 @@ const nodeName = 'Router 1';
 
 test.use({ viewport: { width: 1440, height: 900 } });
 
-async function setUpConsoleLab(page: Page, secondNode = false) {
+async function setUpConsoleLab(
+  page: Page,
+  secondNode = false,
+  onWebSocket?: (socket: WebSocketRoute) => void,
+  onNodes?: (nodes: Record<string, { id: number; name: string; left: number }>) => void
+) {
   const router = {
     id: 1, name: nodeName, type: 'qemu', template: 'linux', image: 'linux',
-    status: 2, console: 'telnet', cpu: 1, ram: 256, ethernet: 0, delay: 0,
+    status: 2, console: 'telnet', second_console: 'vnc', cpu: 1, ram: 256, ethernet: 0, delay: 0,
     left: 400, top: 160, interfaces: []
   };
   await page.route('**/api/**', async (route) => {
@@ -20,10 +25,14 @@ async function setUpConsoleLab(page: Page, secondNode = false) {
     const ok = (data: unknown) => route.fulfill({ json: { code: 200, status: 'success', data } });
     if (pathname === '/api/auth') return ok({ username: 'admin', role: 'admin', html5: true });
     if (pathname === labApi) return ok({ id: 'lab-id', name: 'Console fixture lab', path: labPath, revision: 1 });
-    if (pathname === `${labApi}/nodes`) return ok({
-      '1': router,
-      ...(secondNode ? { '2': { ...router, id: 2, name: 'Router 2', left: 1080 } } : {})
-    });
+    if (pathname === `${labApi}/nodes`) {
+      const nodes = {
+        '1': router,
+        ...(secondNode ? { '2': { ...router, id: 2, name: 'Router 2', left: 1080 } } : {})
+      };
+      onNodes?.(nodes);
+      return ok(nodes);
+    }
     if (pathname === `${labApi}/networks`) return ok({});
     if (pathname.startsWith(`${labApi}/nodes/`) && pathname.endsWith('/recording')) return ok({ recording: false });
     if (pathname.startsWith(`${labApi}/nodes/`) && pathname.endsWith('/html5')) return route.fulfill({
@@ -32,7 +41,10 @@ async function setUpConsoleLab(page: Page, secondNode = false) {
     });
     return ok([]);
   });
-  await page.routeWebSocket('**/ws/labs/**', (socket) => socket.send(JSON.stringify({ type: 'hello', seq: 1 })));
+  await page.routeWebSocket('**/ws/labs/**', (socket) => {
+    if (onWebSocket) onWebSocket(socket);
+    else socket.send(JSON.stringify({ type: 'hello', seq: 1 }));
+  });
   await page.goto(`/labs${labPath}`);
 }
 
@@ -46,7 +58,7 @@ async function openFloatingConsole(page: Page, secondNode = false) {
   return { window, input };
 }
 
-async function clickNodeConsole(page: Page, nodeId: number) {
+async function clickNodeConsole(page: Page, nodeId: number, mode: 'primary' | 'second' = 'primary') {
   const icon = page.locator(`.svelte-flow__node[data-id="node${nodeId}"]`).getByTestId('node-icon-container');
   await expect(icon).toBeVisible();
   await icon.evaluate((element) => {
@@ -56,7 +68,7 @@ async function clickNodeConsole(page: Page, nodeId: number) {
       clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2,
     }));
   });
-  await page.getByTestId('node-menu-console-primary').click();
+  await page.getByTestId(`node-menu-console-${mode === 'second' ? 'secondary' : 'primary'}`).click();
 }
 
 async function openNodeConsole(page: Page, nodeId: number, name: string) {
@@ -175,6 +187,38 @@ test('restoring a second console preserves its own opening position and the firs
   await expect(input).toHaveValue('show version');
 });
 
+for (const layout of ['Tabbed', 'Floating'] as const) {
+  for (const mode of ['primary', 'second'] as const) {
+    const modeLabel = mode === 'second' ? 'secondary' : 'primary';
+    test(`reloading the ${modeLabel} console in ${layout} mode preserves its target and starts a fresh session`, async ({ page }) => {
+      await setUpConsoleLab(page);
+      await page.getByRole('button', { name: layout, exact: true }).click();
+      await clickNodeConsole(page, 1, mode);
+      const consoleName = mode === 'second' ? `${nodeName} (second)` : nodeName;
+      const container = layout === 'Tabbed'
+        ? page.getByRole('dialog', { name: 'Console workspace' })
+        : page.getByRole('dialog', { name: `Console window for ${consoleName}` });
+      const iframe = container.locator(`iframe[title="Guacamole console for ${consoleName}"]`);
+      await expect(iframe).toBeVisible();
+      const openingSrc = (await iframe.getAttribute('src'))!;
+      const openingUrl = new URL(openingSrc, 'http://nova.test');
+      expect(openingUrl.pathname).toBe(`${labApi}/nodes/1/html5`);
+      expect(openingUrl.searchParams.get('console')).toBe(mode === 'second' ? 'second' : null);
+      expect(Number(openingUrl.searchParams.get('ts'))).toBeGreaterThan(0);
+
+      const reloadName = layout === 'Tabbed' ? 'Reload console' : `Reload ${consoleName} console`;
+      await container.getByRole('button', { name: reloadName, exact: true }).click();
+      await expect(iframe).not.toHaveAttribute('src', openingSrc);
+      const reloadedUrl = new URL((await iframe.getAttribute('src'))!, 'http://nova.test');
+      expect(reloadedUrl.pathname).toBe(openingUrl.pathname);
+      expect(reloadedUrl.searchParams.get('console')).toBe(mode === 'second' ? 'second' : null);
+      expect(Number(reloadedUrl.searchParams.get('ts'))).toBeGreaterThan(Number(openingUrl.searchParams.get('ts')));
+      expect([...reloadedUrl.searchParams.keys()].sort()).toEqual(mode === 'second' ? ['console', 'ts'] : ['ts']);
+      await expect(container).toBeVisible();
+    });
+  }
+}
+
 for (const closing of ['active', 'inactive'] as const) {
   test(`closing the ${closing} tab returns keyboard input to the remaining console`, async ({ page }) => {
     await setUpConsoleLab(page, true);
@@ -209,3 +253,112 @@ for (const closing of ['active', 'inactive'] as const) {
     await expect(remainingInput).toHaveAttribute('data-last-key', 'x');
   });
 }
+
+for (const activation of ['pointer', 'keyboard'] as const) {
+  test(`switching loaded tabs by ${activation} preserves sessions and routes immediate typing only to the selected console`, async ({ page }) => {
+    await setUpConsoleLab(page, true);
+    await page.getByRole('button', { name: 'Tabbed', exact: true }).click();
+    await clickNodeConsole(page, 1);
+    const workspace = page.getByRole('dialog', { name: 'Console workspace' });
+    const iframe = (node: number) => workspace.locator(`iframe[title="Guacamole console for Router ${node}"]`);
+    const input = (node: number) => workspace.frameLocator(`iframe[title="Guacamole console for Router ${node}"]`)
+      .locator('input[aria-label="Console input"]');
+    const tab = (node: number) => workspace.getByRole('button', { name: `Router ${node}`, exact: true });
+    await input(1).fill('first');
+    await clickNodeConsole(page, 2);
+    await input(2).fill('second');
+
+    const firstIdentity = await iframe(1).evaluateHandle((element) => element);
+    const secondIdentity = await iframe(2).evaluateHandle((element) => element);
+    const firstSrc = await iframe(1).getAttribute('src');
+    const secondSrc = await iframe(2).getAttribute('src');
+    const expected = { 1: 'first', 2: 'second' };
+
+    for (const selected of [1, 2] as const) {
+      if (activation === 'pointer') {
+        await tab(selected).click();
+      } else {
+        await tab(selected).focus();
+        await page.keyboard.press('Enter');
+      }
+      const typed = selected === 1 ? '-one' : '-two';
+      await page.keyboard.type(typed);
+      expected[selected] += typed;
+      await expect(iframe(selected)).toBeFocused();
+      await expect(input(selected)).toHaveValue(expected[selected]);
+      await expect(input(selected === 1 ? 2 : 1)).toHaveValue(expected[selected === 1 ? 2 : 1]);
+    }
+
+    expect(await iframe(1).evaluate((element, previous) => element === previous, firstIdentity)).toBe(true);
+    expect(await iframe(2).evaluate((element, previous) => element === previous, secondIdentity)).toBe(true);
+    await expect(iframe(1)).toHaveAttribute('src', firstSrc!);
+    await expect(iframe(2)).toHaveAttribute('src', secondSrc!);
+    await firstIdentity.dispose();
+    await secondIdentity.dispose();
+  });
+}
+
+test('a topology reconnect and resnapshot preserve two tabbed consoles and keyboard focus', async ({ page }) => {
+  let socket: WebSocketRoute | undefined;
+  let reconnect = false;
+  let socketConnections = 0;
+  const closeReports: string[] = [];
+  page.on('request', (request) => {
+    const url = new URL(request.url());
+    if (request.method() === 'POST' && url.pathname.endsWith('/console/close')) {
+      closeReports.push(`${url.pathname}${url.search}`);
+    }
+  });
+
+  await setUpConsoleLab(page, true, (connection) => {
+    socket = connection;
+    socketConnections += 1;
+    connection.send(JSON.stringify({ type: 'hello', seq: 1 }));
+    if (reconnect) {
+      connection.send(JSON.stringify({ type: 'force_resnapshot' }));
+      connection.send(JSON.stringify({ type: 'lab_topology', seq: 2, payload: { id: 'lab-id' } }));
+    }
+  }, (nodes) => {
+    if (reconnect) nodes['3'] = { ...nodes['1'], id: 3, name: 'Resnapshot applied', left: 720 };
+  });
+  await page.getByRole('button', { name: 'Tabbed', exact: true }).click();
+  await clickNodeConsole(page, 1);
+  const workspace = page.getByRole('dialog', { name: 'Console workspace' });
+  const iframe = (node: number) => workspace.locator(`iframe[title="Guacamole console for Router ${node}"]`);
+  const input = (node: number) => workspace.frameLocator(`iframe[title="Guacamole console for Router ${node}"]`)
+    .locator('input[aria-label="Console input"]');
+  await input(1).fill('show version');
+  await workspace.getByLabel('Console target').selectOption('2');
+  await input(2).fill('show interfaces');
+  await input(2).evaluate((element) => {
+    element.ownerDocument.addEventListener('keydown', (event) => {
+      element.setAttribute('data-last-key', event.key);
+    });
+  });
+
+  const firstIdentity = await iframe(1).evaluateHandle((element) => element);
+  const secondIdentity = await iframe(2).evaluateHandle((element) => element);
+  const firstSrc = await iframe(1).getAttribute('src');
+  const secondSrc = await iframe(2).getAttribute('src');
+  reconnect = true;
+  socket?.close();
+  await expect.poll(() => socketConnections).toBe(2);
+  await expect(page.locator('.svelte-flow__node').filter({ hasText: 'Resnapshot applied' })).toBeVisible();
+
+  expect(await iframe(1).evaluate((element, previous) => element === previous, firstIdentity)).toBe(true);
+  expect(await iframe(2).evaluate((element, previous) => element === previous, secondIdentity)).toBe(true);
+  await expect(iframe(1)).toHaveAttribute('src', firstSrc!);
+  await expect(iframe(2)).toHaveAttribute('src', secondSrc!);
+  await expect(workspace.getByLabel('Console target')).toHaveValue('2');
+  await expect(input(1)).toHaveValue('show version');
+  await expect(input(2)).toHaveValue('show interfaces');
+  await expect(iframe(2)).toBeFocused();
+  await page.keyboard.press('x');
+  await expect(input(2)).toHaveAttribute('data-last-key', 'x');
+  await expect(input(2)).toHaveValue('show interfacesx');
+  expect(closeReports).toEqual([]);
+  await firstIdentity.dispose();
+  await secondIdentity.dispose();
+  await workspace.getByRole('button', { name: 'Close console workspace' }).click();
+  await expect.poll(() => closeReports.length).toBe(2);
+});
