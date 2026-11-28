@@ -18,6 +18,7 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import threading
 import time
@@ -362,6 +363,8 @@ class IolLauncher:
         tap_factory: Any,
         active_application_ids: set[int] | None = None,
     ) -> IolRecord:
+        active_ids = active_application_ids or set()
+        app_id = cls.application_id_for_start(lab_id, node_id, node, work_dir, active_ids)
         ubridge_binary = shutil.which(_UBRIDGE_BINARY) if not Path(_UBRIDGE_BINARY).exists() else _UBRIDGE_BINARY
         if not ubridge_binary:
             raise IolError(
@@ -376,7 +379,6 @@ class IolLauncher:
             raise IolError(f"could not make IOL image executable: {image_path}: {exc}") from exc
 
         work_dir.mkdir(parents=True, exist_ok=True)
-        app_id = cls.application_id(lab_id, node_id, active_application_ids or set())
         bridge_id = app_id + 512
         cls.write_netmap(work_dir / "NETMAP", app_id, bridge_id)
 
@@ -650,6 +652,72 @@ class IolLauncher:
         env = os.environ.copy()
         env["IOURC"] = str(iourc_path)
         return env
+
+    @classmethod
+    def application_id_for_start(
+        cls,
+        lab_id: str,
+        node_id: int,
+        node: dict[str, Any],
+        work_dir: Path,
+        active_ids: set[int],
+    ) -> int:
+        extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
+        if extras.get("config") in ("Saved", "Exported"):
+            return cls.application_id(lab_id, node_id, active_ids)
+        try:
+            native_entries = sorted(
+                (
+                    entry
+                    for entry in work_dir.iterdir()
+                    if entry.name.startswith("nvram_")
+                    and len(entry.name) == 11
+                    and entry.name[6:].isascii()
+                    and entry.name[6:].isdecimal()
+                ),
+                key=lambda entry: entry.name,
+            )
+        except FileNotFoundError:
+            return cls.application_id(lab_id, node_id, active_ids)
+        except OSError as exc:
+            raise IolError(
+                "could not inspect native NVRAM. Restore access to the node work "
+                "directory and native file, then retry"
+            ) from exc
+        if not native_entries:
+            return cls.application_id(lab_id, node_id, active_ids)
+        if len(native_entries) != 1:
+            raise IolError(
+                "multiple native NVRAM files make the application ID ambiguous. Keep exactly "
+                "one canonical native file and retry"
+            )
+
+        native_path = native_entries[0]
+        native_id = int(native_path.name[6:])
+        if not 1 <= native_id <= 512:
+            raise IolError(
+                "native NVRAM filename must contain a supported IOL application ID from 1 "
+                "to 512. Use a supported native file and retry"
+            )
+        try:
+            if not stat.S_ISREG(native_path.lstat().st_mode):
+                raise IolError(
+                    "native NVRAM must be a regular, non-symlink file. Replace it with "
+                    "a regular file and retry"
+                )
+            with native_path.open("rb"):
+                pass
+        except OSError as exc:
+            raise IolError(
+                "could not inspect native NVRAM. Restore access to the node work "
+                "directory and native file, then retry"
+            ) from exc
+        if native_id in active_ids:
+            raise IolError(
+                f"native NVRAM requires IOL application ID {native_id}, which is in use. "
+                "Retry when that application ID is available"
+            )
+        return native_id
 
     @staticmethod
     def application_id(lab_id: str, node_id: int, active_ids: set[int]) -> int:
