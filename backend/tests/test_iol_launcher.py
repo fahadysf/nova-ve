@@ -585,9 +585,10 @@ def test_iol_saved_start_refuses_invalid_snapshot_before_any_mutation(
     assert not (fixture.work_dir / "NETMAP").exists()
     assert fixture.image.stat().st_mode == image_mode
     assert fixture.native_path.read_bytes() == b"ordinary-native-state"
-    assert list(fixture.work_dir.iterdir()) == [fixture.native_path] + (
-        [snapshot] if archive_kind != "missing" else []
-    )
+    expected_paths = {fixture.native_path}
+    if archive_kind != "missing":
+        expected_paths.add(snapshot)
+    assert set(fixture.work_dir.iterdir()) == expected_paths
 
 
 def test_iol_saved_start_refuses_busy_snapshot_id_before_any_mutation(monkeypatch, tmp_path):
