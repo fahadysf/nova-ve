@@ -724,6 +724,66 @@ async def test_delete_link_cascades_orphan_implicit_bridge_half(
     assert data.get("networks") == {}
 
 
+@pytest.mark.parametrize(
+    "exists, fingerprint, removed",
+    [
+        (True, "absent", True),
+        (True, "match", True),
+        (True, "mismatch", False),
+        (False, "absent", False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_delete_link_removes_gc_implicit_network_bridge(
+    link_settings, monkeypatch, tmp_path, exists, fingerprint, removed,
+):
+    """GC of an implicit network removes its host bridge too, unless the
+    bridge is gone already or another lab's fingerprint claims it."""
+    from app.services import host_net
+
+    _instance_id_fixture(monkeypatch, tmp_path)
+    implicit_net = {
+        "id": 2,
+        "name": "",
+        "type": "linux_bridge",
+        "visibility": False,
+        "implicit": True,
+        "config": {},
+    }
+    lab_name = _seed_lab(
+        link_settings.LABS_DIR,
+        "lab.json",
+        nodes={"1": _node(1), "3": _node(3)},
+        networks={"2": implicit_net},
+        links=[
+            {"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 2}},
+            {"id": "lnk_002", "from": {"node_id": 3, "interface_index": 0}, "to": {"network_id": 2}},
+        ],
+    )
+    bridge = host_net.bridge_name("lab", 2)
+    deleted: list[str] = []
+    checked: list[tuple] = []
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: exists and name == bridge)
+    monkeypatch.setattr(
+        host_net,
+        "bridge_fingerprint_check",
+        lambda name, lab_id, network_id: checked.append((name, lab_id, network_id)) or fingerprint,
+    )
+    monkeypatch.setattr(host_net, "bridge_del", lambda name: deleted.append(name))
+
+    async def _noop_publish(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.ws_hub.ws_hub.publish", _noop_publish)
+
+    _noop, deleted_implicit = await LinkService().delete_link(lab_name, "lnk_001")
+
+    assert deleted_implicit is not None and deleted_implicit["id"] == 2
+    assert deleted == ([bridge] if removed else [])
+    if exists:
+        assert checked == [(bridge, "lab", 2)]
+
+
 @pytest.mark.asyncio
 async def test_create_link_with_attach_stamp_bumps_revision_once(
     link_settings, monkeypatch, tmp_path,
