@@ -4,11 +4,11 @@
 
 These tests cover:
 
-* Kernel-side bridge member with no matching ``links[]`` entry triggers
-  a ``discovered_link`` WS event with the expected payload shape (US-402).
-* Members corresponding to declared links are not re-flagged (US-402).
+* Kernel-side bridge members with no matching ``links[]`` entry publish
+  nothing: the ``discovered_link`` "promote to declared link" suggestion
+  was removed.
 * Hot-plug-in-flight links recorded in ``transition_lease`` are skipped
-  (US-402 + US-404).
+  (US-404).
 * ``_discovery_loop`` re-reads ``get_settings()`` per iteration so live
   cadence edits land within one cycle (US-402).
 * US-404: declared links whose veth/TAP is missing from the kernel emit
@@ -149,55 +149,27 @@ def _patch_settings(monkeypatch, settings) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("filename", ["discovery.json", "team/project/discovery.json"])
-async def test_unknown_bridge_member_triggers_discovered_link(
-    monkeypatch, discovery_settings, stub_instance_id, filename
+async def test_undeclared_bridge_member_publishes_nothing(
+    monkeypatch, discovery_settings, stub_instance_id
 ):
-    """A kernel-side bridge member with no matching ``links[]`` entry must
-    publish a ``discovered_link`` WS event."""
+    """A node interface still on a bridge after its link was deleted (e.g. an
+    IOL node, which has no hot-detach) must not be suggested as a link."""
     lab_id = "lab-discover-1"
-    # Lab declares link from node 1 — node 2 is undeclared.
     declared_link = {
         "id": "lnk_001",
         "from": {"node_id": 1, "interface_index": 0},
         "to": {"network_id": 1},
     }
-    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link], filename)
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [declared_link])
 
     bridge = host_net.bridge_name(lab_id, 1)
     declared_iface = host_net.veth_host_name(lab_id, 1, 0)
-    rogue_iface = host_net.veth_host_name(lab_id, 2, 0)
-
+    leftover_iface = host_net.tap_name(lab_id, 2, 0)
     monkeypatch.setattr(
         NodeRuntimeService,
         "_bridge_members_sync",
-        staticmethod(lambda b: [declared_iface, rogue_iface] if b == bridge else []),
+        staticmethod(lambda b: [declared_iface, leftover_iface] if b == bridge else []),
     )
-    _patch_settings(monkeypatch, discovery_settings)
-    hub = _patch_ws_hub(monkeypatch)
-
-    await NodeRuntimeService._run_discovery_cycle()
-
-    discovered = [e for e in hub.events if e[1] == "discovered_link"]
-    assert len(discovered) == 1, hub.events
-    assert discovered[0][0] == filename
-    payload = discovered[0][2]
-    assert payload["lab_id"] == lab_id
-    assert payload["network_id"] == 1
-    assert payload["bridge_name"] == bridge
-    assert payload["iface"] == rogue_iface
-    assert payload["peer_node_id"] == 2
-    assert isinstance(payload["generation"], int) and payload["generation"] >= 1
-
-
-@pytest.mark.asyncio
-async def test_discovery_skips_ambiguous_runtime_identity(monkeypatch, discovery_settings, stub_instance_id):
-    lab_id = "duplicate-id"
-    root = discovery_settings.LABS_DIR
-    _write_lab(root, lab_id, [], "lab.json")
-    _write_lab(root, lab_id, [], "team/lab.json")
-    rogue_iface = host_net.veth_host_name(lab_id, 1, 0)
-    monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda bridge: [rogue_iface]))
     _patch_settings(monkeypatch, discovery_settings)
     hub = _patch_ws_hub(monkeypatch)
 
@@ -207,68 +179,20 @@ async def test_discovery_skips_ambiguous_runtime_identity(monkeypatch, discovery
 
 
 @pytest.mark.asyncio
-async def test_declared_link_is_not_flagged(
-    monkeypatch, discovery_settings, stub_instance_id
-):
-    """When every kernel-side member matches a declared ``links[]`` entry,
-    no ``discovered_link`` event is emitted."""
-    lab_id = "lab-discover-2"
-    links = [
-        {"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0},
-         "to": {"network_id": 1}},
-        {"id": "lnk_002", "from": {"node_id": 2, "interface_index": 0},
-         "to": {"network_id": 1}},
-    ]
-    _write_lab(discovery_settings.LABS_DIR, lab_id, links)
-
-    bridge = host_net.bridge_name(lab_id, 1)
-    members = [
-        host_net.veth_host_name(lab_id, 1, 0),
-        host_net.veth_host_name(lab_id, 2, 0),
-    ]
-    monkeypatch.setattr(
-        NodeRuntimeService,
-        "_bridge_members_sync",
-        staticmethod(lambda b: members if b == bridge else []),
-    )
+async def test_discovery_skips_ambiguous_runtime_identity(monkeypatch, discovery_settings, stub_instance_id):
+    lab_id = "duplicate-id"
+    root = discovery_settings.LABS_DIR
+    # Both copies declare a link that would be divergent (empty bridges).
+    link = {"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 1}}
+    _write_lab(root, lab_id, [link], "lab.json")
+    _write_lab(root, lab_id, [link], "team/lab.json")
+    monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda bridge: []))
     _patch_settings(monkeypatch, discovery_settings)
     hub = _patch_ws_hub(monkeypatch)
 
     await NodeRuntimeService._run_discovery_cycle()
 
-    discovered = [e for e in hub.events if e[1] == "discovered_link"]
-    assert discovered == []
-
-
-@pytest.mark.asyncio
-async def test_leased_link_is_skipped(
-    monkeypatch, discovery_settings, stub_instance_id
-):
-    """Links currently in a transition lease (in-flight hot-plug from
-    US-204b) must NOT emit a ``discovered_link`` event."""
-    lab_id = "lab-discover-3"
-    _write_lab(discovery_settings.LABS_DIR, lab_id, [])  # no declared links
-
-    bridge = host_net.bridge_name(lab_id, 1)
-    rogue_iface = host_net.veth_host_name(lab_id, 1, 0)
-
-    monkeypatch.setattr(
-        NodeRuntimeService,
-        "_bridge_members_sync",
-        staticmethod(lambda b: [rogue_iface] if b == bridge else []),
-    )
-    _patch_settings(monkeypatch, discovery_settings)
-
-    # Inject a fake ``transition_lease`` module that claims the iface is
-    # currently leased (mid hot-plug).
-    fake_lease = types.ModuleType("app.services.transition_lease")
-    fake_lease.is_leased = lambda *, lab_id, link_id: link_id == rogue_iface  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "app.services.transition_lease", fake_lease)
-
-    hub = _patch_ws_hub(monkeypatch)
-    await NodeRuntimeService._run_discovery_cycle()
-
-    assert [e for e in hub.events if e[1] == "discovered_link"] == []
+    assert hub.events == []
 
 
 @pytest.mark.asyncio
@@ -484,7 +408,7 @@ async def test_leased_divergent_link_via_iface_key_is_skipped(
 ):
     """A lease registered under the iface name (rather than the link_id)
     must also suppress ``link_divergent`` — forward-compatible with the
-    iface-keyed lease scheme used by ``discovered_link``."""
+    iface-keyed lease scheme."""
     lab_id = "lab-divergent-5"
     declared_link = {
         "id": "lnk_iface_leased",
@@ -525,20 +449,19 @@ async def test_discovery_generation_strictly_increasing(
     increasing ``generation`` values.
 
     This is the producer-side guarantee: the frontend can safely reject any
-    ``discovered_link`` / ``link_divergent`` event whose ``generation`` is <=
-    the ``generation`` recorded in the last ``lab_topology`` snapshot.
+    ``link_divergent`` / ``link_divergence_cleared`` event whose
+    ``generation`` is <= the ``generation`` recorded in the last
+    ``lab_topology`` snapshot.
     """
     lab_id = "lab-gen-token-1"
-    # No declared links so each cycle emits a discovered_link for the rogue iface.
-    _write_lab(discovery_settings.LABS_DIR, lab_id, [])
-
-    bridge = host_net.bridge_name(lab_id, 1)
-    rogue_iface = host_net.veth_host_name(lab_id, 99, 0)
+    # A declared link on an empty bridge is re-flagged divergent every cycle.
+    link = {"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 1}}
+    _write_lab(discovery_settings.LABS_DIR, lab_id, [link])
 
     monkeypatch.setattr(
         NodeRuntimeService,
         "_bridge_members_sync",
-        staticmethod(lambda b: [rogue_iface] if b == bridge else []),
+        staticmethod(lambda b: []),
     )
     _patch_settings(monkeypatch, discovery_settings)
     hub = _patch_ws_hub(monkeypatch)
@@ -548,11 +471,11 @@ async def test_discovery_generation_strictly_increasing(
     # Second cycle.
     await NodeRuntimeService._run_discovery_cycle()
 
-    discovered = [e for e in hub.events if e[1] == "discovered_link"]
-    assert len(discovered) == 2, hub.events
+    divergent = [e for e in hub.events if e[1] == "link_divergent"]
+    assert len(divergent) == 2, hub.events
 
-    gen_first = discovered[0][2]["generation"]
-    gen_second = discovered[1][2]["generation"]
+    gen_first = divergent[0][2]["generation"]
+    gen_second = divergent[1][2]["generation"]
     assert isinstance(gen_first, int)
     assert isinstance(gen_second, int)
     assert gen_first < gen_second, (
@@ -613,12 +536,12 @@ async def test_divergence_checks_node_end_of_network_to_node_link(
     await NodeRuntimeService._run_discovery_cycle()
     assert [e[2]["link_id"] for e in hub.events if e[1] == "link_divergent"] == ["lnk_001"]
 
-    # Once the TAP is on the bridge it is consistent (and not "discovered").
+    # Once the TAP is on the bridge the link is consistent.
     tap = host_net.tap_name(lab_id, 1, 0)
     monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda b: [tap]))
     hub.events.clear()
     await NodeRuntimeService._run_discovery_cycle()
-    assert [e for e in hub.events if e[1] in ("link_divergent", "discovered_link")] == []
+    assert [e for e in hub.events if e[1] == "link_divergent"] == []
 
 
 @pytest.mark.asyncio

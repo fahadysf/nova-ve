@@ -30,7 +30,6 @@
     style_override?: LinkStyle | null;
     default_style?: LinkStyle;
     obstacles?: Obstacle[];
-    discovered?: boolean;
     divergent?: boolean;
     last_checked?: string | null;
   } | undefined = undefined;

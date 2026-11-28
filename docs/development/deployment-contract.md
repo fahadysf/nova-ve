@@ -132,7 +132,7 @@ them only when an operator has a specific reason to deviate.
 
 | Variable | Default | Range | Effect |
 | --- | --- | --- | --- |
-| `NOVA_VE_DISCOVERY_CADENCE_SECONDS` | `30` | `[5, 300]` | Period of the discovery loop that walks each lab network's Linux bridge (`bridge link show master <bridge>`) plus container netns and cross-references against `links[]`. Discrepancies emit a `discovered_link` WS event consumed by the canvas overlay. Out-of-range values fail backend startup. Also editable in the UI (System → Settings); edits persist to `system-settings.json` and apply at the next backend restart (`systemctl restart nova-ve-backend.service` — the unit has no reload action). |
+| `NOVA_VE_DISCOVERY_CADENCE_SECONDS` | `30` | `[5, 300]` | Period of the discovery loop that walks each lab network's Linux bridge (`bridge link show master <bridge>`) plus container netns and cross-references against `links[]`. A declared link whose running node's interface is missing emits a `link_divergent` WS event (red link on the canvas), and `link_divergence_cleared` once it recovers. Out-of-range values fail backend startup. Also editable in the UI (System → Settings); edits persist to `system-settings.json` and apply at the next backend restart (`systemctl restart nova-ve-backend.service` — the unit has no reload action). |
 | `NOVA_VE_NAT_CLOUD_POOL` | `10.255.0.0/16` | IPv4 CIDR, prefix `/0`-`/24` | Root pool for auto-allocating one `/24` per NAT-Cloud network. |
 | `NOVA_VE_KSM_PAGES_TO_SCAN` | `1250` | positive int | KSM scanner pages per wake (see below). |
 | `NOVA_VE_KSM_SLEEP_MS` | `10` | positive int | KSM scanner sleep between wakes, in milliseconds (see below). |

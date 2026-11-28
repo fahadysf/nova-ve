@@ -477,7 +477,7 @@ class NodeRuntimeService:
     _transition_timestamps: dict[tuple[str, int], float] = {}
     # Per-lab discovery generation counter (US-403 MEDIUM-3 gen-token fix).
     # Incremented at the start of each _discover_lab call so every emitted
-    # discovered_link / link_divergent event carries the generation that produced
+    # link_divergent / link_divergence_cleared event carries the generation that produced
     # it.  lab_topology snapshots include the current value so the frontend can
     # reject events from older generations (gen <= topology_generation is stale).
     _discovery_generation: dict[str, int] = {}
@@ -514,7 +514,7 @@ class NodeRuntimeService:
 
         Used by the WS reconnect handler (``ws.py``) to include the generation
         in ``lab_topology`` snapshots so the frontend can reject
-        ``discovered_link`` / ``link_divergent`` events from older cycles.
+        ``link_divergent`` / ``link_divergence_cleared`` events from older cycles.
         """
         return cls._discovery_generation.get(lab_id, 0)
 
@@ -2008,8 +2008,8 @@ class NodeRuntimeService:
     @classmethod
     async def _discovery_loop(cls) -> None:
         """Periodic discovery: walks kernel-side bridge state and emits
-        ``discovered_link`` WS events for any bridge member that has no
-        matching entry in ``links[]``.
+        ``link_divergent`` WS events for declared links whose running node's
+        interface is missing from the lab's bridges.
 
         Cadence is read from ``get_settings().DISCOVERY_CADENCE_SECONDS``
         on every iteration so live config edits land within one cycle
@@ -2025,9 +2025,9 @@ class NodeRuntimeService:
 
     @classmethod
     async def _run_discovery_cycle(cls) -> None:
-        """Single discovery cycle: scan every lab.json's network bridges,
-        compare against ``links[]``, and publish ``discovered_link`` events
-        for kernel-side members with no declared link.
+        """Single discovery cycle: scan every lab.json's network bridges and
+        publish ``link_divergent`` / ``link_divergence_cleared`` events for
+        declared links whose running node's interface is missing.
         """
         from app.services.ws_hub import ws_hub
 
@@ -2053,13 +2053,14 @@ class NodeRuntimeService:
     async def _discover_lab(
         cls, lab_id: str, lab_data: dict[str, Any], ws_hub: Any, lab_path: str
     ) -> None:
-        """Scan bridges for one lab and publish ``discovered_link`` /
-        ``link_divergent`` WS events.
+        """Scan bridges for one lab and publish ``link_divergent`` WS events
+        for ``links[]`` entries whose declared veth/TAP is NOT present on any
+        of this lab's bridges (US-404).
 
-        - ``discovered_link``: kernel-side bridge member with no matching
-          ``links[]`` entry (US-402).
-        - ``link_divergent``: ``links[]`` entry whose declared veth/TAP is
-          NOT present on any of this lab's bridges (US-404).
+        Kernel-side bridge members with no declared link are not reported:
+        the old ``discovered_link`` "promote to declared link" suggestion was
+        removed, so an interface left on a bridge after its link is deleted
+        no longer shows up as a suggested link.
 
         Lease respect: links currently in a transition lease (in-flight
         hot-plug from US-204b) are NOT flagged.  We import
@@ -2089,12 +2090,6 @@ class NodeRuntimeService:
                 generation=gen,
             )
             return
-
-        # Build the set of "declared" host-side ifaces per (network, iface).
-        # An entry in links[] like {from: {node_id, interface_index},
-        # to: {network_id}} corresponds to either a veth host-end or a TAP
-        # — both share the prefix nve{hash}d{node_id}i{iface}.
-        declared = cls._declared_iface_set(lab_id, lab_data)
 
         # Optional lease check (US-204b).  When the module isn't present
         # we degrade to "no leases" rather than failing the cycle.
@@ -2138,43 +2133,6 @@ class NodeRuntimeService:
                 continue
 
             kernel_members.update(members)
-
-            for iface in members:
-                if iface in declared:
-                    continue
-                # #319: on a shared bridge, another lab's TAPs and veths are
-                # not links this lab could declare.
-                if cls._belongs_to_other_lab(lab_id, iface):
-                    continue
-                # Decode the peer node from the iface name when possible so
-                # the frontend can render a hint.  Failures degrade to None.
-                peer_node_id = cls._parse_iface_node_id(iface)
-                # Lease check — skip if a hot-plug for this (lab, link) is
-                # in flight.  We don't always have a link_id here; pass the
-                # iface name as the lease key for forward-compatibility.
-                if is_leased is not None:
-                    try:
-                        if is_leased(lab_id=lab_id, link_id=iface):
-                            continue
-                    except Exception:
-                        pass
-                payload = {
-                    "lab_id": lab_id,
-                    "network_id": network_id,
-                    "bridge_name": bridge,
-                    "iface": iface,
-                    "peer_node_id": peer_node_id,
-                    "generation": gen,
-                }
-                try:
-                    await publish_runtime_event(
-                        ws_hub, get_settings().LABS_DIR, lab_id, "discovered_link", payload, path=lab_path,
-                    )
-                except Exception:
-                    _discovery_logger.exception(
-                        "discovery: ws publish failed lab=%s iface=%s",
-                        lab_id, iface,
-                    )
 
         # ------------------------------------------------------------------
         # US-404 — Divergent links (declared in lab.json but kernel says no)
@@ -2337,32 +2295,6 @@ class NodeRuntimeService:
             return False
 
     @staticmethod
-    def _declared_iface_set(lab_id: str, lab_data: dict[str, Any]) -> set[str]:
-        """Return the set of host-side iface names that ARE declared in
-        ``links[]`` — the discovery loop ignores these.
-
-        Each link from a node to a network corresponds to either
-        ``veth_host_name`` (docker) or ``tap_name`` (qemu); both share
-        the same prefix so we record both candidates and let the diff
-        match either form.
-        """
-        declared: set[str] = set()
-        nodes = lab_data.get("nodes") or {}
-        for link in lab_data.get("links") or []:
-            endpoint = _link_node_endpoint(link)
-            if endpoint is None:
-                continue
-            node_id, iface_idx, _network_id = endpoint
-            try:
-                declared.add(host_net.veth_host_name(lab_id, node_id, iface_idx))
-                declared.add(host_net.tap_name(lab_id, node_id, iface_idx))
-            except Exception:
-                continue
-        # Guard against unused-arg warnings when ``nodes`` is empty.
-        _ = nodes
-        return declared
-
-    @staticmethod
     def _bridge_members_sync(bridge: str) -> list[str]:
         """Run ``bridge link show master <bridge>`` and return member names.
 
@@ -2390,34 +2322,6 @@ class NodeRuntimeService:
             if raw:
                 names.append(raw)
         return names
-
-    @staticmethod
-    def _belongs_to_other_lab(lab_id: str, iface: str) -> bool:
-        """True for an ``nve<hash>d...`` iface whose hash is not this lab's."""
-        match = re.match(r"nve[0-9a-f]{4}(?=d\d)", iface)
-        if match is None:
-            return False
-        try:
-            return not host_net.tap_name(lab_id, 0, 0).startswith(match.group(0))
-        except Exception:  # noqa: BLE001 - no instance id: keep reporting
-            return False
-
-    @staticmethod
-    def _parse_iface_node_id(iface: str) -> int | None:
-        """Decode the ``node_id`` from an ``nve<hash>d<node>i<iface>...`` name.
-
-        Returns ``None`` for any name that doesn't match the nova-ve scheme
-        (e.g. an unrelated kernel-side interface attached to the bridge).
-        """
-        # Format: nve{4hex}d{node}i{iface}[h|p]
-        if not iface.startswith("nve") or "d" not in iface or "i" not in iface:
-            return None
-        try:
-            after_d = iface.split("d", 1)[1]
-            node_part = after_d.split("i", 1)[0]
-            return int(node_part)
-        except (ValueError, IndexError):
-            return None
 
     @staticmethod
     def _check_alive_sync(

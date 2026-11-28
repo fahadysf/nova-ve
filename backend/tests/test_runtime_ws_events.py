@@ -43,7 +43,7 @@ async def test_runtime_event_drops_a_replaced_path_and_follows_the_lab_on_lookup
     write_lab(tmp_path, old_path, "other-id")
 
     await publish_runtime_event(
-        hub, tmp_path, "fixture-id", "discovered_link", {"generation": 1}, path=old_path,
+        hub, tmp_path, "fixture-id", "link_divergent", {"generation": 1}, path=old_path,
     )
     assert hub.head_seq(old_path) == 1
     assert hub.replay_since(old_path, 0, identity="other-id") == ([], False)

@@ -282,29 +282,18 @@ export interface Link {
 }
 
 /**
- * Reconciliation state for a single link or discovered iface, surfaced by the
- * backend discovery loop (US-402) and consumed as a unified visual overlay on
- * the canvas (US-403/US-404).  This is observation-only runtime state — it is
- * never persisted to ``links[]`` or ``lab.json``.
- *
- * Key scheme:
- *  - ``'iface:<iface>'``   for kind === 'discovered' (kernel-only iface)
- *  - ``'link:<link_id>'``  for kind === 'divergent'  (declared, no kernel veth/TAP)
+ * Reconciliation state for a declared link, surfaced by the backend discovery
+ * loop and drawn as a red overlay on the canvas (US-404).  This is
+ * observation-only runtime state — it is never persisted to ``links[]`` or
+ * ``lab.json``.  Keyed ``'link:<link_id>'``.
  */
-export type LinkReconciliationKind = 'discovered' | 'divergent';
+export type LinkReconciliationKind = 'divergent';
 
 export interface LinkReconciliation {
   kind: LinkReconciliationKind;
   /** Stable map key. */
   key: string;
-  /** Present when kind === 'divergent'. */
   link_id?: string;
-  /** Present when kind === 'discovered'. */
-  iface?: string;
-  network_id?: number;
-  bridge_name?: string;
-  peer_node_id?: number | null;
-  peer_interface_index?: number | null;
   /** ISO 8601 from backend ``link_divergent`` event. */
   last_checked?: string;
   reason?: string;
