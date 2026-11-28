@@ -1609,20 +1609,6 @@ def test_bridge_add_rejects_bad_mgmt_names(helper, capsys, name):
     assert not helper._test_calls
 
 
-@pytest.mark.parametrize(
-    "hostend, peerend",
-    [
-        ("nvec0ded1mthh", "nvec0ded1mtp"),   # doubled h
-        ("nvec0ded1mth", "nvec0ded1mtpx"),   # bad peer suffix
-        ("nvec0ded1mtx", "nvec0ded1mtp"),    # x is not h/p
-    ],
-)
-def test_veth_pair_rejects_bad_mgmt_names(helper, hostend, peerend):
-    rc = helper.main(["veth-pair-add", hostend, peerend])
-    assert rc == 2
-    assert not helper._test_calls
-
-
 def test_mgmt_netns_verbs_accept_mgmt0(helper):
     """#287: the container-side ``mgmt0`` interface passes netns validation."""
     _seed_pid(helper, 4242)
@@ -1668,6 +1654,10 @@ def test_veth_pair_rejects_identical_names(helper):
         ("nve0000d1i1h", "eth0"),                # peer not nova-ve shape
         ("nve0000d1i1h", "nve0000d1i1x"),         # x suffix not h/p
         ("nve0000d1i1H", "nve0000d1i1p"),         # uppercase
+        # management veth names
+        ("nvec0ded1mthh", "nvec0ded1mtp"),        # doubled h
+        ("nvec0ded1mth", "nvec0ded1mtpx"),        # bad peer suffix
+        ("nvec0ded1mtx", "nvec0ded1mtp"),         # x is not h/p
     ],
 )
 def test_veth_pair_rejects_bad_arg(helper, hostend, peerend):

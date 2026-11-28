@@ -43,6 +43,7 @@ from app.services.template_service import (
     TemplateService,
     _extras_schema_for,
     _matches_template_image_name,
+    invalidate_template_cache,
 )
 
 FILESYSTEM_IMAGE_TYPES = ("qemu", "iol", "dynamips")
@@ -199,6 +200,7 @@ def _write_template_atomically(
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+        invalidate_template_cache()
 
 
 def _validate_template_path(target: Path, template_service: TemplateService) -> None:
@@ -808,6 +810,8 @@ class ImageLibraryService:
                 target.unlink()
             except OSError as exc:
                 raise ImageLibraryError("Failed to remove the template.") from exc
+            finally:
+                invalidate_template_cache()
             return {
                 "type": template.type,
                 "key": key,

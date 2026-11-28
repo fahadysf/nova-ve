@@ -67,6 +67,12 @@ _NodeKey = Tuple[str, int]
 DEFAULT_ACQUIRE_TIMEOUT_S = 2.0
 
 
+def _resolve_timeout(timeout: float | None) -> float:
+    """``timeout``, or the module default read at call time (so it can be
+    tuned at runtime, e.g. by tests)."""
+    return DEFAULT_ACQUIRE_TIMEOUT_S if timeout is None else float(timeout)
+
+
 class RuntimeMutexContention(Exception):
     """Raised when :meth:`RuntimeMutexRegistry.acquire` /
     :meth:`acquire_sync` cannot grab the mutex within the bounded
@@ -157,7 +163,7 @@ class RuntimeMutexRegistry:
         node_id: int,
         interface_index: int,
         *,
-        timeout: float = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout: float | None = None,
     ):
         """Synchronous mutex acquire. Use from sync callers
         (``_start_docker_node``, ``_start_qemu_node``, the public
@@ -167,8 +173,9 @@ class RuntimeMutexRegistry:
         :class:`RuntimeMutexContention` instead of blocking indefinitely
         (US-303 spec).
         """
+        timeout = _resolve_timeout(timeout)
         lock = self._get_or_create(lab_id, node_id, interface_index)
-        if not lock.acquire(timeout=float(timeout)):
+        if not lock.acquire(timeout=timeout):
             raise RuntimeMutexContention(lab_id, node_id, interface_index, timeout)
         try:
             yield
@@ -182,7 +189,7 @@ class RuntimeMutexRegistry:
         node_id: int,
         interface_index: int,
         *,
-        timeout: float = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout: float | None = None,
     ):
         """Async mutex acquire. Use from async callers
         (``link_service.create_link`` / ``delete_link``). Internally
@@ -198,6 +205,7 @@ class RuntimeMutexRegistry:
         """
         import asyncio
 
+        timeout = _resolve_timeout(timeout)
         lock = self._get_or_create(lab_id, node_id, interface_index)
         # Fast path: try non-blocking first to avoid the executor hop on
         # the uncontended common case.
@@ -211,7 +219,7 @@ class RuntimeMutexRegistry:
         # Contended: hop to the default executor so blocking acquire does
         # not stall the event loop. Bounded wait per US-303 spec.
         acquired = await asyncio.get_running_loop().run_in_executor(
-            None, lambda: lock.acquire(timeout=float(timeout))
+            None, lambda: lock.acquire(timeout=timeout)
         )
         if not acquired:
             raise RuntimeMutexContention(lab_id, node_id, interface_index, timeout)
@@ -226,7 +234,7 @@ class RuntimeMutexRegistry:
         lab_id: str,
         node_id: int,
         *,
-        timeout: float = DEFAULT_ACQUIRE_TIMEOUT_S,
+        timeout: float | None = None,
     ):
         """US-303 codex iter1 HIGH-2: per-``(lab, node)`` slot-allocation
         lock. Acquire AROUND the ``query-pci → device_add`` window so
@@ -237,8 +245,9 @@ class RuntimeMutexRegistry:
         — slot pick is a millisecond-scale operation, anything longer
         means the QMP socket itself is wedged.
         """
+        timeout = _resolve_timeout(timeout)
         lock = self._get_or_create_node_lock(lab_id, node_id)
-        if not lock.acquire(timeout=float(timeout)):
+        if not lock.acquire(timeout=timeout):
             # interface_index=-1 sentinel marks "node-scoped" contention
             # so the message is still informative.
             raise RuntimeMutexContention(lab_id, node_id, -1, timeout)

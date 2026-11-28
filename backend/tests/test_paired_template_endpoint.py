@@ -1135,15 +1135,6 @@ def test_207_predictor_overlay_matches_runtime_for_docker_kind(patched_split):
     assert validate_paired_template(template2) is None
 
 
-def test_207_predictor_overlay_preserves_runtime_match_for_full_explicit(patched_split):
-    """Sanity: when explicit covers the full ethernet count (the existing
-    juniper-vmx shape), the overlay produces the explicit list verbatim."""
-    from app.services.template_service import validate_paired_template
-
-    # Same as VMX_PAIRED_TEMPLATE shape (vfp explicit = 4 names, ethernet=4)
-    assert validate_paired_template(VMX_PAIRED_TEMPLATE) is None
-
-
 def test_207_predictor_format_string_still_catches_unresolvable(patched_split):
     """A format-shape template that references an interface name OUTSIDE the
     rendered set must still be flagged invalid (not silently passed)."""
@@ -1660,13 +1651,19 @@ async def test_208e_unexpected_exception_still_returns_500(patched_split, monkey
 
 
 @pytest.mark.asyncio
-async def test_208medium_bad_ethernet_scalar_returns_422_via_preflight(patched_split):
-    """``ethernet: "not-an-int"`` is a template defect, not a server bug.
-    The pre-flight scalar check (#208 codex-iter3) returns a reason string
-    so the endpoint returns 422 with a fix-the-template message."""
+@pytest.mark.parametrize(
+    ("child", "field", "value"),
+    [(1, "ethernet", "not-an-int"), (0, "cpu", "not-an-int"), (0, "ram", "huge")],
+    ids=["ethernet", "cpu", "ram"],
+)
+async def test_208medium_bad_scalar_returns_422_via_preflight(patched_split, child, field, value):
+    """A non-integer ``ethernet``, ``cpu`` or ``ram`` is a template defect,
+    not a server bug. The pre-flight scalar check (#208 codex-iter3) returns
+    a reason string so the endpoint returns 422 with a fix-the-template
+    message before the node phase runs."""
     settings = patched_split
     bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
-    bad["nodes"][1]["ethernet"] = "not-an-int"
+    bad["nodes"][child][field] = value
     _seed_paired_template(settings, bad)
     _seed_empty_lab(settings)
 
@@ -1678,51 +1675,7 @@ async def test_208medium_bad_ethernet_scalar_returns_422_via_preflight(patched_s
     body = _response_json(response)
     assert _response_status(response) == 422, response
     assert body["code"] == 422
-    assert "ethernet" in body["message"]
-    assert "integer" in body["message"]
-
-
-@pytest.mark.asyncio
-async def test_208medium_bad_cpu_scalar_returns_422_via_preflight(patched_split):
-    """``cpu`` is now scalar-validated by ``validate_paired_template`` at
-    pre-flight (#208 codex-iter3); endpoint returns 422 before the node
-    phase even runs."""
-    settings = patched_split
-    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
-    bad["nodes"][0]["cpu"] = "not-an-int"
-    _seed_paired_template(settings, bad)
-    _seed_empty_lab(settings)
-
-    response = await labs.create_nodes_from_paired_template(
-        "demo.json",
-        NodeFromPairedTemplate(template_key="juniper-vmx"),
-        current_user=_admin(),
-    )
-    body = _response_json(response)
-    assert _response_status(response) == 422, response
-    assert body["code"] == 422
-    assert "cpu" in body["message"]
-    assert "integer" in body["message"]
-
-
-@pytest.mark.asyncio
-async def test_208medium_bad_ram_scalar_returns_422_via_preflight(patched_split):
-    """Same path as bad cpu — covers the ram scalar."""
-    settings = patched_split
-    bad = json.loads(json.dumps(VMX_PAIRED_TEMPLATE))
-    bad["nodes"][0]["ram"] = "huge"
-    _seed_paired_template(settings, bad)
-    _seed_empty_lab(settings)
-
-    response = await labs.create_nodes_from_paired_template(
-        "demo.json",
-        NodeFromPairedTemplate(template_key="juniper-vmx"),
-        current_user=_admin(),
-    )
-    body = _response_json(response)
-    assert _response_status(response) == 422, response
-    assert body["code"] == 422
-    assert "ram" in body["message"]
+    assert field in body["message"]
     assert "integer" in body["message"]
 
 

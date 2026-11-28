@@ -294,8 +294,7 @@ def test_main_dry_run_does_not_write(tmp_path):
     assert lab_path.read_text() == original_text
 
 
-def test_process_lab_idempotent(tmp_path):
-    """Running process_lab twice on the same lab is a no-op on the second run."""
+def test_process_lab_second_run_is_noop_and_skips_write(tmp_path, monkeypatch):
     labs_dir = tmp_path / "labs"
     labs_dir.mkdir()
     ep_a = {"node_id": 1, "interface_index": 0}
@@ -308,13 +307,27 @@ def test_process_lab_idempotent(tmp_path):
         ],
     )
 
-    before1, removed1 = dedup_links.process_lab(lab_path, labs_dir, dry_run=False)
-    assert removed1 == 1
+    writes: list[str] = []
+    original_write = dedup_links.LabService.write_lab_json_static
 
-    # Second run — should report 0 removed.
-    before2, removed2 = dedup_links.process_lab(lab_path, labs_dir, dry_run=False)
-    assert removed2 == 0
-    assert before2 == 1
+    def spy(filename: str, data: dict[str, Any]) -> None:
+        writes.append(filename)
+        original_write(filename, data)
+
+    monkeypatch.setattr(
+        dedup_links.LabService,
+        "write_lab_json_static",
+        staticmethod(spy),
+    )
+
+    before_first, removed_first = dedup_links.process_lab(lab_path, labs_dir, dry_run=False)
+    before_second, removed_second = dedup_links.process_lab(lab_path, labs_dir, dry_run=False)
+
+    assert before_first == 2
+    assert removed_first == 1
+    assert before_second == 1
+    assert removed_second == 0
+    assert writes == ["lab.json"]
 
 
 def test_main_nonexistent_labs_dir(tmp_path):

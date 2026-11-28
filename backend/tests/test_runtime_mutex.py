@@ -728,3 +728,49 @@ def test_us204b_detach_absent_attachment_is_idempotent(
         "lab-204b", 1, interface_index=0
     )
     assert result["state"] == "absent"
+
+
+@pytest.mark.asyncio
+async def test_runtime_mutex_default_timeout_is_read_at_call_time(monkeypatch):
+    """Changing ``DEFAULT_ACQUIRE_TIMEOUT_S`` takes effect for every acquire
+    without an explicit ``timeout``; it used to be bound at import time."""
+    from app.services import runtime_mutex as runtime_mutex_module
+
+    monkeypatch.setattr(runtime_mutex_module, "DEFAULT_ACQUIRE_TIMEOUT_S", 0.05)
+    registry = RuntimeMutexRegistry()
+    iface_lock = registry._get_or_create("lab-1", 7, 0)
+    node_lock = registry._get_or_create_node_lock("lab-1", 7)
+    # The node lock is an RLock, so hold both from another thread.
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with iface_lock, node_lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert held.wait(5)
+    try:
+        for make in (
+            lambda: registry.acquire_sync("lab-1", 7, 0),
+            lambda: registry.acquire_node_sync("lab-1", 7),
+        ):
+            with pytest.raises(RuntimeMutexContention) as caught:
+                with make():
+                    pytest.fail("A held lock was acquired")
+            assert caught.value.timeout == 0.05
+
+        with pytest.raises(RuntimeMutexContention) as caught:
+            async with registry.acquire("lab-1", 7, 0):
+                pytest.fail("A held lock was acquired")
+        assert caught.value.timeout == 0.05
+
+        # An explicit timeout still wins over the default.
+        with pytest.raises(RuntimeMutexContention) as caught:
+            with registry.acquire_sync("lab-1", 7, 0, timeout=0.01):
+                pytest.fail("A held lock was acquired")
+        assert caught.value.timeout == 0.01
+    finally:
+        release.set()
+        holder.join(5)

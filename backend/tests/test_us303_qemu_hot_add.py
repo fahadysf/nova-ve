@@ -51,6 +51,7 @@ from app.services.node_runtime_service import (
     NodeRuntimeService,
 )
 from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
+from tests.conftest import _shorten_runtime_mutex_wait
 
 
 # ---------------------------------------------------------------------------
@@ -1730,12 +1731,8 @@ async def test_us303_link_service_create_link_409_on_mutex_contention(
     assert holder_started.wait(timeout=2.0)
 
     link_service = LinkService()
-    # Patch the mutex's acquire timeout via direct call: we cannot pass
-    # a custom timeout through link_service.create_link, so we monkey-
-    # patch the registry's default timeout for this test.
-    monkeypatch.setattr(
-        "app.services.runtime_mutex.DEFAULT_ACQUIRE_TIMEOUT_S", 0.2
-    )
+    # link_service.create_link takes no timeout, so shorten the default.
+    _shorten_runtime_mutex_wait(monkeypatch)
 
     try:
         with pytest.raises(LinkContentionError):

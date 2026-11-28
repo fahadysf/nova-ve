@@ -1,4 +1,5 @@
 from contextlib import ExitStack, suppress
+import copy
 from dataclasses import dataclass, field
 import errno
 from fnmatch import fnmatchcase
@@ -8,6 +9,7 @@ import os
 import shutil
 from stat import S_ISREG
 import subprocess
+import threading
 from typing import Any, BinaryIO, Iterable, Iterator
 from uuid import uuid4
 
@@ -1183,6 +1185,18 @@ def _validate_interface_naming(payload: dict[str, Any], source: str) -> dict[str
     return {"explicit": list(explicit)}
 
 
+# Process-wide cache for ``TemplateService._load_templates``: a single
+# ``(files fingerprint, templates)`` entry under key ``"entry"``.
+_TEMPLATE_CACHE: dict[str, tuple[tuple, list["TemplateDefinition"]]] = {}
+_TEMPLATE_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_template_cache() -> None:
+    """Drop cached template definitions; call after writing template files."""
+    with _TEMPLATE_CACHE_LOCK:
+        _TEMPLATE_CACHE.clear()
+
+
 @dataclass
 class TemplateDefinition:
     key: str
@@ -1972,7 +1986,63 @@ class TemplateService:
             templates.append(template)
         return templates
 
+    def _template_files_fingerprint(self) -> tuple:
+        """Identity of every file template loading reads: both template dirs
+        plus (path, inode, mtime, ctime, size) of each ``*.yml``/``*.json``
+        in them. Any create, edit, rename or delete changes it; writers in
+        this codebase also call :func:`invalidate_template_cache`."""
+        entries: list[tuple[str, int, int, int, int]] = []
+        # Same globs as the loaders: builtin *.yml, user *.yml and *.json.
+        for directory, patterns in (
+            (self.templates_dir, ("*.yml",)),
+            (self.user_templates_dir, ("*.yml", "*.json")),
+        ):
+            if directory is None or not directory.exists():
+                continue
+            for pattern in patterns:
+                for path in directory.rglob(pattern):
+                    try:
+                        stat = path.stat()
+                    except OSError:
+                        continue
+                    entries.append(
+                        (str(path), stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_size)
+                    )
+        return (str(self.templates_dir), str(self.user_templates_dir), tuple(sorted(entries)))
+
     def _load_templates(
+        self,
+        *,
+        paired_templates: list[tuple[Path, dict[str, Any]]] | None = None,
+        parsed_templates: list[tuple[Path, Any]] | None = None,
+    ) -> list[TemplateDefinition]:
+        """Every template definition (builtin, user and synthetic paired).
+
+        Parsing all template YAML is slow, and lookups like
+        :meth:`get_template` run it per call, so a loop over templates was
+        quadratic. The default call is cached process-wide and reused until a
+        template file changes; callers get a deep copy they may mutate.
+        """
+        if paired_templates is not None or parsed_templates is not None:
+            return self._parse_templates(
+                paired_templates=paired_templates, parsed_templates=parsed_templates
+            )
+        return copy.deepcopy(self._shared_templates())
+
+    def _shared_templates(self) -> list[TemplateDefinition]:
+        """The cached template list itself. Read-only: never mutate it or
+        hand it out; copy what you return."""
+        fingerprint = self._template_files_fingerprint()
+        with _TEMPLATE_CACHE_LOCK:
+            cached = _TEMPLATE_CACHE.get("entry")
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
+        templates = self._parse_templates()
+        with _TEMPLATE_CACHE_LOCK:
+            _TEMPLATE_CACHE["entry"] = (fingerprint, templates)
+        return templates
+
+    def _parse_templates(
         self,
         *,
         paired_templates: list[tuple[Path, dict[str, Any]]] | None = None,

@@ -373,3 +373,60 @@ def test_existing_list_endpoint_returns_user_dir_templates(patched_split):
     listed = TemplateService().list_templates("qemu")
     assert "imported" in listed
     assert listed["imported"]["name"] == "ImportedFromUserDir"
+
+
+# ---- template definition cache -------------------------------------------
+
+
+_CSR = "type: qemu\nname: {name}\ncpu: 2\nram: 4096\nethernet: 2\nconsole_type: telnet\nicon_type: router\ncpulimit: 1\n"
+
+
+def _count_parses(monkeypatch) -> list[int]:
+    parses = [0]
+    original = TemplateService._parse_templates
+
+    def counting(self, **kwargs):
+        parses[0] += 1
+        return original(self, **kwargs)
+
+    monkeypatch.setattr(TemplateService, "_parse_templates", counting)
+    return parses
+
+
+def test_template_loading_is_cached_until_a_template_file_changes(patched_split, monkeypatch):
+    settings = patched_split
+    (settings.TEMPLATES_DIR / "qemu").mkdir()
+    csr = settings.TEMPLATES_DIR / "qemu" / "csr.yml"
+    csr.write_text(_CSR.format(name="CSR"))
+    parses = _count_parses(monkeypatch)
+
+    for _ in range(3):
+        assert TemplateService().get_template("qemu", "csr").name == "CSR"
+    assert parses[0] == 1
+
+    csr.write_text(_CSR.format(name="CSR-edited"))
+    assert TemplateService().get_template("qemu", "csr").name == "CSR-edited"
+    assert parses[0] == 2
+
+    (settings.USER_TEMPLATES_DIR / "qemu").mkdir()
+    (settings.USER_TEMPLATES_DIR / "qemu" / "vyos.yml").write_text(_CSR.format(name="VyOS"))
+    assert "vyos" in TemplateService().list_templates("qemu")
+    assert parses[0] == 3
+
+    csr.unlink()
+    assert "csr" not in TemplateService().list_templates("qemu")
+    assert parses[0] == 4
+
+
+def test_cached_templates_are_independent_copies(patched_split):
+    settings = patched_split
+    (settings.TEMPLATES_DIR / "qemu").mkdir()
+    (settings.TEMPLATES_DIR / "qemu" / "csr.yml").write_text(_CSR.format(name="CSR"))
+
+    first = TemplateService().get_template("qemu", "csr")
+    first.capabilities["hotplug"] = "mutated"
+    first.raw["name"] = "mutated"
+
+    second = TemplateService().get_template("qemu", "csr")
+    assert second.capabilities.get("hotplug") != "mutated"
+    assert second.raw["name"] == "CSR"
