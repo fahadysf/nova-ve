@@ -77,17 +77,22 @@ def _stub_host_net_for_qemu_start(monkeypatch):
 
 
 def _shorten_runtime_mutex_wait(monkeypatch, timeout: float = 0.2) -> None:
-    """Make a contended ``runtime_mutex`` acquire give up after ``timeout``.
+    """Make a contended ``runtime_mutex`` acquire give up after ``timeout``
+    instead of the 2s default, so contention tests stay fast."""
+    from app.services import runtime_mutex
 
-    The acquire methods bind ``DEFAULT_ACQUIRE_TIMEOUT_S`` as a keyword
-    default when the module is imported, so patching the constant changes
-    nothing and a contention test waits the full 2s.
-    """
-    from app.services.runtime_mutex import RuntimeMutexRegistry
+    monkeypatch.setattr(runtime_mutex, "DEFAULT_ACQUIRE_TIMEOUT_S", timeout)
 
-    for name in ("acquire_sync", "acquire", "acquire_node_sync"):
-        defaults = getattr(RuntimeMutexRegistry, name).__wrapped__.__kwdefaults__
-        monkeypatch.setitem(defaults, "timeout", timeout)
+
+@pytest.fixture(autouse=True)
+def _fresh_template_cache():
+    """Template definitions are cached process-wide; start each test cold so
+    one test's templates (or patched loaders) never leak into the next."""
+    from app.services.template_service import invalidate_template_cache
+
+    invalidate_template_cache()
+    yield
+    invalidate_template_cache()
 
 
 @pytest.fixture(scope="session")
