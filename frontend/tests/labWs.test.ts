@@ -193,6 +193,49 @@ describe('labWs.createLabWsStores — linkReconciliation (US-403 / US-404)', () 
     expect(entry.reason).toBe('no veth found');
   });
 
+  it('link_divergence_cleared removes only that link\'s divergent entry', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('discovered_link', {
+      type: 'discovered_link',
+      payload: { network_id: 1, bridge_name: 'br0', iface: 'nve1i0h', peer_node_id: 1 },
+    });
+    for (const id of ['lnk_a', 'lnk_b']) {
+      client.emit('link_divergent', {
+        type: 'link_divergent',
+        payload: { link_id: id, last_checked: '2026-04-28T00:00:00Z', generation: 3 },
+      });
+    }
+
+    client.emit('link_divergence_cleared', {
+      type: 'link_divergence_cleared',
+      payload: { link_id: 'lnk_a', lab_id: 'lab1', generation: 4 },
+    });
+
+    expect(Object.keys(get(stores.linkReconciliation)).sort()).toEqual([
+      'iface:nve1i0h',
+      'link:lnk_b',
+    ]);
+  });
+
+  it('ignores link_divergence_cleared from before the last snapshot', () => {
+    const client = makeFakeClient();
+    const stores = createLabWsStores(client);
+
+    client.emit('lab_topology', { type: 'lab_topology', seq: 1, generation: 5, payload: {} });
+    client.emit('link_divergent', {
+      type: 'link_divergent',
+      payload: { link_id: 'lnk_a', last_checked: '2026-04-28T00:00:00Z', generation: 6 },
+    });
+    client.emit('link_divergence_cleared', {
+      type: 'link_divergence_cleared',
+      payload: { link_id: 'lnk_a', generation: 5 },
+    });
+
+    expect(get(stores.linkReconciliation)['link:lnk_a']).toBeDefined();
+  });
+
   it('both event types coexist in the same store keyed distinctly', () => {
     const client = makeFakeClient();
     const stores = createLabWsStores(client);

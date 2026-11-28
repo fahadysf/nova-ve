@@ -389,6 +389,7 @@ class IolLauncher:
         attachments: list[dict[str, Any]],
         tap_factory: Any,
         active_application_ids: set[int] | None = None,
+        prepare_attachments: Any = None,
     ) -> IolRecord:
         active_ids = active_application_ids or set()
         extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
@@ -416,6 +417,8 @@ class IolLauncher:
             raise IolError(f"could not make IOL image executable: {image_path}: {exc}") from exc
 
         command = cls.build_command(image_path, node, app_id)
+        if prepare_attachments is not None:
+            prepare_attachments()
         owned_work = saved_snapshot is not None
         ubridge_popen_attempted = False
         try:

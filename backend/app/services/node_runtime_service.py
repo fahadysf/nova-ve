@@ -56,7 +56,8 @@ from app.services.lab_paths import (
 from app.config import get_settings
 from app.services import host_net, qemu_versions, runtime_pids
 from app.services.runtime_mutex import RuntimeMutexContention, runtime_mutex
-from app.services.shared_network_service import bridge_identity
+from app.services.cloud_inventory_service import bridge_dhcp_enabled
+from app.services.shared_network_service import bridge_identity, is_member
 
 
 _DOCKER_RESTART_POLICIES = {"no", "on-failure", "unless-stopped", "always"}
@@ -417,6 +418,52 @@ def _default_docker_inspect(docker_binary: str, docker_host: str, container_name
     return json.loads(result.stdout.strip() or "{}")
 
 
+
+
+# Upper bound on one node-liveness probe in the discovery divergence check.
+_DIVERGENCE_LIVENESS_TIMEOUT_SECONDS = 10.0
+
+
+def _link_node_endpoint(link: Any) -> tuple[int, int, int] | None:
+    """``(node_id, interface_index, network_id)`` for a node-to-network link.
+
+    Either end may be the node, depending on the direction the link was
+    drawn. Returns None for anything else (e.g. network-to-network).
+    """
+    if not isinstance(link, dict):
+        return None
+    ends = [e for e in (link.get("from"), link.get("to")) if isinstance(e, dict)]
+    node = next((e for e in ends if e.get("node_id") is not None), None)
+    network = next((e for e in ends if e.get("network_id") is not None), None)
+    if node is None or network is None or node.get("interface_index") is None:
+        return None
+    try:
+        return (
+            int(node["node_id"]),
+            int(node["interface_index"]),
+            int(network["network_id"]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+def _bridge_only_network(network: Any) -> bool:
+    """True when a network needs nothing on the host but its own bridge.
+
+    That is a plain lab bridge: an implicit node-to-node network, or an
+    explicit one (including a promoted implicit network) that runs no DHCP,
+    is not a host-owned Bridge-Cloud and does not share a bridge across labs.
+    """
+    if not isinstance(network, dict):
+        return False
+    if str(network.get("type") or "linux_bridge") != "linux_bridge":
+        return False
+    runtime = network.get("runtime") or {}
+    if isinstance(runtime, dict) and runtime.get("driver") not in (None, "linux_bridge"):
+        return False
+    if network.get("shared") is True or is_member(network):
+        return False
+    return not bridge_dhcp_enabled(network)
+
 class NodeRuntimeService:
     _registry: dict[str, dict[str, Any]] = {}
     _observed_inactive: set[str] = set()
@@ -434,6 +481,9 @@ class NodeRuntimeService:
     # it.  lab_topology snapshots include the current value so the frontend can
     # reject events from older generations (gen <= topology_generation is stale).
     _discovery_generation: dict[str, int] = {}
+    # Link ids each lab's last discovery cycle reported divergent, so the next
+    # cycle can publish ``link_divergence_cleared`` for links that recovered.
+    _divergent_links: dict[str, set[str]] = {}
     def __init__(self) -> None:
         self.settings = get_settings()
         self.runtime_dir = self.settings.TMP_DIR / "node-runtime"
@@ -456,6 +506,7 @@ class NodeRuntimeService:
             cls._loaded = False
         cls._transition_timestamps.clear()
         cls._discovery_generation.clear()
+        cls._divergent_links.clear()
 
     @classmethod
     def get_discovery_generation(cls, lab_id: str) -> int:
@@ -2076,7 +2127,12 @@ class NodeRuntimeService:
 
         settings = get_settings()
         labs_dir = settings.LABS_DIR.resolve()
-        for lab_id, lab_path in (await runtime_lab_paths(labs_dir)).items():
+        lab_paths = await runtime_lab_paths(labs_dir)
+        # Forget divergence state for labs no longer on disk (deleted, or
+        # dropped as duplicate/unreadable) so the map cannot grow forever.
+        for stale_lab_id in set(cls._divergent_links) - set(lab_paths):
+            cls._divergent_links.pop(stale_lab_id, None)
+        for lab_id, lab_path in lab_paths.items():
             data = await asyncio.to_thread(read_canonical_lab, labs_dir, labs_dir / lab_path)
             if data is None or lab_identity(data) != lab_id:
                 continue
@@ -2116,6 +2172,16 @@ class NodeRuntimeService:
 
         networks = lab_data.get("networks") or {}
         if not isinstance(networks, dict) or not networks:
+            # No bridges to scan; still retire warnings from earlier cycles.
+            await cls._publish_divergent_links(
+                lab_id=lab_id,
+                lab_path=lab_path,
+                lab_data=lab_data,
+                kernel_members=set(),
+                is_leased=None,
+                ws_hub=ws_hub,
+                generation=gen,
+            )
             return
 
         # Build the set of "declared" host-side ifaces per (network, iface).
@@ -2234,17 +2300,27 @@ class NodeRuntimeService:
         ``link_divergent`` WS event with payload ``{link_id, lab_id, reason,
         last_checked}``.
 
+        Only links whose node is running are checked: a stopped node owns no
+        host interfaces. A link the previous cycle reported divergent and
+        this one does not gets a ``link_divergence_cleared`` event
+        ``{link_id, lab_id, generation}`` so the canvas drops its warning.
+
         Lease respect: a link currently held by ``transition_lease.is_leased``
         is in the middle of a hot-plug operation and MUST NOT be flagged
         divergent.
         """
         links = lab_data.get("links") or []
-        if not isinstance(links, list) or not links:
-            return
+        if not isinstance(links, list):
+            links = []
+        networks = lab_data.get("networks") or {}
+        if not isinstance(networks, dict):
+            networks = {}
 
         from datetime import datetime, timezone
 
         last_checked = datetime.now(timezone.utc).isoformat()
+        running: dict[int, bool] = {}
+        divergent_now: set[str] = set()
 
         for link in links:
             if not isinstance(link, dict):
@@ -2252,17 +2328,14 @@ class NodeRuntimeService:
             link_id = link.get("id")
             if not isinstance(link_id, str) or not link_id:
                 continue
-            src = link.get("from") or {}
-            if not isinstance(src, dict):
+            endpoint = _link_node_endpoint(link)
+            if endpoint is None:
                 continue
-            node_id_raw = src.get("node_id")
-            iface_idx_raw = src.get("interface_index")
-            if node_id_raw is None or iface_idx_raw is None:
-                continue
-            try:
-                node_id = int(node_id_raw)
-                iface_idx = int(iface_idx_raw)
-            except (TypeError, ValueError):
+            node_id, iface_idx, network_id = endpoint
+            # External ``pnet*`` networks have no lab bridge for the scan to
+            # find the node's interface on, so they can never match.
+            network = networks.get(str(network_id))
+            if not isinstance(network, dict) or str(network.get("type", "")).startswith("pnet"):
                 continue
 
             try:
@@ -2274,6 +2347,21 @@ class NodeRuntimeService:
             # If either the veth host-end OR the TAP exists on any bridge
             # this lab owns, the kernel state is consistent — not divergent.
             if veth_iface in kernel_members or tap_iface in kernel_members:
+                continue
+
+            # A stopped node owns no host interfaces, so its links are
+            # expected to be absent from the kernel, not divergent.
+            if node_id not in running:
+                try:
+                    running[node_id] = await asyncio.wait_for(
+                        asyncio.to_thread(cls._node_is_running, lab_id, node_id),
+                        timeout=_DIVERGENCE_LIVENESS_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    # A hung Docker daemon must not stall discovery for every
+                    # lab; an unanswerable node is not reported either way.
+                    running[node_id] = False
+            if not running[node_id]:
                 continue
 
             # Lease respect — skip if a hot-plug is currently in flight for
@@ -2289,8 +2377,12 @@ class NodeRuntimeService:
                     except Exception:
                         continue
                 if leased:
+                    # Mid hot-plug: keep the previous verdict, publish nothing.
+                    if link_id in cls._divergent_links.get(lab_id, ()):
+                        divergent_now.add(link_id)
                     continue
 
+            divergent_now.add(link_id)
             payload = {
                 "link_id": link_id,
                 "lab_id": lab_id,
@@ -2308,6 +2400,36 @@ class NodeRuntimeService:
                     lab_id, link_id,
                 )
 
+        previous = cls._divergent_links.get(lab_id, set())
+        if divergent_now:
+            cls._divergent_links[lab_id] = divergent_now
+        else:
+            cls._divergent_links.pop(lab_id, None)
+        for link_id in sorted(previous - divergent_now):
+            try:
+                await publish_runtime_event(
+                    ws_hub,
+                    get_settings().LABS_DIR,
+                    lab_id,
+                    "link_divergence_cleared",
+                    {"link_id": link_id, "lab_id": lab_id, "generation": generation},
+                    path=lab_path,
+                )
+            except Exception:
+                _discovery_logger.exception(
+                    "discovery: ws publish failed lab=%s link_id=%s",
+                    lab_id, link_id,
+                )
+
+    @classmethod
+    def _node_is_running(cls, lab_id: str, node_id: int) -> bool:
+        """True when the node has a live runtime record, i.e. it should own
+        host interfaces. Blocking (may ask Docker), so call it off-loop."""
+        try:
+            return cls()._runtime_record(lab_id, node_id) is not None
+        except Exception:
+            return False
+
     @staticmethod
     def _declared_iface_set(lab_id: str, lab_data: dict[str, Any]) -> set[str]:
         """Return the set of host-side iface names that ARE declared in
@@ -2321,20 +2443,10 @@ class NodeRuntimeService:
         declared: set[str] = set()
         nodes = lab_data.get("nodes") or {}
         for link in lab_data.get("links") or []:
-            if not isinstance(link, dict):
+            endpoint = _link_node_endpoint(link)
+            if endpoint is None:
                 continue
-            src = link.get("from") or {}
-            if not isinstance(src, dict):
-                continue
-            node_id_raw = src.get("node_id")
-            iface_idx_raw = src.get("interface_index")
-            if node_id_raw is None or iface_idx_raw is None:
-                continue
-            try:
-                node_id = int(node_id_raw)
-                iface_idx = int(iface_idx_raw)
-            except (TypeError, ValueError):
-                continue
+            node_id, iface_idx, _network_id = endpoint
             try:
                 declared.add(host_net.veth_host_name(lab_id, node_id, iface_idx))
                 declared.add(host_net.tap_name(lab_id, node_id, iface_idx))
@@ -2777,14 +2889,7 @@ class NodeRuntimeService:
         # surfaces a typed NodeRuntimeError instead of leaking a half-
         # started VM. SLIRP is opt-in via per-interface ``extras.uplink``.
         attachments = self._qemu_attachments(lab_data, node)
-        for attachment in attachments:
-            bridge = attachment["bridge_name"]
-            if not host_net.bridge_exists(bridge):
-                raise NodeRuntimeError(
-                    f"Bridge {bridge} for network_id={attachment['network_id']} "
-                    f"is not present on the host; provision it via create_network "
-                    f"(US-202) before starting the node."
-                )
+        self._ensure_attachment_bridges(lab_data, attachments)
 
         work_dir = self._work_dir(lab_id, node_id)
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -3121,6 +3226,78 @@ class NodeRuntimeService:
                 return False
         return False
 
+    def _ensure_attachment_bridges(
+        self, lab_data: dict[str, Any], attachments: list[dict[str, Any]]
+    ) -> None:
+        """Pre-flight every attachment bridge before a node starts.
+
+        A node-to-node link is backed by a hidden implicit network.
+        ``create_link`` only creates that network's bridge when one endpoint
+        is already running, so a link drawn between two stopped nodes leaves
+        no bridge on the host. That network keeps no bridge when a third
+        endpoint or a rename promotes it, and a reboot drops every bridge.
+
+        A network whose only host state is the bridge itself is safe to
+        rebuild here: the bridge is created, claimed for this lab and brought
+        up if it is admin-down. Networks with more state (DHCP, NAT,
+        host-owned or cross-lab bridges) are owned by ``create_network`` and
+        the lab-open reconciliation, so a missing one raises
+        ``NodeRuntimeError`` before anything is spawned.
+        """
+        lab_id = self._lab_id(lab_data)
+        networks = lab_data.get("networks") or {}
+        for attachment in attachments:
+            bridge = attachment["bridge_name"]
+            network_id = int(attachment["network_id"])
+            network = networks.get(str(network_id))
+            bridge_only = _bridge_only_network(network)
+            exists = host_net.bridge_exists(bridge)
+            if exists and not bridge_only:
+                continue
+            if not bridge_only:
+                raise NodeRuntimeError(
+                    f"Bridge {bridge} for network_id={network_id} is not present "
+                    f"on the host; reopen the lab to reconcile its networks "
+                    f"before starting the node."
+                )
+            owner = bridge_identity(lab_id, network_id, network)
+            try:
+                if exists:
+                    # Claim an unowned bridge, as lab-open reconciliation does.
+                    if host_net.bridge_fingerprint_check(bridge, *owner) == "absent":
+                        try:
+                            host_net.bridge_fingerprint_write(bridge, *owner)
+                        except (host_net.HostNetError, OSError):
+                            pass
+                else:
+                    try:
+                        host_net.bridge_add(bridge)
+                        claim = "absent"
+                    except host_net.HostNetEEXIST:
+                        # Starts in one lab are serialised by the lab lock, so
+                        # the bridge appeared from outside this lab: only
+                        # adopt it if it is unclaimed or already ours.
+                        claim = host_net.bridge_fingerprint_check(bridge, *owner)
+                        if claim == "mismatch":
+                            raise NodeRuntimeError(
+                                f"Bridge {bridge} for network_id={network_id} "
+                                f"belongs to another lab; it was not reused."
+                            )
+                    if claim == "absent":
+                        try:
+                            host_net.bridge_fingerprint_write(bridge, *owner)
+                        except (host_net.HostNetError, OSError):
+                            pass
+                # A new bridge is admin-down; its ports would not forward.
+                _exists, _master, admin_up = host_net.link_state(bridge)
+                if not admin_up:
+                    host_net.link_up(bridge)
+            except host_net.HostNetError as exc:
+                raise NodeRuntimeError(
+                    f"Could not prepare bridge {bridge} for "
+                    f"network_id={network_id}: {exc}"
+                ) from exc
+
     def _qemu_attachments(
         self, lab_data: dict[str, Any], node: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -3285,7 +3462,8 @@ class NodeRuntimeService:
         Sequence (rollback-safe):
 
           1. Pre-flight: confirm every declared network's bridge exists on
-             the host (``host_net.bridge_exists``).
+             the host, creating a direct link's implicit bridge if needed
+             (``_ensure_attachment_bridges``).
           1b. (#287) Opt-in management: when node extras ``mgmt_access`` is
              truthy, ensure the per-lab mgmt bridge (``nove{h}mg``) and
              derive the node's static ``mgmt0`` address BEFORE ``docker
@@ -3337,19 +3515,11 @@ class NodeRuntimeService:
 
         # ----- Step 1: pre-flight bridge presence check ---------------------
         # Every declared network must have its bridge present on the host
-        # before we start the container. This catches the case where US-202
-        # has not yet provisioned the bridge (e.g. cold lab.json without
-        # `runtime.bridge_name`) and surfaces a typed error rather than
-        # crashing later in the helper-verb sequence.
+        # before we start the container. A direct link's implicit bridge is
+        # created here on first start; a missing explicit bridge surfaces a
+        # typed error rather than crashing later in the helper-verb sequence.
         attachments: list[dict[str, Any]] = self._docker_attachments(lab_data, node)
-        for attachment in attachments:
-            bridge = attachment["bridge_name"]
-            if not host_net.bridge_exists(bridge):
-                raise NodeRuntimeError(
-                    f"Bridge {bridge} for network_id={attachment['network_id']} "
-                    f"is not present on the host; provision it via create_network "
-                    f"(US-202) before starting the node."
-                )
+        self._ensure_attachment_bridges(lab_data, attachments)
 
         # ----- Step 1b: per-lab mgmt bridge ensure (#287) ------------------
         # Opt-in via node extras ``mgmt_access``.  Runs before ``docker run``
@@ -6562,14 +6732,6 @@ class NodeRuntimeService:
         node_id = int(node["id"])
         work_dir = self._work_dir(lab_id, node_id)
         attachments = self._qemu_attachments(lab_data, node)
-        for attachment in attachments:
-            bridge = attachment["bridge_name"]
-            if not host_net.bridge_exists(bridge):
-                raise NodeRuntimeError(
-                    f"Bridge {bridge} for network_id={attachment['network_id']} "
-                    f"is not present on the host; provision it via create_network "
-                    f"before starting the node."
-                )
 
         provisioned_taps: list[str] = []
 
@@ -6599,6 +6761,7 @@ class NodeRuntimeService:
                 attachments=attachments,
                 tap_factory=_tap_factory,
                 active_application_ids=active_ids,
+                prepare_attachments=lambda: self._ensure_attachment_bridges(lab_data, attachments),
             )
         except IolStartError as exc:
             for tap in provisioned_taps:
@@ -6716,14 +6879,7 @@ class NodeRuntimeService:
         # ({interface_index, network_id, bridge_name}) and a single
         # source of truth keeps the link service's invariants intact.
         attachments = self._qemu_attachments(lab_data, node)
-        for attachment in attachments:
-            bridge = attachment["bridge_name"]
-            if not host_net.bridge_exists(bridge):
-                raise NodeRuntimeError(
-                    f"Bridge {bridge} for network_id={attachment['network_id']} "
-                    f"is not present on the host; provision it via create_network "
-                    f"before starting the node."
-                )
+        self._ensure_attachment_bridges(lab_data, attachments)
 
         template = self._dynamips_template_for_node(node)
 

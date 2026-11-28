@@ -230,6 +230,107 @@ def test_iol_invalid_numeric_settings_fail_before_launch_writes_or_popen(saved_r
     ) is None
 
 
+@pytest.mark.parametrize("snapshot_failure", ["missing", "corrupt", "busy"])
+def test_iol_saved_preflight_failure_never_prepares_attachment_bridges(
+    saved_runtime, monkeypatch, snapshot_failure
+):
+    fixture = saved_runtime
+    node = fixture.lab_data["nodes"]["7"]
+    node["interfaces"] = [{"index": 0, "name": "e0/0"}]
+    node["extras"]["config"] = "Saved"
+    fixture.lab_data["networks"] = {
+        "3": {
+            "id": 3,
+            "name": "",
+            "type": "linux_bridge",
+            "visibility": False,
+            "implicit": True,
+            "config": {},
+        }
+    }
+    fixture.lab_data["links"] = [
+        {
+            "id": "link-7-3",
+            "from": {"node_id": 7, "interface_index": 0},
+            "to": {"network_id": 3},
+        }
+    ]
+
+    snapshot = fixture.work_dir / "iol-snapshot.tar"
+    if snapshot_failure == "corrupt":
+        snapshot.write_bytes(b"not a tar archive")
+        snapshot.chmod(0o600)
+    elif snapshot_failure == "busy":
+        IolLauncher.capture_snapshot(fixture.work_dir)
+    monkeypatch.setattr(
+        fixture.service,
+        "_active_iol_application_ids",
+        lambda: {fixture.preferred_id} if snapshot_failure == "busy" else set(),
+    )
+
+    network_calls = []
+
+    def record_network_call(name, result=None):
+        def call(*args, **kwargs):
+            network_calls.append((name, args, kwargs))
+            return result
+
+        return call
+
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_name",
+        lambda lab_id, network_id: "br-saved-3",
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_exists",
+        record_network_call("bridge_exists", False),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_add",
+        record_network_call("bridge_add"),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_fingerprint_check",
+        record_network_call("bridge_fingerprint_check", "absent"),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.bridge_fingerprint_write",
+        record_network_call("bridge_fingerprint_write"),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_state",
+        record_network_call("link_state", (False, None, False)),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_up",
+        record_network_call("link_up"),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_exists",
+        record_network_call("tap_exists", False),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.tap_add",
+        record_network_call("tap_add"),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.host_net.link_master_any",
+        record_network_call("link_master_any"),
+    )
+
+    error = "in use" if snapshot_failure == "busy" else "explicitly captured.*snapshot"
+    with pytest.raises(NodeRuntimeError, match=error):
+        fixture.service.start_node(fixture.lab_data, 7)
+
+    assert network_calls == []
+    assert fixture.popen_calls == []
+    assert not (fixture.work_dir / "NETMAP").exists()
+    assert list(fixture.work_dir.glob(".saved-*")) == []
+    assert fixture.service._runtime_record(
+        fixture.lab_data["id"], 7, include_stopped=True
+    ) is None
+
+
 def test_iol_capture_rejects_running_node_without_replacing_snapshot(saved_runtime):
     fixture = saved_runtime
     fixture.service.capture_iol_snapshot(fixture.lab_data, 7)

@@ -259,7 +259,7 @@ def _native_iol_fixture(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(IolLauncher, "_processes", {})
     monkeypatch.setattr(IolLauncher, "_bridges", {})
 
-    def start(active_ids: set[int], config=_MISSING_CONFIG):
+    def start(active_ids: set[int], config=_MISSING_CONFIG, prepare_attachments=None):
         extras = {"nvram": 1024}
         if config is not _MISSING_CONFIG:
             extras["config"] = config
@@ -280,6 +280,7 @@ def _native_iol_fixture(monkeypatch, tmp_path: Path):
             attachments=[],
             tap_factory=lambda *_: pytest.fail("unexpected TAP setup"),
             active_application_ids=active_ids,
+            prepare_attachments=prepare_attachments,
         )
 
     return SimpleNamespace(
@@ -570,9 +571,11 @@ def test_iol_saved_start_refuses_invalid_snapshot_before_any_mutation(
     snapshot = fixture.work_dir / "iol-snapshot.tar"
     if archive_kind == "corrupt":
         snapshot.write_bytes(b"not a tar archive")
+        snapshot.chmod(0o600)
     elif archive_kind == "empty":
         with tarfile.open(snapshot, "w:"):
             pass
+        snapshot.chmod(0o600)
     image_mode = fixture.image.stat().st_mode
 
     with pytest.raises(IolError, match="explicitly captured.*snapshot"):
@@ -603,6 +606,41 @@ def test_iol_saved_start_refuses_busy_snapshot_id_before_any_mutation(monkeypatc
     assert fixture.image.stat().st_mode == image_mode
     assert fixture.native_path.read_bytes() == b"explicit-state"
     assert snapshot.read_bytes() == archive_bytes
+
+
+def test_iol_saved_prepare_attachments_runs_after_one_preflight_before_launch_writes(
+    monkeypatch, tmp_path
+):
+    fixture = _native_iol_fixture(monkeypatch, tmp_path)
+    fixture.native_path.write_bytes(b"explicit-state")
+    IolLauncher.capture_snapshot(fixture.work_dir)
+    original_read = IolLauncher._read_saved_snapshot.__func__
+    snapshot_reads = []
+    preparations = []
+
+    def track_snapshot_read(cls, work_dir, active_ids):
+        snapshot_reads.append((work_dir, set(active_ids)))
+        return original_read(cls, work_dir, active_ids)
+
+    def prepare_attachments():
+        preparations.append("prepared")
+        assert len(snapshot_reads) == 1
+        assert fixture.popen_calls == []
+        assert not (fixture.work_dir / "NETMAP").exists()
+        assert list(fixture.work_dir.glob(".saved-*")) == []
+
+    monkeypatch.setattr(
+        IolLauncher, "_read_saved_snapshot", classmethod(track_snapshot_read)
+    )
+
+    record = fixture.start(
+        set(), config="Saved", prepare_attachments=prepare_attachments
+    )
+
+    assert snapshot_reads == [(fixture.work_dir, set())]
+    assert preparations == ["prepared"]
+    assert (record.work_dir / "NETMAP").exists()
+    assert len(fixture.popen_calls) == 2
 
 
 def test_iol_saved_start_restores_explicit_snapshot_in_fresh_owned_work(

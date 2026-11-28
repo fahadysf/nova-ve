@@ -14,7 +14,8 @@
  *  - ``linkReconciliation`` unified overlay store (US-403 + US-404): keyed by
  *                            ``'iface:<iface>'`` for ``discovered_link`` events
  *                            and ``'link:<link_id>'`` for ``link_divergent``
- *                            events.  Both map into {@link LinkReconciliation}
+ *                            events (removed by ``link_divergence_cleared``).
+ *                            Both map into {@link LinkReconciliation}
  *                            records and drive the canvas amber/red overlays.
  *  - ``connected``          reflects ``client.isOpen``; updated on every event.
  *
@@ -287,6 +288,23 @@ export function createLabWsStores(client: WsClient): LabWsStores {
       reason: typeof payload.reason === 'string' ? payload.reason : '',
     };
     linkReconciliation.update((current) => ({ ...current, [key]: next }));
+  });
+
+  // The backend sends ``link_divergence_cleared`` when a link it reported
+  // divergent is consistent again (or its node stopped), so the red overlay
+  // does not outlive the problem. Same generation gate as ``link_divergent``.
+  client.on('link_divergence_cleared', (msg: WsMessage) => {
+    if (!isObject(msg.payload)) return;
+    const payload = msg.payload as { link_id?: unknown; generation?: unknown };
+    if (typeof payload.link_id !== 'string' || payload.link_id.length === 0) return;
+    const eventGen = payload.generation;
+    if (typeof eventGen === 'number' && eventGen <= lastTopologyGeneration) return;
+    const key = `link:${payload.link_id}`;
+    linkReconciliation.update((current) => {
+      if (!(key in current)) return current;
+      const { [key]: _cleared, ...rest } = current;
+      return rest;
+    });
   });
 
   // A fresh lab_topology snapshot resets the world.
