@@ -35,19 +35,6 @@ def reset_runtime_registry():
 
 
 @pytest.fixture(autouse=True)
-def _redirect_pids_registry(tmp_path_factory, monkeypatch):
-    """Always redirect ``runtime_pids`` to a tmp_path so registration in
-    QEMU/docker start paths cannot escape into ``/var/lib/nova-ve/runtime``.
-
-    Tests that explicitly seed an instance_id via ``_us203_instance_id``
-    override this with their own per-test path.
-    """
-    pids_dir = tmp_path_factory.mktemp("pids-default")
-    monkeypatch.setenv("NOVA_VE_PIDS_JSON", str(pids_dir / "pids.json"))
-    yield
-
-
-@pytest.fixture(autouse=True)
 def reset_guacamole_token_cache():
     _AUTH_TOKEN_CACHE.clear()
     yield

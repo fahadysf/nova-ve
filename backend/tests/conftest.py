@@ -1,3 +1,4 @@
+import itertools
 import os
 
 import pytest
@@ -7,6 +8,8 @@ os.environ.setdefault(
     "DATABASE_URL", "postgresql+asyncpg://nova:test-password@localhost:5432/novadb"
 )
 os.environ.setdefault("SECRET_KEY", "test-secret-key-for-backend-suite-000000")
+
+_STATE_DIR_IDS = itertools.count()
 
 
 @pytest.fixture(autouse=True)
@@ -73,25 +76,43 @@ def _stub_host_net_for_qemu_start(monkeypatch):
     )
 
 
+@pytest.fixture(scope="session")
+def _default_state_root(tmp_path_factory):
+    """One parent for every test's default runtime-state directory.
+
+    ``tmp_path_factory.mktemp`` scans its whole base directory on each call,
+    so two calls per test made suite setup quadratic. Tests get a numbered
+    child of this single directory instead.
+    """
+    return tmp_path_factory.mktemp("default-state")
+
+
 @pytest.fixture(autouse=True)
-def _redirect_pids_registry(tmp_path_factory, monkeypatch):
+def _default_state_dir(_default_state_root):
+    state_dir = _default_state_root / str(next(_STATE_DIR_IDS))
+    state_dir.mkdir()
+    return state_dir
+
+
+@pytest.fixture(autouse=True)
+def _redirect_pids_registry(_default_state_dir, monkeypatch):
     """Redirect ``runtime_pids`` to a tmp path so registration during node
     start paths (US-201/US-203) cannot escape into ``/var/lib/nova-ve``.
 
     Tests that need to inspect the registry directly should override
     ``NOVA_VE_PIDS_JSON`` themselves with a path under their own tmp_path.
     """
-    pids_dir = tmp_path_factory.mktemp("pids-default")
+    pids_dir = _default_state_dir / "pids"
+    pids_dir.mkdir()
     monkeypatch.setenv("NOVA_VE_PIDS_JSON", str(pids_dir / "pids.json"))
-    yield
 
 
 @pytest.fixture(autouse=True)
-def _redirect_bridge_fingerprints(tmp_path_factory, monkeypatch):
+def _redirect_bridge_fingerprints(_default_state_dir, monkeypatch):
     """Redirect bridge ownership fingerprints away from ``/var/lib/nova-ve``."""
-    fingerprint_dir = tmp_path_factory.mktemp("bridge-fingerprints-default")
+    fingerprint_dir = _default_state_dir / "bridge-fingerprints"
+    fingerprint_dir.mkdir()
     monkeypatch.setenv("NOVA_VE_BRIDGE_FINGERPRINT_ROOT", str(fingerprint_dir))
-    yield
 
 
 @pytest.fixture(autouse=True)
