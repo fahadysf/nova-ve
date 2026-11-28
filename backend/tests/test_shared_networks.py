@@ -656,16 +656,6 @@ async def test_editing_first_mac_takes_effect(client, labs_dir, monkeypatch):
     assert [i["planned_mac"] for i in saved["interfaces"]] == [None, "aa:00:00:00:00:09"]
 
 
-def test_discovery_ignores_other_labs_interfaces(host):
-    own = host_net.tap_name(OWNER_ID, 3, 0)
-    foreign = host_net.tap_name(MEMBER_ID, 3, 0)
-    check = NodeRuntimeService._belongs_to_other_lab
-    assert check(OWNER_ID, foreign) is True
-    assert check(OWNER_ID, host_net.veth_host_name(MEMBER_ID, 12, 1)) is True
-    assert check(OWNER_ID, own) is False
-    assert check(OWNER_ID, "eth0") is False
-
-
 def test_default_macs_differ_between_labs():
     a, b = _first_mac_for_node("lab-a", 1), _first_mac_for_node("lab-b", 1)
     assert a != b

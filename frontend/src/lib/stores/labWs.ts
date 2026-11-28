@@ -11,12 +11,11 @@
  *                            events.
  *  - ``nodeStates``         keyed by ``node_id`` (numeric) from ``node_state``
  *                            events.
- *  - ``linkReconciliation`` unified overlay store (US-403 + US-404): keyed by
- *                            ``'iface:<iface>'`` for ``discovered_link`` events
- *                            and ``'link:<link_id>'`` for ``link_divergent``
+ *  - ``linkReconciliation`` overlay store (US-404): keyed by
+ *                            ``'link:<link_id>'`` for ``link_divergent``
  *                            events (removed by ``link_divergence_cleared``).
- *                            Both map into {@link LinkReconciliation}
- *                            records and drive the canvas amber/red overlays.
+ *                            Entries are {@link LinkReconciliation} records
+ *                            and drive the canvas red divergent overlay.
  *  - ``connected``          reflects ``client.isOpen``; updated on every event.
  *
  * On ``lab_topology`` snapshots ALL derived stores are cleared — the snapshot
@@ -30,7 +29,6 @@
 import { readable, writable, type Readable } from 'svelte/store';
 
 import type { WsClient, WsMessage } from '$lib/services/wsClient';
-import { parseIfaceInterfaceIndex } from '$lib/services/canvasEdges';
 import type { Link, LinkReconciliation, LiveMacState } from '$lib/types';
 
 export type { LinkReconciliation };
@@ -52,15 +50,8 @@ export type LabWsStores = {
   liveMacs: Readable<Record<string, LiveMacState>>;
   linkStates: Readable<Record<number, string>>;
   nodeStates: Readable<Record<number, string>>;
-  /** Unified reconciliation overlay: discovered (amber) + divergent (red). */
+  /** Reconciliation overlay: divergent (red) declared links. */
   linkReconciliation: Readable<Record<string, LinkReconciliation>>;
-  /**
-   * Remove a single entry from the reconciliation store by key.
-   * Used by TopologyCanvas after a successful "Promote to declared link" POST
-   * so the amber discovered overlay clears immediately rather than waiting for
-   * the next discovery cycle (HIGH-1 fix).
-   */
-  deleteReconciliation: (key: string) => void;
   /**
    * #153: subscribe to per-link mutation events. Returns an unsubscribe fn.
    * The callback fires once per matching WS event in arrival order — no
@@ -90,15 +81,6 @@ interface NodeStatePayload {
   state: string;
 }
 
-interface DiscoveredLinkPayload {
-  lab_id?: string;
-  network_id: number;
-  bridge_name: string;
-  iface: string;
-  peer_node_id?: number | null;
-  generation?: number;
-}
-
 interface LinkDivergentPayload {
   link_id: string;
   lab_id?: string;
@@ -121,7 +103,7 @@ export function createLabWsStores(client: WsClient): LabWsStores {
    * Each reconciliation event handler captures the epoch at the start of the
    * call; if it has been bumped by a ``lab_topology`` before the handler
    * writes, the event is treated as stale and discarded.  This prevents a
-   * ``discovered_link`` or ``link_divergent`` in-flight from the previous
+   * ``link_divergent`` in-flight from the previous
    * discovery pass from repopulating the store after a reset.
    *
    * Kept as defense-in-depth for synchronous handler interleaving — the
@@ -237,36 +219,6 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     }));
   });
 
-  // US-403: kernel-only iface not in links[] → amber dashed overlay edge.
-  // MEDIUM-2: parse peer_interface_index from the iface name on ingestion.
-  // MEDIUM-3: producer-side gen-token gate + epoch defense-in-depth.
-  client.on('discovered_link', (msg: WsMessage) => {
-    const myEpoch = topologyEpoch;
-    if (!isObject(msg.payload)) return;
-    const payload = msg.payload as Partial<DiscoveredLinkPayload>;
-    if (typeof payload.iface !== 'string' || payload.iface.length === 0) return;
-    if (typeof payload.network_id !== 'number') return;
-    if (typeof payload.bridge_name !== 'string') return;
-    // Producer-side generation gate: reject events from cycles that predate
-    // the last lab_topology snapshot.  ``?? -1`` makes missing generation
-    // (legacy backend) unconditionally pass through.
-    const eventGen = payload.generation;
-    if (typeof eventGen === 'number' && eventGen <= lastTopologyGeneration) return;
-    if (topologyEpoch !== myEpoch) return;
-    const key = `iface:${payload.iface}`;
-    const next: LinkReconciliation = {
-      kind: 'discovered',
-      key,
-      iface: payload.iface,
-      network_id: payload.network_id,
-      bridge_name: payload.bridge_name,
-      peer_node_id: typeof payload.peer_node_id === 'number' ? payload.peer_node_id : null,
-      // Derived from the iface name; null when the name scheme is unrecognised.
-      peer_interface_index: parseIfaceInterfaceIndex(payload.iface),
-    };
-    linkReconciliation.update((current) => ({ ...current, [key]: next }));
-  });
-
   // US-404: declared link with no matching kernel veth/TAP → red dashed overlay.
   // MEDIUM-3: producer-side gen-token gate + epoch defense-in-depth.
   client.on('link_divergent', (msg: WsMessage) => {
@@ -275,7 +227,8 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     const payload = msg.payload as Partial<LinkDivergentPayload>;
     if (typeof payload.link_id !== 'string' || payload.link_id.length === 0) return;
     if (typeof payload.last_checked !== 'string') return;
-    // Producer-side generation gate — same semantics as discovered_link handler.
+    // Producer-side generation gate: drop events from cycles that predate
+    // the last lab_topology snapshot.
     const eventGen = payload.generation;
     if (typeof eventGen === 'number' && eventGen <= lastTopologyGeneration) return;
     if (topologyEpoch !== myEpoch) return;
@@ -309,7 +262,7 @@ export function createLabWsStores(client: WsClient): LabWsStores {
 
   // A fresh lab_topology snapshot resets the world.
   // MEDIUM-3: bump the epoch BEFORE clearing the store so any in-flight
-  // discovered_link / link_divergent handlers that captured the old epoch
+  // link_divergent handlers that captured the old epoch
   // will discard their writes.
   // MEDIUM-3 (gen-token): capture the producer-side generation from the
   // snapshot.  Subsequent events with generation <= this value are stale
@@ -334,14 +287,6 @@ export function createLabWsStores(client: WsClient): LabWsStores {
     linkStates: { subscribe: linkStates.subscribe },
     nodeStates: { subscribe: nodeStates.subscribe },
     linkReconciliation: { subscribe: linkReconciliation.subscribe },
-    deleteReconciliation(key: string) {
-      linkReconciliation.update((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-    },
     onLinkChange(cb: (event: LinkChangeEvent) => void) {
       linkChangeListeners.add(cb);
       return () => {

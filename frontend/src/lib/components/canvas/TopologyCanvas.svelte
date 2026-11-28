@@ -85,7 +85,7 @@
   import { labState, type LabEditorState } from '$lib/stores/labState';
   import { createLabWsStores, type LabWsStores, type LinkChangeEvent } from '$lib/stores/labWs';
   import { createNodeCatalogLoader, type NodeCatalogLoader } from '$lib/services/nodeCatalogLoader';
-  import { deriveEdges, attachRouteObstacles, parseIfaceInterfaceIndex, slotPosition, type DiscoveredLink } from '$lib/services/canvasEdges';
+  import { deriveEdges, attachRouteObstacles, slotPosition } from '$lib/services/canvasEdges';
   import { createdFromLinkResponse, type LinkCreateResponse } from '$lib/services/linkCreate';
   import {
     dragLinkStore,
@@ -1137,25 +1137,9 @@
 
     // US-404: declared links with no kernel veth/TAP → keyed by link_id.
     const divergentByLinkId: Record<string, LinkReconciliation> = {};
-    // US-403: kernel-only ifaces not in links[] → DiscoveredLink list for 3rd arg.
-    const discoveredList: DiscoveredLink[] = [];
-
     for (const entry of entries) {
       if (entry.kind === 'divergent' && entry.link_id) {
         divergentByLinkId[entry.link_id] = entry;
-      } else if (
-        entry.kind === 'discovered' &&
-        entry.iface &&
-        typeof entry.network_id === 'number' &&
-        typeof entry.bridge_name === 'string'
-      ) {
-        discoveredList.push({
-          iface: entry.iface,
-          bridge_name: entry.bridge_name,
-          network_id: entry.network_id,
-          peer_node_id: entry.peer_node_id ?? null,
-          peer_interface_index: entry.peer_interface_index ?? null,
-        });
       }
     }
 
@@ -1177,7 +1161,7 @@
     }
 
     return attachRouteObstacles(
-      deriveEdges($labState.links, $labState.defaults, discoveredList, divergentByLinkId, $labState.networks),
+      deriveEdges($labState.links, $labState.defaults, divergentByLinkId, $labState.networks),
       routeObstacles
     );
   }
@@ -1431,81 +1415,6 @@
     return $labState.links
       .map((entry, index) => (entry?.id && ids.has(String(entry.id)) ? index : -1))
       .filter((index) => index >= 0);
-  }
-
-  function isDiscoveredEdgeId(edgeId: string | null | undefined): boolean {
-    return typeof edgeId === 'string' && edgeId.startsWith('discovered:');
-  }
-
-  /**
-   * US-403 — promote a kernel-discovered link into ``links[]`` by POSTing a
-   * real link to ``/labs/{labId}/links``.  On success we drop the discovered
-   * overlay locally; the next discovery cycle would clear it anyway, but
-   * optimistic removal keeps the canvas snappy.
-   */
-  async function promoteDiscoveredLink(edgeId: string) {
-    if (!isDiscoveredEdgeId(edgeId)) return;
-    const iface = edgeId.slice('discovered:'.length);
-    const recon = labWsStores ? get(labWsStores.linkReconciliation) : {};
-    const entry = recon[`iface:${iface}`];
-    if (!entry || entry.kind !== 'discovered') return;
-
-    if (typeof entry.peer_node_id !== 'number') {
-      toastStore.push(
-        'Cannot promote discovered link: peer node could not be decoded from iface name.',
-        'error',
-      );
-      return;
-    }
-    const ifaceIndex = entry.peer_interface_index ?? parseIfaceInterfaceIndex(iface);
-    if (typeof ifaceIndex !== 'number') {
-      toastStore.push(
-        'Cannot promote discovered link: interface index could not be decoded from iface name.',
-        'error',
-      );
-      return;
-    }
-    if (typeof entry.network_id !== 'number') {
-      toastStore.push(
-        'Cannot promote discovered link: network_id is missing from reconciliation entry.',
-        'error',
-      );
-      return;
-    }
-
-    const fromEndpoint = { node_id: entry.peer_node_id, interface_index: ifaceIndex };
-    const toEndpoint = { network_id: entry.network_id };
-
-    try {
-      const response = await apiRequest<LinkCreateResponse>(`/labs/${labId}/links`, {
-        method: 'POST',
-        body: { from: fromEndpoint, to: toEndpoint },
-        suppressToast: true,
-      });
-      if (!adoptRevision(response)) return;
-      const created = createdFromLinkResponse(response);
-      if (created.link) {
-        labState.applyCreatedLink(created.link, created.network);
-      }
-      // Optimistically remove the discovered overlay immediately (HIGH-1).
-      // The next discovery cycle would also clear it, but removing it now
-      // avoids a duplicate amber+gray edge flash while the cycle completes.
-      if (labWsStores) {
-        labWsStores.deleteReconciliation(`iface:${iface}`);
-      }
-      publishFlowState();
-      dispatchCanvasChange('topology', {
-      });
-      toastStore.push('Promoted discovered link to declared link.', 'info');
-    } catch (error) {
-      const message =
-        error instanceof ApiError
-          ? error.message
-          : error instanceof Error
-            ? error.message
-            : 'Failed to promote discovered link';
-      toastStore.push(message, 'error');
-    }
   }
 
   async function deleteLink(edgeId: string) {
@@ -2316,7 +2225,7 @@
         publishFlowState();
       });
       // Subscribe to the unified reconciliation store so the canvas repaints
-      // whenever a discovered_link or link_divergent WS event lands.
+      // whenever a link_divergent or link_divergence_cleared WS event lands.
       // Skip the synchronous first emission (store fires on subscribe before
       // any WS events have arrived; publishFlowState already ran via $:).
       let primed = false;
@@ -3097,49 +3006,33 @@
           Auto-positioned
         </div>
       {:else}
-        {#if menu && isDiscoveredEdgeId(menu.targetId)}
+        <div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-widest text-gray-500">Line style</div>
+        {#each ([['straight', 'Straight'], ['bezier', 'Curved'], ['orthogonal', 'Orthogonal']] as const) as [styleVal, styleLabel]}
           <button
             type="button"
             class="menu-item"
             on:click|preventDefault|stopPropagation={() => {
-              if (menu?.targetId) {
-                void promoteDiscoveredLink(menu.targetId);
-              }
-              selectedEdgeId = null;
+              if (menu?.targetId) setLinkStyle(menu.targetId, styleVal);
               closeMenu();
             }}
           >
-            <span>Promote to declared link</span><Plus class="h-3.5 w-3.5 text-amber-300/80" />
+            <span>{styleLabel}</span>
           </button>
-        {:else}
-          <div class="px-2 pt-1 pb-0.5 text-[10px] uppercase tracking-widest text-gray-500">Line style</div>
-          {#each ([['straight', 'Straight'], ['bezier', 'Curved'], ['orthogonal', 'Orthogonal']] as const) as [styleVal, styleLabel]}
-            <button
-              type="button"
-              class="menu-item"
-              on:click|preventDefault|stopPropagation={() => {
-                if (menu?.targetId) setLinkStyle(menu.targetId, styleVal);
-                closeMenu();
-              }}
-            >
-              <span>{styleLabel}</span>
-            </button>
-          {/each}
-          <div class="mx-2 my-1 border-t border-gray-700"></div>
-          <button
-            type="button"
-            class="menu-item text-red-200"
-            on:click|preventDefault|stopPropagation={() => {
-              if (menu?.targetId) {
-                deleteLink(menu.targetId);
-              }
-              selectedEdgeId = null;
-              closeMenu();
-            }}
-          >
-            <span>Delete Link</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
-          </button>
-        {/if}
+        {/each}
+        <div class="mx-2 my-1 border-t border-gray-700"></div>
+        <button
+          type="button"
+          class="menu-item text-red-200"
+          on:click|preventDefault|stopPropagation={() => {
+            if (menu?.targetId) {
+              deleteLink(menu.targetId);
+            }
+            selectedEdgeId = null;
+            closeMenu();
+          }}
+        >
+          <span>Delete Link</span><Trash2 class="h-3.5 w-3.5 text-red-200/80" />
+        </button>
       {/if}
     </div>
   {/if}
