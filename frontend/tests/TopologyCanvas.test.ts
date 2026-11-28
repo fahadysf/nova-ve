@@ -502,6 +502,81 @@ describe('TopologyCanvas lab controls', () => {
     expect(screen.getByTestId('network-config-modal')).toBeVisible();
   });
 
+  it('saves a stopped IOL snapshot once and reports the server response', async () => {
+    const node = { ...makeNode(1, 'edge-a', 0, capabilities), type: 'iol' as const };
+    renderCanvas({ '1': node });
+    await waitFor(() => expect(apiMock).toHaveBeenCalledWith(catalogPath, expect.anything()));
+
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+    let finishSnapshot!: () => void;
+    const snapshotFinished = new Promise<void>((resolve) => { finishSnapshot = resolve; });
+    apiMock.mockImplementationOnce(async () => {
+      await snapshotFinished;
+      return { code: 200, status: 'success', message: 'Snapshot saved.', data: {} };
+    });
+    const openMenu = () => fireEvent(screen.getByTestId('svelte-flow-mock'), new CustomEvent('mock-flow-event', {
+      detail: {
+        type: 'nodecontextmenu',
+        detail: { node: { id: 'node1' }, event: new MouseEvent('contextmenu') },
+      },
+    }));
+
+    try {
+      await openMenu();
+      await fireEvent.click(within(screen.getByRole('menu')).getByRole('button', { name: 'Save snapshot' }));
+      await openMenu();
+      const saving = within(screen.getByRole('menu')).getByRole('button', { name: 'Saving snapshot…' });
+      expect(saving).toBeDisabled();
+      expect(saving).toHaveAttribute('aria-busy', 'true');
+      await fireEvent.click(saving);
+      expect(apiMock.mock.calls.filter(([path]) => path === `${nodesPath}/1/iol-snapshot`)).toHaveLength(1);
+      expect(apiMock).toHaveBeenCalledWith(`${nodesPath}/1/iol-snapshot`, { method: 'POST' });
+
+      finishSnapshot();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith('Snapshot saved.', 'success'));
+      await openMenu();
+      expect(within(screen.getByRole('menu')).getByRole('button', { name: 'Save snapshot' })).toBeEnabled();
+    } finally {
+      finishSnapshot();
+      toast.mockRestore();
+    }
+  });
+
+  it('saves a stopped legacy IOU snapshot through the same node action', async () => {
+    const node = { ...makeNode(1, 'legacy-edge', 0, capabilities), type: 'iou' as const };
+    renderCanvas({ '1': node });
+    await waitFor(() => expect(apiMock).toHaveBeenCalledWith(catalogPath, expect.anything()));
+    apiMock.mockResolvedValueOnce({ code: 200, status: 'success', message: 'Snapshot saved.', data: {} });
+    const toast = vi.spyOn(toastStore, 'push').mockImplementation(() => {});
+
+    try {
+      await fireEvent(screen.getByTestId('svelte-flow-mock'), new CustomEvent('mock-flow-event', {
+        detail: {
+          type: 'nodecontextmenu',
+          detail: { node: { id: 'node1' }, event: new MouseEvent('contextmenu') },
+        },
+      }));
+      await fireEvent.click(within(screen.getByRole('menu')).getByRole('button', { name: 'Save snapshot' }));
+      await waitFor(() => expect(apiMock).toHaveBeenCalledWith(`${nodesPath}/1/iol-snapshot`, { method: 'POST' }));
+    } finally {
+      toast.mockRestore();
+    }
+  });
+
+  it.each([
+    { type: 'iol' as const, status: 2 as const },
+    { type: 'qemu' as const, status: 0 as const },
+  ])('does not offer Save snapshot for a $type node with status $status', async ({ type, status }) => {
+    renderCanvas({ '1': { ...makeNode(1, 'edge-a', status, capabilities), type } });
+    await fireEvent(screen.getByTestId('svelte-flow-mock'), new CustomEvent('mock-flow-event', {
+      detail: {
+        type: 'nodecontextmenu',
+        detail: { node: { id: 'node1' }, event: new MouseEvent('contextmenu') },
+      },
+    }));
+    expect(within(screen.getByRole('menu')).queryByRole('button', { name: 'Save snapshot' })).toBeNull();
+  });
+
   it.each([false, true])('opens network info from the context menu (zen: %s, #318)', async (zenMode) => {
     const view = renderCanvas({}, { '7': makeSharingNetwork() });
     await view.rerender({ zenMode });

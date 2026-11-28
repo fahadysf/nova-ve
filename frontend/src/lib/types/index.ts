@@ -378,7 +378,7 @@ export interface LabData {
 export interface NodeData {
   id: number;
   name: string;
-  type: 'qemu' | 'docker' | 'iol' | 'dynamips';
+  type: 'qemu' | 'docker' | 'iol' | 'iou' | 'dynamips';
   template: string;
   image: string;
   console: 'telnet' | 'vnc' | 'rdp' | 'serial';

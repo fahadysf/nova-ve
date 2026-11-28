@@ -2211,6 +2211,54 @@ async def stop_node(
     }
 
 
+@router.post("/{lab_path:path}/nodes/{node_id}/iol-snapshot", dependencies=[LAB_ACCESS])
+async def capture_iol_snapshot(
+    lab_path: str,
+    node_id: int,
+    current_user: UserRead = Depends(get_current_user),
+):
+    try:
+        scoped_path = _scoped_lab_path(current_user, lab_path, treat_as_absolute=True)
+        data = _read_lab_data(scoped_path)
+        _, cancelled = await run_mutation(
+            lambda: NodeRuntimeService().capture_iol_snapshot(data, node_id)
+        )
+    except LegacyLabSchemaError as exc:
+        return _legacy_schema_response(exc)
+    except FileNotFoundError:
+        return {
+            "code": 404,
+            "status": "fail",
+            "message": "Lab does not exist (60038).",
+        }
+    except NodeRuntimeError as e:
+        return {
+            "code": 400,
+            "status": "fail",
+            "message": str(e),
+        }
+    except PermissionError as e:
+        return {
+            "code": 403,
+            "status": "fail",
+            "message": str(e),
+        }
+
+    await notify_after_mutation(
+        audit_service.record(
+            "node.iol_snapshot",
+            actor=current_user.username,
+            **audit_service.node_context(data, node_id, scoped_path),
+        ),
+        cancelled,
+    )
+    return {
+        "code": 200,
+        "status": "success",
+        "message": "IOL snapshot captured.",
+    }
+
+
 @router.get("/{lab_path:path}/nodes/{node_id}/wipe", dependencies=[LAB_ACCESS])
 async def wipe_node(
     lab_path: str,

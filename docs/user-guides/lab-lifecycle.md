@@ -32,7 +32,13 @@ The lab JSON is unchanged — node configuration survives stops. Re-starting the
 
 ## Saving
 
-There is no explicit save button. Every change you make on the canvas — adding / removing nodes, adding / removing links, moving nodes, dragging ports — is committed to the lab JSON server-side as you make it. The frontend treats the lab JSON as the canonical source of truth, and re-fetches it whenever the live runtime view needs reconciliation.
+Canvas changes are saved automatically. Every change you make on the canvas — adding / removing nodes, adding / removing links, moving nodes, dragging ports — is committed to the lab JSON server-side as you make it. The frontend treats the lab JSON as the canonical source of truth, and re-fetches it whenever the live runtime view needs reconciliation.
+
+### Saving an IOL or IOU snapshot
+
+Save the device configuration into native NVRAM before stopping the node. Then choose **Save snapshot** in its right-click menu. This captures the last stopped run and replaces any snapshot previously saved for that node.
+
+Saved startup mode uses a fresh copy of this snapshot. Ordinary startup continues to preserve the node's native IOL NVRAM, so returning to a saved state requires an explicit snapshot and Saved mode. **Wipe** removes the node's saved snapshot.
 
 ## Deleting a lab
 

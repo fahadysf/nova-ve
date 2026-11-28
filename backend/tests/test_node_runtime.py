@@ -2169,6 +2169,7 @@ def test_iol_start_uses_isolated_launcher_identity_and_tap_wiring(
     captured: dict[str, object] = {}
 
     def fake_start_node(**kwargs):
+        kwargs["prepare_attachments"]()
         captured.update(kwargs)
         for attachment in kwargs["attachments"]:
             kwargs["tap_factory"](
@@ -2343,6 +2344,7 @@ def _patch_iol_start(
     )
 
     def fake_start_node(**kwargs):
+        kwargs["prepare_attachments"]()
         calls["launched"].append([a["bridge_name"] for a in kwargs["attachments"]])
         for attachment in kwargs["attachments"]:
             kwargs["tap_factory"](

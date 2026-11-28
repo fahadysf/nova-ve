@@ -11,6 +11,7 @@ The bridge side is handled by uBridge's ``iol_bridge`` module.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import math
 import os
@@ -18,7 +19,11 @@ import select
 import shutil
 import signal
 import socket
+import stat
 import subprocess
+import sys
+import tarfile
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -32,10 +37,19 @@ _logger = logging.getLogger("nova-ve.runtime.iol")
 
 _UBRIDGE_BINARY = os.environ.get("NOVA_VE_UBRIDGE_BIN", "ubridge")
 _IMAGES_ROOT = Path("/var/lib/nova-ve/images/iol")
+_SNAPSHOT_NAME = "iol-snapshot.tar"
+_SOURCE_NAME = ".iol-source.json"
+_SAVED_WORK_PREFIX = ".saved-"
 
 
 class IolError(RuntimeError):
     """Raised on IOL launch, bridge, or console failures."""
+
+
+class IolStartError(IolError):
+    def __init__(self, record: IolRecord, message: str) -> None:
+        super().__init__(message)
+        self.record = record
 
 
 _TELNET_IAC = 255
@@ -59,6 +73,19 @@ _TELNET_SERVER_NEGOTIATION = bytes(
 
 
 @dataclass
+class IolSource:
+    workspace: str = "."
+    application_id: int | None = None
+    pid: int | None = None
+    pid_create_time: float | None = None
+
+
+@dataclass
+class _SavedSnapshot:
+    application_id: int
+
+
+@dataclass
 class IolRecord:
     lab_id: str
     node_id: int
@@ -68,7 +95,7 @@ class IolRecord:
     image_path: Path
     work_dir: Path
     console_port: int
-    pid: int
+    pid: int | None
     pid_create_time: float | None
     command: list[str]
     stdout_log: Path
@@ -80,6 +107,7 @@ class IolRecord:
     udp_ports: list[int]
     iourc_path: Path | None = None
     ubridge_create_time: float | None = None
+    owned_work: bool = False
 
     def as_runtime(self) -> dict[str, Any]:
         runtime = {
@@ -361,7 +389,20 @@ class IolLauncher:
         attachments: list[dict[str, Any]],
         tap_factory: Any,
         active_application_ids: set[int] | None = None,
+        prepare_attachments: Any = None,
     ) -> IolRecord:
+        active_ids = active_application_ids or set()
+        extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
+        saved_snapshot = (
+            cls._read_saved_snapshot(work_dir, active_ids)
+            if extras.get("config") == "Saved"
+            else None
+        )
+        app_id = (
+            saved_snapshot.application_id
+            if saved_snapshot is not None
+            else cls.application_id_for_start(lab_id, node_id, node, work_dir, active_ids)
+        )
         ubridge_binary = shutil.which(_UBRIDGE_BINARY) if not Path(_UBRIDGE_BINARY).exists() else _UBRIDGE_BINARY
         if not ubridge_binary:
             raise IolError(
@@ -375,36 +416,53 @@ class IolLauncher:
         except OSError as exc:
             raise IolError(f"could not make IOL image executable: {image_path}: {exc}") from exc
 
-        work_dir.mkdir(parents=True, exist_ok=True)
-        app_id = cls.application_id(lab_id, node_id, active_application_ids or set())
-        bridge_id = app_id + 512
-        cls.write_netmap(work_dir / "NETMAP", app_id, bridge_id)
+        command = cls.build_command(image_path, node, app_id)
+        if prepare_attachments is not None:
+            prepare_attachments()
+        owned_work = saved_snapshot is not None
+        ubridge_popen_attempted = False
+        try:
+            if saved_snapshot is not None:
+                work_dir = cls._materialize_saved_work(work_dir, saved_snapshot)
+            else:
+                work_dir.mkdir(parents=True, exist_ok=True)
+            bridge_id = app_id + 512
+            cls.write_netmap(work_dir / "NETMAP", app_id, bridge_id)
 
-        ubridge_port = cls._free_tcp_port()
-        ubridge_proc = subprocess.Popen(
-            [ubridge_binary, "-H", f"127.0.0.1:{ubridge_port}"],
-            cwd=work_dir,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+            ubridge_port = cls._free_tcp_port()
+            ubridge_popen_attempted = True
+            ubridge_proc = subprocess.Popen(
+                [ubridge_binary, "-H", f"127.0.0.1:{ubridge_port}"],
+                cwd=work_dir,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception:
+            if owned_work and not ubridge_popen_attempted:
+                cls._remove_saved_work(work_dir)
+            raise
         with cls._lock:
             cls._processes[ubridge_proc.pid] = ubridge_proc
-        client = _UbridgeClient(ubridge_port)
+        client = None
         tap_names: list[str] = []
         ubridge_bridges: list[str] = []
         udp_ports: list[int] = []
         iol_bridge_name = cls.iol_bridge_name(lab_id, node_id, app_id)
         stdout_log = work_dir / "stdout.log"
         stderr_log = work_dir / "stderr.log"
-        stdout_log.unlink(missing_ok=True)
-        stderr_log.unlink(missing_ok=True)
-        iourc_path = cls.resolve_iourc(image_path)
+        iourc_path: Path | None = None
 
         process: subprocess.Popen[bytes] | None = None
         bridge: IolConsoleBridge | None = None
+        pid_create_time = None
+        ubridge_create_time = None
         try:
+            client = _UbridgeClient(ubridge_port)
+            stdout_log.unlink(missing_ok=True)
+            stderr_log.unlink(missing_ok=True)
+            iourc_path = cls.resolve_iourc(image_path)
             client.request(f"iol_bridge create {iol_bridge_name} {bridge_id}")
             ubridge_bridges.append(iol_bridge_name)
             for attachment in attachments:
@@ -430,7 +488,6 @@ class IolLauncher:
                 )
             client.request(f"iol_bridge start {iol_bridge_name}")
 
-            command = cls.build_command(image_path, node, app_id)
             master_fd, slave_fd = os.openpty()
             try:
                 process = subprocess.Popen(
@@ -492,16 +549,54 @@ class IolLauncher:
                 udp_ports=udp_ports,
                 iourc_path=iourc_path,
                 ubridge_create_time=ubridge_create_time,
+                owned_work=owned_work,
             )
-        except Exception:
-            if bridge is not None:
-                bridge.stop()
-            if process is not None and process.poll() is None:
-                cls._terminate_pid(process.pid)
-            cls.stop_ubridge(ubridge_proc.pid)
-            raise
+        except Exception as exc:
+            if process is not None:
+                try:
+                    pid_create_time = __import__("psutil").Process(process.pid).create_time()
+                except Exception:
+                    pid_create_time = None
+            try:
+                ubridge_create_time = __import__("psutil").Process(ubridge_proc.pid).create_time()
+            except Exception:
+                ubridge_create_time = None
+            partial_record = IolRecord(
+                lab_id=lab_id,
+                node_id=node_id,
+                application_id=app_id,
+                bridge_id=bridge_id,
+                iol_bridge_name=iol_bridge_name,
+                image_path=image_path,
+                work_dir=work_dir,
+                console_port=console_port,
+                pid=process.pid if process is not None else None,
+                pid_create_time=pid_create_time,
+                command=command,
+                stdout_log=stdout_log,
+                stderr_log=stderr_log,
+                tap_names=tap_names,
+                ubridge_pid=ubridge_proc.pid,
+                ubridge_port=ubridge_port,
+                ubridge_bridges=ubridge_bridges,
+                udp_ports=udp_ports,
+                iourc_path=iourc_path,
+                ubridge_create_time=ubridge_create_time,
+                owned_work=owned_work,
+            )
+            try:
+                if bridge is not None:
+                    bridge.stop()
+                if process is not None and process.poll() is None:
+                    cls._terminate_pid(process.pid)
+                cls.stop_ubridge(ubridge_proc.pid)
+                if owned_work and cls._popen_exited(process) and cls._popen_exited(ubridge_proc):
+                    cls._remove_saved_work(work_dir)
+            finally:
+                raise IolStartError(partial_record, str(exc)) from exc
         finally:
-            client.close()
+            if client is not None:
+                client.close()
 
     @classmethod
     def owns_live_process(cls, pid: int) -> bool:
@@ -525,6 +620,13 @@ class IolLauncher:
     @staticmethod
     def stop_ubridge(pid: int) -> None:
         IolLauncher._terminate_pid(pid)
+
+    @staticmethod
+    def _popen_exited(process: subprocess.Popen[bytes] | None) -> bool:
+        try:
+            return process is None or process.poll() is not None
+        except Exception:
+            return False
 
     @staticmethod
     def _terminate_pid(pid: int) -> None:
@@ -570,20 +672,26 @@ class IolLauncher:
     @staticmethod
     def build_command(image_path: Path, node: dict[str, Any], application_id: int) -> list[str]:
         extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
-        ethernet_count = max(0, int(node.get("ethernet", 4)))
-        ethernet_adapters = max(1, math.ceil(ethernet_count / 4))
-        serial_raw = extras.get("serial_adapters")
-        if serial_raw is None:
-            serial_raw = extras.get("serial", 2)
-        nvram_raw = extras.get("nvram")
-        if nvram_raw is None:
-            nvram_raw = node.get("nvram", 256)
-        ram_raw = node.get("ram")
-        if ram_raw is None:
-            ram_raw = extras.get("ram", 1024)
-        serial_adapters = int(serial_raw)
-        nvram = int(nvram_raw)
-        ram = int(ram_raw)
+        try:
+            ethernet_count = max(0, int(node.get("ethernet", 4)))
+            ethernet_adapters = max(1, math.ceil(ethernet_count / 4))
+            serial_raw = extras.get("serial_adapters")
+            if serial_raw is None:
+                serial_raw = extras.get("serial", 2)
+            nvram_raw = extras.get("nvram")
+            if nvram_raw is None:
+                nvram_raw = node.get("nvram", 256)
+            ram_raw = node.get("ram")
+            if ram_raw is None:
+                ram_raw = extras.get("ram", 1024)
+            serial_adapters = int(serial_raw)
+            nvram = int(nvram_raw)
+            ram = int(ram_raw)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise IolError(
+                "Invalid IOL numeric settings: ethernet, serial_adapters/serial, "
+                "nvram, and ram must be integers."
+            ) from exc
 
         command = [str(image_path)]
         if ethernet_adapters != 2:
@@ -650,6 +758,378 @@ class IolLauncher:
         env = os.environ.copy()
         env["IOURC"] = str(iourc_path)
         return env
+
+    @classmethod
+    def capture_snapshot(cls, work_dir: Path, source: IolSource | None = None) -> None:
+        source = source or IolSource()
+        native = cls._open_native_file(cls.source_directory(work_dir, source), nonempty=True)
+        if native is None:
+            raise IolError("no canonical native NVRAM file is available to capture")
+        native_file, native_path, application_id = native
+        if source.application_id is not None and source.application_id != application_id:
+            native_file.close()
+            raise IolError("the native NVRAM application ID does not match the last launch")
+
+        snapshot_path = work_dir / _SNAPSHOT_NAME
+        tmp_path: Path | None = None
+        try:
+            with native_file:
+                descriptor, tmp_name = tempfile.mkstemp(
+                    prefix=".iol-snapshot-", suffix=".tmp", dir=work_dir
+                )
+                tmp_path = Path(tmp_name)
+                with os.fdopen(descriptor, "wb") as handle:
+                    with tarfile.open(fileobj=handle, mode="w") as archive:
+                        member = tarfile.TarInfo(native_path.name)
+                        member.size = os.fstat(native_file.fileno()).st_size
+                        member.mode = 0o600
+                        member.mtime = 0
+                        archive.addfile(member, native_file)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, snapshot_path)
+        except (OSError, tarfile.TarError) as exc:
+            raise IolError("could not publish the IOL snapshot; the previous snapshot was retained") from exc
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _invalid_saved_snapshot() -> IolError:
+        return IolError(
+            "Saved mode requires a valid explicitly captured IOL snapshot. "
+            "Capture a snapshot while the node is stopped, then retry."
+        )
+
+    @classmethod
+    def _read_saved_snapshot(cls, work_dir: Path, active_ids: set[int]) -> _SavedSnapshot:
+        path = work_dir / _SNAPSHOT_NAME
+        try:
+            mode = path.lstat().st_mode
+            if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o077:
+                raise ValueError("invalid snapshot file")
+            with path.open("rb") as handle, tarfile.open(fileobj=handle, mode="r:") as archive:
+                members = archive.getmembers()
+                if len(members) != 1 or not members[0].isreg() or members[0].size <= 0:
+                    raise ValueError("invalid snapshot member")
+                member = members[0]
+                application_id = cls.native_application_id(member.name)
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ValueError("missing snapshot payload")
+                payload_size = 0
+                while chunk := extracted.read(1024 * 1024):
+                    payload_size += len(chunk)
+            if payload_size != member.size:
+                raise ValueError("invalid snapshot payload")
+        except (OSError, ValueError, tarfile.TarError) as exc:
+            raise cls._invalid_saved_snapshot() from exc
+        if application_id in active_ids:
+            raise IolError(
+                f"saved snapshot requires IOL application ID {application_id}, which is in use. "
+                "Retry when that application ID is available"
+            )
+        return _SavedSnapshot(application_id=application_id)
+
+    @classmethod
+    def _materialize_saved_work(cls, work_dir: Path, snapshot: _SavedSnapshot) -> Path:
+        saved_work = Path(tempfile.mkdtemp(prefix=_SAVED_WORK_PREFIX, dir=work_dir))
+        try:
+            native_path = saved_work / f"nvram_{snapshot.application_id:05d}"
+            with (work_dir / _SNAPSHOT_NAME).open("rb") as source_handle:
+                with tarfile.open(fileobj=source_handle, mode="r:") as archive:
+                    members = archive.getmembers()
+                    if len(members) != 1 or members[0].name != native_path.name:
+                        raise cls._invalid_saved_snapshot()
+                    extracted = archive.extractfile(members[0])
+                    if extracted is None:
+                        raise cls._invalid_saved_snapshot()
+                    with native_path.open("xb") as handle:
+                        shutil.copyfileobj(extracted, handle)
+                        if handle.tell() != members[0].size:
+                            raise cls._invalid_saved_snapshot()
+            return saved_work
+        except Exception:
+            cls._remove_saved_work(saved_work)
+            raise
+
+    @staticmethod
+    def _remove_saved_work(path: Path) -> None:
+        try:
+            if (
+                path.name.startswith(_SAVED_WORK_PREFIX)
+                and stat.S_ISDIR(path.lstat().st_mode)
+                and not path.is_symlink()
+            ):
+                shutil.rmtree(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _logger.warning("could not remove superseded IOL Saved work %r: %s", path.name, exc)
+
+    @classmethod
+    def discard_owned_work(cls, record: IolRecord) -> None:
+        if record.owned_work:
+            cls._remove_saved_work(record.work_dir)
+
+    @classmethod
+    def cleanup_superseded_work(
+        cls, work_dir: Path, previous: IolSource | None, current_work_dir: Path
+    ) -> None:
+        if previous is None or previous.workspace == ".":
+            return
+        previous_path = work_dir / previous.workspace
+        if previous_path != current_work_dir and previous_path.parent == work_dir:
+            cls._remove_saved_work(previous_path)
+
+    @classmethod
+    def read_source(cls, work_dir: Path) -> IolSource:
+        path = work_dir / _SOURCE_NAME
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            return IolSource()
+        except OSError as exc:
+            raise IolError("could not read the last IOL launch source") from exc
+        try:
+            if not stat.S_ISREG(mode):
+                raise ValueError("invalid source marker")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return cls._validated_source(data)
+        except (OSError, ValueError, TypeError, AttributeError, OverflowError) as exc:
+            raise IolError("could not read the last IOL launch source") from exc
+
+    @classmethod
+    def _validated_source(cls, data: dict[str, Any]) -> IolSource:
+        if not isinstance(data, dict):
+            raise ValueError("invalid source marker")
+        workspace = data.get("workspace")
+        application_id = data.get("application_id")
+        pid = data.get("pid")
+        pid_create_time = data.get("pid_create_time")
+        if (
+            not isinstance(workspace, str)
+            or not cls._valid_workspace(workspace)
+            or type(application_id) is not int
+            or not 1 <= application_id <= 512
+            or type(pid) is not int
+            or pid <= 0
+            or pid_create_time is not None
+            and (
+                type(pid_create_time) not in (int, float)
+                or not 0 < pid_create_time <= sys.float_info.max
+            )
+        ):
+            raise ValueError("invalid source marker")
+        return IolSource(
+            workspace=workspace,
+            application_id=application_id,
+            pid=pid,
+            pid_create_time=pid_create_time,
+        )
+
+    @staticmethod
+    def _valid_workspace(workspace: str) -> bool:
+        return workspace == "." or (
+            Path(workspace).name == workspace and workspace.startswith(_SAVED_WORK_PREFIX)
+        )
+
+    @classmethod
+    def source_directory(cls, work_dir: Path, source: IolSource) -> Path:
+        if source.workspace == ".":
+            return work_dir
+        source_dir = work_dir / source.workspace
+        try:
+            if (
+                not cls._valid_workspace(source.workspace)
+                or source_dir.parent != work_dir
+                or not stat.S_ISDIR(source_dir.lstat().st_mode)
+            ):
+                raise IolError("managed IOL source must be a real contained directory")
+        except OSError as exc:
+            raise IolError("could not inspect the managed IOL source directory") from exc
+        return source_dir
+
+    @classmethod
+    def runtime_source(cls, work_dir: Path, runtime: dict[str, Any]) -> IolSource:
+        try:
+            runtime_work = Path(runtime.get("work_dir"))
+            workspace = runtime_work.relative_to(work_dir).as_posix()
+            source = cls._validated_source(
+                {
+                    "workspace": workspace,
+                    "application_id": runtime.get("application_id"),
+                    "pid": runtime.get("pid"),
+                    "pid_create_time": runtime.get("pid_create_time"),
+                }
+            )
+            cls.source_directory(work_dir, source)
+            return source
+        except (OSError, ValueError, TypeError, AttributeError, OverflowError) as exc:
+            raise IolError("could not reconcile the IOL runtime source") from exc
+
+    @classmethod
+    def publish_source(cls, work_dir: Path, record: IolRecord) -> IolSource | None:
+        source = cls.runtime_source(work_dir, record.as_runtime())
+        return cls._publish_source(work_dir, source)
+
+    @classmethod
+    def publish_runtime_source(
+        cls, work_dir: Path, runtime: dict[str, Any]
+    ) -> tuple[IolSource, IolSource | None]:
+        source = cls.runtime_source(work_dir, runtime)
+        return source, cls._publish_source(work_dir, source)
+
+    @classmethod
+    def _publish_source(cls, work_dir: Path, source: IolSource) -> IolSource | None:
+        try:
+            previous = cls.read_source(work_dir)
+        except IolError:
+            previous = None
+        cls._atomic_private_write(
+            work_dir / _SOURCE_NAME,
+            json.dumps(source.__dict__, separators=(",", ":")).encode("utf-8"),
+        )
+        return previous
+
+    @staticmethod
+    def _atomic_private_write(path: Path, payload: bytes) -> None:
+        tmp_path: Path | None = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, tmp_name = tempfile.mkstemp(
+                prefix=f".{path.name}-", suffix=".tmp", dir=path.parent
+            )
+            tmp_path = Path(tmp_name)
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            raise IolError(f"could not publish {path.name}") from exc
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def native_application_id(name: str) -> int:
+        if (
+            len(name) != 11
+            or not name.startswith("nvram_")
+            or not name[6:].isascii()
+            or not name[6:].isdecimal()
+        ):
+            raise ValueError("invalid native NVRAM name")
+        application_id = int(name[6:])
+        if not 1 <= application_id <= 512:
+            raise ValueError("unsupported native NVRAM application ID")
+        return application_id
+
+    @classmethod
+    def _open_native_file(cls, work_dir: Path, *, nonempty: bool = False):
+        directory_fd = None
+        native_file = None
+        try:
+            directory_fd = os.open(
+                work_dir,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise IolError(
+                "could not inspect native NVRAM. Restore access to the node work "
+                "directory and native file, then retry"
+            ) from exc
+        try:
+            native_entries = sorted(
+                name
+                for name in os.listdir(directory_fd)
+                if name.startswith("nvram_")
+                and len(name) == 11
+                and name[6:].isascii()
+                and name[6:].isdecimal()
+            )
+            if not native_entries:
+                return None
+            if len(native_entries) != 1:
+                raise IolError(
+                    "multiple native NVRAM files make the application ID ambiguous. Keep exactly "
+                    "one canonical native file and retry"
+                )
+            native_path = work_dir / native_entries[0]
+            native_id = int(native_path.name[6:])
+            if not 1 <= native_id <= 512:
+                raise IolError(
+                    "native NVRAM filename must contain a supported IOL application ID from 1 "
+                    "to 512. Use a supported native file and retry"
+                )
+            if not stat.S_ISREG(native_path.lstat().st_mode):
+                raise IolError(
+                    "native NVRAM must be a regular, non-symlink file. Replace it with "
+                    "a regular file and retry"
+                )
+            native_fd = os.open(
+                native_path.name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=directory_fd,
+            )
+            native_file = os.fdopen(native_fd, "rb")
+            if not stat.S_ISREG(os.fstat(native_file.fileno()).st_mode):
+                raise IolError("native NVRAM must be a regular, non-symlink file")
+            if nonempty and not native_file.read(1):
+                raise IolError("native NVRAM must be nonempty before it can be captured")
+            native_file.seek(0)
+            result = (native_file, native_path, native_id)
+            native_file = None
+            return result
+        except OSError as exc:
+            raise IolError(
+                "could not inspect native NVRAM. Restore access to the node work "
+                "directory and native file, then retry"
+            ) from exc
+        finally:
+            if native_file is not None:
+                native_file.close()
+            if directory_fd is not None:
+                os.close(directory_fd)
+
+    @classmethod
+    def _canonical_native_file(
+        cls, work_dir: Path, *, nonempty: bool = False
+    ) -> tuple[Path, int] | None:
+        native = cls._open_native_file(work_dir, nonempty=nonempty)
+        if native is None:
+            return None
+        native_file, native_path, native_id = native
+        native_file.close()
+        return native_path, native_id
+
+    @classmethod
+    def application_id_for_start(
+        cls,
+        lab_id: str,
+        node_id: int,
+        node: dict[str, Any],
+        work_dir: Path,
+        active_ids: set[int],
+    ) -> int:
+        extras = node.get("extras") if isinstance(node.get("extras"), dict) else {}
+        if extras.get("config") == "Saved":
+            return cls._read_saved_snapshot(work_dir, active_ids).application_id
+        if extras.get("config") == "Exported":
+            return cls.application_id(lab_id, node_id, active_ids)
+        native = cls._canonical_native_file(work_dir)
+        if native is None:
+            return cls.application_id(lab_id, node_id, active_ids)
+        _, native_id = native
+        if native_id in active_ids:
+            raise IolError(
+                f"native NVRAM requires IOL application ID {native_id}, which is in use. "
+                "Retry when that application ID is available"
+            )
+        return native_id
 
     @staticmethod
     def application_id(lab_id: str, node_id: int, active_ids: set[int]) -> int:
