@@ -2232,6 +2232,347 @@ def test_iol_start_uses_isolated_launcher_identity_and_tap_wiring(
     assert calls["runtime_pids"] == [(9007, "iol", "lab-iol-runtime", 7)]
 
 
+def _direct_link_iol_lab(network: dict) -> dict:
+    """An IOL node whose e0/0 is wired to network 3 (a direct link's network)."""
+    return {
+        "schema": 2,
+        "id": "lab-direct-link",
+        "meta": {"name": "direct"},
+        "viewport": {"x": 0, "y": 0, "zoom": 1.0},
+        "nodes": {
+            "4": {
+                "id": 4,
+                "name": "IOL-2",
+                "type": "iol",
+                "image": "i86bi-linux-l3",
+                "console": "telnet",
+                "ram": 512,
+                "ethernet": 1,
+                "interfaces": [{"index": 0, "name": "e0/0"}],
+            },
+            "1": {
+                "id": 1,
+                "name": "alpine-n1",
+                "type": "docker",
+                "image": "alpine:latest",
+                "interfaces": [{"index": 0, "name": "eth0"}],
+            },
+        },
+        "networks": {"3": {"id": 3, **network}},
+        "links": [
+            {"id": "lnk_008", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 3}},
+            {"id": "lnk_009", "from": {"node_id": 4, "interface_index": 0}, "to": {"network_id": 3}},
+        ],
+        "defaults": {"link_style": "orthogonal"},
+    }
+
+
+# Shape create_link writes for a node-to-node link whose endpoints are both
+# stopped: implicit, hidden, and no ``runtime`` block because no bridge was made.
+_IMPLICIT_NETWORK_NO_RUNTIME = {
+    "name": "",
+    "type": "linux_bridge",
+    "visibility": False,
+    "implicit": True,
+    "config": {},
+}
+
+
+def _patch_iol_start(
+    monkeypatch,
+    patched_settings,
+    present: set[str],
+    bridge_add=None,
+    up: set[str] | None = None,
+    fingerprint: str = "absent",
+):
+    """Stub host_net and the IOL launcher; return the recorded helper calls.
+
+    ``present`` holds bridges that exist, ``up`` those that are admin-up and
+    ``fingerprint`` is what ``bridge_fingerprint_check`` reports.
+    """
+    from app.services import host_net
+    from app.services.runtime.iol import IolRecord
+
+    image_dir = patched_settings.IMAGES_DIR / "iol" / "i86bi-linux-l3"
+    image_dir.mkdir(parents=True)
+    image_path = image_dir / "i86bi-linux-l3.bin"
+    image_path.write_text("fake-iol")
+
+    up = set() if up is None else up
+    calls: dict[str, list] = {
+        "bridge_add": [],
+        "fingerprint": [],
+        "link_up": [],
+        "link_master_any": [],
+        "launched": [],
+    }
+
+    def fake_link_up(name):
+        calls["link_up"].append(name)
+        up.add(name)
+
+    def fake_bridge_add(name):
+        calls["bridge_add"].append(name)
+        if bridge_add is not None:
+            bridge_add(name)
+        present.add(name)
+
+    monkeypatch.setattr(host_net, "bridge_exists", lambda name: name in present)
+    monkeypatch.setattr(host_net, "bridge_add", fake_bridge_add)
+    monkeypatch.setattr(
+        host_net,
+        "bridge_fingerprint_write",
+        lambda name, lab_id, network_id: calls["fingerprint"].append((name, lab_id, network_id)),
+    )
+    monkeypatch.setattr(
+        host_net, "bridge_fingerprint_check", lambda name, lab_id, network_id: fingerprint
+    )
+    monkeypatch.setattr(
+        host_net, "link_state", lambda name: (name in present, None, name in up)
+    )
+    monkeypatch.setattr(host_net, "link_up", fake_link_up)
+    monkeypatch.setattr(host_net, "tap_name", lambda lab_id, node_id, iface: f"tap-{node_id}-{iface}")
+    monkeypatch.setattr(host_net, "tap_exists", lambda tap: False)
+    monkeypatch.setattr(host_net, "tap_add", lambda tap: None)
+    monkeypatch.setattr(
+        host_net,
+        "link_master_any",
+        lambda tap, bridge, driver=None: calls["link_master_any"].append((tap, bridge)),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.psutil.Process",
+        lambda pid: SimpleNamespace(
+            create_time=lambda: 777.0,
+            cpu_percent=lambda interval=0.0: 0.0,
+            memory_info=lambda: SimpleNamespace(rss=0),
+            is_running=lambda: True,
+            status=lambda: "sleeping",
+        ),
+    )
+    monkeypatch.setattr(
+        "app.services.node_runtime_service.runtime_pids.register",
+        lambda pid, kind, lab_id, node_id: None,
+    )
+
+    def fake_start_node(**kwargs):
+        calls["launched"].append([a["bridge_name"] for a in kwargs["attachments"]])
+        for attachment in kwargs["attachments"]:
+            kwargs["tap_factory"](
+                int(attachment["interface_index"]),
+                attachment["bridge_name"],
+                attachment.get("driver"),
+            )
+        return IolRecord(
+            lab_id=kwargs["lab_id"],
+            node_id=kwargs["node_id"],
+            application_id=101,
+            bridge_id=613,
+            iol_bridge_name="nve-iol-test",
+            image_path=image_path,
+            work_dir=kwargs["work_dir"],
+            console_port=kwargs["console_port"],
+            pid=9007,
+            pid_create_time=777.0,
+            command=[str(image_path), "101"],
+            stdout_log=kwargs["work_dir"] / "stdout.log",
+            stderr_log=kwargs["work_dir"] / "stderr.log",
+            tap_names=["tap-4-0"],
+            ubridge_pid=9008,
+            ubridge_port=19008,
+            ubridge_bridges=["nve-iol-test", "nve-iolp-test-0"],
+            udp_ports=[20000, 20001],
+        )
+
+    monkeypatch.setattr(
+        "app.services.runtime.iol.IolLauncher.start_node",
+        staticmethod(fake_start_node),
+    )
+    return calls
+
+
+def test_start_creates_missing_bridge_for_direct_link_between_stopped_nodes(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """A node-to-node link drawn while both endpoints were stopped has no
+    bridge yet; starting either endpoint must create it instead of failing."""
+    from app.services import host_net
+
+    lab_data = _direct_link_iol_lab(dict(_IMPLICIT_NETWORK_NO_RUNTIME))
+    bridge = host_net.bridge_name("lab-direct-link", 3)
+    calls = _patch_iol_start(monkeypatch, patched_settings, present=set())
+
+    runtime = NodeRuntimeService().start_node(lab_data, 4)
+
+    assert runtime["kind"] == "iol"
+    assert calls["bridge_add"] == [bridge]
+    assert calls["fingerprint"] == [(bridge, "lab-direct-link", 3)]
+    assert bridge in calls["link_up"]
+    assert calls["launched"] == [[bridge]]
+    assert calls["link_master_any"] == [("tap-4-0", bridge)]
+
+
+def _already_exists(name):
+    from app.services import host_net
+
+    raise host_net.HostNetEEXIST(f"{name} exists")
+
+
+@pytest.mark.parametrize("fingerprint, writes", [("match", 0), ("absent", 1)])
+def test_start_adopts_direct_link_bridge_that_appeared_unclaimed_or_ours(
+    monkeypatch, patched_settings, _us203_instance_id, fingerprint, writes
+):
+    """bridge_add hitting EEXIST reuses the bridge when its fingerprint is
+    ours or missing, claiming it in the missing case."""
+    from app.services import host_net
+
+    lab_data = _direct_link_iol_lab(dict(_IMPLICIT_NETWORK_NO_RUNTIME))
+    bridge = host_net.bridge_name("lab-direct-link", 3)
+    calls = _patch_iol_start(
+        monkeypatch,
+        patched_settings,
+        present=set(),
+        bridge_add=_already_exists,
+        fingerprint=fingerprint,
+    )
+
+    NodeRuntimeService().start_node(lab_data, 4)
+
+    assert calls["bridge_add"] == [bridge]
+    assert len(calls["fingerprint"]) == writes
+    assert bridge in calls["link_up"]
+    assert calls["launched"] == [[bridge]]
+
+
+def test_start_refuses_direct_link_bridge_owned_by_another_lab(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    lab_data = _direct_link_iol_lab(dict(_IMPLICIT_NETWORK_NO_RUNTIME))
+    calls = _patch_iol_start(
+        monkeypatch,
+        patched_settings,
+        present=set(),
+        bridge_add=_already_exists,
+        fingerprint="mismatch",
+    )
+
+    with pytest.raises(NodeRuntimeError, match="belongs to another lab"):
+        NodeRuntimeService().start_node(lab_data, 4)
+
+    assert calls["fingerprint"] == []
+    assert calls["launched"] == []
+
+
+def test_start_raises_admin_down_direct_link_bridge(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """An implicit bridge left down by an earlier partial failure is brought
+    up rather than skipped, so its ports forward."""
+    from app.services import host_net
+
+    lab_data = _direct_link_iol_lab(dict(_IMPLICIT_NETWORK_NO_RUNTIME))
+    bridge = host_net.bridge_name("lab-direct-link", 3)
+    calls = _patch_iol_start(monkeypatch, patched_settings, present={bridge})
+
+    NodeRuntimeService().start_node(lab_data, 4)
+
+    assert calls["bridge_add"] == []
+    assert calls["link_up"][0] == bridge
+    assert calls["launched"] == [[bridge]]
+
+
+def test_start_wraps_direct_link_bridge_failure(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    from app.services import host_net
+
+    def refused(name):
+        raise host_net.HostNetError("helper refused")
+
+    lab_data = _direct_link_iol_lab(dict(_IMPLICIT_NETWORK_NO_RUNTIME))
+    calls = _patch_iol_start(
+        monkeypatch, patched_settings, present=set(), bridge_add=refused
+    )
+
+    with pytest.raises(NodeRuntimeError, match="helper refused"):
+        NodeRuntimeService().start_node(lab_data, 4)
+
+    assert calls["launched"] == []
+
+
+def test_start_creates_missing_bridge_for_promoted_direct_link_network(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """A third endpoint or a rename promotes an implicit network without
+    creating its bridge; a plain bridge with no DHCP is still rebuilt."""
+    from app.services import host_net
+
+    lab_data = _direct_link_iol_lab(
+        {
+            "name": "bridge-3",
+            "type": "linux_bridge",
+            "visibility": True,
+            "implicit": False,
+            "config": {},
+        }
+    )
+    bridge = host_net.bridge_name("lab-direct-link", 3)
+    calls = _patch_iol_start(monkeypatch, patched_settings, present=set())
+
+    NodeRuntimeService().start_node(lab_data, 4)
+
+    assert calls["bridge_add"] == [bridge]
+    assert calls["fingerprint"] == [(bridge, "lab-direct-link", 3)]
+    assert calls["launched"] == [[bridge]]
+
+
+@pytest.mark.parametrize(
+    "network",
+    [
+        {
+            "name": "nat",
+            "type": "nat_cloud",
+            "config": {"cidr": "10.255.0.0/24", "gateway": "10.255.0.1"},
+            "runtime": {"driver": "nat_cloud"},
+        },
+        {
+            "name": "lan",
+            "type": "linux_bridge",
+            "config": {
+                "cidr": "10.9.0.0/24",
+                "gateway": "10.9.0.1",
+                "dhcp": True,
+                "dhcp_server": "10.9.0.2",
+                "dhcp_start": "10.9.0.100",
+                "dhcp_end": "10.9.0.200",
+            },
+        },
+        {"name": "shared", "type": "linux_bridge", "shared": True, "config": {}},
+    ],
+    ids=["nat-cloud", "dhcp-bridge", "shared-bridge"],
+)
+def test_start_does_not_create_missing_bridge_with_more_host_state(
+    monkeypatch, patched_settings, _us203_instance_id, network
+):
+    """Networks with DHCP, NAT or cross-lab state are owned by the lab-open
+    reconciliation, so a missing bridge is an error, never a bridge_add."""
+    from app.services.cloud_inventory_service import bridge_dhcp_enabled
+    from app.services.node_runtime_service import _bridge_only_network
+
+    record = {"id": 3, "visibility": True, "implicit": False, **network}
+    assert not _bridge_only_network(record)
+    if network["name"] == "lan":
+        assert bridge_dhcp_enabled(record)
+    lab_data = _direct_link_iol_lab({"visibility": True, "implicit": False, **network})
+    calls = _patch_iol_start(monkeypatch, patched_settings, present=set())
+
+    with pytest.raises(NodeRuntimeError, match="reopen the lab"):
+        NodeRuntimeService().start_node(lab_data, 4)
+
+    assert calls["bridge_add"] == []
+    assert calls["launched"] == []
+
+
 # ---------------------------------------------------------------------------
 # US-204: hot-attach Docker on links[] create
 # ---------------------------------------------------------------------------
@@ -3247,6 +3588,10 @@ def _us302_helper_mock(
         calls["try_link_del"].append(name)
 
     monkeypatch.setattr(host_net, "bridge_exists", fake_bridge_exists)
+    # Present bridges are admin-up, so the start pre-flight leaves them alone.
+    monkeypatch.setattr(
+        host_net, "link_state", lambda name: (name in present_bridges, None, name in present_bridges)
+    )
     monkeypatch.setattr(host_net, "tap_exists", fake_tap_exists)
     monkeypatch.setattr(host_net, "tap_add", fake_tap_add)
     monkeypatch.setattr(host_net, "tap_del", fake_tap_del)
@@ -3424,13 +3769,20 @@ def test_us302_qemu_start_creates_per_nic_tap_and_no_slirp(
 def test_us302_qemu_start_aborts_when_bridge_missing(
     monkeypatch, patched_settings, _us203_instance_id
 ):
-    """Pre-flight bridge presence check raises before QEMU spawns."""
+    """Pre-flight bridge presence check raises before QEMU spawns.
+
+    Shared bridges belong to the lab-open reconciliation, so the start path
+    refuses rather than rebuilding them.
+    """
     helper = _us302_helper_mock(monkeypatch, present_bridges=set())
     recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+    lab_data = _us302_lab_data()
+    for network in lab_data["networks"].values():
+        network["shared"] = True
 
     service = NodeRuntimeService()
     with pytest.raises(Exception) as excinfo:
-        service.start_node(_us302_lab_data(), 1)
+        service.start_node(lab_data, 1)
 
     assert "bridge" in str(excinfo.value).lower()
     # QEMU never started.
@@ -3438,6 +3790,31 @@ def test_us302_qemu_start_aborts_when_bridge_missing(
     # No TAP work happened.
     assert helper["tap_add"] == []
     assert helper["link_master"] == []
+
+
+def test_us302_qemu_start_rebuilds_missing_plain_bridges(
+    monkeypatch, patched_settings, _us203_instance_id
+):
+    """Plain bridges with no DHCP, NAT or sharing are rebuilt and brought up
+    by the QEMU start path, then the VM is spawned onto them."""
+    from app.services import host_net
+
+    names = _us302_names()
+    present: set[str] = set()
+    helper = _us302_helper_mock(monkeypatch, present_bridges=present)
+    added: list[str] = []
+    monkeypatch.setattr(
+        host_net, "bridge_add", lambda name: added.append(name) or present.add(name)
+    )
+    monkeypatch.setattr(host_net, "bridge_fingerprint_write", lambda *args: None)
+    monkeypatch.setattr(host_net, "link_state", lambda name: (name in present, None, False))
+    recorded_popen = _setup_us302_qemu_runtime(monkeypatch, patched_settings)
+
+    NodeRuntimeService().start_node(_us302_lab_data(), 1)
+
+    assert sorted(added) == sorted([names["bridge1"], names["bridge2"]])
+    assert {names["bridge1"], names["bridge2"]} <= set(helper["link_up"])
+    assert recorded_popen
 
 
 def test_us302_qemu_start_rolls_back_taps_on_helper_failure(

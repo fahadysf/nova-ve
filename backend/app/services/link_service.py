@@ -256,6 +256,36 @@ def _runtime_mutex_lab_id(lab_data: Optional[dict], normalized: str) -> str:
     return str(normalized)
 
 
+
+def _remove_implicit_bridge(lab_id: str, network: dict) -> None:
+    """Best-effort removal of a garbage-collected implicit network's bridge.
+
+    Runs after the JSON write, so a failure only leaves an empty bridge for
+    a network that no longer exists (network ids are never reused, #332).
+    Removing it also unplugs any IOL/Dynamips TAP still enslaved to it,
+    since those runtimes have no hot-detach path. A bridge fingerprinted
+    by another lab is never touched.
+    """
+    try:
+        network_id = int(network.get("id"))
+        runtime = network.get("runtime") or {}
+        bridge = runtime.get("bridge_name") if isinstance(runtime, dict) else None
+        if not bridge:
+            bridge = host_net.bridge_name(*bridge_identity(lab_id, network_id, network))
+        if not host_net.bridge_exists(bridge):
+            return
+        if host_net.bridge_fingerprint_check(bridge, lab_id, network_id) == "mismatch":
+            return
+        host_net.bridge_del(bridge)
+    except host_net.HostNetEINVAL:
+        pass  # already gone
+    except Exception as exc:  # noqa: BLE001 — best-effort; the delete already committed
+        _logger.warning(
+            "delete_link: could not remove implicit bridge for network %s (%s)",
+            network.get("id"),
+            exc,
+        )
+
 class LinkService:
     """Stateful service handling links + implicit-bridge state machine."""
 
@@ -835,6 +865,14 @@ class LinkService:
                 if not host_net.bridge_exists(bridge_name):
                     host_net.bridge_add(bridge_name)
                     provisioned_bridges.append(bridge_name)
+                    # Claim it so delete_link's cleanup can tell it apart
+                    # from another lab's bridge with a colliding name.
+                    try:
+                        host_net.bridge_fingerprint_write(
+                            bridge_name, str(lab_id), int(implicit_net_id_value)
+                        )
+                    except (host_net.HostNetError, OSError):
+                        pass
         seen_explicit_bridges: set = set()
         for _node_id, _iface, network_id, bridge, _kind in attach_targets:
             if network_id == implicit_net_id_value:
@@ -1566,6 +1604,11 @@ class LinkService:
                 data.pop("topology", None)
                 LabService.write_lab_json_static(normalized, data)
                 _recompute_mac_registry(normalized, data)
+
+                if deleted_implicit is not None:
+                    _remove_implicit_bridge(
+                        str(data.get("id") or normalized), deleted_implicit
+                    )
 
                 ws_events.append(("link_deleted", {"link_id": str(link_id)}))
 

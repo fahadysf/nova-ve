@@ -44,6 +44,19 @@ def _reset_registry():
     NodeRuntimeService.reset_registry()
 
 
+@pytest.fixture(autouse=True)
+def running_nodes(monkeypatch):
+    """Node ids the divergence check treats as running (default: all)."""
+    running: set[int] | None = None
+    holder = {"ids": running}
+
+    def is_running(cls, lab_id, node_id):
+        return holder["ids"] is None or node_id in holder["ids"]
+
+    monkeypatch.setattr(NodeRuntimeService, "_node_is_running", classmethod(is_running))
+    return holder
+
+
 @pytest.fixture()
 def discovery_settings(tmp_path):
     labs_dir = tmp_path / "labs"
@@ -545,3 +558,181 @@ async def test_discovery_generation_strictly_increasing(
     assert gen_first < gen_second, (
         f"Expected strictly increasing generations; got {gen_first} then {gen_second}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Divergence noise: stopped nodes, link direction, pnet, recovery
+# ---------------------------------------------------------------------------
+
+
+def _empty_bridges(monkeypatch) -> None:
+    monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda b: []))
+
+
+@pytest.mark.asyncio
+async def test_stopped_node_links_are_not_divergent(
+    monkeypatch, discovery_settings, stub_instance_id, running_nodes
+):
+    """A stopped node owns no TAP/veth, so its links are expected to be
+    absent from the kernel and must not be drawn red."""
+    lab_id = "lab-divergent-stopped"
+    _write_lab(
+        discovery_settings.LABS_DIR,
+        lab_id,
+        [
+            {"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 1}},
+            {"id": "lnk_002", "from": {"node_id": 2, "interface_index": 0}, "to": {"network_id": 1}},
+        ],
+    )
+    running_nodes["ids"] = {2}
+    _empty_bridges(monkeypatch)
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+
+    divergent = [e[2]["link_id"] for e in hub.events if e[1] == "link_divergent"]
+    assert divergent == ["lnk_002"]
+
+
+@pytest.mark.asyncio
+async def test_divergence_checks_node_end_of_network_to_node_link(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """A link drawn from the network to the node is checked by its node end."""
+    lab_id = "lab-divergent-reversed"
+    _write_lab(
+        discovery_settings.LABS_DIR,
+        lab_id,
+        [{"id": "lnk_001", "from": {"network_id": 1}, "to": {"node_id": 1, "interface_index": 0}}],
+    )
+    _empty_bridges(monkeypatch)
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+    assert [e[2]["link_id"] for e in hub.events if e[1] == "link_divergent"] == ["lnk_001"]
+
+    # Once the TAP is on the bridge it is consistent (and not "discovered").
+    tap = host_net.tap_name(lab_id, 1, 0)
+    monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda b: [tap]))
+    hub.events.clear()
+    await NodeRuntimeService._run_discovery_cycle()
+    assert [e for e in hub.events if e[1] in ("link_divergent", "discovered_link")] == []
+
+
+@pytest.mark.asyncio
+async def test_pnet_links_are_not_divergent(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    lab_id = "lab-divergent-pnet"
+    filename = _write_lab(
+        discovery_settings.LABS_DIR,
+        lab_id,
+        [{"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 1}}],
+    )
+    lab_file = discovery_settings.LABS_DIR / filename
+    data = json.loads(lab_file.read_text())
+    data["networks"]["1"]["type"] = "pnet0"
+    lab_file.write_text(json.dumps(data))
+    _empty_bridges(monkeypatch)
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert [e for e in hub.events if e[1] == "link_divergent"] == []
+
+
+@pytest.mark.asyncio
+async def test_recovered_link_publishes_divergence_cleared_once(
+    monkeypatch, discovery_settings, stub_instance_id, running_nodes
+):
+    """A link flagged in one cycle and consistent (or stopped) in the next
+    gets exactly one ``link_divergence_cleared`` so the canvas drops it."""
+    lab_id = "lab-divergent-recover"
+    filename = _write_lab(
+        discovery_settings.LABS_DIR,
+        lab_id,
+        [
+            {"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 1}},
+            {"id": "lnk_002", "from": {"node_id": 2, "interface_index": 0}, "to": {"network_id": 1}},
+        ],
+    )
+    _empty_bridges(monkeypatch)
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+    assert sorted(e[2]["link_id"] for e in hub.events if e[1] == "link_divergent") == [
+        "lnk_001",
+        "lnk_002",
+    ]
+
+    # Cycle 2: node 1's TAP is attached; node 2 was stopped.
+    veth = host_net.veth_host_name(lab_id, 1, 0)
+    monkeypatch.setattr(NodeRuntimeService, "_bridge_members_sync", staticmethod(lambda b: [veth]))
+    running_nodes["ids"] = {1}
+    hub.events.clear()
+    await NodeRuntimeService._run_discovery_cycle()
+
+    cleared = [e for e in hub.events if e[1] == "link_divergence_cleared"]
+    assert sorted(e[2]["link_id"] for e in cleared) == ["lnk_001", "lnk_002"]
+    assert all(e[0] == filename and e[2]["lab_id"] == lab_id for e in cleared)
+    assert all(isinstance(e[2]["generation"], int) for e in cleared)
+    assert [e for e in hub.events if e[1] == "link_divergent"] == []
+
+    # Cycle 3: nothing left to clear.
+    hub.events.clear()
+    await NodeRuntimeService._run_discovery_cycle()
+    assert [e for e in hub.events if e[1] == "link_divergence_cleared"] == []
+
+
+@pytest.mark.asyncio
+async def test_leased_link_keeps_previous_divergent_verdict(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    """A divergent link that enters a hot-plug lease is neither re-flagged
+    nor cleared; it would otherwise flicker if the hot-plug then fails."""
+    lab_id = "lab-divergent-lease-carry"
+    _write_lab(
+        discovery_settings.LABS_DIR,
+        lab_id,
+        [{"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 1}}],
+    )
+    _empty_bridges(monkeypatch)
+    _patch_settings(monkeypatch, discovery_settings)
+    hub = _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+    assert [e[2]["link_id"] for e in hub.events if e[1] == "link_divergent"] == ["lnk_001"]
+
+    fake_lease = types.ModuleType("app.services.transition_lease")
+    fake_lease.is_leased = lambda *, lab_id, link_id: link_id == "lnk_001"  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "app.services.transition_lease", fake_lease)
+    hub.events.clear()
+    await NodeRuntimeService._run_discovery_cycle()
+
+    assert [e for e in hub.events if e[1] in ("link_divergent", "link_divergence_cleared")] == []
+
+
+@pytest.mark.asyncio
+async def test_divergence_state_is_dropped_for_deleted_labs(
+    monkeypatch, discovery_settings, stub_instance_id
+):
+    lab_id = "lab-divergent-deleted"
+    filename = _write_lab(
+        discovery_settings.LABS_DIR,
+        lab_id,
+        [{"id": "lnk_001", "from": {"node_id": 1, "interface_index": 0}, "to": {"network_id": 1}}],
+    )
+    _empty_bridges(monkeypatch)
+    _patch_settings(monkeypatch, discovery_settings)
+    _patch_ws_hub(monkeypatch)
+
+    await NodeRuntimeService._run_discovery_cycle()
+    assert NodeRuntimeService._divergent_links[lab_id] == {"lnk_001"}
+
+    (discovery_settings.LABS_DIR / filename).unlink()
+    await NodeRuntimeService._run_discovery_cycle()
+    assert lab_id not in NodeRuntimeService._divergent_links
