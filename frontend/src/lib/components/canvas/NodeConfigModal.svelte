@@ -102,6 +102,7 @@
       { value: 'rdp', label: 'RDP' },
     ],
     iol: [{ value: 'telnet', label: 'telnet' }],
+    iou: [{ value: 'telnet', label: 'telnet' }],
     dynamips: [{ value: 'telnet', label: 'telnet' }],
   };
   const DEFAULT_INTERFACE_NAMING = '';

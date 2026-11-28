@@ -25,6 +25,7 @@
     Play,
     Plus,
     RotateCcw,
+    Save,
     Share2,
     Square,
     Trash2,
@@ -378,6 +379,7 @@
   const nodeActionPollSchedule = [0, 250, 500, 1000, 2000];
   let canvasDestroyed = false;
   let labNodeAction: { action: LabNodeAction; completed: number; total: number } | null = null;
+  let iolSnapshotPending: Record<number, boolean> = {};
   const labControlButtonClass = 'inline-flex h-8 w-8 items-center justify-center rounded-lg border border-gray-800 bg-gray-950/80 text-gray-200 transition enabled:hover:border-blue-500/40 enabled:hover:text-white disabled:cursor-not-allowed disabled:opacity-40';
 
   $: canStartLabNodes = Object.values($labState.nodes).some((node) => isEligibleForLabAction(node, 'start'));
@@ -1629,6 +1631,10 @@
     return node.status === (action === 'start' ? 0 : 2) && !node.transientStatus;
   }
 
+  function isEligibleForIolSnapshot(node: NodeData) {
+    return ['iol', 'iou'].includes(node.type) && node.status === 0 && !node.transientStatus;
+  }
+
   async function runLabNodeAction(action: LabNodeAction) {
     if (labNodeAction) return;
     const candidates = Object.values($labState.nodes).filter((node) => isEligibleForLabAction(node, action));
@@ -1706,8 +1712,32 @@
     }
   }
 
+  async function runIolSnapshot(node: NodeData) {
+    const { id: nodeId } = node;
+    if (!isEligibleForIolSnapshot(node) || nodeActionTokens.has(nodeId)) return;
+    const actionLabId = labId;
+    const token = ++nodeActionSequence;
+    const actionIsCurrent = () => !canvasDestroyed && labId === actionLabId && nodeActionTokens.get(nodeId) === token;
+
+    nodeActionTokens.set(nodeId, token);
+    iolSnapshotPending = { ...iolSnapshotPending, [nodeId]: true };
+    try {
+      const response = await apiRequest(`/labs/${actionLabId}/nodes/${nodeId}/iol-snapshot`, { method: 'POST' });
+      if (actionIsCurrent()) toastStore.push(response.message || 'Snapshot saved.', 'success');
+    } catch (_error) {
+      // apiRequest already surfaced a toast; nothing else to do here.
+    } finally {
+      if (nodeActionTokens.get(nodeId) === token) {
+        nodeActionTokens.delete(nodeId);
+        const pending = { ...iolSnapshotPending };
+        delete pending[nodeId];
+        iolSnapshotPending = pending;
+      }
+    }
+  }
+
   async function handleNodeAction(
-    action: NodeLifecycleAction | 'delete' | 'console' | 'recordings',
+    action: NodeLifecycleAction | 'iol-snapshot' | 'delete' | 'console' | 'recordings',
     targetId: string,
     consoleMode: 'primary' | 'second' = 'primary'
   ) {
@@ -1735,6 +1765,11 @@
     if (action === 'delete') {
       // #338: confirm first — the backend deletes disks/data immediately.
       nodeDeleteConfirm = { id: decoded.id, name: node.name || `node ${decoded.id}` };
+      return;
+    }
+
+    if (action === 'iol-snapshot') {
+      await runIolSnapshot(node);
       return;
     }
 
@@ -2951,6 +2986,23 @@
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('stop', menu?.targetId ?? '')}>
           <span>Stop</span><Square class="h-3.5 w-3.5 text-gray-400" />
         </button>
+        {#if menuNode && isEligibleForIolSnapshot(menuNode)}
+          <button
+            type="button"
+            class="menu-item disabled:cursor-not-allowed disabled:opacity-50"
+            data-testid="node-menu-iol-snapshot"
+            disabled={iolSnapshotPending[menuNode.id] === true}
+            aria-busy={iolSnapshotPending[menuNode.id] === true}
+            on:click|preventDefault|stopPropagation={() => handleNodeAction('iol-snapshot', menu?.targetId ?? '')}
+          >
+            <span>{iolSnapshotPending[menuNode.id] === true ? 'Saving snapshot…' : 'Save snapshot'}</span>
+            {#if iolSnapshotPending[menuNode.id] === true}
+              <LoaderCircle class="h-3.5 w-3.5 animate-spin text-gray-400" aria-hidden="true" />
+            {:else}
+              <Save class="h-3.5 w-3.5 text-gray-400" aria-hidden="true" />
+            {/if}
+          </button>
+        {/if}
         <button type="button" class="menu-item" on:click|preventDefault|stopPropagation={() => handleNodeAction('wipe', menu?.targetId ?? '')}>
           <span>Wipe</span><Eraser class="h-3.5 w-3.5 text-gray-400" />
         </button>

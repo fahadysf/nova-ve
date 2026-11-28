@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+import stat
+import tarfile
 from types import SimpleNamespace
 
 import pytest
@@ -383,17 +386,14 @@ def test_iol_unconfigured_multiple_native_files_are_ambiguous(monkeypatch, tmp_p
     assert historical_path.read_bytes() == b"historical-state"
 
 
-@pytest.mark.parametrize("config", ["Saved", "Exported"])
-def test_iol_saved_and_exported_collisions_keep_alternate_id_behavior(
-    monkeypatch, tmp_path, config
-):
+def test_iol_exported_collisions_keep_alternate_id_behavior(monkeypatch, tmp_path):
     fixture = _native_iol_fixture(monkeypatch, tmp_path)
     fixture.native_path.write_bytes(b"native-state")
     alternate_id = fixture.preferred_id % 512 + 1
     historical_path = fixture.work_dir / f"nvram_{alternate_id:05d}"
     historical_path.write_bytes(b"historical-state")
 
-    record = fixture.start({fixture.preferred_id}, config=config)
+    record = fixture.start({fixture.preferred_id}, config="Exported")
 
     assert record.application_id != fixture.preferred_id
     assert record.command[-1] == str(record.application_id)
@@ -458,20 +458,20 @@ def test_iol_unconfigured_fails_closed_when_native_nvram_inspection_fails(
 def test_iol_unconfigured_fails_closed_when_native_nvram_is_unreadable(monkeypatch, tmp_path):
     fixture = _native_iol_fixture(monkeypatch, tmp_path)
     fixture.native_path.write_bytes(b"native-state")
-    original_open = Path.open
+    original_open = os.open
 
-    def fail_native_open(path, mode="r", *args, **kwargs):
-        if path == fixture.native_path and mode == "rb":
+    def fail_native_open(path, *args, **kwargs):
+        if Path(path).name == fixture.native_path.name and kwargs.get("dir_fd") is not None:
             raise PermissionError("fixture read failure")
-        return original_open(path, mode, *args, **kwargs)
+        return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", fail_native_open)
+    monkeypatch.setattr("app.services.runtime.iol.os.open", fail_native_open)
 
     with pytest.raises(IolError, match="could not inspect native NVRAM.*Restore access"):
         fixture.start(set())
 
     assert fixture.popen_calls == []
-    with original_open(fixture.native_path, "rb") as native_file:
+    with fixture.native_path.open("rb") as native_file:
         assert native_file.read() == b"native-state"
 
 
@@ -491,3 +491,139 @@ def test_iol_unconfigured_refuses_unsupported_native_application_id(
     assert str(tmp_path) not in str(exc_info.value)
     assert fixture.popen_calls == []
     assert native_path.read_bytes() == b"native-state"
+
+
+def test_iol_explicit_capture_publishes_one_owner_only_native_archive(monkeypatch, tmp_path):
+    fixture = _native_iol_fixture(monkeypatch, tmp_path)
+    payload = b"explicit-native-state\x00\xff"
+    fixture.native_path.write_bytes(payload)
+    ordinary = fixture.work_dir / "ordinary.txt"
+    ordinary.write_bytes(b"keep me")
+
+    result = IolLauncher.capture_snapshot(fixture.work_dir)
+
+    snapshot = fixture.work_dir / "iol-snapshot.tar"
+    assert result is None
+    assert stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+    with tarfile.open(snapshot, "r:") as archive:
+        members = archive.getmembers()
+        assert [member.name for member in members] == [fixture.native_path.name]
+        assert members[0].isreg()
+        assert archive.extractfile(members[0]).read() == payload
+    assert fixture.native_path.read_bytes() == payload
+    assert ordinary.read_bytes() == b"keep me"
+    assert fixture.popen_calls == []
+
+
+@pytest.mark.parametrize("source_kind", ["empty", "multiple", "symlink"])
+def test_iol_explicit_capture_requires_one_nonempty_regular_native_file(
+    monkeypatch, tmp_path, source_kind
+):
+    fixture = _native_iol_fixture(monkeypatch, tmp_path)
+    if source_kind == "empty":
+        fixture.native_path.write_bytes(b"")
+    elif source_kind == "multiple":
+        fixture.native_path.write_bytes(b"first")
+        alternate = fixture.work_dir / f"nvram_{fixture.preferred_id % 512 + 1:05d}"
+        alternate.write_bytes(b"second")
+    else:
+        target = tmp_path / "target"
+        target.write_bytes(b"target")
+        fixture.native_path.symlink_to(target)
+
+    with pytest.raises(IolError):
+        IolLauncher.capture_snapshot(fixture.work_dir)
+
+    assert not (fixture.work_dir / "iol-snapshot.tar").exists()
+    assert fixture.popen_calls == []
+
+
+def test_iol_explicit_capture_failure_retains_previous_archive(monkeypatch, tmp_path):
+    fixture = _native_iol_fixture(monkeypatch, tmp_path)
+    fixture.native_path.write_bytes(b"new-state")
+    snapshot = fixture.work_dir / "iol-snapshot.tar"
+    previous = b"previous-complete-archive"
+    snapshot.write_bytes(previous)
+    original_replace = os.replace
+
+    def fail_replace(source, destination):
+        if Path(destination) == snapshot:
+            raise OSError("fixture publish failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr("app.services.runtime.iol.os.replace", fail_replace)
+
+    with pytest.raises(IolError, match="could not publish"):
+        IolLauncher.capture_snapshot(fixture.work_dir)
+
+    assert snapshot.read_bytes() == previous
+    assert list(fixture.work_dir.glob(".iol-snapshot-*.tmp")) == []
+    assert fixture.popen_calls == []
+
+
+@pytest.mark.parametrize("archive_kind", ["missing", "corrupt", "empty"])
+def test_iol_saved_start_refuses_invalid_snapshot_before_any_mutation(
+    monkeypatch, tmp_path, archive_kind
+):
+    fixture = _native_iol_fixture(monkeypatch, tmp_path)
+    fixture.native_path.write_bytes(b"ordinary-native-state")
+    snapshot = fixture.work_dir / "iol-snapshot.tar"
+    if archive_kind == "corrupt":
+        snapshot.write_bytes(b"not a tar archive")
+    elif archive_kind == "empty":
+        with tarfile.open(snapshot, "w:"):
+            pass
+    image_mode = fixture.image.stat().st_mode
+
+    with pytest.raises(IolError, match="explicitly captured.*snapshot"):
+        fixture.start(set(), config="Saved")
+
+    assert fixture.popen_calls == []
+    assert not (fixture.work_dir / "NETMAP").exists()
+    assert fixture.image.stat().st_mode == image_mode
+    assert fixture.native_path.read_bytes() == b"ordinary-native-state"
+    assert list(fixture.work_dir.iterdir()) == [fixture.native_path] + (
+        [snapshot] if archive_kind != "missing" else []
+    )
+
+
+def test_iol_saved_start_refuses_busy_snapshot_id_before_any_mutation(monkeypatch, tmp_path):
+    fixture = _native_iol_fixture(monkeypatch, tmp_path)
+    fixture.native_path.write_bytes(b"explicit-state")
+    IolLauncher.capture_snapshot(fixture.work_dir)
+    snapshot = fixture.work_dir / "iol-snapshot.tar"
+    archive_bytes = snapshot.read_bytes()
+    image_mode = fixture.image.stat().st_mode
+
+    with pytest.raises(IolError, match=rf"application ID {fixture.preferred_id}.*in use"):
+        fixture.start({fixture.preferred_id}, config="Saved")
+
+    assert fixture.popen_calls == []
+    assert not (fixture.work_dir / "NETMAP").exists()
+    assert fixture.image.stat().st_mode == image_mode
+    assert fixture.native_path.read_bytes() == b"explicit-state"
+    assert snapshot.read_bytes() == archive_bytes
+
+
+def test_iol_saved_start_restores_explicit_snapshot_in_fresh_owned_work(
+    monkeypatch, tmp_path
+):
+    fixture = _native_iol_fixture(monkeypatch, tmp_path)
+    fixture.native_path.write_bytes(b"explicit-state\x00\xff")
+    IolLauncher.capture_snapshot(fixture.work_dir)
+    snapshot = fixture.work_dir / "iol-snapshot.tar"
+    archive_bytes = snapshot.read_bytes()
+    fixture.native_path.write_bytes(b"ordinary-state-after-capture")
+    ordinary = fixture.work_dir / "ordinary.txt"
+    ordinary.write_bytes(b"keep me")
+
+    record = fixture.start(set(), config="Saved")
+
+    assert record.application_id == fixture.preferred_id
+    assert record.work_dir != fixture.work_dir
+    assert record.work_dir.parent == fixture.work_dir
+    assert (record.work_dir / fixture.native_path.name).read_bytes() == b"explicit-state\x00\xff"
+    assert fixture.native_path.read_bytes() == b"ordinary-state-after-capture"
+    assert ordinary.read_bytes() == b"keep me"
+    assert snapshot.read_bytes() == archive_bytes
+    assert fixture.popen_calls[1][1]["cwd"] == record.work_dir

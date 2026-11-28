@@ -519,11 +519,25 @@ class NodeRuntimeService:
         saved = self._runtime_record(lab_id, node_id, include_stopped=True, require_valid=True)
         if saved and saved.get("lab_cleanup_pending"):
             raise NodeRuntimeError("Retry the pending lab deletion before starting this node.")
+        if saved and saved.get("iol_start_incomplete"):
+            raise NodeRuntimeError(
+                "A previous IOL launch did not complete and its process identity is retained. "
+                "Stop the node to confirm cleanup before retrying."
+            )
+        if (
+            node.get("type") in ("iol", "iou")
+            and saved
+            and saved.get("kind") == "iol"
+            and saved.get("work_dir") is not None
+        ):
+            self._reconcile_iol_runtime_source(self._work_dir(lab_id, node_id), saved)
         runtime = self._runtime_record(lab_id, node_id, require_valid=True)
         if not runtime and node.get("type") == "docker":
             runtime = self._reconcile_docker_node_runtime(lab_data, node)
         if runtime:
             return runtime
+        if node.get("type") in ("iol", "iou"):
+            self._ensure_iol_durable_source_stopped(self._work_dir(lab_id, node_id))
 
         quota_cpu, quota_ram = self.node_quota_resources(node, quota=quota)
         if quota is not None:
@@ -539,6 +553,7 @@ class NodeRuntimeService:
                 "the canvas as stopped."
             )
 
+        iol_record = None
         if node.get("type") == "qemu":
             runtime = self._start_qemu_node(lab_data, node)
         elif node.get("type") == "docker":
@@ -555,7 +570,7 @@ class NodeRuntimeService:
             else:
                 runtime = self._start_docker_node(lab_data, node)
         elif node.get("type") in ("iol", "iou"):
-            runtime = self._start_iol_node(lab_data, node)
+            runtime, iol_record = self._start_iol_node(lab_data, node)
         elif node.get("type") == "dynamips":
             runtime = self._start_dynamips_node(lab_data, node)
         else:
@@ -567,7 +582,30 @@ class NodeRuntimeService:
         with self._lock:
             self._registry[key] = runtime
             self._observed_inactive.discard(key)
-        self._persist_runtime(runtime)
+        try:
+            self._persist_runtime(runtime)
+        except Exception:
+            if iol_record is not None:
+                if self._rollback_iol_start(iol_record):
+                    self._restore_iol_runtime(lab_id, node_id, saved, persisted=True)
+                    from app.services.runtime.iol import IolLauncher
+
+                    IolLauncher.discard_owned_work(iol_record)
+                else:
+                    self._track_failed_iol_start(runtime)
+            raise
+        if iol_record is not None:
+            from app.services.runtime.iol import IolError, IolLauncher
+
+            work_dir = self._work_dir(lab_id, node_id)
+            try:
+                previous_source = IolLauncher.publish_source(work_dir, iol_record)
+            except IolError as exc:
+                if self._rollback_iol_start(iol_record):
+                    self._restore_iol_runtime(lab_id, node_id, saved, persisted=True)
+                    IolLauncher.discard_owned_work(iol_record)
+                raise NodeRuntimeError("Failed to record the IOL launch source.") from exc
+            self._cleanup_superseded_iol_work(work_dir, previous_source, iol_record)
 
         # Cadence: schedule live-MAC reads at t=1s/3s/8s after start. No steady-state poll.
         interfaces = node.get("interfaces") or []
@@ -1180,9 +1218,20 @@ class NodeRuntimeService:
         self, lab_data: dict[str, Any], lab_id: str, node_id: int, *, confirm_stopped: bool,
     ) -> None:
         runtime = self._runtime_record(lab_id, node_id, include_stopped=True, require_valid=True)
+        if runtime and not confirm_stopped and runtime.get("lab_cleanup_pending"):
+            raise NodeRuntimeError("Retry the pending lab deletion to finish node cleanup.")
+        if runtime and runtime.get("iol_start_incomplete"):
+            from app.services.runtime.iol import IolLauncher
+
+            work_dir = self._work_dir(lab_id, node_id)
+            runtime_work = Path(runtime.get("work_dir") or work_dir)
+            self._record_transition(lab_id, node_id)
+            self._stop_iol_runtime(runtime, confirm_stopped=True)
+            self._delete_runtime(lab_id, node_id)
+            if runtime_work.parent == work_dir:
+                IolLauncher._remove_saved_work(runtime_work)
+            return
         if runtime and not confirm_stopped:
-            if runtime.get("lab_cleanup_pending"):
-                raise NodeRuntimeError("Retry the pending lab deletion to finish node cleanup.")
             runtime = self._runtime_record(lab_id, node_id, require_valid=True)
         if not runtime:
             if confirm_stopped:
@@ -1222,7 +1271,52 @@ class NodeRuntimeService:
         elif confirm_stopped:
             raise NodeRuntimeError("The node runtime cannot be identified for cleanup.")
 
+        if kind == "iol" and runtime.get("work_dir") is not None:
+            self._reconcile_iol_runtime_source(self._work_dir(lab_id, node_id), runtime)
         self._delete_runtime(lab_id, node_id)
+
+    def capture_iol_snapshot(self, lab_data: dict[str, Any], node_id: int) -> None:
+        from app.services.runtime.iol import IolError, IolLauncher
+
+        lab_id = self._lab_id(lab_data)
+        with self._node_lifecycle_lock(lab_id, node_id):
+            node = self._node_data(lab_data, node_id)
+            if node.get("type") not in ("iol", "iou"):
+                raise NodeRuntimeError("IOL snapshots are available only for IOL/IOU nodes.")
+            runtime = self._runtime_record(
+                lab_id, node_id, include_stopped=True, require_valid=True
+            )
+            if runtime and runtime.get("lab_cleanup_pending"):
+                raise NodeRuntimeError("Retry the pending lab deletion before capturing this node.")
+            if runtime and runtime.get("iol_start_incomplete"):
+                raise NodeRuntimeError(
+                    "A previous IOL launch did not complete. Stop the node to confirm "
+                    "cleanup before capturing a snapshot."
+                )
+            if runtime:
+                self._ensure_iol_capture_stopped(
+                    runtime.get("pid"), runtime.get("pid_create_time")
+                )
+            work_dir = self._work_dir(lab_id, node_id)
+            try:
+                if (
+                    runtime
+                    and runtime.get("kind") == "iol"
+                    and runtime.get("work_dir") is not None
+                ):
+                    source = self._reconcile_iol_runtime_source(work_dir, runtime)
+                else:
+                    source = IolLauncher.read_source(work_dir)
+                self._ensure_iol_capture_stopped(source.pid, source.pid_create_time)
+                IolLauncher.capture_snapshot(work_dir, source)
+            except IolError as exc:
+                raise NodeRuntimeError(str(exc)) from exc
+
+    def _ensure_iol_capture_stopped(
+        self, pid: int | None, expected_create_time: float | None
+    ) -> None:
+        if pid and self._cleanup_process(pid, expected_create_time) is not None:
+            raise NodeRuntimeError("The IOL node must be stopped before capturing a snapshot.")
 
     def wipe_node(self, lab_data: dict[str, Any], node_id: int) -> None:
         lab_id = self._lab_id(lab_data)
@@ -6387,13 +6481,86 @@ class NodeRuntimeService:
     # IOL / IOU (process-runtime, uBridge-driven)
     # ------------------------------------------------------------------
 
+    def _reconcile_iol_runtime_source(self, work_dir: Path, runtime: dict[str, Any]):
+        from app.services.runtime.iol import IolError, IolLauncher
+
+        try:
+            source, _ = IolLauncher.publish_runtime_source(work_dir, runtime)
+            return source
+        except IolError as exc:
+            raise NodeRuntimeError(str(exc)) from exc
+
+    def _ensure_iol_durable_source_stopped(self, work_dir: Path) -> None:
+        from app.services.runtime.iol import IolError, IolLauncher
+
+        try:
+            source = IolLauncher.read_source(work_dir)
+            IolLauncher.source_directory(work_dir, source)
+        except IolError as exc:
+            raise NodeRuntimeError(str(exc)) from exc
+        self._ensure_iol_capture_stopped(source.pid, source.pid_create_time)
+
+    def _rollback_iol_start(self, record: Any) -> bool:
+        runtime = record.as_runtime()
+        try:
+            self._stop_iol_runtime(
+                runtime, confirm_stopped=True, persist_identity=False
+            )
+        except NodeRuntimeError:
+            _logger.warning(
+                "iol.start.rollback process still live lab=%s node=%s",
+                runtime.get("lab_id"), runtime.get("node_id"),
+            )
+            return False
+        return True
+
+    def _track_failed_iol_start(self, runtime: dict[str, Any]) -> None:
+        runtime["iol_start_incomplete"] = True
+        try:
+            self._persist_runtime(runtime)
+        except OSError as exc:
+            _logger.warning("could not persist failed IOL start identity: %s", exc)
+        with self._lock:
+            self._registry[self._key(runtime["lab_id"], runtime["node_id"])] = runtime
+
+    def _restore_iol_runtime(
+        self, lab_id: str, node_id: int, previous: dict[str, Any] | None, *, persisted: bool
+    ) -> None:
+        if persisted:
+            if previous is None:
+                self._state_path(lab_id, node_id).unlink(missing_ok=True)
+            else:
+                self._persist_runtime(previous)
+        key = self._key(lab_id, node_id)
+        with self._lock:
+            if previous is None:
+                self._registry.pop(key, None)
+            else:
+                self._registry[key] = previous
+
+    def _cleanup_superseded_iol_work(
+        self, work_dir: Path, previous: Any, record: Any
+    ) -> None:
+        from app.services.runtime.iol import IolError, IolLauncher
+
+        if previous is None:
+            return
+        try:
+            self._ensure_iol_capture_stopped(previous.pid, previous.pid_create_time)
+            IolLauncher.source_directory(work_dir, previous)
+        except (NodeRuntimeError, IolError) as exc:
+            _logger.warning("retaining live or invalid prior IOL source: %s", exc)
+            return
+        IolLauncher.cleanup_superseded_work(work_dir, previous, record.work_dir)
+
     def _start_iol_node(
         self, lab_data: dict[str, Any], node: dict[str, Any]
-    ) -> dict[str, Any]:
-        from app.services.runtime.iol import IolError, IolLauncher
+    ) -> tuple[dict[str, Any], Any]:
+        from app.services.runtime.iol import IolError, IolLauncher, IolStartError
 
         lab_id = self._lab_id(lab_data)
         node_id = int(node["id"])
+        work_dir = self._work_dir(lab_id, node_id)
         attachments = self._qemu_attachments(lab_data, node)
         for attachment in attachments:
             bridge = attachment["bridge_name"]
@@ -6427,12 +6594,20 @@ class NodeRuntimeService:
                 node_id=node_id,
                 node=node,
                 images_root=self.settings.IMAGES_DIR / "iol",
-                work_dir=self._work_dir(lab_id, node_id),
+                work_dir=work_dir,
                 console_port=console_port,
                 attachments=attachments,
                 tap_factory=_tap_factory,
                 active_application_ids=active_ids,
             )
+        except IolStartError as exc:
+            for tap in provisioned_taps:
+                host_net.try_link_del(tap)
+            if self._rollback_iol_start(exc.record):
+                IolLauncher.discard_owned_work(exc.record)
+            else:
+                self._track_failed_iol_start(exc.record.as_runtime())
+            raise NodeRuntimeError(str(exc)) from exc
         except IolError as exc:
             for tap in provisioned_taps:
                 host_net.try_link_del(tap)
@@ -6446,11 +6621,14 @@ class NodeRuntimeService:
         try:
             runtime_pids.register(int(runtime["pid"]), "iol", lab_id, node_id)
         except Exception as exc:
-            self._stop_iol_runtime(runtime)
+            if not self._rollback_iol_start(record):
+                self._track_failed_iol_start(runtime)
+            else:
+                IolLauncher.discard_owned_work(record)
             raise NodeRuntimeError(
                 f"Failed to register IOL PID in runtime registry: {exc}"
             ) from exc
-        return runtime
+        return runtime, record
 
     def _active_iol_application_ids(self) -> set[int]:
         ids: set[int] = set()
@@ -6464,13 +6642,19 @@ class NodeRuntimeService:
                 continue
         return ids
 
-    def _stop_iol_runtime(self, runtime: dict[str, Any], *, confirm_stopped: bool = False) -> None:
+    def _stop_iol_runtime(
+        self,
+        runtime: dict[str, Any],
+        *,
+        confirm_stopped: bool = False,
+        persist_identity: bool = True,
+    ) -> None:
         from app.services.runtime.iol import IolLauncher
 
         processes = []
         stop_record = runtime
         if confirm_stopped:
-            if not runtime.get("pid"):
+            if not runtime.get("pid") and not runtime.get("ubridge_pid"):
                 raise NodeRuntimeError("IOL runtime has no process identity to verify.")
             stop_record = runtime.copy()
             for pid_key, time_key in (("pid", "pid_create_time"), ("ubridge_pid", "ubridge_create_time")):
@@ -6488,7 +6672,8 @@ class NodeRuntimeService:
                     expected = process.create_time()
                     with self._lock:
                         runtime[time_key] = expected
-                        self._persist_runtime(runtime)
+                        if persist_identity:
+                            self._persist_runtime(runtime)
                 processes.append((pid, expected))
 
         try:
