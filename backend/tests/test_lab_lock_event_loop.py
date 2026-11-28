@@ -30,10 +30,11 @@ from app.services.lab_lock import lab_lock
 from app.services.link_service import LinkService
 from app.services.network_service import NetworkService
 
-# A thread holds the lock for the whole measurement window, so anything
-# close to the window itself means the loop was frozen for the wait.
+# A thread holds the lock until the measurement window ends, and only the
+# test coroutine can release it. A wait that blocks the loop therefore lasts
+# the whole lock timeout (seconds), far past the stall limit.
 STALL_LIMIT_S = 0.2
-WINDOW_S = 0.3
+WINDOW_S = 0.15
 
 LAB = "lab.json"
 LAB_ID = "lab-331"

@@ -245,7 +245,7 @@ def _slow_locked_writer(mutate):
     def run() -> None:
         with locked_lab(LAB) as lab:
             holding.set()
-            time.sleep(0.3)
+            time.sleep(0.15)
             mutate(lab.data)
             lab.save()
 
